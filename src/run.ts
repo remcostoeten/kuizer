@@ -1,5 +1,5 @@
-import { analyze, type TSet, type TRes } from "./index.js"
-import { saveBak } from "./backup.js"
+import { analyze, type TSet, type TRes } from "./index"
+import { saveBak } from "./backup"
 import fs from "fs/promises"
 
 export type TEdit = {
