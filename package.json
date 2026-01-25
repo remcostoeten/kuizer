@@ -1,5 +1,5 @@
 {
-    "name": "ts-type-sweeper",
+    "name": "kuizer",
     "author": "Remco Stoeten",
     "version": "0.1.0",
     "description": "Detects unused TypeScript types, barrel-only exports, and normalizes local Props types",
@@ -20,7 +20,7 @@
         "cli"
     ],
     "bin": {
-        "ts-type-sweeper": "./bin/ts-type-sweeper.js"
+        "kuizer": "./bin/kuizer.js"
     },
     "files": [
         "dist",

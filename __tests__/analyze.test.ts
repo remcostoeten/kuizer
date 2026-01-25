@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import { analyze, type TSet } from "../src/index.js";
 
 function mkTmp() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ts-type-sweeper-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kuizer-"));
   const src = path.join(dir, "src");
   fs.mkdirSync(src, { recursive: true });
 
