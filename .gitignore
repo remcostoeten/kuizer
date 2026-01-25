@@ -1,0 +1,48 @@
+# dependencies
+node_modules
+.pnpm-store
+.yarn
+.yarn-cache
+
+# build outputs
+dist
+build
+out
+coverage
+.tmp
+.cache
+
+# next.js
+.next
+.next-cache
+
+# tauri
+src-tauri/target
+src-tauri/gen
+src-tauri/.cargo
+
+# bun
+bun.lockb
+
+# env
+.env
+.env.*
+.env.local
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# system
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode
+.idea
+
+# test artifacts
+__snapshots__
+

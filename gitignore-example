@@ -1,0 +1,28 @@
+# dependency folders
+node_modules
+.pnpm-store
+.yarn
+
+# build output
+dist
+build
+out
+coverage
+.next
+.next-cache
+
+# tauri
+src-tauri/target
+src-tauri/gen
+
+# tooling
+.turbo
+.cache
+
+# tests
+__snapshots__
+
+# env
+.env
+.env.*
+

@@ -1,0 +1,56 @@
+{
+    "name": "ts-type-sweeper",
+    "author": "Remco Stoeten",
+    "version": "0.1.0",
+    "description": "Detects unused TypeScript types, barrel-only exports, and normalizes local Props types",
+    "type": "module",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": ""
+    },
+    "homepage": "",
+    "keywords": [
+        "typescript",
+        "ts-morph",
+        "static-analysis",
+        "unused-types",
+        "barrel-exports",
+        "props",
+        "cli"
+    ],
+    "bin": {
+        "ts-type-sweeper": "./bin/ts-type-sweeper.js"
+    },
+    "files": [
+        "dist",
+        "bin",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "dev": "tsx src/cli.ts",
+        "build": "tsup",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "lint": "eslint .",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "prepare": "npm run build"
+    },
+    "dependencies": {
+        "@inquirer/prompts": "^5.3.8",
+        "chalk": "^5.4.1",
+        "ts-morph": "^25.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^22.13.1",
+        "eslint": "^9.19.0",
+        "tsx": "^4.19.2",
+        "tsup": "^8.3.5",
+        "typescript": "^5.7.3",
+        "vitest": "^2.1.9"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
