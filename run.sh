@@ -1,3 +1,3 @@
 #!/usr/bin/bash
 
-./bin/kuizer.js
+./dist/index.js
