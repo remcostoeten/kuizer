@@ -1,56 +1,27 @@
 {
-    "name": "kuizer",
-    "author": "Remco Stoeten",
-    "version": "0.1.0",
-    "description": "Detects unused TypeScript types, barrel-only exports, and normalizes local Props types",
-    "type": "module",
-    "license": "MIT",
-    "repository": {
-        "type": "git",
-        "url": ""
-    },
-    "homepage": "",
-    "keywords": [
-        "typescript",
-        "ts-morph",
-        "static-analysis",
-        "unused-types",
-        "barrel-exports",
-        "props",
-        "cli"
-    ],
-    "bin": {
-        "kuizer": "./bin/kuizer.js"
-    },
-    "files": [
-        "dist",
-        "bin",
-        "README.md",
-        "LICENSE"
-    ],
-    "scripts": {
-        "dev": "tsx src/cli.ts",
-        "build": "tsup",
-        "test": "vitest run",
-        "test:watch": "vitest",
-        "lint": "eslint .",
-        "typecheck": "tsc -p tsconfig.json --noEmit",
-        "prepare": "npm run build"
-    },
-    "dependencies": {
-        "@inquirer/prompts": "^5.3.8",
-        "chalk": "^5.4.1",
-        "ts-morph": "^25.0.1"
-    },
-    "devDependencies": {
-        "@types/node": "^22.13.1",
-        "eslint": "^9.19.0",
-        "tsx": "^4.19.2",
-        "tsup": "^8.3.5",
-        "typescript": "^5.7.3",
-        "vitest": "^2.1.9"
-    },
-    "engines": {
-        "node": ">=18"
-    }
+  "name": "kuizer",
+  "version": "0.1.1",
+  "type": "module",
+  "bin": {
+    "kuizer": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cleye": "^1.3.2",
+    "cosmiconfig": "^9.0.0",
+    "fast-glob": "^3.3.2",
+    "picocolors": "^1.1.1",
+    "ts-morph": "^23.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
 }
