@@ -19,7 +19,7 @@ export async function bootstrap(config: Config): Promise<{ project: Project; rea
   const all = new Set(files)
   const configuredEntries = await resolveEntries(config, all, root)
   const entries = configuredEntries.size > 0 ? configuredEntries : inferEntries(project, all)
-  const reachable = bfs(project, entries)
+  const reachable = bfs(project, all, entries)
 
   return { project, reachable, all }
 }
@@ -78,21 +78,15 @@ function inferEntries(project: Project, all: ReadonlySet<string>): ReadonlySet<s
     const sf = project.getSourceFile(path)
     if (!sf) continue
 
-    for (const decl of sf.getImportDeclarations()) {
-      const resolved = decl.getModuleSpecifierSourceFile()
-      if (!resolved) continue
-
-      const next = resolved.getFilePath()
-      if (all.has(next)) {
-        imported.add(next)
-      }
+    for (const next of getAdjacentFiles(sf, all)) {
+      imported.add(next)
     }
   }
 
   return new Set([...all].filter(file => !imported.has(file)))
 }
 
-function bfs(project: Project, entries: ReadonlySet<string>): ReadonlySet<string> {
+function bfs(project: Project, all: ReadonlySet<string>, entries: ReadonlySet<string>): ReadonlySet<string> {
   const visited = new Set<string>()
   const queue = [...entries]
 
@@ -104,13 +98,42 @@ function bfs(project: Project, entries: ReadonlySet<string>): ReadonlySet<string
     const sf = project.getSourceFile(path)
     if (!sf) continue
 
-    for (const decl of sf.getImportDeclarations()) {
-      const resolved = decl.getModuleSpecifierSourceFile()
-      if (!resolved) continue
-      const next = resolved.getFilePath()
+    for (const next of getAdjacentFiles(sf, all)) {
       if (!visited.has(next)) queue.push(next)
     }
   }
 
   return visited
+}
+
+function getAdjacentFiles(
+  sourceFile: {
+    getImportDeclarations(): Array<{ getModuleSpecifierSourceFile(): { getFilePath(): string } | undefined }>
+    getExportDeclarations(): Array<{ getModuleSpecifierSourceFile(): { getFilePath(): string } | undefined }>
+  },
+  all: ReadonlySet<string>,
+): string[] {
+  const adjacent = new Set<string>()
+
+  for (const decl of sourceFile.getImportDeclarations()) {
+    const resolved = decl.getModuleSpecifierSourceFile()
+    if (!resolved) continue
+
+    const next = resolved.getFilePath()
+    if (all.has(next)) {
+      adjacent.add(next)
+    }
+  }
+
+  for (const decl of sourceFile.getExportDeclarations()) {
+    const resolved = decl.getModuleSpecifierSourceFile()
+    if (!resolved) continue
+
+    const next = resolved.getFilePath()
+    if (all.has(next)) {
+      adjacent.add(next)
+    }
+  }
+
+  return [...adjacent]
 }

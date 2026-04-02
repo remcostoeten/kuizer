@@ -4,6 +4,11 @@ export type Severity = "error" | "warn" | "info";
 
 export type Framework = "nextjs-app" | "nextjs-pages" | "vite" | "none";
 
+/** Extra machine-readable data attached to a finding when a detector has it. */
+export type FindingContext = Readonly<Record<string, unknown>>;
+
+export type DetectorResult = readonly Finding[];
+
 /** A single detector result, immutable once produced. */
 export type Finding = Readonly<{
   detectorId: string;
@@ -14,6 +19,7 @@ export type Finding = Readonly<{
   message: string;
   symbol?: string;
   fixable: boolean;
+  context?: FindingContext;
 }>;
 
 export type DetectorOpts = Readonly<{

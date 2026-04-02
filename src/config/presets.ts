@@ -41,7 +41,6 @@ const presets = {
       "getServerSideProps",
       "getStaticProps",
       "getStaticPaths",
-      "default",
     ],
   },
   vite: {

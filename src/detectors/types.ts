@@ -1,4 +1,4 @@
-import type { Ctx, Config, Finding } from '../types.js'
+import type { Ctx, Config, DetectorResult } from '../types.js'
 
 /** Pure function — takes analysis context and resolved config, returns findings. */
-export type Detector = (ctx: Ctx, config: Config) => Finding[]
+export type Detector = (ctx: Ctx, config: Config) => DetectorResult

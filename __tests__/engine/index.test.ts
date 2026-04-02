@@ -112,4 +112,58 @@ describe("bootstrap", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("follows re-export edges during reachability analysis", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "import { value } from './barrel.js'\nconsole.log(value)\n",
+      "src/barrel.ts": "export { value } from './origin.js'\n",
+      "src/origin.ts": "export const value = 1\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(reachable).toEqual(["src/barrel.ts", "src/index.ts", "src/origin.ts"]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("follows export-star edges during reachability analysis", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "import { value } from './barrel.js'\nconsole.log(value)\n",
+      "src/barrel.ts": "export * from './origin.js'\n",
+      "src/origin.ts": "export const value = 1\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(reachable).toEqual(["src/barrel.ts", "src/index.ts", "src/origin.ts"]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
