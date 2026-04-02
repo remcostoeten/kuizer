@@ -1,3 +1,4 @@
+import { SyntaxKind } from 'ts-morph'
 import type { Detector } from './types.js'
 import type { Finding }  from '../types.js'
 
@@ -35,6 +36,61 @@ function isFrameworkConsumedExport(
   return false
 }
 
+function matchesExportedNode(
+  symbol: string,
+  exportedNode: { getSourceFile(): { getFilePath(): string }; getStart(): number },
+  targetNode: { getSourceFile(): { getFilePath(): string }; getStart(): number },
+): boolean {
+  if (symbol === 'default') {
+    return exportedNode.getSourceFile().getFilePath() === targetNode.getSourceFile().getFilePath()
+  }
+
+  return (
+    exportedNode.getSourceFile().getFilePath() === targetNode.getSourceFile().getFilePath() &&
+    exportedNode.getStart() === targetNode.getStart()
+  )
+}
+
+function hasNamespaceConsumer(
+  project: Parameters<Detector>[0]['project'],
+  reachable: Parameters<Detector>[0]['reachable'],
+  path: string,
+  symbol: string,
+  node: { getSourceFile(): { getFilePath(): string }; getStart(): number },
+): boolean {
+  for (const consumerPath of reachable) {
+    if (consumerPath === path) continue
+
+    const sourceFile = project.getSourceFile(consumerPath)
+    if (!sourceFile) continue
+
+    for (const decl of sourceFile.getImportDeclarations()) {
+      const namespaceImport = decl.getNamespaceImport()
+      if (!namespaceImport) continue
+
+      const importedFile = decl.getModuleSpecifierSourceFile()
+      if (!importedFile) continue
+
+      const exportedNodes = importedFile.getExportedDeclarations().get(symbol)
+      if (!exportedNodes?.some(exportedNode => matchesExportedNode(symbol, exportedNode, node))) {
+        continue
+      }
+
+      const alias = namespaceImport.getText()
+      const propertyAccesses = sourceFile.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)
+
+      if (propertyAccesses.some((expr) =>
+        expr.getExpression().getText() === alias &&
+        expr.getName() === symbol,
+      )) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
 export function detect(...[{ project, reachable }, config]: Parameters<Detector>): ReturnType<Detector> {
   const severity = config.detectors.unusedExports?.severity ?? 'warn'
   const allowed  = new Set(config.allowedExports)
@@ -53,6 +109,9 @@ export function detect(...[{ project, reachable }, config]: Parameters<Detector>
       const node = nodes[0]
       if (!node) continue
 
+      if (hasNamespaceConsumer(project, reachable, path, symbol, node)) {
+        continue
+      }
 
       const references = 'findReferences' in node ? node.findReferences() : []
       const external: any[] = [];

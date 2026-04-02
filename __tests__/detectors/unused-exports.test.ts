@@ -33,6 +33,21 @@ describe("unusedExports", () => {
     expect(detect(ctx, makeConfig())).toHaveLength(0);
   });
 
+  it("treats direct namespace property access as a consumer", () => {
+    const ctx = makeCtx(
+      {
+        "/src/utils.ts": `export const value = 1`,
+        "/src/main.ts": `import * as Utils from '/src/utils';\nconsole.log(Utils.value)`,
+      },
+      {
+        "/src/utils.ts": `export const value = 1`,
+        "/src/main.ts": `import * as Utils from '/src/utils';\nconsole.log(Utils.value)`,
+      },
+    );
+
+    expect(detect(ctx, makeConfig())).toHaveLength(0);
+  });
+
   it("ignores consumers from unreachable files", () => {
     const ctx = makeCtx(
       {
@@ -47,6 +62,23 @@ describe("unusedExports", () => {
     const findings = detect(ctx, makeConfig());
     expect(findings).toHaveLength(1);
     expect(findings[0]?.symbol).toBe("dead");
+  });
+
+  it("treats namespace property access through barrels as a consumer", () => {
+    const ctx = makeCtx(
+      {
+        "/src/origin.ts": `export const value = 1`,
+        "/src/barrel.ts": `export { value } from '/src/origin'`,
+        "/src/main.ts": `import * as Barrel from '/src/barrel';\nconsole.log(Barrel.value)`,
+      },
+      {
+        "/src/origin.ts": `export const value = 1`,
+        "/src/barrel.ts": `export { value } from '/src/origin'`,
+        "/src/main.ts": `import * as Barrel from '/src/barrel';\nconsole.log(Barrel.value)`,
+      },
+    );
+
+    expect(detect(ctx, makeConfig())).toHaveLength(0);
   });
 
   it("respects allowedExports", () => {
