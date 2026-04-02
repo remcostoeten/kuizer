@@ -21,6 +21,7 @@ export function makeCtx(all: Files, reachable: Files): Ctx {
         project,
         all: new Set(Object.keys(all)),
         reachable: new Set(Object.keys(reachable)),
+        analysisBoundaries: [],
     }
 }
 

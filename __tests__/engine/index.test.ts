@@ -166,4 +166,62 @@ describe("bootstrap", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("follows string-literal dynamic imports during reachability analysis", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "await import('./lazy.js')\n",
+      "src/lazy.ts": "export const lazy = true\n",
+      "src/dead.ts": "export const dead = true\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(reachable).toEqual(["src/index.ts", "src/lazy.ts"]);
+      expect(ctx.analysisBoundaries).toHaveLength(0);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("records non-literal dynamic imports as analysis boundaries", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": [
+        "const name = 'lazy'",
+        "await import(`./${name}.js`)",
+      ].join("\n"),
+      "src/lazy.ts": "export const lazy = true\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+
+      expect([...ctx.reachable].map((file) => file.replace(cwd + "/", "")).sort()).toEqual(["src/index.ts"]);
+      expect(ctx.analysisBoundaries).toHaveLength(1);
+      expect(ctx.analysisBoundaries[0]?.kind).toBe("dynamic-import");
+      expect(ctx.analysisBoundaries[0]?.file).toBe(join(cwd, "src/index.ts"));
+      expect(ctx.analysisBoundaries[0]?.line).toBe(2);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });

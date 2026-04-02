@@ -9,6 +9,14 @@ export type FindingContext = Readonly<Record<string, unknown>>;
 
 export type DetectorResult = readonly Finding[];
 
+export type AnalysisBoundary = Readonly<{
+  file: string;
+  line: number;
+  col: number;
+  kind: "dynamic-import";
+  message: string;
+}>;
+
 /** A single detector result, immutable once produced. */
 export type Finding = Readonly<{
   detectorId: string;
@@ -56,4 +64,5 @@ export type Ctx = Readonly<{
   project: Project;
   reachable: ReadonlySet<string>;
   all: ReadonlySet<string>;
+  analysisBoundaries: readonly AnalysisBoundary[];
 }>;
