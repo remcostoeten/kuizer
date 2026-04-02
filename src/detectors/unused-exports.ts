@@ -19,7 +19,7 @@ export function detect(...[{ project, reachable }, config]: Parameters<Detector>
       if (!node) continue
 
 
-      const references = node.findReferences?.() ?? [];
+      const references = 'findReferences' in node ? node.findReferences() : []
       const external: any[] = [];
       for (const ref of references) {
         for (const refEntry of ref.getReferences()) {

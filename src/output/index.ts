@@ -1,5 +1,5 @@
 import pc from "picocolors";
-import { Severity } from "../types.js";
+import type { Severity } from '../types.js'
 
 export function dim(s: string) {
   return pc.dim(s);

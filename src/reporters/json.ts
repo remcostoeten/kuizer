@@ -1,20 +1,39 @@
-import type { Reporter } from './types.js'
+import type { Finding } from '../types.js'
+import { getVersion } from '../meta.js'
 
-/** 
- * @name JSON Reporter
- * @description A simple reporter that outputs findings as JSON to stdout. Useful for CI or when you want to process the output with other tools.
+const version = getVersion(import.meta.url)
+
+/**
+ * Outputs findings as formatted JSON to stdout.
+ *
+ * @remarks
+ * Intended for CI pipelines or piping into other tools that consume structured output.
+ *
+ * @param findings - The list of findings to report.
+ * @param durationMs - Execution duration in milliseconds.
  *
  * @example
  * {
- *   "meta": { "version": "0.0.1", "durationMs": 123, "total": 5 },
+ *   "meta": { "version": "0.1.1", "durationMs": 123, "total": 5 },
  *   "findings": [ ... ]
  * }
  */
-
-
-export const report: Reporter = (findings, durationMs) => {
-  process.stdout.write(JSON.stringify({
-    meta: { version: '0.0.1', durationMs, total: findings.length },
-    findings,
-  }, null, 2) + '\n')
+export function json(
+  findings: readonly Finding[],
+  durationMs: number,
+): void {
+  process.stdout.write(
+    JSON.stringify(
+      {
+        meta: {
+          version,
+          durationMs,
+          total: findings.length,
+        },
+        findings,
+      },
+      null,
+      2,
+    ) + '\n',
+  )
 }

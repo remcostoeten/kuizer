@@ -1,0 +1,5 @@
+{
+  "framework": "none",
+  "entrypoints": ["src/index.ts"],
+  "tsconfig": "./tsconfig.json"
+}
