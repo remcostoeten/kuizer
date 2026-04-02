@@ -16,6 +16,12 @@ describe("unusedExports", () => {
     expect(findings[0]?.symbol).toBe("dead");
     expect(findings[0]?.line).toBe(1);
     expect(findings[0]?.col).toBe(1);
+    expect(findings[0]?.context).toEqual({
+      consumerCount: 0,
+      framework: "none",
+      analysisBoundaryCount: 0,
+      hasDynamicImportBoundary: false,
+    });
   });
 
   it("does not flag an export that is consumed", () => {
@@ -182,5 +188,32 @@ describe("unusedExports", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.symbol).toBe("dead");
     expect(findings[0]?.file).toBe("/src/origin.ts");
+  });
+
+  it("adds uncertainty context when analysis boundaries exist", () => {
+    const ctx = {
+      ...makeCtx(
+        { "/src/utils.ts": `export function dead() {}` },
+        { "/src/utils.ts": `export function dead() {}` },
+      ),
+      analysisBoundaries: [
+        {
+          file: "/src/index.ts",
+          line: 2,
+          col: 1,
+          kind: "dynamic-import" as const,
+          message: "Non-literal dynamic import cannot be resolved statically",
+        },
+      ],
+    };
+
+    const finding = detect(ctx, makeConfig())[0];
+    expect(finding?.message).toContain("statically resolved consumers");
+    expect(finding?.context).toEqual({
+      consumerCount: 0,
+      framework: "none",
+      analysisBoundaryCount: 1,
+      hasDynamicImportBoundary: true,
+    });
   });
 });

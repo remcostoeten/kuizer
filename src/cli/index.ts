@@ -4,6 +4,8 @@ import { cli, command } from "cleye";
 import { loadConfig } from "../config/index.js";
 import { registry as detectorRegistry } from "../detectors/registry.js";
 import { bootstrap } from "../engine/index.js";
+import { planFixes } from "../fixers/plan.js";
+import { reportFixPlan } from "../fixers/report.js";
 import { getVersion } from "../meta.js";
 import { registry as reporterRegistry } from "../reporters/registry.js";
 import type { Config, Finding } from "../types.js";
@@ -16,11 +18,21 @@ type ReporterName = keyof typeof reporterRegistry;
 type DetectFlags = {
   config: string | undefined;
   tsconfig: string | undefined;
-  reporter: string | undefined;
   only: string | undefined;
   skip: string | undefined;
+  reporter: string | undefined;
   json: boolean | undefined;
 };
+
+type FixFlags = {
+  config: string | undefined;
+  tsconfig: string | undefined;
+  only: string | undefined;
+  skip: string | undefined;
+  dryRun: boolean | undefined;
+};
+
+type DetectorSelectionFlags = Pick<DetectFlags, "only" | "skip">;
 
 function parseCsv(input?: string): string[] {
   if (!input) return [];
@@ -42,7 +54,7 @@ function resolveReporter(flags: DetectFlags): ReporterName {
   throw new Error(`Unknown reporter '${reporter}'`);
 }
 
-function resolveDetectorIds(config: Config, flags: DetectFlags): DetectorId[] {
+function resolveDetectorIds(config: Config, flags: DetectorSelectionFlags): DetectorId[] {
   const available = Object.keys(detectorRegistry) as DetectorId[];
   const only = parseCsv(flags.only);
   const skip = new Set(parseCsv(flags.skip));
@@ -75,8 +87,30 @@ export async function runDetect(flags: DetectFlags): Promise<number> {
   const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config));
   const reporter = reporterRegistry[resolveReporter(flags)];
 
-  reporter(findings, Date.now() - startedAt);
+  reporter({
+    findings,
+    durationMs: Date.now() - startedAt,
+    analysisBoundaries: ctx.analysisBoundaries,
+  });
   return exitCode(findings);
+}
+
+export async function runFix(flags: FixFlags): Promise<number> {
+  const config = {
+    ...(await loadConfig(process.cwd(), flags.config)),
+    ...(flags.tsconfig ? { tsconfig: flags.tsconfig } : {}),
+  } satisfies Config;
+
+  const ctx = await bootstrap(config);
+  const detectors = resolveDetectorIds(config, flags);
+  const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config));
+  const plans = planFixes(findings, ctx, config);
+
+  reportFixPlan(plans, {
+    dryRun: flags.dryRun !== false,
+  });
+
+  return 0;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -110,6 +144,32 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     },
   });
 
+  const fix = command({
+    name: "fix",
+    flags: {
+      config: {
+        type: String,
+        description: "Path to config file",
+      },
+      tsconfig: {
+        type: String,
+        description: "Override tsconfig path",
+      },
+      only: {
+        type: String,
+        description: "Comma-separated list of detectors to plan fixes for",
+      },
+      skip: {
+        type: String,
+        description: "Comma-separated list of detectors to skip",
+      },
+      dryRun: {
+        type: Boolean,
+        description: "Preview fixes without writing to disk",
+      },
+    },
+  });
+
   const parsed = cli(
     {
       name: "kuizer",
@@ -117,7 +177,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       help: {
         description: "TypeScript dead code intelligence for large codebases.",
       },
-      commands: [detect],
+      commands: [detect, fix],
     },
     undefined,
     argv,
@@ -130,6 +190,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
   if (parsed.command === "detect") {
     return runDetect(parsed.flags);
+  }
+
+  if (parsed.command === "fix") {
+    return runFix(parsed.flags);
   }
 
   (parsed as { showHelp(): void }).showHelp();

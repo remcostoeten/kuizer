@@ -91,11 +91,14 @@ function hasNamespaceConsumer(
   return false
 }
 
-export function detect(...[{ project, reachable }, config]: Parameters<Detector>): ReturnType<Detector> {
+export function detect(...[{ project, reachable, analysisBoundaries }, config]: Parameters<Detector>): ReturnType<Detector> {
   const severity = config.detectors.unusedExports?.severity ?? 'warn'
   const allowed  = new Set(config.allowedExports)
   const ignored  = new Set(config.ignore.symbols)
   const findings: Finding[] = []
+  const hasDynamicImportBoundary = analysisBoundaries.some(
+    (boundary) => boundary.kind === 'dynamic-import',
+  )
 
   for (const path of reachable) {
     const sf = project.getSourceFile(path)
@@ -138,12 +141,16 @@ export function detect(...[{ project, reachable }, config]: Parameters<Detector>
           file:    path,
           line,
           col:     column,
-          message: `Exported symbol '${symbol}' has 0 consumers`,
+          message: hasDynamicImportBoundary
+            ? `Exported symbol '${symbol}' has 0 statically resolved consumers`
+            : `Exported symbol '${symbol}' has 0 consumers`,
           symbol,
           fixable: false,
           context: {
             consumerCount: 0,
             framework: config.framework,
+            analysisBoundaryCount: analysisBoundaries.length,
+            hasDynamicImportBoundary,
           },
         })
       }

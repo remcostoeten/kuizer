@@ -43,4 +43,29 @@ describe('unusedFiles', () => {
 
     expect(detect(ctx, config)[0]?.severity).toBe('error')
   })
+
+  it('adds uncertainty context when analysis boundaries exist', () => {
+    const ctx = {
+      ...makeCtx(
+        { '/src/dead.ts': '', '/src/live.ts': '' },
+        { '/src/live.ts': '' },
+      ),
+      analysisBoundaries: [
+        {
+          file: '/src/live.ts',
+          line: 2,
+          col: 1,
+          kind: 'dynamic-import' as const,
+          message: 'Non-literal dynamic import cannot be resolved statically',
+        },
+      ],
+    }
+
+    const finding = detect(ctx, makeConfig())[0]
+    expect(finding?.message).toContain('statically resolved')
+    expect(finding?.context).toEqual({
+      analysisBoundaryCount: 1,
+      hasDynamicImportBoundary: true,
+    })
+  })
 })

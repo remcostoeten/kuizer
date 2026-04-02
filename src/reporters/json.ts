@@ -1,5 +1,5 @@
-import type { Finding } from '../types.js'
 import { getVersion } from '../meta.js'
+import type { Report } from './types.js'
 
 const version = getVersion(import.meta.url)
 
@@ -18,10 +18,11 @@ const version = getVersion(import.meta.url)
  *   "findings": [ ... ]
  * }
  */
-export function json(
-  findings: readonly Finding[],
-  durationMs: number,
-): void {
+export function json({
+  findings,
+  durationMs,
+  analysisBoundaries,
+}: Report): void {
   process.stdout.write(
     JSON.stringify(
       {
@@ -29,8 +30,10 @@ export function json(
           version,
           durationMs,
           total: findings.length,
+          analysisBoundaryCount: analysisBoundaries.length,
         },
         findings,
+        analysisBoundaries,
       },
       null,
       2,
