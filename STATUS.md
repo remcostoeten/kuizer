@@ -12,9 +12,11 @@ It is meant to answer four questions quickly:
 ## Current Baseline
 
 Latest commit:
+
 - `f5cc745` — `Add dead-code detect MVP pipeline`
 
 Working tree after that commit:
+
 - There are follow-up detector/framework improvements beyond `f5cc745`.
 - There are also unrelated untracked/local files in the repo that are not part of the MVP status.
 
@@ -23,6 +25,7 @@ Working tree after that commit:
 ### CLI detect pipeline
 
 Implemented:
+
 - `kuizer detect`
 - `--config`
 - `--tsconfig`
@@ -33,9 +36,11 @@ Implemented:
 - exit code handling
 
 Code:
+
 - [src/cli/index.ts](/home/remco/dev/kuizer/src/cli/index.ts)
 
 What it does:
+
 - loads config
 - bootstraps the engine
 - runs selected detectors
@@ -46,22 +51,26 @@ What it does:
 ### Config loading
 
 Implemented:
+
 - config discovery
 - explicit config path loading
 - relative path rebasing from the config file location
 - framework preset merge
 
 Code:
+
 - [src/config/index.ts](/home/remco/dev/kuizer/src/config/index.ts)
 - [src/config/defaults.ts](/home/remco/dev/kuizer/src/config/defaults.ts)
 - [src/config/presets.ts](/home/remco/dev/kuizer/src/config/presets.ts)
 
 Important behavior:
+
 - resolved config values are treated as absolute filesystem paths after loading
 
 ### Engine bootstrap
 
 Implemented:
+
 - `ts-morph` project bootstrap from `tsconfig`
 - source file collection from the `tsconfig` program, not a repo-wide glob crawl
 - entrypoint resolution from explicit paths or glob patterns
@@ -70,19 +79,23 @@ Implemented:
 - default exclusion of `*.test.*` and `*.spec.*` files from the analysis set
 
 Code:
+
 - [src/engine/index.ts](/home/remco/dev/kuizer/src/engine/index.ts)
 
 Important behavior:
+
 - repo-root `unusedFiles` runs no longer flag the entire Kuizer source tree just because no entrypoint was configured
 
 ### Reporters
 
 Implemented:
+
 - terminal reporter
 - JSON reporter
 - version metadata for bundled and source execution
 
 Code:
+
 - [src/reporters/terminal.ts](/home/remco/dev/kuizer/src/reporters/terminal.ts)
 - [src/reporters/json.ts](/home/remco/dev/kuizer/src/reporters/json.ts)
 - [src/reporters/registry.ts](/home/remco/dev/kuizer/src/reporters/registry.ts)
@@ -91,14 +104,17 @@ Code:
 ### Detectors
 
 Implemented and working:
+
 - `unusedFiles`
 - `unusedExports`
 
 Code:
+
 - [src/detectors/unused-files.ts](/home/remco/dev/kuizer/src/detectors/unused-files.ts)
 - [src/detectors/unused-exports.ts](/home/remco/dev/kuizer/src/detectors/unused-exports.ts)
 
 Current `unusedExports` behavior:
+
 - inspects exports only in reachable files
 - counts only references from reachable consumers
 - handles named re-export chains
@@ -114,14 +130,17 @@ Current `unusedExports` behavior:
 ### Test fixture
 
 Implemented:
+
 - deterministic sample project fixture checked into the repo
 
 Code:
+
 - [tests/fixtures/sample/kuizer.config.json](/home/remco/dev/kuizer/tests/fixtures/sample/kuizer.config.json)
 - [tests/fixtures/sample/tsconfig.json](/home/remco/dev/kuizer/tests/fixtures/sample/tsconfig.json)
 - [tests/fixtures/sample/src/index.ts](/home/remco/dev/kuizer/tests/fixtures/sample/src/index.ts)
 
 Purpose:
+
 - stable end-to-end verification without depending on generation scripts
 
 ## What Has Been Verified
@@ -133,22 +152,24 @@ These checks passed on the current code while building the MVP:
 - `npm run build`
 
 Verified CLI behavior:
+
 - `node dist/index.js detect --reporter json --only unusedFiles`
-  - returns `0` findings for the Kuizer repo root instead of flooding on the entire source tree
+    - returns `0` findings for the Kuizer repo root instead of flooding on the entire source tree
 - `node dist/index.js detect --config tests/fixtures/sample/kuizer.config.json --reporter json --only unusedFiles,unusedExports`
-  - returns the expected fixture findings
+    - returns the expected fixture findings
 
 Expected fixture findings:
+
 - `unusedFiles`
-  - `src/components/Button.ts`
-  - `src/components/Modal.ts`
-  - `src/utils/format.ts`
-  - `src/utils/math.ts`
+    - `src/components/Button.ts`
+    - `src/components/Modal.ts`
+    - `src/utils/format.ts`
+    - `src/utils/math.ts`
 - `unusedExports`
-  - `shout`
-  - `FileLogger`
-  - `Timestamp`
-  - `PaginatedResponse`
+    - `shout`
+    - `FileLogger`
+    - `Timestamp`
+    - `PaginatedResponse`
 
 ## What Is In Progress
 
@@ -159,6 +180,7 @@ These changes exist locally after `f5cc745` and are working, but are not committ
 - richer finding metadata via `context`
 
 Files:
+
 - [src/engine/index.ts](/home/remco/dev/kuizer/src/engine/index.ts)
 - [src/detectors/unused-exports.ts](/home/remco/dev/kuizer/src/detectors/unused-exports.ts)
 - [src/types.ts](/home/remco/dev/kuizer/src/types.ts)
@@ -181,9 +203,11 @@ These are not bugs in the current MVP so much as unimplemented scope:
 Priority: high
 
 Why:
+
 - this detector is the most valuable next source of false positives or false negatives
 
 Next tasks:
+
 - handle namespace imports and property-access tracing
 - handle more framework-specific opaque consumption cases
 - add more mixed barrel/default/type re-export cases
@@ -193,9 +217,11 @@ Next tasks:
 Priority: high
 
 Why:
+
 - Next.js framework-consumed exports are called out as core spec behavior
 
 Next tasks:
+
 - keep Next.js preset coverage aligned with the spec
 - expand beyond current default-export and allowlist behavior where needed
 
@@ -204,9 +230,11 @@ Next tasks:
 Priority: medium
 
 Why:
+
 - the system is still detector-minimal and finding metadata is thin
 
 Next tasks:
+
 - add richer context on findings
 - make source locations consistent across detectors
 - clean up detector implementation typing and internal utilities
@@ -216,6 +244,7 @@ Next tasks:
 Priority: medium
 
 Most likely next:
+
 - better `unusedExports`
 - then possibly `unusedTypes` or fixer groundwork
 

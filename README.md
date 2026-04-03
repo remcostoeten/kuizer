@@ -18,18 +18,21 @@ Kuizer includes a dead code detector that identifies:
 The `scaffold-e2e-tests.sh` script generates a sample project (`tests/fixtures/sample/`) for testing dead code detection. It contains:
 
 **Live code:**
+
 - `src/index.ts` — entry point
 - `src/lib/greet.ts` — `greet` function used by entry point
 - `src/lib/logger.ts` — `Logger` class used by entry point
 - `src/types/index.ts` — `ID` and `Result` types used by entry point
 
 **Dead code (unused files):**
+
 - `src/utils/format.ts` — never imported
 - `src/utils/math.ts` — never imported
 - `src/components/Button.ts` — never imported
 - `src/components/Modal.ts` — never imported
 
 **Dead code (unused exports):**
+
 - `src/lib/greet.ts`: `shout`
 - `src/lib/logger.ts`: `FileLogger`
 - `src/utils/format.ts`: `formatDate`, `formatBytes`, `formatPercent`
@@ -46,5 +49,6 @@ bun test tests/e2e.test.ts
 ```
 
 This validates:
+
 - `unusedFiles` detects: `format.ts`, `math.ts`, `Button.ts`, `Modal.ts`
 - `unusedExports` detects: `shout`, `FileLogger`, `formatDate`, `formatBytes`, `formatPercent`, `Timestamp`, `PaginatedResponse`
