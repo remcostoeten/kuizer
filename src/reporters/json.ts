@@ -18,25 +18,21 @@ const version = getVersion(import.meta.url)
  *   "findings": [ ... ]
  * }
  */
-export function json({
-  findings,
-  durationMs,
-  analysisBoundaries,
-}: Report): void {
-  process.stdout.write(
-    JSON.stringify(
-      {
-        meta: {
-          version,
-          durationMs,
-          total: findings.length,
-          analysisBoundaryCount: analysisBoundaries.length,
-        },
-        findings,
-        analysisBoundaries,
-      },
-      null,
-      2,
-    ) + '\n',
-  )
+export function json({ findings, durationMs, analysisBoundaries }: Report): void {
+	process.stdout.write(
+		JSON.stringify(
+			{
+				meta: {
+					version,
+					durationMs,
+					total: findings.length,
+					analysisBoundaryCount: analysisBoundaries.length,
+				},
+				findings,
+				analysisBoundaries,
+			},
+			null,
+			2
+		) + '\n'
+	)
 }
