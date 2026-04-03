@@ -224,4 +224,70 @@ describe("bootstrap", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("adds out-of-program tests when countTestsAsConsumers is enabled", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "export function main() { return 1 }\n",
+      "__tests__/index.test.ts": "import { main } from '../src/index.js'\nmain()\n",
+    });
+
+    try {
+      const ctx = await bootstrap(
+        makeConfig(cwd, {
+          countTestsAsConsumers: true,
+        }),
+      );
+
+      const files = [...ctx.all].map((file) => file.replace(cwd + "/", "")).sort();
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(files).toEqual(["__tests__/index.test.ts", "src/index.ts"]);
+      expect(reachable).toEqual(["__tests__/index.test.ts", "src/index.ts"]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("emits bootstrap progress events", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "import './lib.js'\n",
+      "src/lib.ts": "export const value = 1\n",
+    });
+
+    const phases: string[] = [];
+
+    try {
+      await bootstrap(makeConfig(cwd), {
+        onProgress(event) {
+          phases.push(event.phase);
+        },
+      });
+
+      expect(phases).toContain("load-project");
+      expect(phases).toContain("collect-files");
+      expect(phases).toContain("resolve-entries");
+      expect(phases).toContain("analyze-file");
+      expect(phases.at(-1)).toBe("complete");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });

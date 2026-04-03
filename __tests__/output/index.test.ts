@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { badge, colorize, indent, rule } from '../../src/output/index.js'
+import { badge, indent, rule } from '../../src/output/index.js'
 
 describe('output', () => {
   it('rule returns a string of the given width', () => {
@@ -27,9 +27,9 @@ describe('output', () => {
     expect(raw.trim()).toBe('warn')
   })
 
-  it('colorize returns the input string for each severity', () => {
-    expect(colorize('x', 'error')).toContain('x')
-    expect(colorize('y', 'warn')).toContain('y')
-    expect(colorize('z', 'info')).toContain('z')
+  it('badge includes the severity label for each supported level', () => {
+    expect(badge('error')).toContain('error')
+    expect(badge('warn')).toContain('warn')
+    expect(badge('info')).toContain('info')
   })
 })

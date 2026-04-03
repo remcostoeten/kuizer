@@ -19,6 +19,24 @@ function makeUnusedFileFinding(
   };
 }
 
+function makeUnusedExportFinding(
+  file: string,
+  symbol: string,
+  overrides: Partial<Finding> = {},
+): Finding {
+  return {
+    detectorId: "unusedExports",
+    severity: "warn",
+    file,
+    line: 1,
+    col: 1,
+    message: `Exported symbol '${symbol}' has 0 consumers`,
+    symbol,
+    fixable: false,
+    ...overrides,
+  };
+}
+
 describe("planFixes", () => {
   it("plans a delete-file edit for unreachable unused files", () => {
     const ctx = makeCtx(
@@ -75,13 +93,12 @@ describe("planFixes", () => {
     const result = planFixes(
       [
         {
-          detectorId: "unusedExports",
+          detectorId: "unknownDetector",
           severity: "warn",
           file: "/src/utils.ts",
           line: 1,
           col: 1,
-          message: "Exported symbol 'dead' has 0 consumers",
-          symbol: "dead",
+          message: "Some finding",
           fixable: false,
         },
       ],
@@ -92,5 +109,105 @@ describe("planFixes", () => {
     expect(result.supported).toHaveLength(0);
     expect(result.unsupported).toHaveLength(1);
     expect(result.unsupported[0]?.reason).toContain("No fixer planner");
+  });
+
+  it("plans a delete-file edit for simple standalone unused exports", () => {
+    const ctx = makeCtx(
+      { "/src/utils.ts": "export function dead() { return 1 }\n" },
+      { "/src/utils.ts": "export function dead() { return 1 }\n" },
+    );
+    const result = planFixes(
+      [makeUnusedExportFinding("/src/utils.ts", "dead")],
+      ctx,
+      makeConfig(),
+    );
+
+    expect(result.supported).toHaveLength(1);
+    expect(result.unsupported).toHaveLength(0);
+    expect(result.supported[0]?.edits).toEqual([
+      {
+        kind: "delete-file",
+        file: "/src/utils.ts",
+        description: "Delete unused export 'dead'",
+      },
+    ]);
+  });
+
+  it("marks grouped variable unusedExports as unsupported", () => {
+    const ctx = makeCtx(
+      { "/src/utils.ts": "export const a = 1, b = 2\n" },
+      { "/src/utils.ts": "export const a = 1, b = 2\n" },
+    );
+    const result = planFixes(
+      [makeUnusedExportFinding("/src/utils.ts", "a")],
+      ctx,
+      makeConfig(),
+    );
+
+    expect(result.supported).toHaveLength(0);
+    expect(result.unsupported).toHaveLength(1);
+    expect(result.unsupported[0]?.reason).toContain("Only simple whole-declaration exports");
+  });
+
+  it("keeps unusedExports unsupported even with dynamic import uncertainty", () => {
+    const ctx = makeCtx(
+      { "/src/utils.ts": "export function dead() { return 1 }\n" },
+      { "/src/utils.ts": "export function dead() { return 1 }\n" },
+    );
+    const result = planFixes(
+      [
+        makeUnusedExportFinding("/src/utils.ts", "dead", {
+          context: {
+            analysisBoundaryCount: 1,
+            hasDynamicImportBoundary: true,
+          },
+          message: "Exported symbol 'dead' has 0 statically resolved consumers",
+        }),
+      ],
+      ctx,
+      makeConfig(),
+    );
+
+    expect(result.supported).toHaveLength(0);
+    expect(result.unsupported).toHaveLength(1);
+    expect(result.unsupported[0]?.reason).toContain("Dynamic import");
+  });
+
+  it("marks default export unusedExports as unsupported", () => {
+    const ctx = makeCtx(
+      { "/src/utils.ts": "export default function dead() { return 1 }\n" },
+      { "/src/utils.ts": "export default function dead() { return 1 }\n" },
+    );
+    const result = planFixes(
+      [makeUnusedExportFinding("/src/utils.ts", "default")],
+      ctx,
+      makeConfig(),
+    );
+
+    expect(result.supported).toHaveLength(0);
+    expect(result.unsupported).toHaveLength(1);
+    expect(result.unsupported[0]?.reason).toContain("Default exports");
+  });
+
+  it("marks barrel re-export unusedExports as unsupported", () => {
+    const ctx = makeCtx(
+      {
+        "/src/origin.ts": "export const dead = 1\n",
+        "/src/barrel.ts": "export { dead } from '/src/origin'\n",
+      },
+      {
+        "/src/origin.ts": "export const dead = 1\n",
+        "/src/barrel.ts": "export { dead } from '/src/origin'\n",
+      },
+    );
+    const result = planFixes(
+      [makeUnusedExportFinding("/src/barrel.ts", "dead")],
+      ctx,
+      makeConfig(),
+    );
+
+    expect(result.supported).toHaveLength(0);
+    expect(result.unsupported).toHaveLength(1);
+    expect(result.unsupported[0]?.reason).toContain("Only simple whole-declaration exports");
   });
 });

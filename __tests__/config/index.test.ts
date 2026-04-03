@@ -39,6 +39,29 @@ describe("loadConfig", () => {
     }
   });
 
+  it("discovers kuizer.config.json during config search", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "kuizer-config-json-"));
+    const configPath = join(cwd, "kuizer.config.json");
+
+    try {
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          framework: "nextjs-pages",
+          countTestsAsConsumers: true,
+        }),
+      );
+
+      const config = await loadConfig(cwd);
+
+      expect(config.framework).toBe("nextjs-pages");
+      expect(config.countTestsAsConsumers).toBe(true);
+      expect(config.allowedExports).toContain("getServerSideProps");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("rebases relative paths from an explicit config file", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "kuizer-config-base-"));
     const configDir = join(cwd, "config");

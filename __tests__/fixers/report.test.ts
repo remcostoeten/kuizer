@@ -42,7 +42,7 @@ describe("reportFixPlan", () => {
         {
           supported: false,
           finding: {
-            detectorId: "unusedExports",
+            detectorId: "unknownDetector",
             severity: "warn",
             file: "/src/utils.ts",
             line: 1,
@@ -51,7 +51,7 @@ describe("reportFixPlan", () => {
             symbol: "dead",
             fixable: false,
           },
-          reason: "No fixer planner is registered for detector 'unusedExports'",
+          reason: "No fixer planner is registered for detector 'unknownDetector'",
         },
       ],
     };
