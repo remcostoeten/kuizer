@@ -1,6 +1,8 @@
-import type { FixPlanner } from "./types.js";
-import { planUnusedFilesFix } from "./planners/unused-files.js";
+import type { FixPlanner } from './types.js'
+import { planUnusedExportsFix } from './planners/unused-exports.js'
+import { planUnusedFilesFix } from './planners/unused-files.js'
 
 export const registry = {
-  unusedFiles: planUnusedFilesFix,
-} as const satisfies Record<string, FixPlanner>;
+	unusedExports: planUnusedExportsFix,
+	unusedFiles: planUnusedFilesFix,
+} as const satisfies Record<string, FixPlanner>
