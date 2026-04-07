@@ -9,6 +9,7 @@
 	],
 	"type": "module",
 	"scripts": {
+		"prebuild": "./scripts/test-runner.sh",
 		"build": "tsup",
 		"dev": "tsup --watch",
 		"typecheck": "tsc --noEmit",

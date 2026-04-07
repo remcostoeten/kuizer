@@ -68,8 +68,8 @@ section_end() {
 # ── header ───────────────────────────────────────────────────────────────────
 
 print_header() {
-  if [ "${CI:-}" != "true" ]; then
-    clear
+  if [ "${CI:-}" != "true" ] && [ -t 1 ] && [ -n "${TERM:-}" ]; then
+    clear || true
   fi
   echo ""
   colored_rule "═" "$CYAN"
