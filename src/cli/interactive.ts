@@ -73,6 +73,7 @@ type InteractiveSessionOptions = Readonly<{
 	supportedFixes: readonly FixPlan[]
 	initialKinds?: readonly string[]
 	initialDetectors?: readonly string[]
+	reducedMotion?: boolean
 	refresh(): Promise<{
 		findings: readonly Finding[]
 		supportedFixes: readonly FixPlan[]
@@ -614,7 +615,7 @@ function findingRowLabel(
 	const cursor = state.pane === 'findings' && state.findingCursor === absoluteIndex ? '>' : ' '
 	const key = findingKey(finding)
 	const selectable = model.fixPlansByKey.has(key)
-	const marker = state.selectedKeys.has(key) ? 'x' : selectable ? ' ' : '!'
+	const marker = state.selectedKeys.has(key) ? 'x' : (selectable ? ' ' : '!')
 	const symbol = finding.symbol ?? truncateEnd(finding.message, 28)
 	return `${cursor} [${marker}] ${kindToken(finding.kind)} ${symbol} L${finding.line}`
 }
@@ -814,6 +815,7 @@ export async function runInteractiveSession(
 ): Promise<readonly Finding[]> {
 	const input = options.input ?? process.stdin
 	const output = options.output ?? process.stdout
+	const reducedMotion = options.reducedMotion ?? process.env.KUIZER_REDUCED_MOTION === '1'
 
 	if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== 'function') {
 		throw new Error('--interactive requires a TTY on stdin/stdout')
@@ -828,12 +830,21 @@ export async function runInteractiveSession(
 	input.resume()
 	output.write('\x1b[?25l')
 
+	let viewport = createViewport(output)
+	const resizeHandler = () => {
+		viewport = createViewport(output)
+	}
+	output.on('resize', resizeHandler)
+
 	try {
 		let running = true
-		const viewport = createViewport(output)
 
 		while (running) {
-			output.write('\x1b[2J\x1b[H')
+			if (!reducedMotion) {
+				output.write('\x1b[2J\x1b[H')
+			} else {
+				output.clearScreenDown?.()
+			}
 
 			if (state.pane === 'detectors') {
 				const catalog = collectDetectorCatalog(findings)
@@ -1186,8 +1197,13 @@ export async function runInteractiveSession(
 		}
 	} finally {
 		input.setRawMode(false)
+		output.off('resize', resizeHandler)
 		output.write('\x1b[?25h')
-		output.write('\x1b[2J\x1b[H')
+		if (!reducedMotion) {
+			output.write('\x1b[2J\x1b[H')
+		} else {
+			output.clearScreenDown?.()
+		}
 	}
 
 	return findings
