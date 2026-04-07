@@ -119,4 +119,88 @@ describe("applyFixPlans", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("applies multiple declaration edits in descending line order", () => {
+    const cwd = makeWorkspace();
+    const file = join(cwd, "src/exports.ts");
+    const tsconfig = join(cwd, "tsconfig.json");
+
+    try {
+      writeFile(
+        file,
+        [
+          "export const first = 1",
+          "",
+          "const keep = true",
+          "",
+          "export const second = 2",
+          "",
+        ].join("\n")
+      );
+      writeFile(tsconfig, JSON.stringify({ compilerOptions: {}, include: ["src/**/*.ts"] }));
+
+      const plans: FixPlan[] = [
+        {
+          supported: true,
+          finding: {
+            detectorId: "unusedExports",
+            severity: "warn",
+            file,
+            line: 1,
+            col: 1,
+            message: "Unused export 'first'",
+            symbol: "first",
+            kind: "const",
+            fixable: true,
+          },
+          edits: [
+            {
+              kind: "delete-declaration",
+              file,
+              exportName: "first",
+              startLine: 1,
+              endLine: 1,
+              description: "Delete first",
+            },
+          ],
+          safety: "cautious",
+          reason: "Delete first",
+        },
+        {
+          supported: true,
+          finding: {
+            detectorId: "unusedExports",
+            severity: "warn",
+            file,
+            line: 5,
+            col: 1,
+            message: "Unused export 'second'",
+            symbol: "second",
+            kind: "const",
+            fixable: true,
+          },
+          edits: [
+            {
+              kind: "delete-declaration",
+              file,
+              exportName: "second",
+              startLine: 5,
+              endLine: 5,
+              description: "Delete second",
+            },
+          ],
+          safety: "cautious",
+          reason: "Delete second",
+        },
+      ];
+
+      applyFixPlans(plans, [] satisfies readonly UnsupportedFix[], makeConfig(cwd), {
+        backup: false,
+      });
+
+      expect(readFileSync(file, "utf8")).toBe(["const keep = true", ""].join("\n"));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });

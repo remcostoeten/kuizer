@@ -8,7 +8,7 @@ type ProgressOptions = Readonly<{
 	intervalMs?: number
 }>
 
-export type ProgressHandle = Readonly<{
+type ProgressHandle = Readonly<{
 	update(label: string, detail?: string): void
 	stop(finalMessage?: string): void
 }>
@@ -117,11 +117,11 @@ function createActiveProgress(
 
 	return {
 		update(nextLabel: string, nextDetail?: string) {
+			const detail = normalizeDetail(cwd, nextDetail)
 			state = {
 				label: nextLabel,
-				detail: normalizeDetail(cwd, nextDetail),
+				...(detail === undefined ? {} : { detail }),
 			}
-			render()
 		},
 		stop(finalMessage?: string) {
 			if (stopped) return

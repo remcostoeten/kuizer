@@ -1,5 +1,17 @@
-import { SyntaxKind, type SourceFile, type Node } from 'ts-morph'
+import { SyntaxKind, type Node, type SourceFile } from 'ts-morph'
 import type { FixPlanner } from '../types.js'
+
+const SUPPORTED_UNUSED_EXPORT_DETECTOR_IDS = new Set([
+	'unusedExports',
+	'unusedFunctions',
+	'unusedTypes',
+	'unusedClasses',
+	'unusedComponents',
+	'unusedConstants',
+	'unusedEnums',
+	'unusedDefaults',
+	'unusedOthers',
+])
 
 /** Node kinds that represent a complete exported declaration we know how to handle. */
 const SUPPORTED_DECL_KINDS = new Set([
@@ -52,8 +64,16 @@ function getLineRange(node: Node): { startLine: number; endLine: number } {
 }
 
 export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
-	if (finding.detectorId !== 'unusedExports') {
+	if (!SUPPORTED_UNUSED_EXPORT_DETECTOR_IDS.has(finding.detectorId)) {
 		return null
+	}
+
+	if (finding.symbol === 'default') {
+		return {
+			supported: false,
+			finding,
+			reason: 'Default exports are not supported',
+		}
 	}
 
 	if (finding.context?.hasDynamicImportBoundary === true) {
@@ -84,8 +104,8 @@ export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
 
 	// ── Resolve the declaration node ─────────────────────────────────
 
-	const exportedDeclarations = sourceFile.getExportedDeclarations().get(symbol)
-	const node = exportedDeclarations?.[0]
+	const exportedDeclarationNodes = sourceFile.getExportedDeclarations().get(symbol)
+	const node = exportedDeclarationNodes?.[0]
 
 	if (!node) {
 		return {
@@ -115,12 +135,31 @@ export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
 		}
 	}
 
+	if (isExportDeclaration) {
+		return {
+			supported: false,
+			finding,
+			reason: 'Only simple whole-declaration exports are supported',
+		}
+	}
+
+	if (isExportAssignment) {
+		return {
+			supported: false,
+			finding,
+			reason: 'Default exports are not supported',
+		}
+	}
+
 	// ── Strategy selection ────────────────────────────────────────────
 
 	const stmtNode = owningStmt!
 	const statements = sourceFile.getStatements()
 	const isOnlyStatement = statements.length === 1
 	const locallyReferenced = hasLocalReferences(sourceFile, node)
+	const allExportedDeclarations = sourceFile.getExportedDeclarations()
+	const exportsExactlySymbol =
+		allExportedDeclarations.size === 1 && allExportedDeclarations.has(symbol)
 
 	// Strategy 1: If locally referenced, just strip the export keyword
 	if (locallyReferenced && !isExportDeclaration && !isExportAssignment) {
@@ -144,31 +183,20 @@ export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
 		}
 	}
 
-	// Strategy 2: If it's a re-export or the declaration is used locally via ExportDeclaration,
-	// just delete the re-export line
-	if (isExportDeclaration) {
-		const { startLine, endLine } = getLineRange(stmtNode)
-
-		return {
-			supported: true,
-			finding,
-			edits: [
-				{
-					kind: 'delete-declaration',
-					file: finding.file,
-					exportName: symbol,
-					startLine,
-					endLine,
-					description: `Delete re-export of '${symbol}'`,
-				},
-			],
-			safety: 'cautious',
-			reason: `Delete unused re-export '${symbol}'`,
-		}
-	}
-
 	// Strategy 3: If it's the only statement AND not locally referenced, delete the whole file
-	if (isOnlyStatement && !locallyReferenced) {
+	if (isOnlyStatement && !locallyReferenced && exportsExactlySymbol) {
+		if (stmtKind === SyntaxKind.VariableStatement) {
+			const variableStatement = stmtNode.asKindOrThrow(SyntaxKind.VariableStatement)
+			const declarationCount = variableStatement.getDeclarationList().getDeclarations().length
+			if (declarationCount !== 1) {
+				return {
+					supported: false,
+					finding,
+					reason: 'Only simple whole-declaration exports are supported',
+				}
+			}
+		}
+
 		return {
 			supported: true,
 			finding,
@@ -176,7 +204,7 @@ export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
 				{
 					kind: 'delete-file',
 					file: finding.file,
-					description: `Delete file containing only unused export '${symbol}'`,
+					description: `Delete unused export '${symbol}'`,
 				},
 			],
 			safety: 'destructive',
@@ -197,7 +225,7 @@ export const planUnusedExportsFix: FixPlanner = (finding, ctx, _config) => {
 				return {
 					supported: false,
 					finding,
-					reason: 'Grouped variable declarations (const a = 1, b = 2) are not supported',
+					reason: 'Only simple whole-declaration exports are supported',
 				}
 			}
 		}

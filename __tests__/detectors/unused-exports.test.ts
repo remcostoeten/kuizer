@@ -172,6 +172,38 @@ describe("unusedExports", () => {
     expect(detect(ctx, makeConfig())).toHaveLength(0);
   });
 
+  it("treats namespace access to default export aliases through barrels as live", () => {
+    const ctx = makeCtx(
+      {
+        "/src/origin.ts": `export default function value() { return 1 }`,
+        "/src/barrel.ts": `export { default as value } from '/src/origin'`,
+        "/src/main.ts": `import * as Barrel from '/src/barrel';\nconsole.log(Barrel.value())`,
+      },
+      {
+        "/src/origin.ts": `export default function value() { return 1 }`,
+        "/src/barrel.ts": `export { default as value } from '/src/origin'`,
+        "/src/main.ts": `import * as Barrel from '/src/barrel';\nconsole.log(Barrel.value())`,
+      },
+    );
+
+    expect(detect(ctx, makeConfig())).toHaveLength(0);
+  });
+
+  it("treats local export aliases as consumed when imported by their exported name", () => {
+    const ctx = makeCtx(
+      {
+        "/src/origin.ts": `const foo = 1\nexport { foo as bar }`,
+        "/src/main.ts": `import { bar } from '/src/origin';\nconsole.log(bar)`,
+      },
+      {
+        "/src/origin.ts": `const foo = 1\nexport { foo as bar }`,
+        "/src/main.ts": `import { bar } from '/src/origin';\nconsole.log(bar)`,
+      },
+    );
+
+    expect(detect(ctx, makeConfig())).toHaveLength(0);
+  });
+
   it("flags re-exported symbols when the barrel chain has no reachable consumers", () => {
     const ctx = makeCtx(
       {

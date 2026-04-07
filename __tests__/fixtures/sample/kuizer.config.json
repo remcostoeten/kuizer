@@ -1,0 +1,7 @@
+{
+  "kuizer": {
+    "tsconfig": "./tsconfig.json",
+    "entrypoints": ["src/index.ts"],
+    "framework": "none"
+  }
+}

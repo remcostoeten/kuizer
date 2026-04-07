@@ -1,20 +1,29 @@
 #!/usr/bin/env node
 
-import { cli, command } from 'cleye'
-import { fileURLToPath } from 'node:url'
-import readline from 'node:readline'
-import { dim, write, bold, green, cyan, yellow, red } from '../output/index.js'
-import { restoreSnapshot } from '../backup/restore.js'
-import { loadConfig } from '../config/index.js'
-import { registry as detectorRegistry } from '../detectors/registry.js'
+import { existsSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { resolve } from 'node:path'
+import pc from 'picocolors'
+import { preset } from '../config/presets.js'
 import { applyFixPlans } from '../fixers/apply.js'
-import { bootstrap } from '../engine/index.js'
 import { planFixes } from '../fixers/plan.js'
 import { reportAppliedFixes, reportFixPlan } from '../fixers/report.js'
-import { getVersion } from '../meta.js'
+import type { Config, Ctx, Finding, Framework } from '../types.js'
+
+import { bootstrap } from '../engine/index.js'
 import { createProgress } from '../output/progress.js'
+
+import { registry as detectorRegistry } from '../detectors/registry.js'
 import { registry as reporterRegistry } from '../reporters/registry.js'
-import type { Config, Finding } from '../types.js'
+
+import { cli, command } from 'cleye'
+import { fileURLToPath } from 'node:url'
+import { restoreSnapshot } from '../backup/restore.js'
+import { loadConfig } from '../config/index.js'
+import { getVersion } from '../meta.js'
+import { dim, write } from '../output/index.js'
+import { printMainHelp, tryHandleHelp } from './help.js'
+import { runInteractiveSession } from './interactive.js'
 
 const version = getVersion(import.meta.url)
 
@@ -45,10 +54,51 @@ type FixFlags = {
 
 type RestoreFlags = {
 	config: string | undefined
+	tsconfig: string | undefined
+	snapshot: string | undefined
+}
+
+type InitFlags = {
+	global: boolean | undefined
+	project: boolean | undefined
+}
+
+type RevertFlags = {
 	snapshot: string | undefined
 }
 
 type DetectorSelectionFlags = Pick<DetectFlags, 'only' | 'skip'>
+
+type FilterSelection = Readonly<{
+	detectorIds: ReadonlySet<DetectorId>
+	kinds: readonly string[]
+	includeAll: boolean
+}>
+
+const SPLIT_EXPORT_DETECTOR_IDS = [
+	'unusedFunctions',
+	'unusedTypes',
+	'unusedClasses',
+	'unusedComponents',
+	'unusedConstants',
+	'unusedEnums',
+	'unusedDefaults',
+	'unusedOthers',
+] as const satisfies readonly DetectorId[]
+
+const DEFAULT_DETECTOR_IDS = [
+	'unusedFiles',
+	...SPLIT_EXPORT_DETECTOR_IDS,
+] as const satisfies readonly DetectorId[]
+const DEFAULT_DETECTOR_ID_SET = new Set<DetectorId>(DEFAULT_DETECTOR_IDS)
+
+const DETECTOR_ALIAS_MAP: Readonly<Record<string, readonly DetectorId[]>> = {
+	files: ['unusedFiles'],
+	exports: SPLIT_EXPORT_DETECTOR_IDS,
+	unusedExports: SPLIT_EXPORT_DETECTOR_IDS,
+	imports: ['unusedImports'],
+	components: ['unusedComponents'],
+}
 
 function parseCsv(input?: string): string[] {
 	if (!input) return []
@@ -57,6 +107,25 @@ function parseCsv(input?: string): string[] {
 		.split(',')
 		.map((part) => part.trim())
 		.filter(Boolean)
+}
+
+function resolveDetectorToken(
+	token: string,
+	available: ReadonlySet<DetectorId>
+): readonly DetectorId[] | undefined {
+	if (available.has(token as DetectorId)) {
+		return [token as DetectorId]
+	}
+
+	const alias = DETECTOR_ALIAS_MAP[token.toLowerCase()]
+	if (alias) {
+		const expanded = alias.filter((id) => available.has(id))
+		if (expanded.length > 0) {
+			return expanded
+		}
+	}
+
+	return undefined
 }
 
 function resolveReporter(flags: DetectFlags): ReporterName {
@@ -72,367 +141,293 @@ function resolveReporter(flags: DetectFlags): ReporterName {
 
 function resolveDetectorIds(config: Config, flags: DetectorSelectionFlags): DetectorId[] {
 	const available = Object.keys(detectorRegistry) as DetectorId[]
+	const availableSet = new Set(available)
 	const only = parseCsv(flags.only)
-	const skip = new Set(parseCsv(flags.skip))
-	const enabled = available.filter((id) => config.detectors[id]?.enabled !== false)
+	const skip = new Set<DetectorId>()
+	const enabled = [
+		...DEFAULT_DETECTOR_IDS.filter(
+			(id) => availableSet.has(id) && config.detectors[id]?.enabled !== false
+		),
+		...available.filter(
+			(id) => !DEFAULT_DETECTOR_ID_SET.has(id) && config.detectors[id]?.enabled === true
+		),
+	]
+	const unknown: string[] = []
+	const normalizedOnly: DetectorId[] = []
 
-	for (const detectorId of [...only, ...skip]) {
-		if (!available.includes(detectorId as DetectorId)) {
-			throw new Error(`Unknown detector '${detectorId}'`)
+	for (const detectorId of only) {
+		const normalized = resolveDetectorToken(detectorId, availableSet)
+		if (!normalized) {
+			unknown.push(detectorId)
+			continue
+		}
+
+		normalizedOnly.push(...normalized)
+	}
+
+	for (const detectorId of parseCsv(flags.skip)) {
+		const normalized = resolveDetectorToken(detectorId, availableSet)
+		if (!normalized) {
+			unknown.push(detectorId)
+			continue
+		}
+
+		for (const id of normalized) {
+			skip.add(id)
 		}
 	}
 
-	return (only.length > 0 ? only : enabled).filter((id): id is DetectorId => !skip.has(id))
+	if (unknown.length > 0) {
+		throw new Error(`Unknown detector '${unknown[0]}'`)
+	}
+
+	return [...new Set(only.length > 0 ? normalizedOnly : enabled)].filter(
+		(id): id is DetectorId => !skip.has(id)
+	)
 }
 
 function exitCode(findings: readonly Finding[]): number {
 	return findings.some((finding) => finding.severity === 'error') ? 1 : 0
 }
 
-function groupByFileInteractive(findings: readonly Finding[]): Map<string, Finding[]> {
-	return findings.reduce((acc, f) => {
-		const group = acc.get(f.file) ?? []
-		group.push(f)
-		return acc.set(f.file, group)
-	}, new Map<string, Finding[]>())
+const DETECT_FILTER_KIND_MAP: Readonly<Record<string, string>> = {
+	functions: 'function',
+	vars: 'const',
+	variables: 'const',
+	classes: 'class',
+	types: 'type',
+	interfaces: 'interface',
+	enums: 'enum',
+	defaults: 'default',
+	others: 'other',
+	all: 'all',
+}
+
+function resolveFilterSelection(filter?: string): FilterSelection {
+	const available = new Set(Object.keys(detectorRegistry) as DetectorId[])
+	const detectorIds = new Set<DetectorId>()
+	const kinds = new Set<string>()
+	let includeAll = false
+
+	for (const token of parseCsv(filter)) {
+		const normalized = token.toLowerCase()
+		if (normalized === 'all') {
+			includeAll = true
+			continue
+		}
+
+		const detectorId = resolveDetectorToken(token, available)
+		if (detectorId) {
+			for (const id of detectorId) {
+				detectorIds.add(id)
+			}
+			continue
+		}
+
+		const kind = DETECT_FILTER_KIND_MAP[normalized]
+		kinds.add(kind ?? token)
+	}
+
+	return {
+		detectorIds,
+		kinds: [...kinds],
+		includeAll,
+	}
+}
+
+function applyFindingFilters(findings: readonly Finding[], selection: FilterSelection): Finding[] {
+	if (
+		selection.includeAll ||
+		(selection.detectorIds.size === 0 && selection.kinds.length === 0)
+	) {
+		return [...findings]
+	}
+
+	const filterKinds = new Set(selection.kinds)
+
+	return findings.filter((finding) => {
+		if (selection.detectorIds.has(finding.detectorId as DetectorId)) {
+			return true
+		}
+
+		if (filterKinds.size === 0) {
+			return false
+		}
+
+		return finding.kind !== undefined && filterKinds.has(finding.kind)
+	})
+}
+
+function compileExcludePattern(pattern?: string): RegExp | undefined {
+	if (!pattern) {
+		return undefined
+	}
+
+	try {
+		return new RegExp(pattern)
+	} catch {
+		throw new Error(`Invalid regex pattern: ${pattern}`)
+	}
+}
+
+function applyExcludePattern(findings: readonly Finding[], pattern?: RegExp): Finding[] {
+	if (!pattern) {
+		return [...findings]
+	}
+
+	return findings.filter((finding) => !pattern.test(finding.symbol || ''))
 }
 
 async function runDetect(flags: DetectFlags): Promise<number> {
 	const startedAt = Date.now()
-	const config = {
-		...(await loadConfig(process.cwd(), flags.config)),
-		...(flags.tsconfig ? { tsconfig: flags.tsconfig } : {}),
-	} satisfies Config
+	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
 
 	const reporterName = resolveReporter(flags)
 	const interactive = flags.interactive === true
 	const showProgress = reporterName === 'terminal' && !interactive
 	const progress = showProgress ? createProgress({ cwd: process.cwd() }) : undefined
-
-	progress?.update('Loading TypeScript project')
-	const ctx = await bootstrap(config, {
-		onProgress(event) {
-			if (!progress) return
-
-			switch (event.phase) {
-				case 'load-project':
-					progress.update('Loading TypeScript project')
-					break
-				case 'collect-files':
-					progress.update('Collecting source files')
-					break
-				case 'resolve-entries':
-					progress.update('Resolving entrypoints', `${event.totalFiles ?? 0} files`)
-					break
-				case 'analyze-file':
-					progress.update(
-						`Analyzing import graph ${event.completed}/${event.totalFiles}`,
-						event.file
-					)
-					break
-				case 'complete':
-					progress.update('Analysis ready', `${event.totalFiles ?? 0} files`)
-					break
-			}
-		},
-	})
 	const detectors = resolveDetectorIds(config, flags)
-	let findings: Finding[] = []
+	const filterSelection = resolveFilterSelection(flags.filter)
+	const excludePattern = compileExcludePattern(flags.excludePattern)
 
-	for (const [index, id] of detectors.entries()) {
-		progress?.update(`Running detector ${index + 1}/${detectors.length}`, id)
-		findings.push(...detectorRegistry[id](ctx, config))
-	}
-
-	if (flags.filter) {
-		const kindMap: Record<string, string> = {
-			functions: 'function',
-			vars: 'const',
-			variables: 'const',
-			classes: 'class',
-			types: 'type',
-			interfaces: 'interface',
-			enums: 'enum',
-			defaults: 'default',
-			others: 'other',
-			all: 'all',
+	const analyze = async (withProgress: boolean): Promise<{ ctx: Ctx; findings: Finding[] }> => {
+		if (withProgress) {
+			progress?.update('Loading TypeScript project')
 		}
-		const filterKinds = parseCsv(flags.filter).flatMap((k) => {
-			const normalized = k.toLowerCase()
-			return kindMap[normalized] ? [kindMap[normalized]] : [normalized]
-		})
-		if (!filterKinds.includes('all')) {
-			findings = findings.filter((f) => {
-				if (f.detectorId !== 'unusedExports') return true
-				return f.kind && filterKinds.includes(f.kind)
-			})
-		}
-	}
 
-	if (flags.excludePattern) {
+		let ctx: Ctx
 		try {
-			const regex = new RegExp(flags.excludePattern)
-			findings = findings.filter((f) => !regex.test(f.symbol || ''))
-		} catch (e) {
-			throw new Error(`Invalid regex pattern: ${flags.excludePattern}`)
+			ctx = await bootstrap(
+				config,
+				withProgress
+					? {
+							onProgress(event) {
+								if (!progress) return
+
+								switch (event.phase) {
+									case 'load-project':
+										progress.update('Loading TypeScript project')
+										break
+									case 'collect-files':
+										progress.update('Collecting source files')
+										break
+									case 'resolve-entries':
+										progress.update(
+											'Resolving entrypoints',
+											`${event.totalFiles ?? 0} files`
+										)
+										break
+									case 'analyze-file':
+										progress.update(
+											`Analyzing import graph ${event.completed}/${event.totalFiles}`,
+											event.file
+										)
+										break
+									case 'complete':
+										progress.update(
+											'Analysis ready',
+											`${event.totalFiles ?? 0} files`
+										)
+										break
+								}
+							},
+						}
+					: {}
+			)
+		} catch (error) {
+			if (error instanceof Error && error.message.includes('File not found')) {
+				console.error(`kuizer: ${error.message}`)
+				console.error(`Make sure a valid tsconfig.json exists at ${config.tsconfig}`)
+				process.exit(1)
+			}
+			throw error
 		}
+
+		let findings: Finding[] = []
+		for (const [index, id] of detectors.entries()) {
+			if (withProgress) {
+				progress?.update(`Running detector ${index + 1}/${detectors.length}`, id)
+			}
+			findings.push(...detectorRegistry[id](ctx, config))
+		}
+
+		return { ctx, findings }
 	}
 
-	if (flags.interactive) {
-		type ViewMode = 'summary' | 'results' | 'help'
+	const initial = await analyze(true)
 
-		const W = 56
-
-		const applyFilter = (selectedKinds: string[], allFindings: Finding[]) => {
-			if (selectedKinds.includes('all') || selectedKinds.length === 0) {
-				return allFindings
-			}
-			return allFindings.filter((f) => {
-				if (f.detectorId !== 'unusedExports') return true
-				return f.kind && selectedKinds.includes(f.kind)
-			})
-		}
-
-		const pad = (s: string, len: number) => s + ' '.repeat(Math.max(0, len - s.length))
-		const padStart = (s: string, len: number) => ' '.repeat(Math.max(0, len - s.length)) + s
-
-		const renderDashboard = (
-			currentKinds: string[],
-			filteredFindings: Finding[],
-			view: ViewMode,
-			page: number
-		) => {
-			const pageSize = 12
-			const grouped = groupByFileInteractive(filteredFindings)
-			const fileCount = grouped.size
-			const totalPages = Math.max(1, Math.ceil(fileCount / pageSize))
-			const clampedPage = Math.max(1, Math.min(page, totalPages))
-
-			const errors = filteredFindings.filter((f) => f.severity === 'error').length
-			const warnings = filteredFindings.filter((f) => f.severity === 'warn').length
-			const funcs = filteredFindings.filter((f) => f.kind === 'function').length
-			const types = filteredFindings.filter(
-				(f) => f.kind === 'type' || f.kind === 'interface'
-			).length
-			const consts = filteredFindings.filter((f) => f.kind === 'const').length
-
-			process.stdout.write('\x1b[2J\x1b[H')
-
-			write(bold(pad(` kuizer ${version}`, W - 1) + '│'))
-			write(bold(pad('│', W) + '│'))
-			write(bold(pad('│ Detect unused exports', W - 1) + '│'))
-			write(bold(pad('│', W) + '│'))
-			write(bold(pad(`│ ${filteredFindings.length} findings`, W - 1) + '│'))
-			write(bold(pad(`│   ${errors} errors  ${warnings} warnings`, W - 1) + '│'))
-			write(bold(pad('│', W) + '│'))
-			write(bold(pad('│ Filters:', W - 1) + '│'))
-			write(bold(pad(`│   [${currentKinds.includes('function') ? 'x' : ' '}] fn  [${currentKinds.includes('const') ? 'x' : ' '}] const  [${currentKinds.includes('type') ? 'x' : ' '}] type`, W - 1) + '│'))
-			write(bold(pad(`│   [${currentKinds.includes('interface') ? 'x' : ' '}] interface`, W - 1) + '│'))
-			write(bold(pad('│', W) + '│'))
-			write(bold(pad('│ View:', W - 1) + '│'))
-			write(bold(pad(`│   [${view === 'summary' ? 'x' : ' '}] summary  [${view === 'results' ? 'x' : ' '}] results  [${view === 'help' ? 'x' : ' '}] help`, W - 1) + '│'))
-			write(bold(pad('', W) + '│'))
-			write(bold('└' + '─'.repeat(W - 1) + '┘'))
-
-			if (view === 'help') {
-				write(bold('\n┌' + '─'.repeat(W - 2) + '┐'))
-				write(bold(pad('│ Keyboard shortcuts', W - 1) + '│'))
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ f   toggle functions', W - 1) + '│')
-				write(pad('│ c   toggle const', W - 1) + '│')
-				write(pad('│ t   toggle types', W - 1) + '│')
-				write(pad('│ i   toggle interfaces', W - 1) + '│')
-				write(pad('│ a   show all kinds', W - 1) + '│')
-				write(pad('│ r   reset filters', W - 1) + '│')
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ v   switch view', W - 1) + '│')
-				write(pad('│ ←→  navigate pages', W - 1) + '│')
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ Enter apply selected', W - 1) + '│')
-				write(pad('│ Space select file', W - 1) + '│')
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ q   quit', W - 1) + '│')
-				write(bold('└' + '─'.repeat(W - 2) + '┘'))
-			} else if (view === 'summary') {
-				write(bold('\n┌' + '─'.repeat(W - 2) + '┐'))
-				write(bold(pad(`│ Files with unused exports (${fileCount})`, W - 1) + '│'))
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ ' + padStart(`${funcs}`, 3) + ' functions', W - 1) + '│')
-				write(pad('│ ' + padStart(`${consts}`, 3) + ' const', W - 1) + '│')
-				write(pad('│ ' + padStart(`${types}`, 3) + ' types', W - 1) + '│')
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-				write(pad('│ ' + padStart(`${clampedPage}`, 3) + ' / ' + `${totalPages}` + ' pages', W - 1) + '│')
-				write(bold('└' + '─'.repeat(W - 2) + '┘'))
-
-				write(bold('\n┌' + '─'.repeat(W - 2) + '┐'))
-				write(bold(pad('│ Files', W - 1) + '│'))
-				write(bold('├' + '─'.repeat(W - 2) + '┤'))
-
-				const allFiles = Array.from(grouped.entries())
-				const startIdx = (clampedPage - 1) * pageSize
-				const pageFiles = allFiles.slice(startIdx, startIdx + pageSize)
-
-				for (const [file, group] of pageFiles) {
-					const shortFile = file.length > 40 ? '...' + file.slice(-37) : file
-					write(pad(`│ ${padStart(`${group.length}`, 2)} │ ${shortFile}`, W - 1) + '│')
+	if (interactive) {
+		const interactiveFindings = applyFindingFilters(
+			applyExcludePattern(initial.findings, excludePattern),
+			filterSelection
+		)
+		const remaining = await runInteractiveSession({
+			version,
+			config,
+			cwd: process.cwd(),
+			findings: interactiveFindings,
+			supportedFixes: planFixes(interactiveFindings, initial.ctx, config).supported,
+			initialKinds: filterSelection.kinds,
+			initialDetectors: [...filterSelection.detectorIds],
+			async refresh() {
+				const refreshed = await analyze(false)
+				const refreshedFindings = applyFindingFilters(
+					applyExcludePattern(refreshed.findings, excludePattern),
+					filterSelection
+				)
+				return {
+					findings: refreshedFindings,
+					supportedFixes: planFixes(refreshedFindings, refreshed.ctx, config).supported,
 				}
-
-				if (pageFiles.length === 0) {
-					write(pad('│ (no files)', W - 1) + '│')
-				}
-
-				write(bold('└' + '─'.repeat(W - 2) + '┘'))
-			} else {
-				const allFiles = Array.from(grouped.entries())
-				const startIdx = (clampedPage - 1) * pageSize
-				const pageFiles = allFiles.slice(startIdx, startIdx + pageSize)
-
-				write(bold('\n┌' + '─'.repeat(W - 2) + '┐'))
-				write(bold(pad(`│ Results (page ${clampedPage}/${totalPages})`, W - 1) + '│'))
-				write(bold('└' + '─'.repeat(W - 2) + '┘'))
-
-				for (const [file, group] of pageFiles) {
-					const shortFile = file.length > 40 ? '...' + file.slice(-37) : file
-					write(bold('\n┌' + '─'.repeat(W - 2) + '┐'))
-					write(bold(pad(`│ ${shortFile}`, W - 1) + '│'))
-					write(bold('├' + '─'.repeat(W - 2) + '┤'))
-
-					for (const f of group.slice(0, 5)) {
-						const kindLabel = f.kind === 'function'
-							? 'fn'
-							: f.kind === 'type'
-								? 'tp'
-								: f.kind === 'interface'
-									? 'if'
-									: f.kind === 'const'
-										? 'cn'
-										: '--'
-						const sym = f.symbol?.slice(0, 24) || '?'
-						const lineInfo = `L${f.line}`
-						write(pad(`│ ${padStart(lineInfo, 4)} [${kindLabel}] ${sym}`, W - 1) + '│')
-					}
-					if (group.length > 5) {
-						write(dim(pad(`│   + ${group.length - 5} more...`, W - 1) + '│'))
-					}
-				}
-
-				write(bold('\n└' + '─'.repeat(W - 2) + '┘'))
-			}
-
-			write(bold('\n› '))
-		}
-
-		function groupedCount(findings: Finding[]): number {
-			const grouped = groupByFileInteractive(findings)
-			return grouped.size
-		}
-
-		readline.emitKeypressEvents(process.stdin)
-		process.stdin.setRawMode(true)
-
-		let running = true
-		let activeKinds: string[] = []
-		let view: ViewMode = 'summary'
-		let page = 1
-
-		while (running) {
-			const filtered = applyFilter(activeKinds, findings)
-			renderDashboard(activeKinds, filtered, view, page)
-
-			const key = await new Promise<string>((resolve) => {
-				const handler = (str: string, key: { name: string; meta: boolean }) => {
-					process.stdin.off('keypress', handler)
-					resolve(key.name || str)
-				}
-				process.stdin.on('keypress', handler)
-			})
-
-			switch (key) {
-				case 'f':
-					activeKinds = activeKinds.includes('function')
-						? activeKinds.filter((k) => k !== 'function')
-						: [...activeKinds, 'function']
-					page = 1
-					break
-				case 'c':
-					activeKinds = activeKinds.includes('const')
-						? activeKinds.filter((k) => k !== 'const')
-						: [...activeKinds, 'const']
-					page = 1
-					break
-				case 't':
-					activeKinds = activeKinds.includes('type')
-						? activeKinds.filter((k) => k !== 'type')
-						: [...activeKinds, 'type']
-					page = 1
-					break
-				case 'i':
-					activeKinds = activeKinds.includes('interface')
-						? activeKinds.filter((k) => k !== 'interface')
-						: [...activeKinds, 'interface']
-					page = 1
-					break
-				case 'a':
-					activeKinds = activeKinds.includes('all') ? [] : ['all']
-					page = 1
-					break
-				case 'r':
-					activeKinds = []
-					page = 1
-					break
-				case 'v':
-					view = view === 'summary' ? 'results' : view === 'results' ? 'help' : 'summary'
-					page = 1
-					break
-				case '?':
-					view = view === 'help' ? 'summary' : 'help'
-					page = 1
-					break
-				case 'right':
-				case 'arrowright':
-					page++
-					break
-				case 'left':
-				case 'arrowleft':
-					page = Math.max(1, page - 1)
-					break
-				case 'q':
-				case 'escape':
-					running = false
-					break
-			}
-		}
-
-		process.stdin.setRawMode(false)
-		write(dim('\nGoodbye!'))
-		return 0
+			},
+		})
+		return exitCode(remaining)
 	}
 
 	progress?.stop()
 
+	const findings = applyFindingFilters(
+		applyExcludePattern(initial.findings, excludePattern),
+		filterSelection
+	)
 	const reporter = reporterRegistry[reporterName]
 
 	reporter({
 		findings,
 		durationMs: Date.now() - startedAt,
-		analysisBoundaries: ctx.analysisBoundaries,
+		analysisBoundaries: initial.ctx.analysisBoundaries,
 	})
 	return exitCode(findings)
 }
 
 async function runFix(flags: FixFlags): Promise<number> {
-	const config = {
-		...(await loadConfig(process.cwd(), flags.config)),
-		...(flags.tsconfig ? { tsconfig: flags.tsconfig } : {}),
-	} satisfies Config
+	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
 
-	const ctx = await bootstrap(config)
+	let ctx: Ctx
+	try {
+		ctx = await bootstrap(config)
+	} catch (error) {
+		if (error instanceof Error && error.message.includes('File not found')) {
+			console.error(`kuizer: ${error.message}`)
+			console.error(`Make sure a valid tsconfig.json exists at ${config.tsconfig}`)
+			process.exit(1)
+		}
+		throw error
+	}
 	const detectors = resolveDetectorIds(config, flags)
 	const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config))
 	const plans = planFixes(findings, ctx, config)
 
-	const shouldWrite = flags.write === true
-	if (!shouldWrite || flags.dryRun === true) {
+	// Determine if we should write based on config and flags
+	const explicitWrite = flags.write === true
+	const explicitDry = flags.dryRun === true
+	const defaultDryRun = config.dryRunByDefault
+
+	// -w always writes, --dry-run always dries, otherwise use config default
+	const shouldWrite = explicitWrite && !explicitDry
+	const shouldDryRun = explicitDry || (!explicitWrite && defaultDryRun)
+
+	if (shouldDryRun) {
 		reportFixPlan(plans, { dryRun: true })
 		return 0
 	}
@@ -449,7 +444,7 @@ async function runRestore(flags: RestoreFlags): Promise<number> {
 		throw new Error('Missing required --snapshot path')
 	}
 
-	const config = await loadConfig(process.cwd(), flags.config)
+	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
 	const result = restoreSnapshot(flags.snapshot, {
 		cwd: process.cwd(),
 		outputDir: config.outputDir,
@@ -459,31 +454,284 @@ async function runRestore(flags: RestoreFlags): Promise<number> {
 	return 0
 }
 
-export async function main(argv = process.argv.slice(2)): Promise<number> {
+async function runInit(flags: InitFlags): Promise<number> {
+	// Determine config type
+	let isGlobal: boolean
+	if (flags.global && flags.project) {
+		console.error(pc.red('Error: Cannot specify both --global and --project'))
+		return 1
+	} else if (flags.global) {
+		isGlobal = true
+	} else if (flags.project) {
+		isGlobal = false
+	} else {
+		// Interactive prompt
+		console.log(pc.yellow('🔧 Kuizer Configuration Setup'))
+		console.log('')
+		console.log('Where do you want to create the configuration?')
+		console.log('1) Global (~/.kuizerrc) - applies to all projects')
+		console.log('2) Project (./kuizer.config.json) - applies to current project only')
+		console.log('')
+
+		// Simple stdin read for choice
+		process.stdout.write(pc.cyan('Choose [1/2]: '))
+		const choice = await new Promise<string>((resolve) => {
+			process.stdin.once('data', (data) => {
+				resolve(data.toString().trim())
+			})
+		})
+
+		isGlobal = choice === '1'
+	}
+
+	const configPath = isGlobal
+		? resolve(homedir(), '.kuizerrc')
+		: resolve(process.cwd(), 'kuizer.config.json')
+
+	// Check if config already exists
+	if (existsSync(configPath)) {
+		console.log(pc.red(`Configuration already exists at: ${configPath}`))
+		console.log(pc.dim('Remove it first or edit it directly.'))
+		return 1
+	}
+
+	// Interactive configuration
+	console.log('')
+	console.log(pc.yellow('Configure your preferences:'))
+	console.log('')
+
+	// Ask about dry-run default
+	process.stdout.write(pc.cyan('Default to dry-run mode? (recommended) [Y/n]: '))
+	const dryRunChoice = await new Promise<string>((resolve) => {
+		process.stdin.once('data', (data) => {
+			resolve(data.toString().trim().toLowerCase())
+		})
+	})
+	const dryRunByDefault = dryRunChoice !== 'n' && dryRunChoice !== 'no'
+
+	// Ask about framework
+	console.log('')
+	console.log('Framework presets:')
+	console.log('1) none      - Generic TypeScript project')
+	console.log('2) nextjs-app - Next.js App Router')
+	console.log('3) nextjs-pages - Next.js Pages Router')
+	console.log('4) vite      - Vite-based project')
+	console.log('')
+
+	process.stdout.write(pc.cyan('Choose framework [1-4]: '))
+	const frameworkChoice = await new Promise<string>((resolve) => {
+		process.stdin.once('data', (data) => {
+			resolve(data.toString().trim())
+		})
+	})
+
+	const frameworkMap: Record<string, Framework> = {
+		'1': 'none',
+		'2': 'nextjs-app',
+		'3': 'nextjs-pages',
+		'4': 'vite',
+	}
+	const framework = frameworkMap[frameworkChoice] || 'none'
+
+	// Create config object
+	const config = {
+		dryRunByDefault,
+		framework,
+		...(framework !== 'none' && preset(framework)),
+	}
+
+	// Write config file
+	writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n')
+
+	const relativePath = isGlobal ? '~/.kuizerrc' : './kuizer.config.json'
+	console.log('')
+	console.log(pc.green('✅ Configuration created!'))
+	console.log(pc.dim(`Location: ${relativePath}`))
+	console.log('')
+
+	if (dryRunByDefault) {
+		console.log(pc.dim('🛡️  Safe mode enabled: kuizer fix will dry-run by default'))
+		console.log(pc.dim('   Use kuizer fix -w to apply fixes'))
+	} else {
+		console.log(pc.dim('⚡ Write mode enabled: kuizer fix will apply changes by default'))
+		console.log(pc.dim('   Use kuizer fix --dry to preview changes'))
+	}
+
+	if (framework !== 'none') {
+		console.log(pc.dim(`🔧 Framework preset applied: ${framework}`))
+	}
+
+	return 0
+}
+
+async function runRevert(flags: RevertFlags): Promise<number> {
+	if (!flags.snapshot) {
+		console.error(pc.red('Error: Missing required --snapshot path or ID'))
+		console.error(pc.dim('Usage: kuizer revert --snapshot <path|id>'))
+		console.error(pc.dim('Or: kuizer revert <snapshot-id>'))
+		return 1
+	}
+
+	try {
+		const config = await loadConfig(process.cwd())
+		const result = restoreSnapshot(flags.snapshot, {
+			cwd: process.cwd(),
+			outputDir: config.outputDir,
+		})
+
+		write(`Reverted ${result.restored.length} file${result.restored.length === 1 ? '' : 's'}`)
+		write(dim(`Snapshot: ${result.manifestPath}`))
+		return 0
+	} catch (error) {
+		console.error(
+			pc.red(`Failed to revert: ${error instanceof Error ? error.message : 'Unknown error'}`)
+		)
+		return 1
+	}
+}
+
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+	// Custom help system — intercept before cleye
+	if (tryHandleHelp(argv, version)) {
+		return 0
+	}
+
+	// Handle --command style flags by converting them to commands
+	const flagToCommand: Record<string, string> = {
+		'--detect': 'detect',
+		'--fix': 'fix',
+		'--restore': 'restore',
+		'--init': 'init',
+		'--revert': 'revert',
+		version: 'version',
+		'--version': 'version',
+		v: 'version',
+		'-v': 'version',
+	}
+
+	// Flags that should default to 'detect' command
+	const detectFlags = new Set([
+		'-c',
+		'--config',
+		'config',
+		'-o',
+		'--only',
+		'only',
+		'-s',
+		'--skip',
+		'skip',
+		'-r',
+		'--reporter',
+		'--report',
+		'report',
+		'reporter',
+		'-f',
+		'--filter',
+		'filter',
+		'--tsconfig',
+		'tsconfig',
+		'--exclude-pattern',
+		'--interactive',
+		'--json',
+		'json', // Support both --json and json as standalone arguments
+	])
+
+	// Flags that should default to 'fix' command
+	const fixFlags = new Set([
+		'--dry',
+		'--dr',
+		'--dry-run',
+		'dry',
+		'-w',
+		'--write',
+		'write',
+		'--no-backup',
+		'no-backup',
+		'--dryRun',
+		'write',
+		'noBackup',
+	])
+
+	// Handle additional flag aliases
+	const flagAliases: Record<string, string> = {
+		'--dry': '--dryRun',
+		'--dr': '--dryRun',
+		'--write': '--write',
+		'--no-backup': '--noBackup',
+		'--tsconfig': '--tsconfig',
+		'--config': '--config',
+		'--only': '--only',
+		'--skip': '--skip',
+		'--report': '--reporter',
+		'--filter': '--filter',
+	}
+
+	let processedArgv = [...argv]
+
+	// If first arg is a flag, prepend appropriate command
+	if (argv.length > 0) {
+		const firstArg = argv[0]
+		if (firstArg && detectFlags.has(firstArg)) {
+			// Special handling for 'json' - convert to --json
+			if (firstArg === 'json') {
+				processedArgv = ['detect', '--json', ...argv.slice(1)]
+			} else {
+				processedArgv = ['detect', ...argv]
+			}
+		} else if (firstArg && fixFlags.has(firstArg)) {
+			processedArgv = ['fix', ...argv]
+		} else if (firstArg && firstArg in flagToCommand) {
+			// Handle command aliases
+			const mappedCommand = flagToCommand[firstArg as keyof typeof flagToCommand]!
+			processedArgv[0] = mappedCommand
+		}
+	}
+
+	// Process flag aliases (but don't process --help to allow main help to show)
+	processedArgv = processedArgv.map((arg, index) => {
+		// Handle 'json' as a standalone argument (convert to --json)
+		if (arg === 'json' && index > 0) {
+			// Check if previous arg was a command or flag that expects json
+			const prevArg = processedArgv[index - 1]
+			if (prevArg === 'detect' || prevArg === 'd' || prevArg === 'fix' || prevArg === 'f') {
+				return '--json'
+			}
+		}
+		return arg === '--help' ? arg : flagAliases[arg] || arg
+	})
+
 	const detect = command({
 		name: 'detect',
+		alias: 'd',
 		help: {
 			description: 'Analyze your codebase to find unused exports and dead code',
 		},
 		flags: {
 			config: {
 				type: String,
-				description: 'Path to kuizer config file (defaults to kuizer.config.json)',
+				alias: 'c',
+				description:
+					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
 			},
 			tsconfig: {
 				type: String,
-				description: 'Path to tsconfig.json (auto-detected if not provided)',
+				description:
+					'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
 			},
 			reporter: {
 				type: String,
-				description: 'Output format: terminal (colored) or json',
+				alias: 'r',
+				description: 'Output format: terminal (colored) or json (alias: --report)',
 			},
 			only: {
 				type: String,
-				description: 'Run only specific detectors (e.g., unusedExports, unusedFiles)',
+				alias: 'o',
+				description:
+					'Run only specific detectors (e.g., unusedImports, unusedComponents, exports)',
 			},
 			skip: {
 				type: String,
+				alias: 's',
 				description: 'Skip specific detectors',
 			},
 			json: {
@@ -492,8 +740,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 			},
 			filter: {
 				type: String,
+				alias: 'f',
 				description:
-					'Filter results by export type: functions, const, types, interfaces, classes, all',
+					'Filter results by kind or detector: functions, classes, unusedImports, unusedComponents, all',
 			},
 			excludePattern: {
 				type: String,
@@ -508,50 +757,66 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
 	const fix = command({
 		name: 'fix',
+		alias: 'f',
 		help: {
 			description: 'Automatically remove unused exports and dead code from your project',
 		},
 		flags: {
 			config: {
 				type: String,
-				description: 'Path to kuizer config file (defaults to kuizer.config.json)',
+				alias: 'c',
+				description:
+					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
 			},
 			tsconfig: {
 				type: String,
-				description: 'Path to tsconfig.json (auto-detected if not provided)',
+				description:
+					'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
 			},
 			only: {
 				type: String,
+				alias: 'o',
 				description: 'Plan fixes for specific detectors only',
 			},
 			skip: {
 				type: String,
+				alias: 's',
 				description: 'Skip specific detectors when planning fixes',
 			},
 			dryRun: {
 				type: Boolean,
-				description: 'Show what would be fixed without writing any changes',
+				description:
+					'Show what would be fixed without writing any changes (aliases: --dry, --dr)',
 			},
 			write: {
 				type: Boolean,
-				description: 'Apply the fixes to your files (creates a backup by default)',
+				alias: 'w',
+				description:
+					'Apply the fixes to your files (creates a backup by default) (alias: --write)',
 			},
 			noBackup: {
 				type: Boolean,
-				description: 'Skip creating a backup before applying fixes',
+				description: 'Skip creating a backup before applying fixes (alias: --no-backup)',
 			},
 		},
 	})
 
 	const restore = command({
 		name: 'restore',
+		alias: 'r',
 		help: {
 			description: 'Restore files from a previous backup snapshot',
 		},
 		flags: {
 			config: {
 				type: String,
-				description: 'Path to kuizer config file (defaults to kuizer.config.json)',
+				alias: 'c',
+				description:
+					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
+			},
+			tsconfig: {
+				type: String,
+				description: 'Path to tsconfig.json (defaults to auto-detection)',
 			},
 			snapshot: {
 				type: String,
@@ -560,21 +825,89 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 		},
 	})
 
+	const init = command({
+		name: 'init',
+		help: {
+			description: 'Interactive configuration setup',
+		},
+		flags: {
+			global: {
+				type: Boolean,
+				description: 'Create global config (~/.kuizerrc)',
+			},
+			project: {
+				type: Boolean,
+				description: 'Create project config (./kuizer.config.json)',
+			},
+		},
+	})
+
+	const revert = command({
+		name: 'revert',
+		alias: 'rv',
+		help: {
+			description: 'Revert changes from a snapshot',
+		},
+		flags: {
+			snapshot: {
+				type: String,
+				description: 'Snapshot path or ID to revert from',
+			},
+		},
+	})
+
 	const parsed = cli(
 		{
 			name: 'kuizer',
 			version,
-			help: {
-				description: 'TypeScript dead code intelligence for large codebases.',
-			},
-			commands: [detect, fix, restore],
+			help: false,
+			commands: [detect, fix, restore, init, revert],
 		},
 		undefined,
-		argv
+		processedArgv
 	)
 
+	// Validate flag values
+	if ('command' in parsed) {
+		const flags = parsed.flags as any
+		const errors: string[] = []
+
+		// Check for required string flag values
+		if (flags.config === '') {
+			errors.push('Config path cannot be empty. Use: kuizer -c <path>')
+		}
+		if (flags.tsconfig === '') {
+			errors.push('Tsconfig path cannot be empty. Use: kuizer --tsconfig <path>')
+		}
+		if (flags.reporter === '') {
+			errors.push('Reporter cannot be empty. Use: kuizer -r <format>')
+		}
+		if (flags.only === '') {
+			errors.push('Only flag cannot be empty. Use: kuizer -o <detectors>')
+		}
+		if (flags.skip === '') {
+			errors.push('Skip flag cannot be empty. Use: kuizer -s <detectors>')
+		}
+		if (flags.filter === '') {
+			errors.push('Filter cannot be empty. Use: kuizer -f <types>')
+		}
+
+		// Check restore specific flags
+		if (parsed.command === 'restore' && flags.snapshot === '') {
+			errors.push('Snapshot path cannot be empty. Use: kuizer restore --snapshot <path|id>')
+		}
+
+		if (errors.length > 0) {
+			console.error('kuizer: Error:')
+			errors.forEach((error) => console.error(`  ${error}`))
+			console.error('')
+			console.error('For help, use: kuizer --help')
+			return 1
+		}
+	}
+
 	if (!('command' in parsed)) {
-		;(parsed as { showHelp(): void }).showHelp()
+		printMainHelp(version)
 		return 1
 	}
 
@@ -590,7 +923,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 		return runRestore(parsed.flags)
 	}
 
-	;(parsed as { showHelp(): void }).showHelp()
+	if (parsed.command === 'init') {
+		return runInit(parsed.flags)
+	}
+
+	if (parsed.command === 'revert') {
+		return runRevert(parsed.flags)
+	}
+
+	printMainHelp(version)
 	return 1
 }
 

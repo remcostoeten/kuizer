@@ -1,3 +1,4 @@
+import type { Finding } from '../types.js'
 import type { Detector } from './types.js'
 
 export function detect(
@@ -8,11 +9,14 @@ export function detect(
 	const hasDynamicImportBoundary = analysisBoundaries.some(
 		(boundary) => boundary.kind === 'dynamic-import'
 	)
+	const findings: Finding[] = []
 
-	return [...all]
-		.filter((f) => !reachable.has(f))
-		.filter((f) => !ignored.has(f))
-		.map((file) => ({
+	for (const file of all) {
+		if (reachable.has(file) || ignored.has(file)) {
+			continue
+		}
+
+		findings.push({
 			detectorId: 'unusedFiles',
 			severity,
 			file,
@@ -30,5 +34,8 @@ export function detect(
 						},
 					}
 				: {}),
-		}))
+		})
+	}
+
+	return findings
 }

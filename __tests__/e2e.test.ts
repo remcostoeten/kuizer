@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeAll } from 'bun:test'
+import { beforeAll, describe, expect, it } from 'bun:test'
 import { resolve } from 'path'
-import { bootstrap } from '../src/engine/index.js'
-import { detect as unusedFiles } from '../src/detectors/unused-files.js'
-import { detect as unusedExports } from '../src/detectors/unused-exports.js'
-import type { Config, Ctx, Finding } from '../src/types.js'
 import { defaults } from '../src/config/defaults.js'
+import { detect as unusedExports } from '../src/detectors/unused-exports.js'
+import { detect as unusedFiles } from '../src/detectors/unused-files.js'
+import { bootstrap } from '../src/engine/index.js'
+import type { Config, Ctx, Finding } from '../src/types.js'
 
-const FIXTURE = resolve(import.meta.dir, '../tests/fixtures/sample')
+const FIXTURE = resolve(import.meta.dir, 'fixtures/sample')
 
 const config: Config = {
   ...defaults,

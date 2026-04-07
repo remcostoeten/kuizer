@@ -13,10 +13,8 @@ export function applyFixPlans(
 	const snapshot =
 		options.backup && allEdits.length > 0 ? createSnapshot(allEdits, config) : undefined
 
-	for (const plan of plans) {
-		for (const edit of plan.edits) {
-			applyEdit(edit)
-		}
+	for (const edit of orderEditsForApply(allEdits)) {
+		applyEdit(edit)
 	}
 
 	return {
@@ -24,6 +22,31 @@ export function applyFixPlans(
 		skipped: unsupported,
 		...(snapshot ? { snapshotPath: snapshot.manifestPath } : {}),
 	}
+}
+
+function orderEditsForApply(edits: readonly PlannedEdit[]): PlannedEdit[] {
+	const grouped = edits.reduce((acc, edit) => {
+		const current = acc.get(edit.file) ?? []
+		current.push(edit)
+		acc.set(edit.file, current)
+		return acc
+	}, new Map<string, PlannedEdit[]>())
+
+	return [...grouped.values()].flatMap((fileEdits) => {
+		const deleteFile = fileEdits.find((edit) => edit.kind === 'delete-file')
+		if (deleteFile) {
+			return [deleteFile]
+		}
+
+		return [...fileEdits].sort((a, b) => {
+			const startA = 'startLine' in a ? a.startLine : 0
+			const startB = 'startLine' in b ? b.startLine : 0
+			const endA = 'endLine' in a ? a.endLine : 0
+			const endB = 'endLine' in b ? b.endLine : 0
+
+			return endB - endA || startB - startA
+		})
+	})
 }
 
 function applyEdit(edit: PlannedEdit): void {
@@ -56,15 +79,20 @@ function applyRemoveExportKeyword(edit: {
 	const result: string[] = []
 
 	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]
+		if (line === undefined) {
+			continue
+		}
+
 		const lineNum = i + 1
 		if (lineNum >= edit.startLine && lineNum <= edit.endLine) {
 			// Strip 'export default ', 'export ', from the line
-			const stripped = lines[i]
+			const stripped = line
 				.replace(/^(\s*)export\s+default\s+/, '$1')
 				.replace(/^(\s*)export\s+/, '$1')
 			result.push(stripped)
 		} else {
-			result.push(lines[i])
+			result.push(line)
 		}
 	}
 
@@ -80,20 +108,34 @@ function applyDeleteDeclaration(edit: { file: string; startLine: number; endLine
 
 	let prevWasBlank = false
 	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]
+		if (line === undefined) {
+			continue
+		}
+
 		const lineNum = i + 1
 		if (lineNum >= edit.startLine && lineNum <= edit.endLine) {
 			continue
 		}
 
-		const isBlank = lines[i].trim() === ''
+		const isBlank = line.trim() === ''
 		// Skip consecutive blank lines that would result from removing declarations
 		if (isBlank && prevWasBlank) continue
 		prevWasBlank = isBlank
-		result.push(lines[i])
+		result.push(line)
+	}
+
+	while (result[0] !== undefined && result[0].trim() === '') {
+		result.shift()
 	}
 
 	// Trim trailing blank lines
-	while (result.length > 0 && result[result.length - 1].trim() === '') {
+	while (result.length > 0) {
+		const lastLine = result.at(-1)
+		if (lastLine === undefined || lastLine.trim() !== '') {
+			break
+		}
+
 		result.pop()
 	}
 	// Ensure file ends with a newline

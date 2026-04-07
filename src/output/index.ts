@@ -9,22 +9,6 @@ export function bold(s: string) {
 	return pc.bold(s)
 }
 
-export function green(s: string) {
-	return pc.green(s)
-}
-
-export function cyan(s: string) {
-	return pc.cyan(s)
-}
-
-export function yellow(s: string) {
-	return pc.yellow(s)
-}
-
-export function red(s: string) {
-	return pc.red(s)
-}
-
 function colorize(s: string, severity: Severity) {
 	if (severity === 'error') return pc.red(s)
 	if (severity === 'warn') return pc.yellow(s)

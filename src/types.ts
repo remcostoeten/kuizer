@@ -47,16 +47,29 @@ type DetectorOpts = Readonly<{
 	ignore?: readonly string[]
 }>
 
+type UnusedExportDetectorKey =
+	| 'unusedExports'
+	| 'unusedImports'
+	| 'unusedFunctions'
+	| 'unusedTypes'
+	| 'unusedClasses'
+	| 'unusedComponents'
+	| 'unusedConstants'
+	| 'unusedEnums'
+	| 'unusedDefaults'
+	| 'unusedOthers'
+
 type Ignore = Readonly<{
 	files: readonly string[]
 	symbols: readonly string[]
 	paths: readonly string[]
 }>
 
-type Detectors = Readonly<{
-	unusedFiles?: DetectorOpts
-	unusedExports?: DetectorOpts
-}>
+type Detectors = Readonly<
+	{
+		unusedFiles?: DetectorOpts
+	} & Partial<Record<UnusedExportDetectorKey, DetectorOpts>>
+>
 
 /** Fully resolved config — all fields present, no optionals at top level. */
 export type Config = Readonly<{
@@ -68,6 +81,7 @@ export type Config = Readonly<{
 	ignore: Ignore
 	detectors: Detectors
 	outputDir: string
+	dryRunByDefault: boolean
 }>
 
 /** Shared analysis context produced by the engine, consumed by detectors. */

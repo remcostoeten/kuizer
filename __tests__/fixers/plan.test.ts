@@ -20,12 +20,13 @@ function makeUnusedFileFinding(
 }
 
 function makeUnusedExportFinding(
+  detectorId: Finding["detectorId"],
   file: string,
   symbol: string,
   overrides: Partial<Finding> = {},
 ): Finding {
   return {
-    detectorId: "unusedExports",
+    detectorId,
     severity: "warn",
     file,
     line: 1,
@@ -117,7 +118,7 @@ describe("planFixes", () => {
       { "/src/utils.ts": "export function dead() { return 1 }\n" },
     );
     const result = planFixes(
-      [makeUnusedExportFinding("/src/utils.ts", "dead")],
+      [makeUnusedExportFinding("unusedExports", "/src/utils.ts", "dead")],
       ctx,
       makeConfig(),
     );
@@ -139,7 +140,7 @@ describe("planFixes", () => {
       { "/src/utils.ts": "export const a = 1, b = 2\n" },
     );
     const result = planFixes(
-      [makeUnusedExportFinding("/src/utils.ts", "a")],
+      [makeUnusedExportFinding("unusedExports", "/src/utils.ts", "a")],
       ctx,
       makeConfig(),
     );
@@ -156,7 +157,7 @@ describe("planFixes", () => {
     );
     const result = planFixes(
       [
-        makeUnusedExportFinding("/src/utils.ts", "dead", {
+        makeUnusedExportFinding("unusedExports", "/src/utils.ts", "dead", {
           context: {
             analysisBoundaryCount: 1,
             hasDynamicImportBoundary: true,
@@ -179,7 +180,7 @@ describe("planFixes", () => {
       { "/src/utils.ts": "export default function dead() { return 1 }\n" },
     );
     const result = planFixes(
-      [makeUnusedExportFinding("/src/utils.ts", "default")],
+      [makeUnusedExportFinding("unusedExports", "/src/utils.ts", "default")],
       ctx,
       makeConfig(),
     );
@@ -201,7 +202,7 @@ describe("planFixes", () => {
       },
     );
     const result = planFixes(
-      [makeUnusedExportFinding("/src/barrel.ts", "dead")],
+      [makeUnusedExportFinding("unusedExports", "/src/barrel.ts", "dead")],
       ctx,
       makeConfig(),
     );
@@ -210,4 +211,58 @@ describe("planFixes", () => {
     expect(result.unsupported).toHaveLength(1);
     expect(result.unsupported[0]?.reason).toContain("Only simple whole-declaration exports");
   });
+
+  it.each([
+    "unusedFunctions",
+    "unusedTypes",
+    "unusedComponents",
+  ] satisfies Finding["detectorId"][])(
+    "routes %s findings through the unused export planner when the declaration is supported",
+    (detectorId) => {
+      const file = detectorId === "unusedComponents" ? "/src/component.tsx" : "/src/utils.ts";
+      const source =
+        detectorId === "unusedComponents"
+          ? "export function Button() { return null }\n"
+          : "export function dead() { return 1 }\n";
+      const symbol = detectorId === "unusedComponents" ? "Button" : "dead";
+      const ctx = makeCtx({ [file]: source }, { [file]: source });
+      const result = planFixes(
+        [makeUnusedExportFinding(detectorId, file, symbol)],
+        ctx,
+        makeConfig(),
+      );
+
+      expect(result.supported).toHaveLength(1);
+      expect(result.unsupported).toHaveLength(0);
+      expect(result.supported[0]?.edits).toEqual([
+        {
+          kind: "delete-file",
+          file,
+          description: `Delete unused export '${symbol}'`,
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    "unusedExports",
+    "unusedDefaults",
+  ] satisfies Finding["detectorId"][])(
+    "keeps default exports unsupported for %s findings",
+    (detectorId) => {
+      const ctx = makeCtx(
+        { "/src/utils.ts": "export default function dead() { return 1 }\n" },
+        { "/src/utils.ts": "export default function dead() { return 1 }\n" },
+      );
+      const result = planFixes(
+        [makeUnusedExportFinding(detectorId, "/src/utils.ts", "default")],
+        ctx,
+        makeConfig(),
+      );
+
+      expect(result.supported).toHaveLength(0);
+      expect(result.unsupported).toHaveLength(1);
+      expect(result.unsupported[0]?.reason).toContain("Default exports");
+    },
+  );
 });

@@ -1,5 +1,7 @@
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { cosmiconfig } from 'cosmiconfig'
-import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Config, Framework } from '../types.js'
 import { defaults } from './defaults.js'
 import { preset } from './presets.js'
@@ -11,6 +13,7 @@ type Raw = Partial<{
 	countTestsAsConsumers: boolean
 	allowedExports: string[]
 	outputDir: string
+	dryRunByDefault: boolean
 	ignore: Partial<{
 		files: string[]
 		symbols: string[]
@@ -21,6 +24,29 @@ type Raw = Partial<{
 
 function resolveFrom(baseDir: string, value: string): string {
 	return isAbsolute(value) ? value : resolve(baseDir, value)
+}
+
+function isGlobalConfigPath(path: string): boolean {
+	return (
+		dirname(path) === homedir() &&
+		['.kuizerrc', '.kuizerrc.json', '.kuizerrc.js', '.kuizerrc.ts'].includes(basename(path))
+	)
+}
+
+async function loadGlobalConfig(explorer: ReturnType<typeof cosmiconfig>) {
+	const candidates = ['.kuizerrc', '.kuizerrc.json', '.kuizerrc.js', '.kuizerrc.ts'].map((name) =>
+		resolve(homedir(), name)
+	)
+
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) {
+			continue
+		}
+
+		return await explorer.load(candidate)
+	}
+
+	return undefined
 }
 
 /** Merges user-supplied raw config with framework preset and defaults. */
@@ -43,11 +69,16 @@ function mergeConfig(raw: Raw, baseDir: string): Config {
 			paths: [...(raw.ignore?.paths ?? [])],
 		},
 		detectors: raw.detectors ?? {},
+		dryRunByDefault: raw.dryRunByDefault ?? defaults.dryRunByDefault,
 	}
 }
 
 /** Discovers and loads kuizer config via cosmiconfig, returning a fully resolved Config. */
-export async function loadConfig(cwd = process.cwd(), configPath?: string): Promise<Config> {
+export async function loadConfig(
+	cwd = process.cwd(),
+	configPath?: string,
+	tsconfigPath?: string
+): Promise<Config> {
 	const explorer = cosmiconfig('kuizer', {
 		searchPlaces: [
 			'kuizer.config.json',
@@ -60,12 +91,18 @@ export async function loadConfig(cwd = process.cwd(), configPath?: string): Prom
 		],
 	})
 
-	const result = configPath
+	const localResult = configPath
 		? await explorer.load(resolve(cwd, configPath))
 		: await explorer.search(cwd)
+	const result = localResult ?? (configPath ? undefined : await loadGlobalConfig(explorer))
 
 	const loadedPath = result?.filepath
-	const baseDir = loadedPath ? dirname(loadedPath) : cwd
+	const baseDir = loadedPath && !isGlobalConfigPath(loadedPath) ? dirname(loadedPath) : cwd
+	const raw = { ...((result?.config as Raw | undefined) ?? {}) }
 
-	return mergeConfig((result?.config as Raw | undefined) ?? {}, baseDir)
+	if (tsconfigPath) {
+		raw.tsconfig = resolve(cwd, tsconfigPath)
+	}
+
+	return mergeConfig(raw, baseDir)
 }

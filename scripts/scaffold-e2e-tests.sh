@@ -21,7 +21,7 @@ diff_backup() {
     echo "Backup $backup_name not found in $BACKUP_DIR"
     exit 1
   fi
-  local target_root="${2:-tests/fixtures/sample}"
+  local target_root="${2:-__tests__/fixtures/sample}"
   
   echo "Diff between $target_backup and $target_root:"
   for new_file in $(find "$target_root" -type f -name "*.ts" -o -name "*.json" | sort); do
@@ -47,10 +47,10 @@ if [ "${1:-}" == "--diff-backup" ]; then
     echo "Usage: $0 --diff-backup <backup-name> [target-root]"
     exit 1
   fi
-  diff_backup "$2" "${3:-tests/fixtures/sample}"
+  diff_backup "$2" "${3:-__tests__/fixtures/sample}"
 fi
 
-ROOT="${1:-tests/fixtures/sample}"
+ROOT="${1:-__tests__/fixtures/sample}"
 
 mkdir -p \
   "$ROOT/src/components" \

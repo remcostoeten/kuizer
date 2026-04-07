@@ -44,6 +44,10 @@ function renderRemoveExportDiff(file: string, startLine: number, endLine: number
 
 	for (let i = startLine - 1; i < endLine && i < lines.length; i++) {
 		const original = lines[i]
+		if (original === undefined) {
+			continue
+		}
+
 		const stripped = original
 			.replace(/^(\s*)export\s+default\s+/, '$1')
 			.replace(/^(\s*)export\s+/, '$1')
@@ -64,7 +68,12 @@ function renderDeleteDeclarationDiff(file: string, startLine: number, endLine: n
 	const diff: string[] = []
 
 	for (let i = startLine - 1; i < endLine && i < lines.length; i++) {
-		diff.push(`- ${lines[i]}`)
+		const line = lines[i]
+		if (line === undefined) {
+			continue
+		}
+
+		diff.push(`- ${line}`)
 	}
 
 	return [...header, ...diff].join('\n')

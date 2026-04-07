@@ -13,4 +13,5 @@ export const defaults = {
 	},
 	detectors: {},
 	outputDir: '.kuizer',
+	dryRunByDefault: true,
 } as const satisfies Config
