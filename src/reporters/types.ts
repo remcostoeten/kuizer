@@ -1,4 +1,10 @@
-import type { Finding } from '../types.js'
+import type { AnalysisBoundary, Finding } from '../types.js'
 
-/** Pure sink — receives all findings after all detectors have run. */
-export type Reporter = (findings: readonly Finding[], durationMs: number) => void
+export type Report = Readonly<{
+	findings: readonly Finding[]
+	durationMs: number
+	analysisBoundaries: readonly AnalysisBoundary[]
+}>
+
+/** Pure sink — receives the analysis report after all detectors run. */
+export type Reporter = (report: Report) => void
