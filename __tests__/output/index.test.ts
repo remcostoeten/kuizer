@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'bun:test'
 import { badge, indent, rule } from '../../src/output/index.js'
 
+const ANSI_RE = new RegExp(String.raw`\u001B\[[0-9;]*m`, 'g')
+
 describe('output', () => {
   it('rule returns a string of the given width', () => {
-    const raw = rule(20).replace(/\x1b\[[0-9;]*m/g, '')
+    const raw = rule(20).replace(ANSI_RE, '')
     expect(raw).toHaveLength(20)
   })
 
@@ -16,13 +18,13 @@ describe('output', () => {
   })
 
   it('badge pads severity to 5 characters', () => {
-    const raw = badge('error').replace(/\x1b\[[0-9;]*m/g, '')
+    const raw = badge('error').replace(ANSI_RE, '')
     expect(raw.trim()).toBe('error')
     expect(raw).toHaveLength(5)
   })
 
   it('badge pads short severity labels', () => {
-    const raw = badge('warn').replace(/\x1b\[[0-9;]*m/g, '')
+    const raw = badge('warn').replace(ANSI_RE, '')
     expect(raw).toHaveLength(5)
     expect(raw.trim()).toBe('warn')
   })

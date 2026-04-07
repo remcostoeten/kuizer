@@ -27,27 +27,81 @@ type ExportFinding = Finding & Readonly<{ detectorId: UnusedExportDetectorId; sy
 type SourceFileWithExports = {
 	getFilePath(): string
 	getExportedDeclarations(): ReadonlyMap<string, ExportedNode[]>
-	getExportSymbols(): Array<{
+	getExportSymbols(): {
 		getName(): string
 		getAliasedSymbol(): { getName(): string } | undefined
+	}[]
+}
+
+type DetectorContext = Parameters<Detector>[0]
+type DetectorConfig = Parameters<Detector>[1]
+
+type ExportDeclarationLike = {
+	getModuleSpecifierValue?(): string | undefined
+	getNamedExports(): Array<{
+		getAliasNode?(): { getText(): string } | undefined
+		getName(): string
 	}>
 }
 
-function isLocallyReexported(sourceFile: any, symbol: string): boolean {
-	if (!sourceFile || typeof sourceFile.getExportDeclarations !== 'function') {
+type ReferenceEntryLike = {
+	getSourceFile(): {
+		getFilePath(): string
+	}
+	isDefinition(): boolean | undefined
+}
+
+type ReferenceSymbolLike = {
+	getReferences(): ReferenceEntryLike[]
+}
+
+type ReferenceableNode = {
+	findReferences(): ReferenceSymbolLike[]
+}
+
+const EXPORT_DETECTOR_IDS = [
+	'unusedExports',
+	'unusedFunctions',
+	'unusedTypes',
+	'unusedClasses',
+	'unusedComponents',
+	'unusedConstants',
+	'unusedEnums',
+	'unusedDefaults',
+	'unusedOthers',
+] as const satisfies readonly UnusedExportDetectorId[]
+
+const EXPORT_FINDING_CACHE = new WeakMap<DetectorContext, Map<string, readonly ExportFinding[]>>()
+
+function hasLocalReferences(node: ReferenceableNode | undefined, filePath: string): boolean {
+	if (!node) {
 		return false
 	}
 
+	for (const reference of node.findReferences()) {
+		for (const entry of reference.getReferences()) {
+			if (entry.getSourceFile().getFilePath() !== filePath) continue
+			if (entry.isDefinition()) continue
+			return true
+		}
+	}
+
+	return false
+}
+
+function isLocallyReexported(
+	sourceFile: { getExportDeclarations(): ExportDeclarationLike[] },
+	symbol: string
+): boolean {
 	for (const decl of sourceFile.getExportDeclarations()) {
 		if (typeof decl.getModuleSpecifierValue === 'function' && decl.getModuleSpecifierValue()) {
 			continue
 		}
 
 		for (const specifier of decl.getNamedExports()) {
-			const exportedName =
-				typeof specifier.getAliasNode === 'function' && specifier.getAliasNode()
-					? specifier.getAliasNode().getText()
-					: specifier.getName()
+			const aliasNode =
+				typeof specifier.getAliasNode === 'function' ? specifier.getAliasNode() : undefined
+			const exportedName = aliasNode ? aliasNode.getText() : specifier.getName()
 			if (exportedName === symbol) {
 				return true
 			}
@@ -85,7 +139,7 @@ function getExportKind(sourceFile: any, symbol: string, node: any): ExportKind {
 }
 
 function getSeverityForDetector(
-	config: Parameters<Detector>[1],
+	config: DetectorConfig,
 	detectorId: UnusedExportDetectorId
 ): Severity {
 	return (
@@ -238,8 +292,8 @@ function resolveConsumerKey(sourceFile: SourceFileWithExports, symbol: string): 
 }
 
 function buildConsumerCounts(
-	project: Parameters<Detector>[0]['project'],
-	reachable: Parameters<Detector>[0]['reachable']
+	project: DetectorContext['project'],
+	reachable: DetectorContext['reachable']
 ): ReadonlyMap<string, number> {
 	const counts = new Map<string, number>()
 
@@ -260,25 +314,16 @@ function buildConsumerCounts(
 			const importedFile = decl.getModuleSpecifierSourceFile()
 			if (!importedFile) continue
 
-			if (decl.getImportClause()?.isTypeOnly()) {
-				const defaultImport = decl.getDefaultImport()
-				if (defaultImport) {
-					recordConsumer(importedFile, 'default')
-				}
-
-				for (const specifier of decl.getNamedImports()) {
-					recordConsumer(importedFile, specifier.getName())
-				}
-				continue
-			}
-
 			const defaultImport = decl.getDefaultImport()
-			if (defaultImport) {
+			if (defaultImport && hasLocalReferences(defaultImport, consumerPath)) {
 				recordConsumer(importedFile, 'default')
 			}
 
 			for (const specifier of decl.getNamedImports()) {
-				recordConsumer(importedFile, specifier.getName())
+				const localNode = specifier.getAliasNode() ?? specifier.getNameNode()
+				if (hasLocalReferences(localNode, consumerPath)) {
+					recordConsumer(importedFile, specifier.getName())
+				}
 			}
 
 			const namespaceImport = decl.getNamespaceImport()
@@ -303,8 +348,8 @@ function buildConsumerCounts(
 }
 
 function collectUnusedExportFindings(
-	ctx: Parameters<Detector>[0],
-	config: Parameters<Detector>[1]
+	ctx: DetectorContext,
+	config: DetectorConfig
 ): ExportFinding[] {
 	const { project, reachable, analysisBoundaries } = ctx
 	const allowed = new Set(config.allowedExports)
@@ -371,9 +416,47 @@ function collectUnusedExportFindings(
 	return findings
 }
 
+function buildCacheKey(config: DetectorConfig): string {
+	return JSON.stringify({
+		framework: config.framework,
+		allowedExports: [...config.allowedExports].sort(),
+		ignoreSymbols: [...config.ignore.symbols].sort(),
+		detectors: Object.fromEntries(
+			EXPORT_DETECTOR_IDS.map((detectorId) => [
+				detectorId,
+				{
+					enabled: config.detectors[detectorId]?.enabled ?? null,
+					severity: config.detectors[detectorId]?.severity ?? null,
+				},
+			])
+		),
+	})
+}
+
+function getCachedUnusedExportFindings(
+	ctx: DetectorContext,
+	config: DetectorConfig
+): readonly ExportFinding[] {
+	const cacheKey = buildCacheKey(config)
+	const contextCache = EXPORT_FINDING_CACHE.get(ctx)
+	const cached = contextCache?.get(cacheKey)
+	if (cached) {
+		return cached
+	}
+
+	const findings = collectUnusedExportFindings(ctx, config)
+	if (contextCache) {
+		contextCache.set(cacheKey, findings)
+	} else {
+		EXPORT_FINDING_CACHE.set(ctx, new Map([[cacheKey, findings]]))
+	}
+
+	return findings
+}
+
 function detectById(detectorId: UnusedExportDetectorId): Detector {
 	return (ctx, config) => {
-		const findings = collectUnusedExportFindings(ctx, config)
+		const findings = getCachedUnusedExportFindings(ctx, config)
 		if (detectorId === 'unusedExports') {
 			return findings.map((finding) => ({
 				...finding,

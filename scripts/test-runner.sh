@@ -241,6 +241,7 @@ print_summary() {
   local pass="$1"
   local fail="$2"
   local elapsed_ms="$3"
+  local test_ok="$4"
 
   # Guard against empty values
   pass="${pass:-0}"
@@ -254,11 +255,11 @@ print_summary() {
   echo ""
   colored_rule "─" "$GRAY"
 
-  if [ "$fail" -eq 0 ] && [ "$total" -gt 0 ]; then
+  if [ "$test_ok" = true ] && [ "$fail" -eq 0 ] && [ "$total" -gt 0 ]; then
     printf "  $(badge "ALL PASS" "$GREEN" "$BG_GREEN")  "
     printf "${WHITE}${BOLD}%d${RESET} ${GRAY}tests${RESET}  " "$total"
     printf "${GRAY}%ss${RESET}\n" "$elapsed_s"
-  elif [ "$total" -eq 0 ]; then
+  elif [ "$test_ok" = true ] && [ "$total" -eq 0 ]; then
     printf "  $(badge "NO TESTS" "$YELLOW")  "
     printf "${GRAY}no test results captured${RESET}\n"
   else
@@ -298,9 +299,9 @@ main() {
     read -r pass fail elapsed_ms < "$RESULTS_FILE"
   fi
 
-  print_summary "${pass:-0}" "${fail:-0}" "${elapsed_ms:-0}"
+  print_summary "${pass:-0}" "${fail:-0}" "${elapsed_ms:-0}" "$test_ok"
 
-  if [ "$typecheck_ok" = false ] || [ "${fail:-0}" -gt 0 ]; then
+  if [ "$typecheck_ok" = false ] || [ "$test_ok" = false ] || [ "${fail:-0}" -gt 0 ]; then
     exit 1
   fi
 }

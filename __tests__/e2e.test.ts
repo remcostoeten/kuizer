@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'bun:test'
 import { resolve } from 'path'
-import { defaults } from '../src/config/defaults.js'
+import { loadConfig } from '../src/config/index.js'
 import { detect as unusedExports } from '../src/detectors/unused-exports.js'
 import { detect as unusedFiles } from '../src/detectors/unused-files.js'
 import { bootstrap } from '../src/engine/index.js'
@@ -8,12 +8,7 @@ import type { Config, Ctx, Finding } from '../src/types.js'
 
 const FIXTURE = resolve(import.meta.dir, 'fixtures/sample')
 
-const config: Config = {
-  ...defaults,
-  tsconfig:    `${FIXTURE}/tsconfig.json`,
-  entrypoints: [`${FIXTURE}/src/index.ts`],
-  framework:   'none',
-}
+let config: Config
 
 function filenames(findings: readonly Finding[], detector: string): string[] {
   return findings
@@ -33,6 +28,7 @@ describe('e2e — sample fixture', () => {
   let ctx: Ctx
 
   beforeAll(async () => {
+    config = await loadConfig(FIXTURE)
     ctx = await bootstrap(config)
   })
 
@@ -40,6 +36,12 @@ describe('e2e — sample fixture', () => {
     expect(ctx.all.size).toBeGreaterThan(0)
     expect(ctx.reachable.size).toBeGreaterThan(0)
     expect(ctx.reachable.size).toBeLessThan(ctx.all.size)
+  })
+
+  it('loads the fixture config from disk through loadConfig', () => {
+    expect(config.tsconfig).toBe(`${FIXTURE}/tsconfig.json`)
+    expect(config.entrypoints).toEqual([`${FIXTURE}/src/index.ts`])
+    expect(config.framework).toBe('none')
   })
 
   it('reachable set contains exactly the live files', () => {

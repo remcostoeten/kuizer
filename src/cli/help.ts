@@ -1,7 +1,5 @@
 import pc from 'picocolors'
 
-const VERSION_PLACEHOLDER = '__VERSION__'
-
 interface FlagDef {
 	name: string
 	short?: string
@@ -231,7 +229,7 @@ const ALL_FLAGS: FlagDef[] = [
 	FLAG_SNAPSHOT,
 ]
 
-const ANSI_RE = /\x1b\[[0-9;]*m/g
+const ANSI_RE = new RegExp(String.raw`\u001B\[[0-9;]*m`, 'g')
 function visible(s: string): number {
 	return s.replace(ANSI_RE, '').length
 }
@@ -277,10 +275,6 @@ function formatCommandLine(cmd: CommandDef): string {
 		.join(pc.dim(' | '))
 	const left = `  ${name} ${pc.dim('|')} ${rest}`
 	return padTo(left, CMD_DESC_COL) + cmd.description
-}
-
-function twoCol(left: string, right: string, colWidth: number): string {
-	return padTo(left, colWidth) + right
 }
 
 // ── Main help ───────────────────────────────────────────────────────
@@ -424,7 +418,7 @@ function printCommandHelp(cmdName: string, version: string): void {
 	process.stdout.write(o.join('\n') + '\n')
 }
 
-function printFlagHelp(flagInput: string, version: string): void {
+function printFlagHelp(flagInput: string): void {
 	const normalized = flagInput.replace(/^-+/, '').toLowerCase()
 	const flag = ALL_FLAGS.find(
 		(f) =>
@@ -440,7 +434,6 @@ function printFlagHelp(flagInput: string, version: string): void {
 	const g = pc.green
 	const c = pc.cyan
 	const w = pc.white
-	const y = pc.yellow
 
 	lines.push('')
 	lines.push(`  ${b(c('--' + flag.name))} ${flag.placeholder ? d(flag.placeholder) : ''}`)
@@ -538,7 +531,7 @@ export function tryHandleHelp(argv: string[], version: string): boolean {
 		// Is it a flag? → flag help
 		const flag = findFlagByInput(first)
 		if (flag) {
-			printFlagHelp(first, version)
+			printFlagHelp(first)
 			return true
 		}
 	}
@@ -548,7 +541,7 @@ export function tryHandleHelp(argv: string[], version: string): boolean {
 	if (argv.length === 3 && isHelpArg(third)) {
 		const flag = findFlagByInput(second)
 		if (flag) {
-			printFlagHelp(second, version)
+			printFlagHelp(second)
 			return true
 		}
 	}
@@ -558,7 +551,7 @@ export function tryHandleHelp(argv: string[], version: string): boolean {
 		const lastArg = argv[argv.length - 1] ?? ''
 		const prevArg = argv[argv.length - 2] ?? ''
 		if (isHelpArg(lastArg) && findFlagByInput(prevArg)) {
-			printFlagHelp(prevArg, version)
+			printFlagHelp(prevArg)
 			return true
 		}
 	}

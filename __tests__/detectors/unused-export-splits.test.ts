@@ -62,20 +62,20 @@ describe("unused export split detectors", () => {
 			...detectUnusedOthers(ctx, config),
 		];
 
-		expect(aggregate.map((finding) => finding.symbol).sort()).toEqual(
-			splitFindings.map((finding) => finding.symbol).sort(),
+		expect(aggregate.map((finding) => finding.symbol).sort((a, b) => a.localeCompare(b))).toEqual(
+			splitFindings.map((finding) => finding.symbol).sort((a, b) => a.localeCompare(b)),
 		);
 		expect(new Set(splitFindings.map((finding) => `${finding.file}:${finding.symbol}`)).size).toBe(
 			splitFindings.length,
 		);
 
 		expect(detectUnusedFunctions(ctx, config).map((finding) => finding.symbol)).toEqual(["deadFn"]);
-		expect(detectUnusedTypes(ctx, config).map((finding) => finding.symbol).sort()).toEqual([
+		expect(detectUnusedTypes(ctx, config).map((finding) => finding.symbol).sort((a, b) => a.localeCompare(b))).toEqual([
 			"DeadInterface",
 			"DeadType",
 		]);
 		expect(detectUnusedClasses(ctx, config).map((finding) => finding.symbol)).toEqual(["DeadClass"]);
-		expect(detectUnusedComponents(ctx, config).map((finding) => finding.symbol).sort()).toEqual([
+		expect(detectUnusedComponents(ctx, config).map((finding) => finding.symbol).sort((a, b) => a.localeCompare(b))).toEqual([
 			"DeadPanel",
 			"DeadWidget",
 		]);
@@ -106,7 +106,7 @@ describe("unused export split detectors", () => {
 		);
 		const config = makeConfig();
 
-		expect(detectUnusedComponents(ctx, config).map((finding) => finding.symbol).sort()).toEqual([
+		expect(detectUnusedComponents(ctx, config).map((finding) => finding.symbol).sort((a, b) => a.localeCompare(b))).toEqual([
 			"HeroCard",
 			"SidebarPanel",
 		]);

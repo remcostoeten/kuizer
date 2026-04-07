@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createSnapshot } from "../../src/backup/create.js";
@@ -23,6 +23,15 @@ function makeConfig(cwd: string): Config {
 function writeFile(path: string, contents: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents);
+}
+
+function rewriteManifest(
+  manifestPath: string,
+  update: (manifest: Record<string, unknown>) => void,
+): void {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  update(manifest);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
 describe("restoreSnapshot", () => {
@@ -76,6 +85,37 @@ describe("restoreSnapshot", () => {
       rmSync(otherFile);
 
       expect(() => restoreSnapshot(snapshot.manifestPath)).toThrow("Snapshot file is missing");
+      expect(existsSync(file)).toBeFalse();
+      expect(existsSync(otherFile)).toBeFalse();
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects traversal entries before restoring any files", () => {
+    const cwd = makeWorkspace();
+    const config = makeConfig(cwd);
+    const file = join(cwd, "src/dead.ts");
+    const escapeTarget = join(cwd, "..", "escape.ts");
+
+    try {
+      writeFile(file, "export const dead = true\n");
+      writeFile(config.tsconfig, JSON.stringify({ compilerOptions: {}, include: ["src/**/*.ts"] }));
+
+      const edits: readonly PlannedEdit[] = [
+        { kind: "delete-file", file, description: "Delete unreachable file" },
+      ];
+
+      const snapshot = createSnapshot(edits, config);
+      rmSync(file);
+
+      rewriteManifest(snapshot.manifestPath, (manifest) => {
+        manifest.files = [file, "../escape.ts"];
+      });
+
+      expect(() => restoreSnapshot(snapshot.manifestPath)).toThrow("outside the snapshot root");
+      expect(existsSync(file)).toBeFalse();
+      expect(existsSync(escapeTarget)).toBeFalse();
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

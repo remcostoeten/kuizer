@@ -22,7 +22,7 @@ diff_backup() {
     exit 1
   fi
   local target_root="${2:-__tests__/fixtures/sample}"
-  
+
   echo "Diff between $target_backup and $target_root:"
   for new_file in $(find "$target_root" -type f -name "*.ts" -o -name "*.json" | sort); do
     rel="${new_file#$target_root/}"
@@ -91,25 +91,22 @@ fi
 
 # ── entry point ──────────────────────────────────────────────────────────────
 
-  # ── color codes ──
-  BOLD="\033[1m"
-  CYAN="\033[36m"
-  YELLOW="\033[33m"
-  GREEN="\033[32m"
-  MAGENTA="\033[35m"
-  GRAY="\033[90m"
-  RESET="\033[0m"
+# ── color codes ──
+BOLD="\033[1m"
+CYAN="\033[36m"
+YELLOW="\033[33m"
+GREEN="\033[32m"
+MAGENTA="\033[35m"
+GRAY="\033[90m"
+RESET="\033[0m"
 
-
-  echo -e "${BOLD}Expected findings:${RESET}"
-  echo -e "  ${YELLOW}unusedFiles${RESET}    ${GRAY}→${RESET} ${GREEN}src/utils/format.ts${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/utils/math.ts${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/components/Button.ts${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/components/Modal.ts${RESET}"
-  echo -e "  ${YELLOW}unusedExports${RESET}  ${GRAY}→${RESET} ${GREEN}src/lib/greet.ts${RESET}        ${MAGENTA}: shout${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/lib/logger.ts${RESET}       ${MAGENTA}: FileLogger${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/utils/format.ts${RESET}     ${MAGENTA}: formatDate, formatBytes, formatPercent${RESET}"
-  echo -e "                 ${GRAY}→${RESET} ${GREEN}src/types/index.ts${RESET}      ${MAGENTA}: Timestamp, PaginatedResponse${RESET}"
+echo -e "${BOLD}Expected findings:${RESET}"
+echo -e "  ${YELLOW}unusedFiles${RESET}    ${GRAY}→${RESET} ${GREEN}src/utils/format.ts${RESET}"
+echo -e "                 ${GRAY}→${RESET} ${GREEN}src/utils/math.ts${RESET}"
+echo -e "                 ${GRAY}→${RESET} ${GREEN}src/components/Button.ts${RESET}"
+echo -e "                 ${GRAY}→${RESET} ${GREEN}src/components/Modal.ts${RESET}"
+echo -e "  ${YELLOW}unusedExports${RESET}  ${GRAY}→${RESET} ${GREEN}src/lib/greet.ts${RESET}        ${MAGENTA}: shout${RESET}"
+echo -e "                 ${GRAY}→${RESET} ${GREEN}src/lib/logger.ts${RESET}       ${MAGENTA}: FileLogger, PaginatedResponse, Timestamp${RESET}"
 cat >"$ROOT/src/index.ts" <<'EOF'
 import { greet } from './lib/greet.js'
 import { Logger } from './lib/logger.js'
@@ -240,11 +237,10 @@ EOF
 
 
 # ── README.md─────────────────────────────────────────────────────────────────
-date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 cat >"$ROOT/README.md" <<'EOF'
 # Sample Project
 
-> Scaffolded via `scaffold-e2e-tests.sh` on '"$date"',
+> Scaffolded via `scaffold-e2e-tests.sh`.
 
 This project is a sample codebase used for testing the unused code detectors in Kuizer. It contains a mix of live and dead code, including:
 
@@ -276,11 +272,9 @@ EOF
 
 cat >"$ROOT/kuizer.config.json" <<'EOF'
 {
-  "kuizer": {
-    "tsconfig": "./tsconfig.json",
-    "entrypoints": ["src/index.ts"],
-    "framework": "none"
-  }
+  "tsconfig": "./tsconfig.json",
+  "entrypoints": ["src/index.ts"],
+  "framework": "none"
 }
 EOF
 

@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { cosmiconfig } from 'cosmiconfig'
 import type { Config, Framework } from '../types.js'
+import { detectTsConfig } from './detect-tsconfig.js'
 import { defaults } from './defaults.js'
 import { preset } from './presets.js'
 
@@ -22,8 +23,193 @@ type Raw = Partial<{
 	detectors: Config['detectors']
 }>
 
+type SeverityValue = 'error' | 'warn' | 'info'
+
+const VALID_FRAMEWORKS = new Set<Framework>(['none', 'nextjs-app', 'nextjs-pages', 'vite'])
+const VALID_SEVERITIES = new Set<SeverityValue>(['error', 'warn', 'info'])
+const KNOWN_TOP_LEVEL_KEYS = new Set([
+	'tsconfig',
+	'entrypoints',
+	'framework',
+	'countTestsAsConsumers',
+	'allowedExports',
+	'outputDir',
+	'dryRunByDefault',
+	'ignore',
+	'detectors',
+])
+const KNOWN_IGNORE_KEYS = new Set(['files', 'symbols', 'paths'])
+const KNOWN_DETECTOR_KEYS = new Set(['enabled', 'severity', 'ignore'])
+
 function resolveFrom(baseDir: string, value: string): string {
 	return isAbsolute(value) ? value : resolve(baseDir, value)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function sourceSuffix(source?: string): string {
+	return source ? ` in ${source}` : ''
+}
+
+function failConfig(message: string): never {
+	throw new Error(`Invalid kuizer config${message}`)
+}
+
+function expectString(value: unknown, path: string, source?: string): string {
+	if (typeof value !== 'string') {
+		failConfig(`: expected ${path} to be a string${sourceSuffix(source)}`)
+	}
+
+	return value
+}
+
+function expectBoolean(value: unknown, path: string, source?: string): boolean {
+	if (typeof value !== 'boolean') {
+		failConfig(`: expected ${path} to be a boolean${sourceSuffix(source)}`)
+	}
+
+	return value
+}
+
+function expectStringArray(value: unknown, path: string, source?: string): string[] {
+	if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+		failConfig(`: expected ${path} to be an array of strings${sourceSuffix(source)}`)
+	}
+
+	return value
+}
+
+function validateIgnore(value: unknown, source?: string): NonNullable<Raw['ignore']> {
+	if (!isRecord(value)) {
+		failConfig(`: expected ignore to be an object${sourceSuffix(source)}`)
+	}
+
+	for (const key of Object.keys(value)) {
+		if (!KNOWN_IGNORE_KEYS.has(key)) {
+			failConfig(`: unknown ignore key '${key}'${sourceSuffix(source)}`)
+		}
+	}
+
+	return {
+		...(value.files !== undefined
+			? { files: expectStringArray(value.files, 'ignore.files', source) }
+			: {}),
+		...(value.symbols !== undefined
+			? { symbols: expectStringArray(value.symbols, 'ignore.symbols', source) }
+			: {}),
+		...(value.paths !== undefined
+			? { paths: expectStringArray(value.paths, 'ignore.paths', source) }
+			: {}),
+	}
+}
+
+function validateDetectorOptions(
+	value: unknown,
+	path: string,
+	source?: string
+): Record<string, unknown> {
+	if (!isRecord(value)) {
+		failConfig(`: expected ${path} to be an object${sourceSuffix(source)}`)
+	}
+
+	for (const key of Object.keys(value)) {
+		if (!KNOWN_DETECTOR_KEYS.has(key)) {
+			failConfig(`: unknown detector option '${path}.${key}'${sourceSuffix(source)}`)
+		}
+	}
+
+	return {
+		...(value.enabled !== undefined
+			? { enabled: expectBoolean(value.enabled, `${path}.enabled`, source) }
+			: {}),
+		...(value.severity !== undefined
+			? (() => {
+					const severity = expectString(value.severity, `${path}.severity`, source)
+					if (!VALID_SEVERITIES.has(severity as SeverityValue)) {
+						failConfig(
+							`: invalid severity '${severity}' for ${path}.severity${sourceSuffix(source)}`
+						)
+					}
+
+					return { severity }
+				})()
+			: {}),
+		...(value.ignore !== undefined
+			? { ignore: expectStringArray(value.ignore, `${path}.ignore`, source) }
+			: {}),
+	}
+}
+
+function validateRawConfig(config: unknown, source?: string): Raw {
+	if (!isRecord(config)) {
+		failConfig(`: expected the config file to export an object${sourceSuffix(source)}`)
+	}
+
+	for (const key of Object.keys(config)) {
+		if (!KNOWN_TOP_LEVEL_KEYS.has(key)) {
+			failConfig(`: unknown top-level key '${key}'${sourceSuffix(source)}`)
+		}
+	}
+
+	const raw: Raw = {}
+
+	if (config.tsconfig !== undefined) {
+		raw.tsconfig = expectString(config.tsconfig, 'tsconfig', source)
+	}
+
+	if (config.entrypoints !== undefined) {
+		raw.entrypoints = expectStringArray(config.entrypoints, 'entrypoints', source)
+	}
+
+	if (config.framework !== undefined) {
+		const framework = expectString(config.framework, 'framework', source) as Framework
+		if (!VALID_FRAMEWORKS.has(framework)) {
+			failConfig(`: invalid framework '${framework}'${sourceSuffix(source)}`)
+		}
+
+		raw.framework = framework
+	}
+
+	if (config.countTestsAsConsumers !== undefined) {
+		raw.countTestsAsConsumers = expectBoolean(
+			config.countTestsAsConsumers,
+			'countTestsAsConsumers',
+			source
+		)
+	}
+
+	if (config.allowedExports !== undefined) {
+		raw.allowedExports = expectStringArray(config.allowedExports, 'allowedExports', source)
+	}
+
+	if (config.outputDir !== undefined) {
+		raw.outputDir = expectString(config.outputDir, 'outputDir', source)
+	}
+
+	if (config.dryRunByDefault !== undefined) {
+		raw.dryRunByDefault = expectBoolean(config.dryRunByDefault, 'dryRunByDefault', source)
+	}
+
+	if (config.ignore !== undefined) {
+		raw.ignore = validateIgnore(config.ignore, source)
+	}
+
+	if (config.detectors !== undefined) {
+		if (!isRecord(config.detectors)) {
+			failConfig(`: expected detectors to be an object${sourceSuffix(source)}`)
+		}
+
+		raw.detectors = Object.fromEntries(
+			Object.entries(config.detectors).map(([detectorId, value]) => [
+				detectorId,
+				validateDetectorOptions(value, `detectors.${detectorId}`, source),
+			])
+		) as Config['detectors']
+	}
+
+	return raw
 }
 
 function isGlobalConfigPath(path: string): boolean {
@@ -84,6 +270,7 @@ export async function loadConfig(
 			'kuizer.config.json',
 			'kuizer.config.ts',
 			'kuizer.config.js',
+			'.kuizerrc',
 			'.kuizerrc.ts',
 			'.kuizerrc.js',
 			'.kuizerrc.json',
@@ -98,11 +285,14 @@ export async function loadConfig(
 
 	const loadedPath = result?.filepath
 	const baseDir = loadedPath && !isGlobalConfigPath(loadedPath) ? dirname(loadedPath) : cwd
-	const raw = { ...((result?.config as Raw | undefined) ?? {}) }
+	const raw = validateRawConfig(result?.config ?? {}, loadedPath)
+	const configuredTsconfig = raw.tsconfig ? resolveFrom(baseDir, raw.tsconfig) : undefined
 
-	if (tsconfigPath) {
-		raw.tsconfig = resolve(cwd, tsconfigPath)
-	}
+	const detectedTsconfig =
+		(await detectTsConfig(
+			cwd,
+			tsconfigPath ? resolve(cwd, tsconfigPath) : configuredTsconfig
+		)) ?? resolveFrom(baseDir, defaults.tsconfig)
 
-	return mergeConfig(raw, baseDir)
+	return mergeConfig({ ...raw, tsconfig: detectedTsconfig }, baseDir)
 }

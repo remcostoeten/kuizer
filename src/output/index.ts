@@ -33,5 +33,5 @@ export function indent(s: string, n = 2) {
 }
 
 export function write(s: string) {
-	process.stdout.write(s + '\n')
+	process.stdout.write(`${s}\n`)
 }

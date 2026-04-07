@@ -1,3 +1,4 @@
+import { isAbsolute, relative } from 'node:path'
 import { write, badge, bold, dim, rule, indent } from '../output/index.js'
 import type { AnalysisBoundary, Finding } from '../types.js'
 import type { Report } from './types.js'
@@ -24,6 +25,29 @@ function groupBoundariesByFile(
 		group.push(boundary)
 		return acc.set(boundary.file, group)
 	}, new Map<string, AnalysisBoundary[]>())
+}
+
+function displayPath(file: string, cwd = process.cwd()): string {
+	if (!isAbsolute(file)) {
+		return file
+	}
+
+	const relativePath = relative(cwd, file)
+	if (
+		relativePath === '' ||
+		relativePath === '..' ||
+		relativePath.startsWith('../') ||
+		relativePath.startsWith('..\\') ||
+		isAbsolute(relativePath)
+	) {
+		return file
+	}
+
+	return relativePath
+}
+
+function formatLocation(line: number, col: number): string {
+	return `L${line}:C${col}`
 }
 
 /**
@@ -66,10 +90,10 @@ export function terminal({ findings, durationMs, analysisBoundaries }: Report): 
 	}
 
 	for (const [file, group] of groupByFile(findings)) {
-		write(`\n${bold(file)}`)
+		write(`\n${bold(displayPath(file))}`)
 
 		for (const f of group) {
-			const loc = dim(`L${f.line}`)
+			const loc = dim(formatLocation(f.line, f.col))
 			const id = dim(f.detectorId)
 
 			write(indent(`${badge(f.severity)}  ${loc}  ${id}  ${f.message}`))
@@ -80,10 +104,10 @@ export function terminal({ findings, durationMs, analysisBoundaries }: Report): 
 		write(`\n${bold('Analysis boundaries')}`)
 
 		for (const [file, group] of groupBoundariesByFile(analysisBoundaries)) {
-			write(`\n${bold(file)}`)
+			write(`\n${bold(displayPath(file))}`)
 
 			for (const boundary of group) {
-				const loc = dim(`L${boundary.line}`)
+				const loc = dim(formatLocation(boundary.line, boundary.col))
 				const kind = dim(boundary.kind)
 				write(indent(`${badge('info')}  ${loc}  ${kind}  ${boundary.message}`))
 			}

@@ -831,7 +831,6 @@ export async function runInteractiveSession(
 	try {
 		let running = true
 		const viewport = createViewport(output)
-		const model = buildInteractiveModel(findings, supportedFixes, state, viewport)
 
 		while (running) {
 			output.write('\x1b[2J\x1b[H')

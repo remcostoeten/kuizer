@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { RestoreResult, SnapshotManifest } from './types.js'
 
 type RestoreOptions = Readonly<{
@@ -13,24 +13,25 @@ export function restoreSnapshot(snapshotRef: string, options: RestoreOptions = {
 	const manifest = readSnapshotManifest(resolvedManifestPath)
 	const snapshotDir = dirname(resolvedManifestPath)
 	const filesDir = join(snapshotDir, 'files')
-	const root = manifest.root ?? inferSnapshotRoot(manifest.files, filesDir)
 
-	for (const file of manifest.files) {
-		const relativePath = relative(root, file)
-		const source = join(filesDir, relativePath)
+	const root = resolveSnapshotRoot(manifest.root, snapshotDir)
+	const operations = manifest.files.map((file) => resolveSnapshotEntry(root, filesDir, file))
 
-		if (!existsSync(source)) {
-			throw new Error(`Snapshot file is missing for '${file}'`)
+	for (const operation of operations) {
+		if (!existsSync(operation.source)) {
+			throw new Error(`Snapshot file is missing for '${operation.target}'`)
 		}
+	}
 
-		mkdirSync(dirname(file), { recursive: true })
-		copyFileSync(source, file)
+	for (const operation of operations) {
+		mkdirSync(dirname(operation.target), { recursive: true })
+		copyFileSync(operation.source, operation.target)
 	}
 
 	return {
 		manifestPath: resolvedManifestPath,
 		snapshotId: manifest.id,
-		restored: manifest.files,
+		restored: operations.map((operation) => operation.target),
 	}
 }
 
@@ -69,53 +70,37 @@ function readSnapshotManifest(manifestPath: string): SnapshotManifest {
 	}
 }
 
-function inferSnapshotRoot(files: readonly string[], filesDir: string): string {
-	if (files.length === 0) {
-		throw new Error('Snapshot manifest does not contain any files')
+function resolveSnapshotRoot(manifestRoot: string | undefined, snapshotDir: string): string {
+	if (!manifestRoot) {
+		throw new Error('Snapshot manifest is missing root metadata')
 	}
 
-	let candidate = dirname(files[0]!)
-	while (true) {
-		if (isValidSnapshotRoot(candidate, files, filesDir)) {
-			return candidate
-		}
-
-		const parent = dirname(candidate)
-		if (parent === candidate) {
-			break
-		}
-
-		candidate = parent
-	}
-
-	if (isValidSnapshotRoot(candidate, files, filesDir)) {
-		return candidate
-	}
-
-	throw new Error('Unable to infer snapshot root from manifest')
+	return isAbsolute(manifestRoot) ? manifestRoot : resolve(snapshotDir, manifestRoot)
 }
 
-function isValidSnapshotRoot(
-	candidate: string,
-	files: readonly string[],
-	filesDir: string
-): boolean {
-	return files.every((file) => {
-		if (!isAbsolute(file)) {
-			return false
-		}
+function resolveSnapshotEntry(
+	root: string,
+	filesDir: string,
+	file: string
+): Readonly<{
+	target: string
+	source: string
+}> {
+	const target = isAbsolute(file) ? file : resolve(root, file)
+	const relativePath = relative(root, target)
 
-		const relativePath = relative(candidate, file)
-		if (
-			relativePath === '' ||
-			relativePath === '..' ||
-			relativePath.startsWith('../') ||
-			relativePath.startsWith('..\\') ||
-			isAbsolute(relativePath)
-		) {
-			return false
-		}
+	if (
+		relativePath === '' ||
+		relativePath === '.' ||
+		relativePath === '..' ||
+		relativePath.startsWith(`..${sep}`) ||
+		isAbsolute(relativePath)
+	) {
+		throw new Error(`Snapshot file '${file}' is outside the snapshot root '${root}'`)
+	}
 
-		return existsSync(join(filesDir, relativePath))
-	})
+	return {
+		target,
+		source: join(filesDir, relativePath),
+	}
 }

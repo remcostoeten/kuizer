@@ -64,4 +64,23 @@ describe("createSnapshot", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("rejects files outside the snapshot root", () => {
+    const cwd = makeWorkspace();
+    const external = makeWorkspace();
+    const file = join(external, "src/outside.ts");
+    const tsconfig = join(cwd, "tsconfig.json");
+
+    try {
+      writeFile(file, "export const outside = true\n");
+      writeFile(tsconfig, JSON.stringify({ compilerOptions: {}, include: ["src/**/*.ts"] }));
+
+      expect(() =>
+        createSnapshot([{ kind: "delete-file", file, description: "Delete outside file" }], makeConfig(cwd)),
+      ).toThrow("outside the snapshot root");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
 });

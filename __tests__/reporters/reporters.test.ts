@@ -1,27 +1,28 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { join } from "node:path";
 import { json } from "../../src/reporters/json.js";
 import { terminal } from "../../src/reporters/terminal.js";
 import type { Report } from "../../src/reporters/types.js";
 
 const baseReport: Report = {
-  findings: [
-    {
-      detectorId: "unusedFiles",
-      severity: "warn",
-      file: "/src/dead.ts",
-      line: 1,
-      col: 1,
-      message: "File is unreachable from any entry point",
-      fixable: false,
-    },
+	findings: [
+		{
+			detectorId: "unusedFiles",
+			severity: "warn",
+			file: join(process.cwd(), "src/dead.ts"),
+			line: 1,
+			col: 3,
+			message: "File is unreachable from any entry point",
+			fixable: false,
+		},
   ],
   durationMs: 42,
-  analysisBoundaries: [
-    {
-      file: "/src/index.ts",
-      line: 2,
-      col: 7,
-      kind: "dynamic-import",
+	analysisBoundaries: [
+		{
+			file: join(process.cwd(), "src/index.ts"),
+			line: 2,
+			col: 7,
+			kind: "dynamic-import",
       message: "Non-literal dynamic import cannot be resolved statically",
     },
   ],
@@ -56,8 +57,12 @@ describe("reporters", () => {
 
     terminal(baseReport);
 
-    expect(output).toContain("Analysis boundaries");
-    expect(output).toContain("dynamic-import");
-    expect(output).toContain("boundaries");
-  });
+		expect(output).toContain("Analysis boundaries");
+		expect(output).toContain("dynamic-import");
+		expect(output).toContain("boundaries");
+		expect(output).toContain("src/dead.ts");
+		expect(output).toContain("src/index.ts");
+		expect(output).toContain("L1:C3");
+		expect(output).toContain("L2:C7");
+	});
 });

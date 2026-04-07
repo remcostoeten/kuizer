@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { detect } from "../../src/detectors/unused-exports.js";
+import { detect as unusedImports } from "../../src/detectors/unused-imports.js";
 import { makeConfig, makeCtx } from "./fixture.js";
 
 const consumer = (path: string) => `import { used } from '${path}';\nused()`;
@@ -37,6 +38,22 @@ describe("unusedExports", () => {
     );
 
     expect(detect(ctx, makeConfig())).toHaveLength(0);
+  });
+
+  it("flags a dead export even when the only reference is an unused import", () => {
+    const ctx = makeCtx(
+      {
+        "/src/dead.ts": `export function dead() {}`,
+        "/src/main.ts": `import { dead } from '/src/dead'\nconsole.log('x')`,
+      },
+      {
+        "/src/dead.ts": `export function dead() {}`,
+        "/src/main.ts": `import { dead } from '/src/dead'\nconsole.log('x')`,
+      },
+    );
+
+    expect(unusedImports(ctx, makeConfig())).toHaveLength(1);
+    expect(detect(ctx, makeConfig()).map((finding) => finding.symbol)).toEqual(["dead"]);
   });
 
   it("treats direct namespace property access as a consumer", () => {

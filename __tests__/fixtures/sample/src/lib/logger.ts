@@ -6,18 +6,10 @@ export class Logger {
   }
 }
 
-// Unused exports - should be flagged by unusedExports detector
 export class FileLogger {
-	log() {}
-}
+  constructor(private readonly path: string) {}
 
-export interface PaginatedResponse<T> {
-	data: T[]
-	total: number
-}
-
-export type Timestamp = number
-
-export function shout(msg: string): string {
-	return msg.toUpperCase()
+  write(msg: string) {
+    console.log(`[file:${this.path}] ${msg}`)
+  }
 }

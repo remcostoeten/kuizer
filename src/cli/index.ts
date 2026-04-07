@@ -69,6 +69,8 @@ type RevertFlags = {
 
 type DetectorSelectionFlags = Pick<DetectFlags, 'only' | 'skip'>
 
+type FlagRecord = Record<string, unknown>
+
 type FilterSelection = Readonly<{
 	detectorIds: ReadonlySet<DetectorId>
 	kinds: readonly string[]
@@ -100,6 +102,87 @@ const DETECTOR_ALIAS_MAP: Readonly<Record<string, readonly DetectorId[]>> = {
 	components: ['unusedComponents'],
 }
 
+const FLAG_TO_COMMAND: Readonly<Record<string, string>> = {
+	'--detect': 'detect',
+	'--fix': 'fix',
+	'--restore': 'restore',
+	'--init': 'init',
+	'--revert': 'revert',
+	version: 'version',
+	'--version': 'version',
+	v: 'version',
+	'-v': 'version',
+}
+
+const DETECT_FLAGS = new Set([
+	'-c',
+	'--config',
+	'config',
+	'-o',
+	'--only',
+	'only',
+	'-s',
+	'--skip',
+	'skip',
+	'-r',
+	'--reporter',
+	'--report',
+	'report',
+	'reporter',
+	'-f',
+	'--filter',
+	'filter',
+	'--tsconfig',
+	'tsconfig',
+	'--exclude-pattern',
+	'--interactive',
+	'--json',
+	'json',
+])
+
+const FIX_FLAGS = new Set([
+	'--dry',
+	'--dr',
+	'--dry-run',
+	'dry',
+	'-w',
+	'--write',
+	'write',
+	'--no-backup',
+	'no-backup',
+	'--dryRun',
+	'noBackup',
+])
+
+const FLAG_ALIASES: Readonly<Record<string, string>> = {
+	'--dry': '--dryRun',
+	'--dr': '--dryRun',
+	'-c': '--config',
+	'-o': '--only',
+	'-s': '--skip',
+	'-r': '--reporter',
+	'-f': '--filter',
+	'-w': '--write',
+	'--write': '--write',
+	'--no-backup': '--noBackup',
+	'--tsconfig': '--tsconfig',
+	'--config': '--config',
+	'--only': '--only',
+	'--skip': '--skip',
+	'--report': '--reporter',
+	'--filter': '--filter',
+}
+
+class CliError extends Error {
+	exitCode: number
+
+	constructor(message: string, exitCode = 1) {
+		super(message)
+		this.name = 'CliError'
+		this.exitCode = exitCode
+	}
+}
+
 function parseCsv(input?: string): string[] {
 	if (!input) return []
 
@@ -128,7 +211,7 @@ function resolveDetectorToken(
 	return undefined
 }
 
-function resolveReporter(flags: DetectFlags): ReporterName {
+export function resolveReporter(flags: DetectFlags): ReporterName {
 	if (flags.json) return 'json'
 
 	const reporter = flags.reporter ?? 'terminal'
@@ -137,6 +220,87 @@ function resolveReporter(flags: DetectFlags): ReporterName {
 	}
 
 	throw new Error(`Unknown reporter '${reporter}'`)
+}
+
+export function normalizeArgv(argv: readonly string[]): string[] {
+	let processedArgv = [...argv]
+
+	if (processedArgv.length > 0) {
+		const firstArg = processedArgv[0]
+		if (firstArg && DETECT_FLAGS.has(firstArg)) {
+			if (firstArg === 'json') {
+				processedArgv = ['detect', '--json', ...processedArgv.slice(1)]
+			} else {
+				processedArgv = ['detect', ...processedArgv]
+			}
+		} else if (firstArg && FIX_FLAGS.has(firstArg)) {
+			processedArgv = ['fix', ...processedArgv]
+		} else if (firstArg && firstArg in FLAG_TO_COMMAND) {
+			const mappedCommand = FLAG_TO_COMMAND[firstArg]
+			if (mappedCommand) {
+				processedArgv[0] = mappedCommand
+			}
+		}
+	}
+
+	return processedArgv.map((arg, index) => {
+		if (arg === 'json' && index > 0) {
+			const prevArg = processedArgv[index - 1]
+			if (prevArg === 'detect' || prevArg === 'd' || prevArg === 'fix' || prevArg === 'f') {
+				return '--json'
+			}
+		}
+
+		return arg === '--help' ? arg : FLAG_ALIASES[arg] || arg
+	})
+}
+
+export function collectFlagValidationErrors(command: string, flags: FlagRecord): string[] {
+	const errors: string[] = []
+	const requireNonEmpty = (value: unknown, message: string) => {
+		if (value === '') {
+			errors.push(message)
+		}
+	}
+
+	switch (command) {
+		case 'detect':
+			requireNonEmpty(flags.config, 'Config path cannot be empty. Use: kuizer -c <path>')
+			requireNonEmpty(
+				flags.tsconfig,
+				'Tsconfig path cannot be empty. Use: kuizer --tsconfig <path>'
+			)
+			requireNonEmpty(flags.reporter, 'Reporter cannot be empty. Use: kuizer -r <format>')
+			requireNonEmpty(flags.only, 'Only flag cannot be empty. Use: kuizer -o <detectors>')
+			requireNonEmpty(flags.skip, 'Skip flag cannot be empty. Use: kuizer -s <detectors>')
+			requireNonEmpty(flags.filter, 'Filter cannot be empty. Use: kuizer -f <types>')
+			break
+		case 'fix':
+			requireNonEmpty(flags.config, 'Config path cannot be empty. Use: kuizer -c <path>')
+			requireNonEmpty(
+				flags.tsconfig,
+				'Tsconfig path cannot be empty. Use: kuizer --tsconfig <path>'
+			)
+			requireNonEmpty(flags.only, 'Only flag cannot be empty. Use: kuizer -o <detectors>')
+			requireNonEmpty(flags.skip, 'Skip flag cannot be empty. Use: kuizer -s <detectors>')
+			if (flags.write === true && flags.dryRun === true) {
+				errors.push('Cannot combine --write with --dryRun/--dry. Choose one mode.')
+			}
+			break
+		case 'restore':
+			requireNonEmpty(flags.config, 'Config path cannot be empty. Use: kuizer -c <path>')
+			requireNonEmpty(
+				flags.tsconfig,
+				'Tsconfig path cannot be empty. Use: kuizer --tsconfig <path>'
+			)
+			requireNonEmpty(
+				flags.snapshot,
+				'Snapshot path cannot be empty. Use: kuizer restore --snapshot <path|id>'
+			)
+			break
+	}
+
+	return errors
 }
 
 function resolveDetectorIds(config: Config, flags: DetectorSelectionFlags): DetectorId[] {
@@ -295,53 +459,43 @@ async function runDetect(flags: DetectFlags): Promise<number> {
 			progress?.update('Loading TypeScript project')
 		}
 
-		let ctx: Ctx
-		try {
-			ctx = await bootstrap(
-				config,
-				withProgress
-					? {
-							onProgress(event) {
-								if (!progress) return
+		const ctx = await bootstrap(
+			config,
+			withProgress
+				? {
+						onProgress(event) {
+							if (!progress) return
 
-								switch (event.phase) {
-									case 'load-project':
-										progress.update('Loading TypeScript project')
-										break
-									case 'collect-files':
-										progress.update('Collecting source files')
-										break
-									case 'resolve-entries':
-										progress.update(
-											'Resolving entrypoints',
-											`${event.totalFiles ?? 0} files`
-										)
-										break
-									case 'analyze-file':
-										progress.update(
-											`Analyzing import graph ${event.completed}/${event.totalFiles}`,
-											event.file
-										)
-										break
-									case 'complete':
-										progress.update(
-											'Analysis ready',
-											`${event.totalFiles ?? 0} files`
-										)
-										break
-								}
-							},
-						}
-					: {}
-			)
-		} catch (error) {
-			if (error instanceof Error && error.message.includes('File not found')) {
-				console.error(`kuizer: ${error.message}`)
-				console.error(`Make sure a valid tsconfig.json exists at ${config.tsconfig}`)
-				process.exit(1)
-			}
-			throw error
-		}
+							switch (event.phase) {
+								case 'load-project':
+									progress.update('Loading TypeScript project')
+									break
+								case 'collect-files':
+									progress.update('Collecting source files')
+									break
+								case 'resolve-entries':
+									progress.update(
+										'Resolving entrypoints',
+										`${event.totalFiles ?? 0} files`
+									)
+									break
+								case 'analyze-file':
+									progress.update(
+										`Analyzing import graph ${event.completed}/${event.totalFiles}`,
+										event.file
+									)
+									break
+								case 'complete':
+									progress.update(
+										'Analysis ready',
+										`${event.totalFiles ?? 0} files`
+									)
+									break
+							}
+						},
+					}
+				: {}
+		)
 
 		let findings: Finding[] = []
 		for (const [index, id] of detectors.entries()) {
@@ -354,94 +508,94 @@ async function runDetect(flags: DetectFlags): Promise<number> {
 		return { ctx, findings }
 	}
 
-	const initial = await analyze(true)
+	try {
+		const initial = await analyze(true)
 
-	if (interactive) {
-		const interactiveFindings = applyFindingFilters(
+		if (interactive) {
+			const interactiveFindings = applyFindingFilters(
+				applyExcludePattern(initial.findings, excludePattern),
+				filterSelection
+			)
+			const remaining = await runInteractiveSession({
+				version,
+				config,
+				cwd: process.cwd(),
+				findings: interactiveFindings,
+				supportedFixes: planFixes(interactiveFindings, initial.ctx, config).supported,
+				initialKinds: filterSelection.kinds,
+				initialDetectors: [...filterSelection.detectorIds],
+				async refresh() {
+					const refreshed = await analyze(false)
+					const refreshedFindings = applyFindingFilters(
+						applyExcludePattern(refreshed.findings, excludePattern),
+						filterSelection
+					)
+					return {
+						findings: refreshedFindings,
+						supportedFixes: planFixes(refreshedFindings, refreshed.ctx, config)
+							.supported,
+					}
+				},
+			})
+			return exitCode(remaining)
+		}
+
+		const findings = applyFindingFilters(
 			applyExcludePattern(initial.findings, excludePattern),
 			filterSelection
 		)
-		const remaining = await runInteractiveSession({
-			version,
-			config,
-			cwd: process.cwd(),
-			findings: interactiveFindings,
-			supportedFixes: planFixes(interactiveFindings, initial.ctx, config).supported,
-			initialKinds: filterSelection.kinds,
-			initialDetectors: [...filterSelection.detectorIds],
-			async refresh() {
-				const refreshed = await analyze(false)
-				const refreshedFindings = applyFindingFilters(
-					applyExcludePattern(refreshed.findings, excludePattern),
-					filterSelection
-				)
-				return {
-					findings: refreshedFindings,
-					supportedFixes: planFixes(refreshedFindings, refreshed.ctx, config).supported,
-				}
-			},
+		const reporter = reporterRegistry[reporterName]
+
+		reporter({
+			findings,
+			durationMs: Date.now() - startedAt,
+			analysisBoundaries: initial.ctx.analysisBoundaries,
 		})
-		return exitCode(remaining)
+		return exitCode(findings)
+	} catch (error) {
+		if (error instanceof Error && error.message.includes('File not found')) {
+			throw new CliError(error.message, 1)
+		}
+
+		throw error
+	} finally {
+		progress?.stop()
 	}
-
-	progress?.stop()
-
-	const findings = applyFindingFilters(
-		applyExcludePattern(initial.findings, excludePattern),
-		filterSelection
-	)
-	const reporter = reporterRegistry[reporterName]
-
-	reporter({
-		findings,
-		durationMs: Date.now() - startedAt,
-		analysisBoundaries: initial.ctx.analysisBoundaries,
-	})
-	return exitCode(findings)
 }
 
 async function runFix(flags: FixFlags): Promise<number> {
 	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
 
-	let ctx: Ctx
 	try {
-		ctx = await bootstrap(config)
+		const ctx = await bootstrap(config)
+		const detectors = resolveDetectorIds(config, flags)
+		const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config))
+		const plans = planFixes(findings, ctx, config)
+		const shouldDryRun =
+			flags.dryRun === true || (flags.write !== true && config.dryRunByDefault)
+
+		if (shouldDryRun) {
+			reportFixPlan(plans, { dryRun: true })
+			return 0
+		}
+
+		const result = applyFixPlans(plans.supported, plans.unsupported, config, {
+			backup: flags.noBackup !== true,
+		})
+		reportAppliedFixes(result)
+		return 0
 	} catch (error) {
 		if (error instanceof Error && error.message.includes('File not found')) {
-			console.error(`kuizer: ${error.message}`)
-			console.error(`Make sure a valid tsconfig.json exists at ${config.tsconfig}`)
-			process.exit(1)
+			throw new CliError(error.message, 1)
 		}
+
 		throw error
 	}
-	const detectors = resolveDetectorIds(config, flags)
-	const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config))
-	const plans = planFixes(findings, ctx, config)
-
-	// Determine if we should write based on config and flags
-	const explicitWrite = flags.write === true
-	const explicitDry = flags.dryRun === true
-	const defaultDryRun = config.dryRunByDefault
-
-	// -w always writes, --dry-run always dries, otherwise use config default
-	const shouldWrite = explicitWrite && !explicitDry
-	const shouldDryRun = explicitDry || (!explicitWrite && defaultDryRun)
-
-	if (shouldDryRun) {
-		reportFixPlan(plans, { dryRun: true })
-		return 0
-	}
-
-	const result = applyFixPlans(plans.supported, plans.unsupported, config, {
-		backup: flags.noBackup !== true,
-	})
-	reportAppliedFixes(result)
-	return 0
 }
 
 async function runRestore(flags: RestoreFlags): Promise<number> {
 	if (!flags.snapshot) {
-		throw new Error('Missing required --snapshot path')
+		throw new CliError('Missing required --snapshot path')
 	}
 
 	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
@@ -591,348 +745,229 @@ async function runRevert(flags: RevertFlags): Promise<number> {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
-	// Custom help system — intercept before cleye
-	if (tryHandleHelp(argv, version)) {
-		return 0
-	}
+	try {
+		const normalizedArgv = normalizeArgv(argv)
 
-	// Handle --command style flags by converting them to commands
-	const flagToCommand: Record<string, string> = {
-		'--detect': 'detect',
-		'--fix': 'fix',
-		'--restore': 'restore',
-		'--init': 'init',
-		'--revert': 'revert',
-		version: 'version',
-		'--version': 'version',
-		v: 'version',
-		'-v': 'version',
-	}
+		// Custom help system — intercept before cleye
+		if (tryHandleHelp(normalizedArgv, version)) {
+			return 0
+		}
 
-	// Flags that should default to 'detect' command
-	const detectFlags = new Set([
-		'-c',
-		'--config',
-		'config',
-		'-o',
-		'--only',
-		'only',
-		'-s',
-		'--skip',
-		'skip',
-		'-r',
-		'--reporter',
-		'--report',
-		'report',
-		'reporter',
-		'-f',
-		'--filter',
-		'filter',
-		'--tsconfig',
-		'tsconfig',
-		'--exclude-pattern',
-		'--interactive',
-		'--json',
-		'json', // Support both --json and json as standalone arguments
-	])
+		const detect = command({
+			name: 'detect',
+			alias: 'd',
+			help: {
+				description: 'Analyze your codebase to find unused exports and dead code',
+			},
+			flags: {
+				config: {
+					type: String,
+					alias: 'c',
+					description:
+						'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
+				},
+				tsconfig: {
+					type: String,
+					description:
+						'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
+				},
+				reporter: {
+					type: String,
+					alias: 'r',
+					description: 'Output format: terminal (colored) or json (alias: --report)',
+				},
+				only: {
+					type: String,
+					alias: 'o',
+					description:
+						'Run only specific detectors (e.g., unusedImports, unusedComponents, exports)',
+				},
+				skip: {
+					type: String,
+					alias: 's',
+					description: 'Skip specific detectors',
+				},
+				json: {
+					type: Boolean,
+					description: 'Output results as JSON (shorthand for --reporter json)',
+				},
+				filter: {
+					type: String,
+					alias: 'f',
+					description:
+						'Filter results by kind or detector: functions, classes, unusedImports, unusedComponents, all',
+				},
+				excludePattern: {
+					type: String,
+					description: 'Exclude findings matching a regex pattern (e.g., "^_")',
+				},
+				interactive: {
+					type: Boolean,
+					description: 'Interactive TUI to browse and filter results with keyboard',
+				},
+			},
+		})
 
-	// Flags that should default to 'fix' command
-	const fixFlags = new Set([
-		'--dry',
-		'--dr',
-		'--dry-run',
-		'dry',
-		'-w',
-		'--write',
-		'write',
-		'--no-backup',
-		'no-backup',
-		'--dryRun',
-		'write',
-		'noBackup',
-	])
+		const fix = command({
+			name: 'fix',
+			alias: 'f',
+			help: {
+				description: 'Automatically remove unused exports and dead code from your project',
+			},
+			flags: {
+				config: {
+					type: String,
+					alias: 'c',
+					description:
+						'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
+				},
+				tsconfig: {
+					type: String,
+					description:
+						'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
+				},
+				only: {
+					type: String,
+					alias: 'o',
+					description: 'Plan fixes for specific detectors only',
+				},
+				skip: {
+					type: String,
+					alias: 's',
+					description: 'Skip specific detectors when planning fixes',
+				},
+				dryRun: {
+					type: Boolean,
+					description:
+						'Show what would be fixed without writing any changes (aliases: --dry, --dr)',
+				},
+				write: {
+					type: Boolean,
+					alias: 'w',
+					description:
+						'Apply the fixes to your files (creates a backup by default) (alias: --write)',
+				},
+				noBackup: {
+					type: Boolean,
+					description:
+						'Skip creating a backup before applying fixes (alias: --no-backup)',
+				},
+			},
+		})
 
-	// Handle additional flag aliases
-	const flagAliases: Record<string, string> = {
-		'--dry': '--dryRun',
-		'--dr': '--dryRun',
-		'--write': '--write',
-		'--no-backup': '--noBackup',
-		'--tsconfig': '--tsconfig',
-		'--config': '--config',
-		'--only': '--only',
-		'--skip': '--skip',
-		'--report': '--reporter',
-		'--filter': '--filter',
-	}
+		const restore = command({
+			name: 'restore',
+			alias: 'r',
+			help: {
+				description: 'Restore files from a previous backup snapshot',
+			},
+			flags: {
+				config: {
+					type: String,
+					alias: 'c',
+					description:
+						'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
+				},
+				tsconfig: {
+					type: String,
+					description: 'Path to tsconfig.json (defaults to auto-detection)',
+				},
+				snapshot: {
+					type: String,
+					description: 'Path to snapshot manifest (JSON file) or snapshot ID',
+				},
+			},
+		})
 
-	let processedArgv = [...argv]
+		const init = command({
+			name: 'init',
+			help: {
+				description: 'Interactive configuration setup',
+			},
+			flags: {
+				global: {
+					type: Boolean,
+					description: 'Create global config (~/.kuizerrc)',
+				},
+				project: {
+					type: Boolean,
+					description: 'Create project config (./kuizer.config.json)',
+				},
+			},
+		})
 
-	// If first arg is a flag, prepend appropriate command
-	if (argv.length > 0) {
-		const firstArg = argv[0]
-		if (firstArg && detectFlags.has(firstArg)) {
-			// Special handling for 'json' - convert to --json
-			if (firstArg === 'json') {
-				processedArgv = ['detect', '--json', ...argv.slice(1)]
-			} else {
-				processedArgv = ['detect', ...argv]
+		const revert = command({
+			name: 'revert',
+			alias: 'rv',
+			help: {
+				description: 'Revert changes from a snapshot',
+			},
+			flags: {
+				snapshot: {
+					type: String,
+					description: 'Snapshot path or ID to revert from',
+				},
+			},
+		})
+
+		const parsed = cli(
+			{
+				name: 'kuizer',
+				version,
+				help: false,
+				commands: [detect, fix, restore, init, revert],
+			},
+			undefined,
+			normalizedArgv
+		)
+
+		if ('command' in parsed) {
+			const command = parsed.command as string
+			const errors = collectFlagValidationErrors(command, parsed.flags as FlagRecord)
+			if (errors.length > 0) {
+				console.error('kuizer: Error:')
+				errors.forEach((error) => console.error(`  ${error}`))
+				console.error('')
+				console.error('For help, use: kuizer --help')
+				return 1
 			}
-		} else if (firstArg && fixFlags.has(firstArg)) {
-			processedArgv = ['fix', ...argv]
-		} else if (firstArg && firstArg in flagToCommand) {
-			// Handle command aliases
-			const mappedCommand = flagToCommand[firstArg as keyof typeof flagToCommand]!
-			processedArgv[0] = mappedCommand
-		}
-	}
-
-	// Process flag aliases (but don't process --help to allow main help to show)
-	processedArgv = processedArgv.map((arg, index) => {
-		// Handle 'json' as a standalone argument (convert to --json)
-		if (arg === 'json' && index > 0) {
-			// Check if previous arg was a command or flag that expects json
-			const prevArg = processedArgv[index - 1]
-			if (prevArg === 'detect' || prevArg === 'd' || prevArg === 'fix' || prevArg === 'f') {
-				return '--json'
-			}
-		}
-		return arg === '--help' ? arg : flagAliases[arg] || arg
-	})
-
-	const detect = command({
-		name: 'detect',
-		alias: 'd',
-		help: {
-			description: 'Analyze your codebase to find unused exports and dead code',
-		},
-		flags: {
-			config: {
-				type: String,
-				alias: 'c',
-				description:
-					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
-			},
-			tsconfig: {
-				type: String,
-				description:
-					'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
-			},
-			reporter: {
-				type: String,
-				alias: 'r',
-				description: 'Output format: terminal (colored) or json (alias: --report)',
-			},
-			only: {
-				type: String,
-				alias: 'o',
-				description:
-					'Run only specific detectors (e.g., unusedImports, unusedComponents, exports)',
-			},
-			skip: {
-				type: String,
-				alias: 's',
-				description: 'Skip specific detectors',
-			},
-			json: {
-				type: Boolean,
-				description: 'Output results as JSON (shorthand for --reporter json)',
-			},
-			filter: {
-				type: String,
-				alias: 'f',
-				description:
-					'Filter results by kind or detector: functions, classes, unusedImports, unusedComponents, all',
-			},
-			excludePattern: {
-				type: String,
-				description: 'Exclude findings matching a regex pattern (e.g., "^_")',
-			},
-			interactive: {
-				type: Boolean,
-				description: 'Interactive TUI to browse and filter results with keyboard',
-			},
-		},
-	})
-
-	const fix = command({
-		name: 'fix',
-		alias: 'f',
-		help: {
-			description: 'Automatically remove unused exports and dead code from your project',
-		},
-		flags: {
-			config: {
-				type: String,
-				alias: 'c',
-				description:
-					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
-			},
-			tsconfig: {
-				type: String,
-				description:
-					'Path to tsconfig.json (auto-detected if not provided) (alias: --tsconfig)',
-			},
-			only: {
-				type: String,
-				alias: 'o',
-				description: 'Plan fixes for specific detectors only',
-			},
-			skip: {
-				type: String,
-				alias: 's',
-				description: 'Skip specific detectors when planning fixes',
-			},
-			dryRun: {
-				type: Boolean,
-				description:
-					'Show what would be fixed without writing any changes (aliases: --dry, --dr)',
-			},
-			write: {
-				type: Boolean,
-				alias: 'w',
-				description:
-					'Apply the fixes to your files (creates a backup by default) (alias: --write)',
-			},
-			noBackup: {
-				type: Boolean,
-				description: 'Skip creating a backup before applying fixes (alias: --no-backup)',
-			},
-		},
-	})
-
-	const restore = command({
-		name: 'restore',
-		alias: 'r',
-		help: {
-			description: 'Restore files from a previous backup snapshot',
-		},
-		flags: {
-			config: {
-				type: String,
-				alias: 'c',
-				description:
-					'Path to kuizer config file (defaults to kuizer.config.json) (alias: --config)',
-			},
-			tsconfig: {
-				type: String,
-				description: 'Path to tsconfig.json (defaults to auto-detection)',
-			},
-			snapshot: {
-				type: String,
-				description: 'Path to snapshot manifest (JSON file) or snapshot ID',
-			},
-		},
-	})
-
-	const init = command({
-		name: 'init',
-		help: {
-			description: 'Interactive configuration setup',
-		},
-		flags: {
-			global: {
-				type: Boolean,
-				description: 'Create global config (~/.kuizerrc)',
-			},
-			project: {
-				type: Boolean,
-				description: 'Create project config (./kuizer.config.json)',
-			},
-		},
-	})
-
-	const revert = command({
-		name: 'revert',
-		alias: 'rv',
-		help: {
-			description: 'Revert changes from a snapshot',
-		},
-		flags: {
-			snapshot: {
-				type: String,
-				description: 'Snapshot path or ID to revert from',
-			},
-		},
-	})
-
-	const parsed = cli(
-		{
-			name: 'kuizer',
-			version,
-			help: false,
-			commands: [detect, fix, restore, init, revert],
-		},
-		undefined,
-		processedArgv
-	)
-
-	// Validate flag values
-	if ('command' in parsed) {
-		const flags = parsed.flags as any
-		const errors: string[] = []
-
-		// Check for required string flag values
-		if (flags.config === '') {
-			errors.push('Config path cannot be empty. Use: kuizer -c <path>')
-		}
-		if (flags.tsconfig === '') {
-			errors.push('Tsconfig path cannot be empty. Use: kuizer --tsconfig <path>')
-		}
-		if (flags.reporter === '') {
-			errors.push('Reporter cannot be empty. Use: kuizer -r <format>')
-		}
-		if (flags.only === '') {
-			errors.push('Only flag cannot be empty. Use: kuizer -o <detectors>')
-		}
-		if (flags.skip === '') {
-			errors.push('Skip flag cannot be empty. Use: kuizer -s <detectors>')
-		}
-		if (flags.filter === '') {
-			errors.push('Filter cannot be empty. Use: kuizer -f <types>')
 		}
 
-		// Check restore specific flags
-		if (parsed.command === 'restore' && flags.snapshot === '') {
-			errors.push('Snapshot path cannot be empty. Use: kuizer restore --snapshot <path|id>')
-		}
-
-		if (errors.length > 0) {
-			console.error('kuizer: Error:')
-			errors.forEach((error) => console.error(`  ${error}`))
-			console.error('')
-			console.error('For help, use: kuizer --help')
+		if (!('command' in parsed)) {
+			printMainHelp(version)
 			return 1
 		}
-	}
 
-	if (!('command' in parsed)) {
+		if (parsed.command === 'detect') {
+			return runDetect(parsed.flags)
+		}
+
+		if (parsed.command === 'fix') {
+			return runFix(parsed.flags)
+		}
+
+		if (parsed.command === 'restore') {
+			return runRestore(parsed.flags)
+		}
+
+		if (parsed.command === 'init') {
+			return runInit(parsed.flags)
+		}
+
+		if (parsed.command === 'revert') {
+			return runRevert(parsed.flags)
+		}
+
 		printMainHelp(version)
 		return 1
-	}
+	} catch (error) {
+		if (error instanceof CliError) {
+			console.error(`kuizer: ${error.message}`)
+			return error.exitCode
+		}
 
-	if (parsed.command === 'detect') {
-		return runDetect(parsed.flags)
+		throw error
 	}
-
-	if (parsed.command === 'fix') {
-		return runFix(parsed.flags)
-	}
-
-	if (parsed.command === 'restore') {
-		return runRestore(parsed.flags)
-	}
-
-	if (parsed.command === 'init') {
-		return runInit(parsed.flags)
-	}
-
-	if (parsed.command === 'revert') {
-		return runRevert(parsed.flags)
-	}
-
-	printMainHelp(version)
-	return 1
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

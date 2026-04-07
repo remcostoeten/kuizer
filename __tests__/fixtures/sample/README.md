@@ -1,6 +1,6 @@
 # Sample Project
 
-> Scaffolded via `scaffold-e2e-tests.sh` on '"$date"',
+> Scaffolded via `scaffold-e2e-tests.sh`.
 
 This project is a sample codebase used for testing the unused code detectors in Kuizer. It contains a mix of live and dead code, including:
 
