@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Kuizer is a Bun-based TypeScript CLI. Source lives in `src/`, split by responsibility: `cli/` for command entrypoints, `engine/` for analysis bootstrap, `detectors/` for findings, `fixers/` for plan/apply flows, `reporters/` for output, `backup/` for snapshot restore, and `config/` for config loading. Build artifacts are generated into `dist/`. Tests live in `__tests__/`, with reusable fixture projects in `tests/fixtures/`. Helper scripts belong in `scripts/`.
+Kuizer is a Bun-based TypeScript CLI. Source lives in `src/`, split by responsibility: `cli/` for command entrypoints, `engine/` for analysis bootstrap, `detectors/` for findings, `fixers/` for plan/apply flows, `reporters/` for output, `output/` for output utilities and progress display, `backup/` for snapshot restore, and `config/` for config loading. Build artifacts are generated into `dist/`. Tests live in `__tests__/`, with reusable fixture projects in `__tests__/fixtures/`. Helper scripts belong in `scripts/`.
 
 ## Build, Test, and Development Commands
 
@@ -21,7 +21,7 @@ Formatting is enforced by `oxfmt`: tabs, 4-column width, single quotes, no semic
 
 ## Testing Guidelines
 
-Write tests with Bun and place them in `__tests__/` using the `*.test.ts` suffix. Prefer fixture-driven integration coverage for CLI behavior and keep supporting sample projects in `tests/fixtures/`. If fixture layout changes, regenerate scaffolding with `bash scripts/scaffold-e2e-tests.sh`. Before opening a PR, run `bun run typecheck` and `bash scripts/test-runner.sh`.
+Write tests with Bun and place them in `__tests__/` using the `*.test.ts` suffix. Prefer fixture-driven integration coverage for CLI behavior and keep supporting sample projects in `__tests__/fixtures/`. If fixture layout changes, regenerate scaffolding with `bash scripts/scaffold-e2e-tests.sh`. Before opening a PR, run `bun run typecheck` and `bash scripts/test-runner.sh`.
 
 ## Commit & Pull Request Guidelines
 
@@ -30,3 +30,21 @@ Follow the existing history: short imperative subjects, usually with Conventiona
 ## Agent Notes
 
 Do not edit `dist/` by hand; rebuild it from source. Avoid reverting unrelated changes in a dirty worktree. If you add a detector, fixer, or reporter, update its registry and cover it with tests in `__tests__/`.
+
+## AI Agent Guidelines
+
+This project uses Bun as the package manager and runtime. Key architectural patterns:
+
+- **Registry Pattern**: Detectors, fixers, and reporters use registry objects for extensibility
+- **TypeScript AST Analysis**: Uses `ts-morph` for code analysis and manipulation
+- **Config System**: Uses `cosmiconfig` for flexible configuration loading
+- **Progress Display**: Terminal progress bars via `src/output/progress.js`
+- **Backup System**: Snapshot/restore functionality in `src/backup/`
+
+When working on this codebase:
+
+- Always run `bun run typecheck` before committing
+- Use `bun run test` for fast test execution
+- Check `__tests__/fixtures/sample/` for integration test examples
+- Follow the existing module structure and naming conventions
+- The CLI entry point is `src/cli/index.ts` with commands: detect, fix, restore, init, revert

@@ -1,54 +1,106 @@
 # Kuizer
 
-**Kuizer** (noun) /ˈkœy.zər/ — Frisian-derived, "one who cleans, restores order, or brings something back to a proper state."
+Kuizer is a Bun-based CLI for finding and removing dead code in TypeScript
+projects. It analyzes your import graph, reports unreachable files and
+unused exports/imports, and can apply supported fixes with snapshot-based
+rollback.
 
-A deterministic CLI code hygiene tool that enforces a strict, opinionated TypeScript and JavaScript style. Kuizer transforms codebases by applying structural refactors such as converting interfaces to types, arrow functions to named function declarations, and normalizing patterns to a consistent, performance-oriented standard.
+## Current scope
 
-Designed for large, long-lived codebases, Kuizer operates recursively, respects ignore files, and applies changes safely and predictably. Rather than linting or formatting, it performs semantic cleanup to align code with a single, coherent style philosophy. Kuizer is intended as a one-command cleanup and enforcement tool, not a configurable rule engine.
+Kuizer currently implements dead-code analysis and cleanup. It does not
+implement the broader style-refactor workflow described in older project
+notes.
 
-## Dead Code Detection
+Implemented today:
 
-Kuizer includes a dead code detector that identifies:
+- Detect unreachable source files.
+- Detect unused imports and unused exports in reachable files.
+- Split unused export findings by functions, types, classes, components,
+  constants, enums, defaults, and other exports.
+- Apply supported fixes for unused files and simple unused export
+  declarations.
+- Create snapshots before writes and restore them later.
+- Browse findings in an interactive terminal UI.
 
-- **Unused files**: Entire source files with no imports from the entry point
-- **Unused exports**: Exported functions, classes, types that are never imported anywhere
+Known fixer limits:
 
-### Test Fixture
+- Default exports are not auto-fixed.
+- Barrel export declarations are not auto-fixed.
+- Grouped variable exports such as `export const a = 1, b = 2` are not
+  auto-fixed.
 
-The `scaffold-e2e-tests.sh` script generates a sample project (`tests/fixtures/sample/`) for testing dead code detection. It contains:
+## Commands
 
-**Live code:**
+Kuizer currently exposes these commands:
 
-- `src/index.ts` — entry point
-- `src/lib/greet.ts` — `greet` function used by entry point
-- `src/lib/logger.ts` — `Logger` class used by entry point
-- `src/types/index.ts` — `ID` and `Result` types used by entry point
+- `kuizer detect`
+- `kuizer fix`
+- `kuizer restore`
+- `kuizer init`
+- `kuizer revert`
 
-**Dead code (unused files):**
+You can also omit the command for many detect-style invocations, for
+example `kuizer --json`.
 
-- `src/utils/format.ts` — never imported
-- `src/utils/math.ts` — never imported
-- `src/components/Button.ts` — never imported
-- `src/components/Modal.ts` — never imported
+## Quick start
 
-**Dead code (unused exports):**
-
-- `src/lib/greet.ts`: `shout`
-- `src/lib/logger.ts`: `FileLogger`
-- `src/utils/format.ts`: `formatDate`, `formatBytes`, `formatPercent`
-- `src/types/index.ts`: `Timestamp`, `PaginatedResponse`
-
-Run `./scaffold-e2e-tests.sh` to regenerate the fixture.
-
-### Verification
-
-Run the e2e tests to verify Kuizer correctly detects the dead code:
+Install dependencies:
 
 ```bash
-bun test tests/e2e.test.ts
+bun install --frozen-lockfile
 ```
 
-This validates:
+Run detection:
 
-- `unusedFiles` detects: `format.ts`, `math.ts`, `Button.ts`, `Modal.ts`
-- `unusedExports` detects: `shout`, `FileLogger`, `formatDate`, `formatBytes`, `formatPercent`, `Timestamp`, `PaginatedResponse`
+```bash
+kuizer detect
+kuizer detect --json
+kuizer detect --interactive
+kuizer detect --only unusedImports
+kuizer detect --only exports
+```
+
+Preview fixes:
+
+```bash
+kuizer fix --dry
+```
+
+Apply fixes:
+
+```bash
+kuizer fix -w
+```
+
+Restore a snapshot:
+
+```bash
+kuizer restore --snapshot ./.kuizer/snapshots/<id>/manifest.json
+kuizer revert --snapshot 2026-04-05T04-45-49-701Z-fix-f1f310e4
+```
+
+## Configuration lookup
+
+Kuizer resolves configuration in this order:
+
+1. `--config <path>`
+2. Project config discovered from the current working directory upward
+3. `~/.kuizerrc`
+4. Built-in defaults
+
+For TypeScript project resolution, Kuizer uses this order:
+
+1. `--tsconfig <path>`
+2. `tsconfig` from config files
+3. The nearest `tsconfig.json` from the current working directory upward
+4. The default `./tsconfig.json` relative to the selected config base
+
+## Development
+
+Run the core checks:
+
+```bash
+bun run typecheck
+bun run test
+bun run build
+```
