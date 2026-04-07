@@ -101,6 +101,7 @@ Run the core checks:
 
 ```bash
 bun run typecheck
+bun run lint
 bun run test
 bun run build
 ```
