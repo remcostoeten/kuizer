@@ -6,12 +6,22 @@ import {
 	type FixFlags,
 	type RestoreFlags,
 	type InitFlags,
+	type CompletionFlags,
 	type RevertFlags,
 	type FlagRecord,
 } from './parser.js'
 import { getVersion } from '../meta.js'
-import { runDetect, runFix, runRestore, runInit, runRevert } from './commands.js'
+import {
+	runDetect,
+	runFix,
+	runRestore,
+	runInit,
+	runCompletion,
+	runRevert,
+	runInfo,
+} from './commands.js'
 import { printMainHelp, tryHandleHelp } from './help.js'
+import { runMainMenu } from './menu.js'
 
 export class CliError extends Error {
 	exitCode: number
@@ -25,6 +35,12 @@ export class CliError extends Error {
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
 	const version = getVersion(import.meta.url)
+
+	// No args → show interactive menu
+	if (argv.length === 0) {
+		return runMainMenu()
+	}
+
 	const normalizedArgv = normalizeArgv(argv)
 
 	if (tryHandleHelp(normalizedArgv, version)) {
@@ -83,6 +99,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 				type: Boolean,
 				description: 'Interactive TUI to browse and filter results with keyboard',
 			},
+			includeUi: {
+				type: Boolean,
+				description:
+					'Include preset ui directories in analysis instead of ignoring them',
+			},
 		},
 	})
 
@@ -129,6 +150,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 				type: Boolean,
 				description:
 					'Skip creating a backup before applying fixes (alias: --no-backup)',
+			},
+			includeUi: {
+				type: Boolean,
+				description:
+					'Include preset ui directories in analysis instead of ignoring them',
 			},
 		},
 	})
@@ -188,12 +214,36 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 		},
 	})
 
+	const completion = command({
+		name: 'completion',
+		alias: 'comp',
+		help: {
+			description: 'Print shell completion setup instructions or scripts',
+		},
+		flags: {
+			shell: {
+				type: String,
+				alias: 's',
+				description: 'Shell to generate completions for: bash, zsh, or fish',
+			},
+		},
+	})
+
+	const info = command({
+		name: 'info',
+		alias: 'i',
+		help: {
+			description: 'Show current configuration and ignored patterns',
+		},
+		flags: {},
+	})
+
 	const parsed = cli(
 		{
 			name: 'kuizer',
 			version,
 			help: false,
-			commands: [detect, fix, restore, init, revert],
+			commands: [detect, fix, restore, init, completion, revert, info],
 		},
 		undefined,
 		normalizedArgv
@@ -212,8 +262,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 	}
 
 	if (!('command' in parsed)) {
-		printMainHelp(version)
-		return 1
+		return runMainMenu()
 	}
 
 	if (parsed.command === 'detect') {
@@ -232,13 +281,29 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 		return runInit(parsed.flags as unknown as InitFlags)
 	}
 
+	if (parsed.command === 'completion') {
+		return runCompletion(parsed.flags as unknown as CompletionFlags)
+	}
+
 	if (parsed.command === 'revert') {
 		return runRevert(parsed.flags as unknown as RevertFlags)
+	}
+
+	if (parsed.command === 'info') {
+		return runInfo()
 	}
 
 	printMainHelp(version)
 	return 1
 }
 
-export { runDetect, runFix, runRestore, runInit, runRevert } from './commands.js'
+export {
+	runDetect,
+	runFix,
+	runRestore,
+	runInit,
+	runCompletion,
+	runRevert,
+	runInfo,
+} from './commands.js'
 export type { DetectFlags, FixFlags, RestoreFlags, InitFlags, RevertFlags } from './parser.js'

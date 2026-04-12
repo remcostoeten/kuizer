@@ -195,6 +195,38 @@ describe("bootstrap", () => {
     }
   });
 
+  it("resolves aliased string-literal dynamic imports during reachability analysis", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          baseUrl: ".",
+          paths: {
+            "@/*": ["src/*"],
+          },
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "await import('@/lazy')\n",
+      "src/lazy.ts": "export const lazy = true\n",
+      "src/dead.ts": "export const dead = true\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(reachable).toEqual(["src/index.ts", "src/lazy.ts"]);
+      expect(ctx.analysisBoundaries).toHaveLength(0);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("records non-literal dynamic imports as analysis boundaries", async () => {
     const cwd = createWorkspace({
       "tsconfig.json": JSON.stringify({
@@ -253,6 +285,31 @@ describe("bootstrap", () => {
 
       expect(files).toEqual(["__tests__/index.test.ts", "src/index.ts"]);
       expect(reachable).toEqual(["__tests__/index.test.ts", "src/index.ts"]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores test-support directories when tests are not counted as consumers", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          target: "ES2020",
+          module: "ESNext",
+          moduleResolution: "Bundler",
+        },
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "export const main = true\n",
+      "src/test/factories/github.ts": "export const fixture = true\n",
+      "src/tests/setup.ts": "export const setup = true\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const files = [...ctx.all].map((file) => file.replace(cwd + "/", "")).sort();
+
+      expect(files).toEqual(["src/index.ts"]);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

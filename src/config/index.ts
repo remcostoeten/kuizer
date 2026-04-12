@@ -250,9 +250,9 @@ function mergeConfig(raw: Raw, baseDir: string): Config {
 		),
 		allowedExports: [...p.allowedExports, ...(raw.allowedExports ?? [])],
 		ignore: {
-			files: [...(raw.ignore?.files ?? [])],
-			symbols: [...(raw.ignore?.symbols ?? [])],
-			paths: [...(raw.ignore?.paths ?? [])],
+			files: [...(p.ignore?.files ?? []), ...(raw.ignore?.files ?? [])],
+			symbols: [...(p.ignore?.symbols ?? []), ...(raw.ignore?.symbols ?? [])],
+			paths: [...(p.ignore?.paths ?? []), ...(raw.ignore?.paths ?? [])],
 		},
 		detectors: raw.detectors ?? {},
 		dryRunByDefault: raw.dryRunByDefault ?? defaults.dryRunByDefault,
@@ -294,5 +294,18 @@ export async function loadConfig(
 			tsconfigPath ? resolve(cwd, tsconfigPath) : configuredTsconfig
 		)) ?? resolveFrom(baseDir, defaults.tsconfig)
 
-	return mergeConfig({ ...raw, tsconfig: detectedTsconfig }, baseDir)
+	const autoDetectedFramework = raw.framework ?? detectFramework(baseDir)
+
+	return mergeConfig({ ...raw, tsconfig: detectedTsconfig, framework: autoDetectedFramework }, baseDir)
+}
+
+function detectFramework(baseDir: string): Framework {
+	const hasAppRouter = existsSync(resolve(baseDir, 'app')) || existsSync(resolve(baseDir, 'src/app'))
+	const hasPagesRouter = existsSync(resolve(baseDir, 'pages')) || existsSync(resolve(baseDir, 'src/pages'))
+	const hasViteConfig = existsSync(resolve(baseDir, 'vite.config.ts')) || existsSync(resolve(baseDir, 'vite.config.js'))
+
+	if (hasAppRouter) return 'nextjs-app'
+	if (hasPagesRouter) return 'nextjs-pages'
+	if (hasViteConfig) return 'vite'
+	return 'none'
 }

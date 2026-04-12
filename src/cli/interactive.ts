@@ -1079,7 +1079,7 @@ export async function runInteractiveSession(
 						detectorSelection: new Set(
 							state.activeDetectors.includes('all') ? [] : [...state.activeDetectors]
 						),
-						status: 'Select detectors to analyze. Space toggles, Enter to start.',
+						status: 'Select detectors to analyze. Space toggles, Enter to start, a for all, q to quit.',
 					})
 					break
 				case '?':
@@ -1197,6 +1197,7 @@ export async function runInteractiveSession(
 		}
 	} finally {
 		input.setRawMode(false)
+		input.pause()
 		output.off('resize', resizeHandler)
 		output.write('\x1b[?25h')
 		if (!reducedMotion) {

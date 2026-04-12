@@ -28,6 +28,7 @@ describe('kuizer CLI dispatch helpers', () => {
 			filter: '',
 			excludePattern: undefined,
 			interactive: undefined,
+			includeUi: undefined,
 		})
 
 		expect(errors).toHaveLength(6)
@@ -49,8 +50,14 @@ describe('kuizer CLI dispatch helpers', () => {
 			dryRun: true,
 			write: true,
 			noBackup: undefined,
+			includeUi: undefined,
 		})
 
 		expect(errors).toContain('Cannot combine --write with --dryRun/--dry. Choose one mode.')
+	})
+
+	it('normalizes the include-ui flag for detect and fix commands', () => {
+		expect(normalizeArgv(['detect', '--include-ui'])).toEqual(['detect', '--includeUi'])
+		expect(normalizeArgv(['fix', '--include-ui'])).toEqual(['fix', '--includeUi'])
 	})
 })

@@ -3,8 +3,24 @@
 import { fileURLToPath } from 'node:url'
 import { main, CliError } from './dispatch.js'
 
-export { main, CliError, runDetect, runFix, runRestore, runInit, runRevert } from './dispatch.js'
-export type { DetectFlags, FixFlags, RestoreFlags, InitFlags, RevertFlags } from './parser.js'
+export {
+	main,
+	CliError,
+	runDetect,
+	runFix,
+	runRestore,
+	runInit,
+	runCompletion,
+	runRevert,
+} from './dispatch.js'
+export type {
+	DetectFlags,
+	FixFlags,
+	RestoreFlags,
+	InitFlags,
+	CompletionFlags,
+	RevertFlags,
+} from './parser.js'
 export {
 	normalizeArgv,
 	collectFlagValidationErrors,

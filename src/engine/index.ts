@@ -1,6 +1,7 @@
-import { Project, SyntaxKind } from 'ts-morph'
+import { Project, SyntaxKind, ts } from 'ts-morph'
 import { dirname, isAbsolute, resolve } from 'path'
 import fg from 'fast-glob'
+import { minimatch } from 'minimatch'
 import type { AnalysisBoundary, Config } from '../types.js'
 
 /** Initialises the ts-morph project, collects all source files, and runs BFS reachability from resolved entry points. */
@@ -56,9 +57,12 @@ export async function bootstrap(
 	await addTestFiles(project, config, root)
 	options.onProgress?.({ phase: 'collect-files' })
 	const ignoredFiles = new Set(config.ignore.files)
-	const ignoredPaths = config.ignore.paths.map((path) =>
-		isAbsolute(path) ? path : resolve(root, path)
-	)
+	const ignoredPaths = config.ignore.paths.map((path) => {
+		if (path.includes('**')) {
+			return path
+		}
+		return isAbsolute(path) ? path : resolve(root, path)
+	})
 
 	const files = project
 		.getSourceFiles()
@@ -93,18 +97,41 @@ function isIgnored(
 	if (relative.startsWith('.next/')) return true
 	if (file.startsWith(config.outputDir + '/')) return true
 	if (!config.countTestsAsConsumers && isTestFile(relative)) return true
+	if (!config.countTestsAsConsumers && isTestSupportFile(relative)) return true
 
-	for (const absolute of ignoredPaths) {
-		if (file === absolute || file.startsWith(absolute + '/')) {
-			return true
+	for (const pattern of ignoredPaths) {
+		if (pattern.includes('**')) {
+			if (minimatch(relative, pattern, { dot: true })) {
+				return true
+			}
+		} else {
+			if (file === pattern || file.startsWith(pattern + '/')) {
+				return true
+			}
 		}
 	}
 
-	return ignoredFiles.has(relative) || ignoredFiles.has(file)
+	if (ignoredFiles.has(relative) || ignoredFiles.has(file)) {
+		return true
+	}
+
+	for (const pattern of config.ignore.files) {
+		if (pattern.includes('**') || pattern.includes('*')) {
+			if (minimatch(relative, pattern, { dot: true })) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 function isTestFile(path: string): boolean {
 	return /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)
+}
+
+function isTestSupportFile(path: string): boolean {
+	return /(^|\/)(__tests__|test|tests)\//.test(path)
 }
 
 async function addTestFiles(project: Project, config: Config, root: string): Promise<void> {
@@ -185,6 +212,7 @@ function buildGraph(
 }> {
 	const adjacency = new Map<string, readonly string[]>()
 	const imported = new Set<string>()
+	const resolveModule = createModuleResolver(project, all)
 
 	for (const path of all) {
 		const sf = project.getSourceFile(path)
@@ -193,7 +221,7 @@ function buildGraph(
 			continue
 		}
 
-		const adjacent = getAdjacentFiles(sf, all)
+		const adjacent = getAdjacentFiles(sf, all, resolveModule)
 		adjacency.set(path, adjacent)
 
 		for (const next of adjacent) {
@@ -276,7 +304,8 @@ function getAdjacentFiles(
 			}>
 		}>
 	},
-	all: ReadonlySet<string>
+	all: ReadonlySet<string>,
+	resolveModule: (fromFile: string, specifier: string) => string | undefined
 ): string[] {
 	const adjacent = new Set<string>()
 
@@ -310,11 +339,7 @@ function getAdjacentFiles(
 			specifier.getKind() === SyntaxKind.StringLiteral ||
 			specifier.getKind() === SyntaxKind.NoSubstitutionTemplateLiteral
 		) {
-			const resolved = resolveDynamicImport(
-				sourceFile.getFilePath(),
-				specifier.getLiteralText!(),
-				all
-			)
+			const resolved = resolveModule(sourceFile.getFilePath(), specifier.getLiteralText!())
 
 			if (resolved) {
 				adjacent.add(resolved)
@@ -325,6 +350,49 @@ function getAdjacentFiles(
 	}
 
 	return [...adjacent]
+}
+
+function createModuleResolver(
+	project: Project,
+	all: ReadonlySet<string>
+): (fromFile: string, specifier: string) => string | undefined {
+	const compilerOptions = project.getCompilerOptions()
+	const host = ts.createCompilerHost(compilerOptions, true)
+
+	return (fromFile: string, specifier: string) => {
+		const resolved = ts.resolveModuleName(
+			specifier,
+			fromFile,
+			compilerOptions,
+			host
+		).resolvedModule
+
+		if (!resolved) {
+			return undefined
+		}
+
+		return normalizeResolvedModulePath(resolved.resolvedFileName, all)
+	}
+}
+
+function normalizeResolvedModulePath(
+	resolvedFileName: string,
+	all: ReadonlySet<string>
+): string | undefined {
+	const normalized = resolvedFileName.replaceAll('\\', '/')
+	const withoutDts = normalized.replace(/\.d\.ts$/, '')
+	const withoutExt = normalized.replace(/\.(mjs|cjs|js|jsx|ts|tsx)$/, '')
+	const candidates = [
+		normalized,
+		`${withoutDts}.ts`,
+		`${withoutDts}.tsx`,
+		`${withoutExt}.ts`,
+		`${withoutExt}.tsx`,
+		resolve(withoutExt, 'index.ts'),
+		resolve(withoutExt, 'index.tsx'),
+	]
+
+	return candidates.find((candidate) => all.has(candidate))
 }
 
 function recordDynamicImportBoundaries(
@@ -367,31 +435,4 @@ function recordDynamicImportBoundaries(
 			message: 'Non-literal dynamic import cannot be resolved statically',
 		})
 	}
-}
-
-function resolveDynamicImport(
-	fromFile: string,
-	specifier: string,
-	all: ReadonlySet<string>
-): string | undefined {
-	if (!specifier.startsWith('.')) {
-		return undefined
-	}
-
-	const base = resolve(dirname(fromFile), specifier)
-	const withoutJsExt = base.replace(/\.(mjs|cjs|js|jsx)$/, '')
-	const candidates = [
-		base,
-		withoutJsExt,
-		`${base}.ts`,
-		`${base}.tsx`,
-		`${withoutJsExt}.ts`,
-		`${withoutJsExt}.tsx`,
-		resolve(base, 'index.ts'),
-		resolve(base, 'index.tsx'),
-		resolve(withoutJsExt, 'index.ts'),
-		resolve(withoutJsExt, 'index.tsx'),
-	]
-
-	return candidates.find((candidate) => all.has(candidate))
 }

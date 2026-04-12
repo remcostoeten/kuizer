@@ -57,6 +57,30 @@ describe('loadConfig', () => {
 		}
 	})
 
+	it('applies nextjs preset ui ignore paths by default', async () => {
+		const cwd = mkdtempSync(join(tmpdir(), 'kuizer-config-next-preset-'))
+
+		try {
+			mkdirSync(join(cwd, 'src', 'app'), { recursive: true })
+			writeFileSync(join(cwd, 'src', 'app', 'page.tsx'), 'export default function Page() { return null }\n')
+			writeFileSync(
+				join(cwd, 'tsconfig.json'),
+				JSON.stringify({
+					compilerOptions: { jsx: 'react-jsx' },
+					include: ['src/**/*'],
+				})
+			)
+
+			const config = await loadConfig(cwd)
+
+			expect(config.framework).toBe('nextjs-app')
+			expect(config.ignore.paths).toContain('**/ui/**')
+			expect(config.ignore.paths).toContain('**/components/ui/**')
+		} finally {
+			rmSync(cwd, { recursive: true, force: true })
+		}
+	})
+
 	it('honors an explicit tsconfig override over config and search', async () => {
 		const cwd = mkdtempSync(join(tmpdir(), 'kuizer-config-override-'))
 		const configPath = join(cwd, 'kuizer.config.json')

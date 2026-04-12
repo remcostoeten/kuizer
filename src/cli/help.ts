@@ -109,6 +109,14 @@ const FLAG_INTERACTIVE: FlagDef = {
 	detail: 'Open a terminal UI to browse findings and apply supported fixes.\n\nFeatures:\n  • File and finding panes\n  • Kind filters and detector-category filters\n  • Selection and batch apply actions\n  • In-session revert of the last applied snapshot\n\nKeyboard shortcuts:\n  • ↑/↓         - Navigate\n  • Tab         - Switch pane\n  • Space       - Select current item\n  • Enter       - Apply the current item or file\n  • x           - Apply selected items\n  • A           - Apply all filtered items\n  • f/c/t/i     - Toggle function, const, type, interface filters\n  • 1-9,0       - Toggle detector categories shown in the header\n  • a           - Show all kinds\n  • *           - Show all detector categories\n  • r           - Reset kind and detector filters\n  • R           - Revert the last applied snapshot\n  • q           - Quit\n\nExample:\n  kuizer detect --interactive --only unusedComponents',
 }
 
+const FLAG_INCLUDE_UI: FlagDef = {
+	name: 'include-ui',
+	aliases: ['--include-ui'],
+	type: 'boolean',
+	description: 'Include preset ui directories in analysis',
+	detail: 'By default, the Next.js presets ignore common shared UI folders such as `ui/` and `components/ui/` to avoid flagging design-system primitives as dead code.\n\nPass this flag to remove those preset ignore rules for the current command only.\n\nUseful when:\n  - Auditing whether your shared UI kit is actually used\n  - Cleaning up an old design system\n  - Verifying component-library reachability before deleting files\n\nExamples:\n  kuizer detect --only unusedFiles --include-ui\n  kuizer fix --dry --only unusedFiles --include-ui',
+}
+
 // ── Fix flags ───────────────────────────────────────────────────────
 
 const FLAG_DRY_RUN: FlagDef = {
@@ -147,6 +155,16 @@ const FLAG_SNAPSHOT: FlagDef = {
 	detail: 'Restore files to a previous state using a backup snapshot.\n\nPass either a snapshot ID or a manifest.json path.\n\nExamples:\n  kuizer restore --snapshot 2026-04-05T04-45-49-701Z-fix-f1f310e4\n  kuizer restore --snapshot ./.kuizer/snapshots/<id>/manifest.json',
 }
 
+const FLAG_SHELL: FlagDef = {
+	name: 'shell',
+	short: 's',
+	aliases: ['shell', '-s', '--shell'],
+	type: 'string',
+	placeholder: '<bash|zsh|fish>',
+	description: 'Shell to generate completions for',
+	detail: 'Used by the completion command to print a shell-specific completion script.\n\nExamples:\n  kuizer completion --shell bash\n  kuizer completion --shell zsh > ~/.zfunc/_kuizer\n  kuizer completion --shell fish > ~/.config/fish/completions/kuizer.fish',
+}
+
 // ── Command definitions ─────────────────────────────────────────────
 
 const CMD_DETECT: CommandDef = {
@@ -165,6 +183,7 @@ const CMD_DETECT: CommandDef = {
 		FLAG_FILTER,
 		FLAG_EXCLUDE_PATTERN,
 		FLAG_INTERACTIVE,
+		FLAG_INCLUDE_UI,
 	],
 }
 
@@ -182,6 +201,7 @@ const CMD_FIX: CommandDef = {
 		FLAG_DRY_RUN,
 		FLAG_WRITE,
 		FLAG_NO_BACKUP,
+		FLAG_INCLUDE_UI,
 	],
 }
 
@@ -202,6 +222,15 @@ const CMD_INIT: CommandDef = {
 	flags: [],
 }
 
+const CMD_COMPLETION: CommandDef = {
+	name: 'completion',
+	short: 'comp',
+	aliases: ['completion', 'comp'],
+	description: 'Print shell completion setup info or scripts',
+	detail: 'Without flags, prints setup instructions for bash, zsh, and fish.\n\nWith --shell, prints a completion script to stdout so you can redirect it into your shell completion directory.\n\nExamples:\n  kuizer completion\n  kuizer completion --shell bash\n  kuizer completion --shell zsh > ~/.zfunc/_kuizer',
+	flags: [FLAG_SHELL],
+}
+
 const CMD_REVERT: CommandDef = {
 	name: 'revert',
 	short: 'rv',
@@ -211,7 +240,14 @@ const CMD_REVERT: CommandDef = {
 	flags: [FLAG_CONFIG, FLAG_SNAPSHOT],
 }
 
-const COMMANDS: CommandDef[] = [CMD_DETECT, CMD_FIX, CMD_RESTORE, CMD_INIT, CMD_REVERT]
+const COMMANDS: CommandDef[] = [
+	CMD_DETECT,
+	CMD_FIX,
+	CMD_RESTORE,
+	CMD_INIT,
+	CMD_COMPLETION,
+	CMD_REVERT,
+]
 
 const ALL_FLAGS: FlagDef[] = [
 	FLAG_CONFIG,
@@ -223,10 +259,12 @@ const ALL_FLAGS: FlagDef[] = [
 	FLAG_FILTER,
 	FLAG_EXCLUDE_PATTERN,
 	FLAG_INTERACTIVE,
+	FLAG_INCLUDE_UI,
 	FLAG_DRY_RUN,
 	FLAG_WRITE,
 	FLAG_NO_BACKUP,
 	FLAG_SNAPSHOT,
+	FLAG_SHELL,
 ]
 
 const ANSI_RE = new RegExp(String.raw`\u001B\[[0-9;]*m`, 'g')
@@ -303,6 +341,7 @@ export function printMainHelp(version: string): void {
 	o.push(formatCommandLine(CMD_FIX))
 	o.push(formatCommandLine(CMD_RESTORE))
 	o.push(formatCommandLine(CMD_INIT))
+	o.push(formatCommandLine(CMD_COMPLETION))
 	o.push(formatCommandLine(CMD_REVERT))
 	o.push(`  ${b(w('META'))}`)
 	o.push(
@@ -348,9 +387,9 @@ export function printMainHelp(version: string): void {
 		['kuizer fix --dry', 'Preview fixes'],
 		['kuizer f -w', 'Apply fixes'],
 		['kuizer f -w --no-backup', 'Skip backup'],
+		['kuizer completion', 'Completion setup'],
 		['kuizer revert --snapshot <id>', 'Revert changes'],
 		['kuizer restore --snapshot <id>', 'Restore'],
-		['kuizer dry -h', 'Flag help'],
 	]
 	o.push(`  ${b(w('EXAMPLES'))}`)
 	for (let i = 0; i < exL.length; i++) {
@@ -378,6 +417,10 @@ export function printMainHelp(version: string): void {
 	o.push(
 		padTo(`    ${g('kuizer f -w --no-backup -c cfg.json')}`, EX_HALF) +
 			`  ${g('kuizer config --help')} ${d('→ --config info')}`
+	)
+	o.push(
+		padTo(`    ${g('kuizer completion --shell zsh > ~/.zfunc/_kuizer')}`, EX_HALF) +
+			`  ${g('kuizer completion -h')} ${d('→ completion command help')}`
 	)
 	o.push('')
 
@@ -493,10 +536,9 @@ export function tryHandleHelp(argv: string[], version: string): boolean {
 	const second = argv[1] ?? ''
 	const third = argv[2] ?? ''
 
-	// No args → main help
+	// No args → show main menu
 	if (argv.length === 0) {
-		printMainHelp(version)
-		return true
+		return false // Will trigger main menu in dispatch
 	}
 
 	// Single arg: help, -h, --help → main help

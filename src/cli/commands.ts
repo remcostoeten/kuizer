@@ -6,7 +6,7 @@ import { preset } from '../config/presets.js'
 import { applyFixPlans } from '../fixers/apply.js'
 import { planFixes } from '../fixers/plan.js'
 import { reportAppliedFixes, reportFixPlan } from '../fixers/report.js'
-import type { Ctx, Finding, Framework } from '../types.js'
+import type { Config, Ctx, Finding, Framework } from '../types.js'
 import { bootstrap } from '../engine/index.js'
 import { createProgress } from '../output/progress.js'
 import { registry as detectorRegistry } from '../detectors/registry.js'
@@ -19,6 +19,7 @@ import type {
 	FixFlags,
 	RestoreFlags,
 	InitFlags,
+	CompletionFlags,
 	RevertFlags,
 } from './parser.js'
 import {
@@ -31,13 +32,35 @@ import {
 } from './parser.js'
 import { runInteractiveSession } from './interactive.js'
 
+const PRESET_UI_IGNORE_PATHS = new Set(['**/ui/**', '**/components/ui/**'])
+
+function applyCliOverrides<T extends { includeUi?: boolean | undefined }>(
+	config: Config,
+	flags: T
+): Config {
+	if (flags.includeUi !== true) {
+		return config
+	}
+
+	return {
+		...config,
+		ignore: {
+			...config.ignore,
+			paths: config.ignore.paths.filter((path) => !PRESET_UI_IGNORE_PATHS.has(path)),
+		},
+	}
+}
+
 function exitCode(findings: readonly Finding[]): number {
 	return findings.some((finding) => finding.severity === 'error') ? 1 : 0
 }
 
 export async function runDetect(flags: DetectFlags, version: string): Promise<number> {
 	const startedAt = Date.now()
-	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
+	const config = applyCliOverrides(
+		await loadConfig(process.cwd(), flags.config, flags.tsconfig),
+		flags
+	)
 
 	const reporterName = resolveReporter(flags)
 	const interactive = flags.interactive === true
@@ -157,7 +180,10 @@ export async function runDetect(flags: DetectFlags, version: string): Promise<nu
 }
 
 export async function runFix(flags: FixFlags): Promise<number> {
-	const config = await loadConfig(process.cwd(), flags.config, flags.tsconfig)
+	const config = applyCliOverrides(
+		await loadConfig(process.cwd(), flags.config, flags.tsconfig),
+		flags
+	)
 
 	try {
 		const ctx = await bootstrap(config)
@@ -302,6 +328,234 @@ export async function runInit(flags: InitFlags): Promise<number> {
 	return 0
 }
 
+type CompletionShell = 'bash' | 'zsh' | 'fish'
+
+const COMPLETION_SHELLS = ['bash', 'zsh', 'fish'] as const satisfies readonly CompletionShell[]
+
+function isCompletionShell(value: string): value is CompletionShell {
+	return COMPLETION_SHELLS.includes(value as CompletionShell)
+}
+
+function shellCommands(): readonly string[] {
+	return ['detect', 'fix', 'restore', 'init', 'completion', 'revert', 'info', 'help', 'version']
+}
+
+function shellFlags(): readonly string[] {
+	return [
+		'--help',
+		'-h',
+		'--version',
+		'-v',
+		'--config',
+		'-c',
+		'--tsconfig',
+		'--only',
+		'-o',
+		'--skip',
+		'-s',
+		'--reporter',
+		'-r',
+		'--report',
+		'--json',
+		'--filter',
+		'-f',
+		'--exclude-pattern',
+		'--interactive',
+		'--include-ui',
+		'--dry',
+		'--dr',
+		'--dry-run',
+		'--write',
+		'-w',
+		'--no-backup',
+		'--snapshot',
+		'--global',
+		'--project',
+		'--shell',
+	]
+}
+
+function generateBashCompletion(): string {
+	const commands = shellCommands().join(' ')
+	const flags = shellFlags().join(' ')
+
+	return [
+		'# bash completion for kuizer',
+		'_kuizer_completions() {',
+		'\tlocal cur prev words cword',
+		'\t_init_completion || return',
+		'',
+		`\tlocal commands="${commands}"`,
+		`\tlocal global_flags="${flags}"`,
+		'',
+		'\tif [[ "$prev" == "--shell" ]]; then',
+		'\t\tCOMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )',
+		'\t\treturn',
+		'\tfi',
+		'',
+		'\tcase "${words[1]}" in',
+		'\t\tdetect)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\t\tfix)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\t\trestore|revert)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "--snapshot --config --tsconfig" -- "$cur") )',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\t\tinit)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "--global --project" -- "$cur") )',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\t\tcompletion)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "--shell -s" -- "$cur") )',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\t\tinfo|help|version)',
+		'\t\t\treturn',
+		'\t\t\t;;',
+		'\tesac',
+		'',
+		'\tif [[ $cword -eq 1 ]]; then',
+		'\t\tCOMPREPLY=( $(compgen -W "$commands $global_flags" -- "$cur") )',
+		'\t\treturn',
+		'\tfi',
+		'',
+		'\tCOMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )',
+		'}',
+		'',
+		'complete -F _kuizer_completions kuizer',
+		'',
+	].join('\n')
+}
+
+function generateZshCompletion(): string {
+	const commands = shellCommands()
+
+	return `#compdef kuizer
+
+_kuizer() {
+	local -a commands
+	commands=(
+${commands.map((command) => `\t\t'${command}:${command} command'`).join('\n')}
+	)
+
+	_arguments -C \
+		'1:command:->command' \
+		'*::arg:->args'
+
+	case $state in
+		command)
+			_describe 'command' commands
+			;;
+		args)
+			case $words[2] in
+				completion)
+					_arguments '--shell[Shell to generate completions for]:shell:(bash zsh fish)' '-s[Shell to generate completions for]:shell:(bash zsh fish)'
+					;;
+				init)
+					_arguments '--global[Create global config]' '--project[Create project config]'
+					;;
+				restore|revert)
+					_arguments '--snapshot[Snapshot path or ID]' '--config[Config path]' '--tsconfig[tsconfig path]'
+					;;
+				detect|fix)
+					_arguments \
+						'--config[Config path]' '-c[Config path]' \
+						'--tsconfig[tsconfig path]' \
+						'--only[Run only specific detectors]' '-o[Run only specific detectors]' \
+						'--skip[Skip specific detectors]' '-s[Skip specific detectors]' \
+						'--include-ui[Include preset ui directories in analysis]' \
+						'--dry-run[Preview fixes without writing]' '--dry[Preview fixes without writing]' '--dr[Preview fixes without writing]' \
+						'--write[Apply fixes to files]' '-w[Apply fixes to files]' \
+						'--no-backup[Skip backup before applying fixes]' \
+						'--reporter[Output format]:format:(terminal json)' '-r[Output format]:format:(terminal json)' \
+						'--report[Output format]:format:(terminal json)' \
+						'--json[Output results as JSON]' \
+						'--filter[Filter by kind or detector]' '-f[Filter by kind or detector]' \
+						'--exclude-pattern[Exclude symbols matching regex]' \
+						'--interactive[Launch interactive TUI]'
+					;;
+			esac
+			;;
+	esac
+}
+
+_kuizer "$@"
+`
+}
+
+function generateFishCompletion(): string {
+	return `complete -c kuizer -f
+complete -c kuizer -n "__fish_use_subcommand" -a "detect fix restore init completion revert info help version"
+complete -c kuizer -n "__fish_seen_subcommand_from completion" -l shell -s s -a "bash zsh fish"
+complete -c kuizer -n "__fish_seen_subcommand_from init" -l global
+complete -c kuizer -n "__fish_seen_subcommand_from init" -l project
+complete -c kuizer -n "__fish_seen_subcommand_from restore revert" -l snapshot
+complete -c kuizer -n "__fish_seen_subcommand_from detect fix restore" -l config -s c
+complete -c kuizer -n "__fish_seen_subcommand_from detect fix restore" -l tsconfig
+complete -c kuizer -n "__fish_seen_subcommand_from detect fix" -l only -s o
+complete -c kuizer -n "__fish_seen_subcommand_from detect fix" -l skip -s s
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l reporter -s r -a "terminal json"
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l report -a "terminal json"
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l json
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l filter -s f
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l exclude-pattern
+complete -c kuizer -n "__fish_seen_subcommand_from detect" -l interactive
+complete -c kuizer -n "__fish_seen_subcommand_from detect fix" -l include-ui
+complete -c kuizer -n "__fish_seen_subcommand_from fix" -l dry-run
+complete -c kuizer -n "__fish_seen_subcommand_from fix" -l dry
+complete -c kuizer -n "__fish_seen_subcommand_from fix" -l dr
+complete -c kuizer -n "__fish_seen_subcommand_from fix" -l write -s w
+complete -c kuizer -n "__fish_seen_subcommand_from fix" -l no-backup
+`
+}
+
+function completionScript(shell: CompletionShell): string {
+	switch (shell) {
+		case 'bash':
+			return generateBashCompletion()
+		case 'zsh':
+			return generateZshCompletion()
+		case 'fish':
+			return generateFishCompletion()
+	}
+}
+
+function printCompletionInstructions(): void {
+	write('Shell completions')
+	write(dim('Generate a completion script with:'))
+	write('  kuizer completion --shell bash')
+	write('  kuizer completion --shell zsh')
+	write('  kuizer completion --shell fish')
+	write('')
+	write(dim('Install examples:'))
+	write('  Bash: kuizer completion --shell bash > ~/.local/share/bash-completion/completions/kuizer')
+	write('  Zsh:  kuizer completion --shell zsh > ~/.zfunc/_kuizer')
+	write('        Then add `fpath=(~/.zfunc $fpath)` to your ~/.zshrc and run `autoload -Uz compinit && compinit`')
+	write('  Fish: kuizer completion --shell fish > ~/.config/fish/completions/kuizer.fish')
+}
+
+export async function runCompletion(flags: CompletionFlags): Promise<number> {
+	if (!flags.shell) {
+		printCompletionInstructions()
+		return 0
+	}
+
+	const shell = flags.shell.toLowerCase()
+	if (!isCompletionShell(shell)) {
+		console.error(pc.red(`Error: Unsupported shell '${flags.shell}'`))
+		console.error(pc.dim('Use one of: bash, zsh, fish'))
+		return 1
+	}
+
+	process.stdout.write(completionScript(shell))
+	return 0
+}
+
 export async function runRevert(flags: RevertFlags): Promise<number> {
 	if (!flags.snapshot) {
 		console.error(pc.red('Error: Missing required --snapshot path or ID'))
@@ -326,4 +580,66 @@ export async function runRevert(flags: RevertFlags): Promise<number> {
 		)
 		return 1
 	}
+}
+
+export async function runInfo(): Promise<number> {
+	const config = await loadConfig(process.cwd())
+
+	console.log('')
+	console.log(pc.bold('Kuizer Configuration'))
+	console.log(pc.dim('─'.repeat(40)))
+	console.log('')
+	console.log(pc.cyan('Framework:'), config.framework)
+	console.log('')
+	console.log(pc.cyan('Entrypoints:'))
+	if (config.entrypoints.length === 0) {
+		console.log(pc.dim('  (inferred)'))
+	} else {
+		for (const entry of config.entrypoints) {
+			console.log(`  ${entry}`)
+		}
+	}
+	console.log('')
+	console.log(pc.cyan('Allowed Exports:'))
+	if (config.allowedExports.length === 0) {
+		console.log(pc.dim('  (none)'))
+	} else {
+		for (const exp of config.allowedExports) {
+			console.log(`  ${exp}`)
+		}
+	}
+	console.log('')
+	console.log(pc.cyan('Ignored Paths:'))
+	if (config.ignore.paths.length === 0) {
+		console.log(pc.dim('  (none)'))
+	} else {
+		for (const path of config.ignore.paths) {
+			console.log(`  ${path}`)
+		}
+	}
+	console.log('')
+	console.log(pc.cyan('Ignored Files:'))
+	if (config.ignore.files.length === 0) {
+		console.log(pc.dim('  (none)'))
+	} else {
+		for (const file of config.ignore.files) {
+			console.log(`  ${file}`)
+		}
+	}
+	console.log('')
+	console.log(pc.cyan('Ignored Symbols:'))
+	if (config.ignore.symbols.length === 0) {
+		console.log(pc.dim('  (none)'))
+	} else {
+		for (const sym of config.ignore.symbols) {
+			console.log(`  ${sym}`)
+		}
+	}
+	console.log('')
+	console.log(pc.cyan('Other Options:'))
+	console.log(`  countTestsAsConsumers: ${config.countTestsAsConsumers}`)
+	console.log(`  dryRunByDefault: ${config.dryRunByDefault}`)
+	console.log('')
+
+	return 0
 }

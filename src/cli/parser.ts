@@ -10,6 +10,7 @@ export type DetectFlags = {
 	filter: string | undefined
 	excludePattern: string | undefined
 	interactive: boolean | undefined
+	includeUi: boolean | undefined
 }
 
 export type FixFlags = {
@@ -20,6 +21,7 @@ export type FixFlags = {
 	dryRun: boolean | undefined
 	write: boolean | undefined
 	noBackup: boolean | undefined
+	includeUi: boolean | undefined
 }
 
 export type RestoreFlags = {
@@ -31,6 +33,10 @@ export type RestoreFlags = {
 export type InitFlags = {
 	global: boolean | undefined
 	project: boolean | undefined
+}
+
+export type CompletionFlags = {
+	shell: string | undefined
 }
 
 export type RevertFlags = {
@@ -107,6 +113,7 @@ export const DETECT_FLAGS = new Set([
 	'tsconfig',
 	'--exclude-pattern',
 	'--interactive',
+	'--include-ui',
 	'--json',
 	'json',
 ])
@@ -121,6 +128,7 @@ export const FIX_FLAGS = new Set([
 	'write',
 	'--no-backup',
 	'no-backup',
+	'--include-ui',
 	'--dryRun',
 	'noBackup',
 ])
@@ -142,6 +150,7 @@ export const FLAG_ALIASES: Readonly<Record<string, string>> = {
 	'--skip': '--skip',
 	'--report': '--reporter',
 	'--filter': '--filter',
+	'--include-ui': '--includeUi',
 }
 
 export const FLAG_TO_COMMAND: Readonly<Record<string, string>> = {
@@ -278,6 +287,12 @@ export function collectFlagValidationErrors(command: string, flags: FlagRecord):
 			requireNonEmpty(
 				flags.snapshot,
 				'Snapshot path cannot be empty. Use: kuizer restore --snapshot <path|id>'
+			)
+			break
+		case 'completion':
+			requireNonEmpty(
+				flags.shell,
+				'Shell cannot be empty. Use: kuizer completion --shell <bash|zsh|fish>'
 			)
 			break
 	}
