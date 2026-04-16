@@ -2,7 +2,7 @@ import type { Finding } from '../types.js'
 import type { Detector } from './types.js'
 
 export function detect(
-	...[{ all, reachable, analysisBoundaries }, config]: Parameters<Detector>
+	...[{ all, reachable, testReachable, analysisBoundaries }, config]: Parameters<Detector>
 ): ReturnType<Detector> {
 	const severity = config.detectors.unusedFiles?.severity ?? 'warn'
 	const ignored = new Set(config.ignore.files)

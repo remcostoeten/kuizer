@@ -10,6 +10,8 @@ type Files = Record<string, string>
  * * @description Helpers to create a Ctx and Config for testing detectors. The Ctx is created using ts-morph's in-memory file system, so you can provide a simple object mapping file paths to their contents. The Config can be overridden with any partial config values, and will be merged with the defaults. 
  */
 
+import { FileCacheManager } from '../../src/engine/cache.js'
+
 export function makeCtx(all: Files, reachable: Files): Ctx {
     const project = new Project({ useInMemoryFileSystem: true })
 
@@ -21,7 +23,9 @@ export function makeCtx(all: Files, reachable: Files): Ctx {
         project,
         all: new Set(Object.keys(all)),
         reachable: new Set(Object.keys(reachable)),
+        testReachable: new Set(),
         analysisBoundaries: [],
+        cache: new FileCacheManager(process.cwd()),
     }
 }
 
