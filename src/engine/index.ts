@@ -1,7 +1,8 @@
-import { Project, SyntaxKind } from 'ts-morph'
+import { Project, SyntaxKind, ts, SourceFile } from 'ts-morph'
 import { dirname, isAbsolute, resolve } from 'path'
 import fg from 'fast-glob'
 import type { AnalysisBoundary, Config } from '../types.js'
+import { FileCacheManager } from './cache.js'
 
 /** Initialises the ts-morph project, collects all source files, and runs BFS reachability from resolved entry points. */
 
@@ -24,8 +25,10 @@ type BootstrapOptions = Readonly<{
 export async function bootstrap(config: Config): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }>
 export async function bootstrap(
 	config: Config,
@@ -33,8 +36,10 @@ export async function bootstrap(
 ): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }>
 export async function bootstrap(
 	config: Config,
@@ -42,10 +47,13 @@ export async function bootstrap(
 ): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }> {
 	const root = dirname(resolve(config.tsconfig))
+	const cache = new FileCacheManager(root)
 	options.onProgress?.({ phase: 'load-project' })
 
 	const project = new Project({
@@ -54,6 +62,7 @@ export async function bootstrap(
 		skipLoadingLibFiles: true,
 	})
 	await addTestFiles(project, config, root)
+	await addWorkspaceFiles(project, config, root) // added this as well to cover monorepo sibling consumers
 	options.onProgress?.({ phase: 'collect-files' })
 	const ignoredFiles = new Set(config.ignore.files)
 	const ignoredPaths = config.ignore.paths.map((path) =>
@@ -67,18 +76,29 @@ export async function bootstrap(
 	const all = new Set(files)
 	options.onProgress?.({ phase: 'resolve-entries', totalFiles: all.size })
 	const configuredEntries = await resolveEntries(config, all, root)
-	const tests = config.countTestsAsConsumers
-		? new Set([...all].filter((file) => isTestFile(file.slice(root.length + 1))))
-		: new Set<string>()
-	const graph = buildGraph(project, all)
+	
+	const graph = buildGraph(project, all, cache)
+	const inferredEntries = inferEntries(all, graph.imported)
+	
+	const tests = new Set([...all].filter((file) => isTestFile(file.slice(root.length + 1))))
+	
 	const baseEntries =
-		configuredEntries.size > 0 ? configuredEntries : inferEntries(all, graph.imported)
-	const entries = new Set([...baseEntries, ...tests])
-	const reachable = bfs(entries, graph.adjacency, all.size, options.onProgress)
-	const analysisBoundaries = collectAnalysisBoundaries(project, reachable)
+		configuredEntries.size > 0 ? configuredEntries : new Set([...inferredEntries].filter(e => !(tests as any).has(e)))
+	
+	const prodEntries = config.countTestsAsConsumers
+		? new Set([...baseEntries, ...tests])
+		: new Set([...baseEntries])
+	const reachable = bfs(prodEntries, graph.adjacency, all.size, options.onProgress)
+	
+	const testReachable = bfs(tests, graph.adjacency, all.size)
+	// remove anything reachable from prod
+	for (const f of reachable) testReachable.delete(f)
+
+	const combinedReachable = new Set([...reachable, ...testReachable])
+	const analysisBoundaries = collectAnalysisBoundaries(project, combinedReachable, cache)
 	options.onProgress?.({ phase: 'complete', totalFiles: all.size })
 
-	return { project, reachable, all, analysisBoundaries }
+	return { project, reachable, testReachable, all, analysisBoundaries, cache }
 }
 
 function isIgnored(
@@ -178,7 +198,8 @@ function inferEntries(
 
 function buildGraph(
 	project: Project,
-	all: ReadonlySet<string>
+	all: ReadonlySet<string>,
+	cache: FileCacheManager
 ): Readonly<{
 	adjacency: ReadonlyMap<string, readonly string[]>
 	imported: ReadonlySet<string>
@@ -187,13 +208,18 @@ function buildGraph(
 	const imported = new Set<string>()
 
 	for (const path of all) {
-		const sf = project.getSourceFile(path)
-		if (!sf) {
-			adjacency.set(path, [])
-			continue
+		let adjacent = cache.getCachedFileContext(path)?.adjacent
+		if (!adjacent) {
+			const sf = project.getSourceFile(path)
+			if (!sf) {
+				adjacency.set(path, [])
+				continue
+			}
+
+			adjacent = getAdjacentFiles(sf, all)
+			cache.setCachedFileContext(path, { adjacent })
 		}
 
-		const adjacent = getAdjacentFiles(sf, all)
 		adjacency.set(path, adjacent)
 
 		for (const next of adjacent) {
@@ -230,7 +256,7 @@ function bfs(
 	adjacency: ReadonlyMap<string, readonly string[]>,
 	totalFiles: number,
 	onProgress?: (event: BootstrapProgress) => void
-): ReadonlySet<string> {
+): Set<string> {
 	const visited = new Set<string>()
 	const queue = [...entries]
 	let head = 0

@@ -50,6 +50,7 @@ type FixFlags = {
 	dryRun: boolean | undefined
 	write: boolean | undefined
 	noBackup: boolean | undefined
+	interactive: boolean | undefined
 }
 
 type RestoreFlags = {
@@ -397,6 +398,7 @@ async function runDetect(flags: DetectFlags): Promise<number> {
 		durationMs: Date.now() - startedAt,
 		analysisBoundaries: initial.ctx.analysisBoundaries,
 	})
+	initial.ctx.cache.save()
 	return exitCode(findings)
 }
 
@@ -418,10 +420,40 @@ async function runFix(flags: FixFlags): Promise<number> {
 	const findings = detectors.flatMap((id) => detectorRegistry[id](ctx, config))
 	const plans = planFixes(findings, ctx, config)
 
-	// Determine if we should write based on config and flags
 	const explicitWrite = flags.write === true
 	const explicitDry = flags.dryRun === true
 	const defaultDryRun = config.dryRunByDefault
+
+	const interactive = flags.interactive === true
+	if (interactive) {
+		const fixableFindings = findings.filter((f) =>
+			plans.supported.some((p) => p.finding === f)
+		)
+		const remaining = await runInteractiveSession({
+			version,
+			config,
+			cwd: process.cwd(),
+			findings: fixableFindings,
+			supportedFixes: plans.supported,
+			async refresh() {
+				const refreshedCtx = await bootstrap(config)
+				const refreshedFindings = detectors.flatMap((id) =>
+					detectorRegistry[id](refreshedCtx, config)
+				)
+				const refreshedPlans = planFixes(refreshedFindings, refreshedCtx, config)
+				const refreshedFixableFindings = refreshedFindings.filter((f) =>
+					refreshedPlans.supported.some((p) => p.finding === f)
+				)
+
+				return {
+					findings: refreshedFixableFindings,
+					supportedFixes: refreshedPlans.supported,
+				}
+			},
+		})
+		ctx.cache.save()
+		return exitCode(remaining)
+	}
 
 	// -w always writes, --dry-run always dries, otherwise use config default
 	const shouldWrite = explicitWrite && !explicitDry
@@ -436,6 +468,7 @@ async function runFix(flags: FixFlags): Promise<number> {
 		backup: flags.noBackup !== true,
 	})
 	reportAppliedFixes(result)
+	ctx.cache.save()
 	return 0
 }
 
@@ -787,6 +820,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 				type: Boolean,
 				description:
 					'Show what would be fixed without writing any changes (aliases: --dry, --dr)',
+			},
+			interactive: {
+				type: Boolean,
+				alias: 'i',
+				description: 'Interactive TUI to select and apply fixes',
 			},
 			write: {
 				type: Boolean,
