@@ -27,7 +27,7 @@ function makeConfig(cwd: string, overrides: Partial<Config> = {}): Config {
 }
 
 describe("bootstrap", () => {
-  it("limits source files to the tsconfig program", async () => {
+  it("includes all workspace files, even if outside tsconfig include (for monorepo sibling support)", async () => {
     const cwd = createWorkspace({
       "tsconfig.json": JSON.stringify({
         compilerOptions: {
@@ -48,25 +48,19 @@ describe("bootstrap", () => {
       const ctx = await bootstrap(makeConfig(cwd));
       const files = [...ctx.all].map((file) => file.replace(cwd + "/", "")).sort();
 
-      expect(files).toEqual(["src/index.ts", "src/lib.ts"]);
+      expect(files).toEqual(["src/index.ts", "src/lib.test.ts", "src/lib.ts", "test/ignored.ts", "tooling.ts"]);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
 
-  it("infers entrypoints from files with no internal importers", async () => {
+  it("follows reachability from sibling apps in a monorepo", async () => {
     const cwd = createWorkspace({
       "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          target: "ES2020",
-          module: "ESNext",
-          moduleResolution: "Bundler",
-        },
         include: ["src/**/*.ts"],
       }),
-      "src/cli.ts": "import './shared.js'\n",
       "src/shared.ts": "export const shared = true\n",
-      "src/orphan.ts": "export const orphan = true\n",
+      "apps/mobile/src/main.ts": "import { shared } from '../../../src/shared.js'\nconsole.log(shared)\n",
     });
 
     try {
@@ -75,7 +69,86 @@ describe("bootstrap", () => {
         .map((file) => file.replace(cwd + "/", ""))
         .sort();
 
+      expect(reachable).toContain("src/shared.ts");
+      expect(reachable).toContain("apps/mobile/src/main.ts");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes between prod and test reachability", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        include: ["src/**/*.ts"],
+      }),
+      "src/prod.ts": "export const prod = true\n",
+      "src/only-test.ts": "export const testOnly = true\n",
+      "src/main.ts": "import { prod } from './prod.js'\n",
+      "__tests__/index.test.ts": "import { testOnly } from '../src/only-test.js'\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd, { entrypoints: [join(cwd, "src/main.ts")] }));
+      
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+      const testReachable = [...ctx.testReachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      expect(reachable).toContain("src/prod.ts");
+      expect(reachable).not.toContain("src/only-test.ts");
+      
+      expect(testReachable).toContain("src/only-test.ts");
+      expect(testReachable).toContain("__tests__/index.test.ts");
+      expect(testReachable).not.toContain("src/prod.ts"); // Should be in prod reachable instead
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("infers entrypoints from files with no internal importers (excluding tests)", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        include: ["src/**/*.ts"],
+      }),
+      "src/cli.ts": "import './shared.js'\n",
+      "src/shared.ts": "export const shared = true\n",
+      "src/orphan.ts": "export const orphan = true\n",
+      "__tests__/some.test.ts": "import './shared.js'\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const reachable = [...ctx.reachable]
+        .map((file) => file.replace(cwd + "/", ""))
+        .sort();
+
+      // __tests__/some.test.ts should NOT be a prod entrypoint, but src/cli.ts and src/orphan.ts should be.
       expect(reachable).toEqual(["src/cli.ts", "src/orphan.ts", "src/shared.ts"]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores nested .next and node_modules directories", async () => {
+    const cwd = createWorkspace({
+      "tsconfig.json": JSON.stringify({
+        include: ["src/**/*.ts"],
+      }),
+      "src/index.ts": "export const a = 1\n",
+      "apps/web/.next/static/chunks/main.js": "console.log('generated')\n",
+      "apps/web/node_modules/dep/index.ts": "export const dep = 1\n",
+    });
+
+    try {
+      const ctx = await bootstrap(makeConfig(cwd));
+      const files = [...ctx.all].map((file) => file.replace(cwd + "/", "")).sort();
+
+      expect(files).toEqual(["src/index.ts"]);
+      expect(files).not.toContain("apps/web/.next/static/chunks/main.js");
+      expect(files).not.toContain("apps/web/node_modules/dep/index.ts");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

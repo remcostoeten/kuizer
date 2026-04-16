@@ -59,4 +59,51 @@ describe("unusedExports framework handling", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.symbol).toBe("helper");
   });
+
+  it("does not flag nextjs-app viewport in page entries", () => {
+    const pagePath = "/repo/app/blog/page.tsx";
+    const ctx = makeCtx(
+      {
+        [pagePath]: [
+          "export default function Page() { return null }",
+          "export const viewport = { width: 'device-width' }",
+          "export const helper = 1",
+        ].join("\n"),
+      },
+      {
+        [pagePath]: [
+          "export default function Page() { return null }",
+          "export const viewport = { width: 'device-width' }",
+          "export const helper = 1",
+        ].join("\n"),
+      },
+    );
+    const config = makeConfig({
+      framework: "nextjs-app",
+      ...preset("nextjs-app"),
+    });
+
+    const findings = detect(ctx, config);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.symbol).toBe("helper");
+  });
+
+  it("does not flag playwright.config.ts and next.config.ts default exports", () => {
+    const ctx = makeCtx(
+      {
+        "/repo/playwright.config.ts": "export default {}",
+        "/repo/next.config.ts": "export default {}",
+      },
+      {
+        "/repo/playwright.config.ts": "export default {}",
+        "/repo/next.config.ts": "export default {}",
+      },
+    );
+    const config = makeConfig({ framework: "none" });
+
+    const findings = detect(ctx, config);
+    expect(findings).toHaveLength(0);
+  });
 });
+

@@ -1,4 +1,5 @@
-import { SyntaxKind } from 'ts-morph'
+import { SyntaxKind, Node, ts } from 'ts-morph'
+import { dirname, resolve } from 'path'
 import type { Detector } from './types.js'
 import type { Finding, ExportKind, Severity } from '../types.js'
 
@@ -39,7 +40,7 @@ function isLocallyReexported(sourceFile: any, symbol: string): boolean {
 	}
 
 	for (const decl of sourceFile.getExportDeclarations()) {
-		if (typeof decl.getModuleSpecifierValue === 'function' && decl.getModuleSpecifierValue()) {
+		if (decl.hasModuleSpecifier()) {
 			continue
 		}
 
@@ -142,7 +143,7 @@ function isFrameworkConsumedExport(
 
 	if (symbol === 'default') {
 		const rootConfigPattern =
-			/\/(next|drizzle|vitest|vite|postcss|tailwind|jest)\.config\.[cm]?[jt]sx?$/
+			/\/(next|drizzle|vitest|vite|playwright|postcss|tailwind|jest)\.config\.[cm]?[jt]sx?$/
 		if (rootConfigPattern.test(filePath)) return true
 	}
 
@@ -153,8 +154,10 @@ function isFrameworkConsumedExport(
 
 	const isDefault = symbol === 'default'
 	const isMetadata = symbol === 'metadata'
+	const isViewport = symbol === 'viewport'
 	const isGenerateStaticParams = symbol === 'generateStaticParams'
 	const isGenerateMetadata = symbol === 'generateMetadata'
+	const isGenerateViewport = symbol === 'generateViewport'
 	const isRouteHandler =
 		symbol === 'GET' ||
 		symbol === 'POST' ||
@@ -193,10 +196,10 @@ function isFrameworkConsumedExport(
 			)
 		}
 
-		if (isMetadata && isInAppDir && /\/(page|layout)\.(tsx|ts)$/.test(filePath)) return true
+		if ((isMetadata || isViewport) && isInAppDir && /\/(page|layout)\.(tsx|ts)$/.test(filePath)) return true
 
 		if (
-			(isGenerateStaticParams || isGenerateMetadata) &&
+			(isGenerateStaticParams || isGenerateMetadata || isGenerateViewport) &&
 			/\/app\/.*\/page\.(tsx|ts)$/.test(filePath)
 		) {
 			return true
@@ -237,83 +240,196 @@ function resolveConsumerKey(sourceFile: SourceFileWithExports, symbol: string): 
 	return createExportKey(resolvedSymbol, node)
 }
 
-function buildConsumerCounts(
-	project: Parameters<Detector>[0]['project'],
-	reachable: Parameters<Detector>[0]['reachable']
-): ReadonlyMap<string, number> {
-	const counts = new Map<string, number>()
-
-	const recordConsumer = (sourceFile: SourceFileWithExports, symbol: string) => {
-		const key = resolveConsumerKey(sourceFile, symbol)
-		if (!key) return
-
-		counts.set(key, (counts.get(key) ?? 0) + 1)
+function resolveDynamicImport(
+	fromFile: string,
+	specifier: string,
+	all: ReadonlySet<string>
+): string | undefined {
+	if (!specifier.startsWith('.')) {
+		return undefined
 	}
 
-	for (const consumerPath of reachable) {
-		const sourceFile = project.getSourceFile(consumerPath)
-		if (!sourceFile) continue
+	const base = resolve(dirname(fromFile), specifier)
+	const withoutJsExt = base.replace(/\.(mjs|cjs|js|jsx)$/, '')
+	const candidates = [
+		base,
+		withoutJsExt,
+		`${base}.ts`,
+		`${base}.tsx`,
+		`${withoutJsExt}.ts`,
+		`${withoutJsExt}.tsx`,
+		resolve(base, 'index.ts'),
+		resolve(base, 'index.tsx'),
+		resolve(withoutJsExt, 'index.ts'),
+		resolve(withoutJsExt, 'index.tsx'),
+	]
 
-		const namespaceImports = new Map<string, SourceFileWithExports>()
+	return candidates.find((candidate) => all.has(candidate))
+}
 
-		for (const decl of sourceFile.getImportDeclarations()) {
-			const importedFile = decl.getModuleSpecifierSourceFile()
-			if (!importedFile) continue
+function buildConsumerCounts(
+	ctx: Parameters<Detector>[0]
+): { prodCounts: Map<string, number>, testCounts: Map<string, number> } {
+	const { project, reachable, testReachable, all, cache } = ctx
+	const prodCounts = new Map<string, number>()
+	const testCounts = new Map<string, number>()
 
-			if (decl.getImportClause()?.isTypeOnly()) {
-				const defaultImport = decl.getDefaultImport()
-				if (defaultImport) {
-					recordConsumer(importedFile, 'default')
-				}
-
-				for (const specifier of decl.getNamedImports()) {
-					recordConsumer(importedFile, specifier.getName())
+	const processConsumers = (files: ReadonlySet<string>, counts: Map<string, number>) => {
+		for (const consumerPath of files) {
+			const cachedKeys = cache.getCachedFileContext(consumerPath)?.consumerKeys
+			if (cachedKeys) {
+				for (const key of cachedKeys) {
+					counts.set(key, (counts.get(key) ?? 0) + 1)
 				}
 				continue
 			}
 
-			const defaultImport = decl.getDefaultImport()
-			if (defaultImport) {
-				recordConsumer(importedFile, 'default')
+			const discoveredKeys: string[] = []
+			const recordConsumer = (sourceFile: SourceFileWithExports, symbol: string) => {
+				const key = resolveConsumerKey(sourceFile, symbol)
+				if (!key) return
+				discoveredKeys.push(key)
+				counts.set(key, (counts.get(key) ?? 0) + 1)
+			}
+			const sourceFile = project.getSourceFile(consumerPath)
+			if (!sourceFile) continue
+
+			const namespaceImports = new Map<string, SourceFileWithExports>()
+
+			for (const decl of sourceFile.getImportDeclarations()) {
+				const importedFile = decl.getModuleSpecifierSourceFile()
+				if (!importedFile) continue
+
+				if (decl.getImportClause()?.isTypeOnly()) {
+					const defaultImport = decl.getDefaultImport()
+					if (defaultImport) recordConsumer(importedFile, 'default')
+
+					for (const specifier of decl.getNamedImports()) {
+						recordConsumer(importedFile, specifier.getName())
+					}
+					continue
+				}
+
+				const defaultImport = decl.getDefaultImport()
+				if (defaultImport) recordConsumer(importedFile, 'default')
+
+				for (const specifier of decl.getNamedImports()) {
+					recordConsumer(importedFile, specifier.getName())
+				}
+
+				const namespaceImport = decl.getNamespaceImport()
+				if (namespaceImport) {
+					namespaceImports.set(namespaceImport.getText(), importedFile)
+				}
 			}
 
-			for (const specifier of decl.getNamedImports()) {
-				recordConsumer(importedFile, specifier.getName())
+			const walkAST = (node: ts.Node) => {
+				if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+					const specifier = node.arguments[0]
+					if (specifier && (ts.isStringLiteral(specifier) || ts.isNoSubstitutionTemplateLiteral(specifier))) {
+						const resolvedStr = resolveDynamicImport(sourceFile.getFilePath(), specifier.text, all)
+						if (resolvedStr) {
+							const resolved = project.getSourceFile(resolvedStr)
+							if (resolved) {
+								const parent = node.parent
+								if (parent && ts.isPropertyAccessExpression(parent) && parent.name.text === 'then') {
+									const thenCall = parent.parent
+									if (thenCall && ts.isCallExpression(thenCall)) {
+										const arrowFn = thenCall.arguments[0]
+										if (arrowFn && (ts.isArrowFunction(arrowFn) || ts.isFunctionExpression(arrowFn))) {
+											const modParam = arrowFn.parameters[0]
+											if (modParam && ts.isIdentifier(modParam.name)) {
+												const modName = modParam.name.text
+												const searchModAccess = (n: ts.Node) => {
+													if (ts.isPropertyAccessExpression(n)) {
+														if (ts.isIdentifier(n.expression) && n.expression.text === modName) {
+															recordConsumer(resolved, n.name.text)
+														}
+													}
+													ts.forEachChild(n, searchModAccess)
+												}
+												searchModAccess(arrowFn.body)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+
+				if (namespaceImports.size > 0 && ts.isPropertyAccessExpression(node)) {
+					if (ts.isIdentifier(node.expression)) {
+						const importedFile = namespaceImports.get(node.expression.text)
+						if (importedFile) {
+							recordConsumer(importedFile, node.name.text)
+						}
+					}
+				}
+
+				ts.forEachChild(node, walkAST)
 			}
+			ts.forEachChild(sourceFile.compilerNode, walkAST)
 
-			const namespaceImport = decl.getNamespaceImport()
-			if (namespaceImport) {
-				namespaceImports.set(namespaceImport.getText(), importedFile)
-			}
-		}
-
-		if (namespaceImports.size === 0) {
-			continue
-		}
-
-		for (const expr of sourceFile.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
-			const importedFile = namespaceImports.get(expr.getExpression().getText())
-			if (!importedFile) continue
-
-			recordConsumer(importedFile, expr.getName())
+			cache.setCachedFileContext(consumerPath, { consumerKeys: discoveredKeys })
 		}
 	}
 
-	return counts
+	processConsumers(reachable, prodCounts)
+	processConsumers(testReachable, testCounts)
+
+	return { prodCounts, testCounts }
+}
+
+function hasInternalConsumer(sourceFile: any, node: any): boolean {
+	if (!Node.isNode(node)) return false;
+
+	const nameNode = typeof (node as any).getNameNode === 'function' ? (node as any).getNameNode() : null;
+	const name = nameNode ? nameNode.getText() : (typeof (node as any).getName === 'function' ? (node as any).getName() : null);
+	if (!name) return false;
+
+	let hasUsage = false;
+	const walk = (n: ts.Node) => {
+		if (hasUsage) return;
+		if (ts.isIdentifier(n) && n.text === name) {
+			const isDeclName = nameNode && n === nameNode.compilerNode;
+			if (!isDeclName) {
+				const parent = n.parent;
+				if (!(parent && ts.isExportSpecifier(parent)) && !(parent && ts.isPropertyAccessExpression(parent) && parent.name === n)) {
+					// ensure it's not strictly within the node itself
+					let current: ts.Node | undefined = n;
+					let isInside = false;
+					while (current) {
+						if (current === node.compilerNode) {
+							isInside = true;
+							break;
+						}
+						current = current.parent;
+					}
+					if (!isInside) {
+						hasUsage = true;
+					}
+				}
+			}
+		}
+		ts.forEachChild(n, walk);
+	};
+	ts.forEachChild(sourceFile.compilerNode, walk);
+	return hasUsage;
 }
 
 function collectUnusedExportFindings(
 	ctx: Parameters<Detector>[0],
 	config: Parameters<Detector>[1]
 ): ExportFinding[] {
-	const { project, reachable, analysisBoundaries } = ctx
+	const { project, reachable, testReachable, all, analysisBoundaries } = ctx
 	const allowed = new Set(config.allowedExports)
 	const ignored = new Set(config.ignore.symbols)
 	const findings: ExportFinding[] = []
 	const hasDynamicImportBoundary = analysisBoundaries.some(
 		(boundary) => boundary.kind === 'dynamic-import'
 	)
-	const consumerCounts = buildConsumerCounts(project, reachable)
+	const { prodCounts, testCounts } = buildConsumerCounts(ctx)
 	const reported = new Set<string>()
 
 	for (const path of reachable) {
@@ -338,13 +454,31 @@ function collectUnusedExportFindings(
 			}
 			reported.add(exportKey)
 
-			if ((consumerCounts.get(exportKey) ?? 0) !== 0) {
+			const pCount = prodCounts.get(exportKey) ?? 0;
+			const tCount = testCounts.get(exportKey) ?? 0;
+
+			if (pCount > 0) {
 				continue
+			}
+
+			const isTestOnly = tCount > 0 && !config.countTestsAsConsumers;
+			let isInternalOnly = false;
+			if (!isTestOnly) {
+				isInternalOnly = hasInternalConsumer(sf, node);
 			}
 
 			const { line, column } = node.getSourceFile().getLineAndColumnAtPos(node.getStart())
 			const kind = getExportKind(sf, symbol, node)
 			const detectorId = mapDetectorId({ file: path, symbol, kind })
+
+			let message = `Exported symbol '${symbol}' has 0 consumers`;
+			if (isTestOnly) {
+				message = `Exported symbol '${symbol}' is only used in tests (test-only)`;
+			} else if (isInternalOnly) {
+				message = `Exported symbol '${symbol}' is only used internally in the same module`;
+			} else if (hasDynamicImportBoundary) {
+				message = `Exported symbol '${symbol}' has 0 statically resolved consumers`;
+			}
 
 			findings.push({
 				detectorId,
@@ -352,9 +486,7 @@ function collectUnusedExportFindings(
 				file: path,
 				line,
 				col: column,
-				message: hasDynamicImportBoundary
-					? `Exported symbol '${symbol}' has 0 statically resolved consumers`
-					: `Exported symbol '${symbol}' has 0 consumers`,
+				message,
 				symbol,
 				kind,
 				fixable: false,
@@ -363,6 +495,8 @@ function collectUnusedExportFindings(
 					framework: config.framework,
 					analysisBoundaryCount: analysisBoundaries.length,
 					hasDynamicImportBoundary,
+					testOnly: isTestOnly,
+					internalOnly: isInternalOnly
 				},
 			})
 		}

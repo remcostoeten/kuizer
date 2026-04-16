@@ -21,6 +21,8 @@ describe("unusedExports", () => {
       framework: "none",
       analysisBoundaryCount: 0,
       hasDynamicImportBoundary: false,
+      internalOnly: false,
+      testOnly: false,
     });
   });
 
@@ -246,6 +248,114 @@ describe("unusedExports", () => {
       framework: "none",
       analysisBoundaryCount: 1,
       hasDynamicImportBoundary: true,
+      internalOnly: false,
+      testOnly: false,
+    });
+  });
+
+  describe("Internal/Same-file consumers", () => {
+    it("recognizes same-file usage as internal-only", () => {
+      const ctx = makeCtx(
+        {
+          "/src/utils.ts": `export function usedInternal() {};\nusedInternal();`
+        },
+        {
+          "/src/utils.ts": `export function usedInternal() {};\nusedInternal();`
+        }
+      );
+      const findings = detect(ctx, makeConfig());
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.context?.internalOnly).toBe(true);
+      expect(findings[0]?.message).toContain("used internally");
+    });
+  });
+
+  describe("Type-only consumers", () => {
+    it("recognizes import { type X } as a real consumer", () => {
+      const ctx = makeCtx(
+        {
+          "/src/types.ts": `export type Foo = string;\nexport type Bar = number;`,
+          "/src/main.ts": `import { type Foo, Bar } from './types.js';\nlet a: Foo; let b: Bar;`
+        },
+        {
+          "/src/types.ts": `export type Foo = string;\nexport type Bar = number;`,
+          "/src/main.ts": `import { type Foo, Bar } from './types.js';\nlet a: Foo; let b: Bar;`
+        }
+      );
+      const findings = detect(ctx, makeConfig());
+      expect(findings).toHaveLength(0);
+    });
+  });
+
+  describe("Dynamic imports", () => {
+    it("recognizes .then((mod) => mod.X) patterns", () => {
+      const ctx = makeCtx(
+        {
+          "/src/lazy.ts": `export function feature() {}`,
+          "/src/main.ts": `import('./lazy.js').then((mod) => mod.feature)`
+        },
+        {
+          "/src/lazy.ts": `export function feature() {}`,
+          "/src/main.ts": `import('./lazy.js').then((mod) => mod.feature)`
+        }
+      );
+      const findings = detect(ctx, makeConfig());
+      expect(findings).toHaveLength(0);
+    });
+
+    it("recognizes .then((mod) => ({ default: mod.X })) patterns", () => {
+      const ctx = makeCtx(
+        {
+          "/src/lazy.ts": `export function feature() {}`,
+          "/src/main.ts": `import('./lazy.js').then((mod) => ({ default: mod.feature }))`
+        },
+        {
+          "/src/lazy.ts": `export function feature() {}`,
+          "/src/main.ts": `import('./lazy.js').then((mod) => ({ default: mod.feature }))`
+        }
+      );
+      const findings = detect(ctx, makeConfig());
+      expect(findings).toHaveLength(0);
+    });
+  });
+
+  describe("Test consumers behavior", () => {
+    it("reports test-only usage if countTestsAsConsumers is false", () => {
+      const context = makeCtx(
+        {
+          "/src/utils.ts": `export function testHelper() {}\nexport function used() {}`,
+          "/src/main.ts": `import { used } from './utils.js'; used();`,
+          "/__tests__/utils.test.ts": `import { testHelper } from '../src/utils.js';\ntestHelper();`
+        },
+        {
+          "/src/utils.ts": `export function testHelper() {}\nexport function used() {}`,
+          "/src/main.ts": `import { used } from './utils.js'; used();`,
+        }
+      );
+      // add testReachable to the mocked context
+      context.testReachable = new Set(["/__tests__/utils.test.ts"]);
+      
+      const config = makeConfig({ countTestsAsConsumers: false });
+      const findings = detect(context, config);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]?.context?.testOnly).toBe(true);
+      expect(findings[0]?.message).toContain("test-only");
+    });
+  });
+
+  describe("Dynamic imports with non-literals", () => {
+    it("does not crash when encountering non-literal dynamic imports", () => {
+      const ctx = makeCtx(
+        {
+          "/src/main.ts": `const name = 'lazy'; import(name).then((mod) => mod.X)`
+        },
+        {
+          "/src/main.ts": `const name = 'lazy'; import(name).then((mod) => mod.X)`
+        }
+      );
+      // This should not throw 'Expected the module specifier to be a string literal.'
+      const findings = detect(ctx, makeConfig());
+      expect(findings).toHaveLength(0);
     });
   });
 });

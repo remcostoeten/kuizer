@@ -1,7 +1,8 @@
-import { Project, SyntaxKind } from 'ts-morph'
+import { Project, SyntaxKind, ts, SourceFile } from 'ts-morph'
 import { dirname, isAbsolute, resolve } from 'path'
 import fg from 'fast-glob'
 import type { AnalysisBoundary, Config } from '../types.js'
+import { FileCacheManager } from './cache.js'
 
 /** Initialises the ts-morph project, collects all source files, and runs BFS reachability from resolved entry points. */
 
@@ -24,8 +25,10 @@ type BootstrapOptions = Readonly<{
 export async function bootstrap(config: Config): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }>
 export async function bootstrap(
 	config: Config,
@@ -33,8 +36,10 @@ export async function bootstrap(
 ): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }>
 export async function bootstrap(
 	config: Config,
@@ -42,10 +47,13 @@ export async function bootstrap(
 ): Promise<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }> {
 	const root = dirname(resolve(config.tsconfig))
+	const cache = new FileCacheManager(root)
 	options.onProgress?.({ phase: 'load-project' })
 
 	const project = new Project({
@@ -54,6 +62,7 @@ export async function bootstrap(
 		skipLoadingLibFiles: true,
 	})
 	await addTestFiles(project, config, root)
+	await addWorkspaceFiles(project, config, root) // added this as well to cover monorepo sibling consumers
 	options.onProgress?.({ phase: 'collect-files' })
 	const ignoredFiles = new Set(config.ignore.files)
 	const ignoredPaths = config.ignore.paths.map((path) =>
@@ -67,18 +76,29 @@ export async function bootstrap(
 	const all = new Set(files)
 	options.onProgress?.({ phase: 'resolve-entries', totalFiles: all.size })
 	const configuredEntries = await resolveEntries(config, all, root)
-	const tests = config.countTestsAsConsumers
-		? new Set([...all].filter((file) => isTestFile(file.slice(root.length + 1))))
-		: new Set<string>()
-	const graph = buildGraph(project, all)
+	
+	const graph = buildGraph(project, all, cache)
+	const inferredEntries = inferEntries(all, graph.imported)
+	
+	const tests = new Set([...all].filter((file) => isTestFile(file.slice(root.length + 1))))
+	
 	const baseEntries =
-		configuredEntries.size > 0 ? configuredEntries : inferEntries(all, graph.imported)
-	const entries = new Set([...baseEntries, ...tests])
-	const reachable = bfs(entries, graph.adjacency, all.size, options.onProgress)
-	const analysisBoundaries = collectAnalysisBoundaries(project, reachable)
+		configuredEntries.size > 0 ? configuredEntries : new Set([...inferredEntries].filter(e => !(tests as any).has(e)))
+	
+	const prodEntries = config.countTestsAsConsumers
+		? new Set([...baseEntries, ...tests])
+		: new Set([...baseEntries])
+	const reachable = bfs(prodEntries, graph.adjacency, all.size, options.onProgress)
+	
+	const testReachable = bfs(tests, graph.adjacency, all.size)
+	// remove anything reachable from prod
+	for (const f of reachable) testReachable.delete(f)
+
+	const combinedReachable = new Set([...reachable, ...testReachable])
+	const analysisBoundaries = collectAnalysisBoundaries(project, combinedReachable, cache)
 	options.onProgress?.({ phase: 'complete', totalFiles: all.size })
 
-	return { project, reachable, all, analysisBoundaries }
+	return { project, reachable, testReachable, all, analysisBoundaries, cache }
 }
 
 function isIgnored(
@@ -89,10 +109,13 @@ function isIgnored(
 	ignoredPaths: readonly string[]
 ): boolean {
 	const relative = file.slice(root.length + 1)
-	if (relative.startsWith('node_modules/')) return true
-	if (relative.startsWith('.next/')) return true
+	const segments = relative.split('/')
+
+	if (segments.some(s => s === 'node_modules' || s === '.next' || s === 'dist')) {
+		return true
+	}
+
 	if (file.startsWith(config.outputDir + '/')) return true
-	if (!config.countTestsAsConsumers && isTestFile(relative)) return true
 
 	for (const absolute of ignoredPaths) {
 		if (file === absolute || file.startsWith(absolute + '/')) {
@@ -107,11 +130,29 @@ function isTestFile(path: string): boolean {
 	return /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)
 }
 
-async function addTestFiles(project: Project, config: Config, root: string): Promise<void> {
-	if (!config.countTestsAsConsumers) {
-		return
-	}
+async function addWorkspaceFiles(project: Project, config: Config, root: string): Promise<void> {
+	const matches = await fg(
+		[
+			resolve(root, '**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}'),
+		],
+		{
+			absolute: true,
+			onlyFiles: true,
+			ignore: [
+				'**/node_modules/**',
+				'**/.next/**',
+				'**/dist/**',
+				`${config.outputDir}/**`
+			],
+		}
+	)
 
+	if (matches.length > 0) {
+		project.addSourceFilesAtPaths(matches)
+	}
+}
+
+async function addTestFiles(project: Project, config: Config, root: string): Promise<void> {
 	const matches = await fg(
 		[
 			resolve(root, '**/*.test.{ts,tsx,js,jsx,mts,cts,mjs,cjs}'),
@@ -120,7 +161,12 @@ async function addTestFiles(project: Project, config: Config, root: string): Pro
 		{
 			absolute: true,
 			onlyFiles: true,
-			ignore: [`${config.outputDir}/**`, `${resolve(root, 'node_modules')}/**`],
+			ignore: [
+				'**/node_modules/**',
+				'**/.next/**',
+				'**/dist/**',
+				`${config.outputDir}/**`
+			],
 		}
 	)
 
@@ -178,7 +224,8 @@ function inferEntries(
 
 function buildGraph(
 	project: Project,
-	all: ReadonlySet<string>
+	all: ReadonlySet<string>,
+	cache: FileCacheManager
 ): Readonly<{
 	adjacency: ReadonlyMap<string, readonly string[]>
 	imported: ReadonlySet<string>
@@ -187,13 +234,18 @@ function buildGraph(
 	const imported = new Set<string>()
 
 	for (const path of all) {
-		const sf = project.getSourceFile(path)
-		if (!sf) {
-			adjacency.set(path, [])
-			continue
+		let adjacent = cache.getCachedFileContext(path)?.adjacent
+		if (!adjacent) {
+			const sf = project.getSourceFile(path)
+			if (!sf) {
+				adjacency.set(path, [])
+				continue
+			}
+
+			adjacent = getAdjacentFiles(sf, all)
+			cache.setCachedFileContext(path, { adjacent })
 		}
 
-		const adjacent = getAdjacentFiles(sf, all)
 		adjacency.set(path, adjacent)
 
 		for (const next of adjacent) {
@@ -209,17 +261,27 @@ function buildGraph(
 
 function collectAnalysisBoundaries(
 	project: Project,
-	reachable: ReadonlySet<string>
+	reachable: ReadonlySet<string>,
+	cache: FileCacheManager
 ): readonly AnalysisBoundary[] {
 	const analysisBoundaries: AnalysisBoundary[] = []
 
 	for (const path of reachable) {
+		const cached = cache.getCachedFileContext(path)?.boundaries
+		if (cached) {
+			analysisBoundaries.push(...cached)
+			continue
+		}
+
 		const sf = project.getSourceFile(path)
 		if (!sf) {
 			continue
 		}
 
-		recordDynamicImportBoundaries(sf, analysisBoundaries)
+		const newBoundaries: AnalysisBoundary[] = []
+		recordDynamicImportBoundaries(sf, newBoundaries)
+		cache.setCachedFileContext(path, { boundaries: newBoundaries })
+		analysisBoundaries.push(...newBoundaries)
 	}
 
 	return analysisBoundaries
@@ -230,7 +292,7 @@ function bfs(
 	adjacency: ReadonlyMap<string, readonly string[]>,
 	totalFiles: number,
 	onProgress?: (event: BootstrapProgress) => void
-): ReadonlySet<string> {
+): Set<string> {
 	const visited = new Set<string>()
 	const queue = [...entries]
 	let head = 0
@@ -255,27 +317,7 @@ function bfs(
 }
 
 function getAdjacentFiles(
-	sourceFile: {
-		getImportDeclarations(): Array<{
-			getModuleSpecifierSourceFile(): { getFilePath(): string } | undefined
-		}>
-		getExportDeclarations(): Array<{
-			getModuleSpecifierSourceFile(): { getFilePath(): string } | undefined
-		}>
-		getFilePath(): string
-		getDescendantsOfKind(kind: SyntaxKind.CallExpression): Array<{
-			getExpression(): { getKind(): SyntaxKind }
-			getArguments(): Array<{
-				getKind(): SyntaxKind
-				getLiteralText?: () => string
-				getStart(): number
-				getSourceFile(): {
-					getFilePath(): string
-					getLineAndColumnAtPos(pos: number): { line: number; column: number }
-				}
-			}>
-		}>
-	},
+	sourceFile: SourceFile,
 	all: ReadonlySet<string>
 ): string[] {
 	const adjacent = new Set<string>()
@@ -300,73 +342,51 @@ function getAdjacentFiles(
 		}
 	}
 
-	for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
-		if (call.getExpression().getKind() !== SyntaxKind.ImportKeyword) continue
+	const walkDynamicImports = (node: ts.Node) => {
+		if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+			const specifier = node.arguments[0]
+			if (specifier && (ts.isStringLiteral(specifier) || ts.isNoSubstitutionTemplateLiteral(specifier))) {
+				const resolved = resolveDynamicImport(
+					sourceFile.getFilePath(),
+					specifier.text,
+					all
+				)
 
-		const specifier = call.getArguments()[0]
-		if (!specifier) continue
-
-		if (
-			specifier.getKind() === SyntaxKind.StringLiteral ||
-			specifier.getKind() === SyntaxKind.NoSubstitutionTemplateLiteral
-		) {
-			const resolved = resolveDynamicImport(
-				sourceFile.getFilePath(),
-				specifier.getLiteralText!(),
-				all
-			)
-
-			if (resolved) {
-				adjacent.add(resolved)
+				if (resolved) {
+					adjacent.add(resolved)
+				}
 			}
-
-			continue
 		}
+		ts.forEachChild(node, walkDynamicImports)
 	}
+	ts.forEachChild(sourceFile.compilerNode, walkDynamicImports)
 
 	return [...adjacent]
 }
 
 function recordDynamicImportBoundaries(
-	sourceFile: {
-		getDescendantsOfKind(kind: SyntaxKind.CallExpression): Array<{
-			getExpression(): { getKind(): SyntaxKind }
-			getArguments(): Array<{
-				getKind(): SyntaxKind
-				getStart(): number
-				getSourceFile(): {
-					getLineAndColumnAtPos(pos: number): { line: number; column: number }
-				}
-			}>
-		}>
-		getFilePath(): string
-	},
+	sourceFile: SourceFile,
 	analysisBoundaries: AnalysisBoundary[]
 ): void {
-	for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
-		if (call.getExpression().getKind() !== SyntaxKind.ImportKeyword) continue
-
-		const specifier = call.getArguments()[0]
-		if (!specifier) continue
-
-		if (
-			specifier.getKind() === SyntaxKind.StringLiteral ||
-			specifier.getKind() === SyntaxKind.NoSubstitutionTemplateLiteral
-		) {
-			continue
+	const walkDynamicImports = (node: ts.Node) => {
+		if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+			const specifier = node.arguments[0]
+			if (specifier && !(ts.isStringLiteral(specifier) || ts.isNoSubstitutionTemplateLiteral(specifier))) {
+				const pos = specifier.getStart(sourceFile.compilerNode)
+				const { line, character } = sourceFile.compilerNode.getLineAndCharacterOfPosition(pos)
+				
+				analysisBoundaries.push({
+					file: sourceFile.getFilePath(),
+					line: line + 1,
+					col: character + 1,
+					kind: 'dynamic-import',
+					message: 'Non-literal dynamic import cannot be resolved statically',
+				})
+			}
 		}
-
-		const { line, column } = specifier
-			.getSourceFile()
-			.getLineAndColumnAtPos(specifier.getStart())
-		analysisBoundaries.push({
-			file: sourceFile.getFilePath(),
-			line,
-			col: column,
-			kind: 'dynamic-import',
-			message: 'Non-literal dynamic import cannot be resolved statically',
-		})
+		ts.forEachChild(node, walkDynamicImports)
 	}
+	ts.forEachChild(sourceFile.compilerNode, walkDynamicImports)
 }
 
 function resolveDynamicImport(

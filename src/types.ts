@@ -1,4 +1,5 @@
 import type { Project } from 'ts-morph'
+import type { FileCacheManager } from './engine/cache.js'
 
 export type Severity = 'error' | 'warn' | 'info'
 
@@ -88,6 +89,8 @@ export type Config = Readonly<{
 export type Ctx = Readonly<{
 	project: Project
 	reachable: ReadonlySet<string>
+	testReachable: ReadonlySet<string>
 	all: ReadonlySet<string>
 	analysisBoundaries: readonly AnalysisBoundary[]
+	cache: FileCacheManager
 }>
