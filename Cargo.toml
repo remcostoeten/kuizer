@@ -1,0 +1,38 @@
+[package]
+name = "kuizer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Keyboard-driven disk cleanup for developers: generated artifacts, caches and duplicates"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "kuizer"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1.8.7"
+clap = { version = "4.6.7", features = ["derive"] }
+crossbeam-channel = "0.5.17"
+dirs = "7.0.0"
+globset = "0.4.20"
+jiff = { version = "0.2.38", features = ["serde"] }
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+toml = "1.1.8"
+trash = "5.2.9"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.5", features = ["fs"] }

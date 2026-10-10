@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+PACKAGE_NAME="kuizer"
+REPOSITORY_URL="https://github.com/remcostoeten/kuizer"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    RESET=$'\033[0m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    CYAN=$'\033[36m'
+    GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'
+    RED=$'\033[31m'
+else
+    RESET=''
+    BOLD=''
+    DIM=''
+    CYAN=''
+    GREEN=''
+    YELLOW=''
+    RED=''
+fi
+
+function project_version() {
+    sed -n 's/^version *= *"\(.*\)"/\1/p' "$PROJECT_ROOT/Cargo.toml" | head -n 1
+}
+
+function project_branch() {
+    git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || true
+}
+
+function print_rule() {
+    printf '  %s%s%s\n' "$DIM" '────────────────────────────────────────────────' "$RESET"
+}
+
+function print_header() {
+    local version branch details
+    version="$(project_version)"
+    branch="$(project_branch)"
+    details="${version:+v$version}${branch:+  ⎇ $branch}"
+
+    printf '\n  %s%s◆ kuizer%s  %s%s%s\n' "$BOLD" "$CYAN" "$RESET" "$DIM" "$details" "$RESET"
+    printf '  %s%s%s\n' "$DIM" "${PROJECT_ROOT/#$HOME/\~}" "$RESET"
+    print_rule
+}
+
+function print_section() {
+    printf '\n  %s%s%s\n' "$BOLD$YELLOW" "$1" "$RESET"
+}
+
+function print_item() {
+    printf '   %s%s%s  %-24s %s%s%s\n' "$BOLD$CYAN" "$1" "$RESET" "$2" "$DIM" "$3" "$RESET"
+}
+
+function print_success() {
+    printf '%s✓%s %s\n' "$GREEN" "$RESET" "$1"
+}
+
+function print_info() {
+    printf '%s•%s %s\n' "$CYAN" "$RESET" "$1"
+}
+
+function print_error() {
+    printf '%s✗%s %s\n' "$RED" "$RESET" "$1" >&2
+}
+
+function require_cargo() {
+    if ! command -v cargo >/dev/null 2>&1; then
+        print_error 'Cargo is not installed or is not available in PATH.'
+        exit 1
+    fi
+}
+
+function run_cargo() {
+    local command_name="$1"
+    shift
+
+    printf '\n%s%s cargo %s%s' "$DIM" '$' "$command_name" "$RESET"
+    if (($# > 0)); then
+        printf ' %q' "$@"
+    fi
+    printf '\n\n'
+    cargo "$command_name" "$@"
+}
+
+function test_suite() {
+    require_cargo
+    cd -- "$PROJECT_ROOT"
+    run_cargo test --all-targets || return
+    print_success 'Test suite passed.'
+}
+
+function install_project() {
+    require_cargo
+    cd -- "$PROJECT_ROOT"
+    run_cargo install --path . --locked --force || return
+    print_success "Installed $PACKAGE_NAME."
+}
+
+function uninstall_project() {
+    require_cargo
+
+    if [[ -t 0 ]]; then
+        printf '%sRemove %s from Cargo\x27s bin directory? [y/N] %s' "$YELLOW" "$PACKAGE_NAME" "$RESET"
+        local answer
+        read -r answer
+        if [[ ! "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            print_info 'Uninstall cancelled.'
+            return 0
+        fi
+    fi
+
+    run_cargo uninstall "$PACKAGE_NAME" || return
+    print_success "Uninstalled $PACKAGE_NAME."
+}
+
+function rebuild_project() {
+    require_cargo
+    cd -- "$PROJECT_ROOT"
+    run_cargo build --release || return
+    print_success 'Release build completed.'
+}
+
+function rebuild_and_install() {
+    require_cargo
+    cd -- "$PROJECT_ROOT"
+    run_cargo install --path . --locked --force || return
+    print_success 'Release build completed and installed.'
+}
+
+function open_repository() {
+    local opener=''
+
+    case "${OSTYPE:-}" in
+        darwin*) opener='open' ;;
+        msys*|cygwin*|win32*) opener='start' ;;
+        linux*) opener='xdg-open' ;;
+    esac
+
+    if [[ -n "$opener" ]] && command -v "$opener" >/dev/null 2>&1; then
+        "$opener" "$REPOSITORY_URL" >/dev/null 2>&1 &
+        print_success "Opening $REPOSITORY_URL"
+        return 0
+    fi
+
+    print_info "Open $REPOSITORY_URL"
+}
+
+function print_help() {
+    cat <<EOF
+Usage: bin/cmd [command]
+
+Run without a command for the interactive menu.
+
+Commands:
+  test, tests       Run the complete test suite
+  install           Build and install kuizer with Cargo
+  uninstall         Remove kuizer from Cargo's bin directory
+  rebuild, build    Build the optimized release binary
+  rebuild-install   Build and install the optimized release binary
+  github, repo      Open the GitHub repository
+  help              Show this help
+EOF
+}
+
+function print_menu() {
+    if [[ -t 1 ]]; then
+        printf '\033[2J\033[H'
+    fi
+    print_header
+
+    print_section 'Develop'
+    print_item 1 'Run test suite' 'cargo test --all-targets'
+    print_item 2 'Rebuild release binary' 'cargo build --release'
+
+    print_section 'Install'
+    print_item 3 'Install kuizer' 'cargo install --path .'
+    print_item 4 'Rebuild and install' 'release build, then install'
+    print_item 5 'Uninstall kuizer' 'cargo uninstall kuizer'
+
+    print_section 'Other'
+    print_item 6 'Open GitHub repository' "${REPOSITORY_URL#https://}"
+    print_item q 'Quit' ''
+
+    printf '\n'
+    print_rule
+}
+
+function run_menu_action() {
+    local action="$1"
+
+    if ! "$action"; then
+        print_error 'Action failed.'
+    fi
+}
+
+function run_menu() {
+    while true; do
+        print_menu
+        printf '  %s❯%s ' "$CYAN" "$RESET"
+        local choice
+        read -r choice || return 0
+        printf '\n'
+
+        case "$choice" in
+            1) run_menu_action test_suite ;;
+            2) run_menu_action rebuild_project ;;
+            3) run_menu_action install_project ;;
+            4) run_menu_action rebuild_and_install ;;
+            5) run_menu_action uninstall_project ;;
+            6) run_menu_action open_repository ;;
+            q|Q|7|'') return 0 ;;
+            *) print_error 'Choose 1 to 6, or q to quit.' ;;
+        esac
+
+        printf '\n  %sPress Enter to return to the menu%s' "$DIM" "$RESET"
+        read -r || return 0
+    done
+}
+
+function main() {
+    local command_name="${1:-menu}"
+
+    case "$command_name" in
+        menu|interactive) run_menu ;;
+        test|tests|check) test_suite ;;
+        install) install_project ;;
+        uninstall|remove) uninstall_project ;;
+        rebuild|build) rebuild_project ;;
+        rebuild-install|reinstall|build-install) rebuild_and_install ;;
+        github|repo|open) open_repository ;;
+        help|-h|--help) print_help ;;
+        *)
+            print_error "Unknown command: $command_name"
+            printf '\n'
+            print_help
+            return 2
+            ;;
+    esac
+}
+
+main "$@"

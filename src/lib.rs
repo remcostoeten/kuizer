@@ -1,0 +1,15 @@
+pub mod caches;
+pub mod cli;
+pub mod commands;
+pub mod config;
+pub mod delete;
+pub mod detect;
+pub mod dupes;
+pub mod git;
+pub mod history;
+pub mod output;
+pub mod platform;
+pub mod protect;
+pub mod scan;
+pub mod tui;
+pub mod units;
