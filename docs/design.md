@@ -14,7 +14,18 @@ Principles:
 - The UI stays responsive while the filesystem is slow. Results stream in as they are found and sized.
 - Defaults are conservative: no symlink following, no crossing filesystems, virtual and network filesystems skipped.
 
-Non-goals for 1.0: a daemon, scheduled cleanup, cloud storage, Windows-specific caches before the platform layer exists.
+Every item comes from a source, and every source has the same verbs, filters, selection rules, history and JSON shape:
+
+| Source | Items | Removable |
+| --- | --- | --- |
+| projects (default) | dependency folders, build output, project caches, temp files | yes |
+| `cache` | global tool caches: npm, pnpm, cargo, pip, uv and others | yes |
+| `toolchain` | rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions | yes |
+| `docker` | dangling images, build cache, stopped containers | yes, through the `docker` CLI |
+| `duplicates` | groups of files with identical contents | no, report only |
+| `big` | large files and directories that match no artifact rule | no, report only |
+
+Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the platform layer exists. Scheduled cleanup comes after 1.0, as a systemd user timer that runs a policy (section 6.6), not as a daemon.
 
 ## 2. Architecture and module boundaries
 
@@ -148,29 +159,109 @@ ecosystem = "android"
 
 `kuizer rules` lists the active rules.
 
+A policy is a named set of filters and a selection, run with `kuizer clean --policy NAME` or by a schedule (section 6.6):
+
+```toml
+[policy.stale-deps]
+source = "projects"       # projects, cache, toolchain or docker
+paths = ["~/apps"]        # projects only; defaults to scan.roots
+category = ["dependencies", "build"]
+rule = []                 # rule names, empty means all
+idle = "60d"
+min_size = "50MB"
+exclude = []              # globs, added to scan.exclude
+select = "safe"           # safe, all or a list of rule names
+permanent = false
+```
+
+Every key except `source` is optional. Unknown keys and unknown rule names are an error, as everywhere else in the config.
+
 ## 6. CLI
 
 ```text
-kuizer [--config PATH] [--json] [-q] [COMMAND]
+kuizer [--config PATH] [--json | --json-lines] [-q] [COMMAND]
 
-kuizer                          TUI on a terminal (phase 2); scan output until then
-kuizer scan [PATHS...]          list candidates
-    --category NAME            repeatable
-    --min-size SIZE
-    --sort size|path|category
-    --safe-only
+kuizer [PATHS...]                         TUI on a terminal
+kuizer ui [PATHS...]                      same, explicitly
+kuizer scan  [PATHS...] [FILTERS]         list project items
+    --sort size|path|category|idle
     --limit N
-kuizer duplicates [PATHS...]    --min-size SIZE, --verify, --limit N; reports only, never deletes
-kuizer clean [PATHS...]         --dry-run, --permanent, --select safe|all|RULE, --yes, --category, --min-size
-kuizer config [show|path|init|check]
-kuizer rules                    active detection rules
-kuizer cache                    known tool caches outside projects (npm, pnpm store, cargo, bun)
-    --clean                    remove the selection, with the same flags as clean
+    --no-live
+kuizer clean [PATHS...] [FILTERS] [REMOVAL]
+    --policy NAME                        filters and selection from the config
+
+kuizer cache            [FILTERS]                  list global tool caches
+kuizer cache clean      [FILTERS] [REMOVAL]
+kuizer toolchain        [FILTERS]                  list installed toolchain versions
+kuizer toolchain clean  [FILTERS] [REMOVAL]
+kuizer docker           [FILTERS]                  list Docker images, build cache, containers
+kuizer docker clean     [FILTERS] [REMOVAL]
+
+kuizer duplicates [PATHS...] --min-size SIZE --verify --limit N    report only
+kuizer big        [PATHS...] --min-size SIZE --limit N             report only
+
+kuizer history                            sessions with their ids; `insight` is an alias
+kuizer history show SESSION               every item of one session
+kuizer restore ID... | --last             put trashed items back
+
+kuizer policy list | show NAME
+kuizer schedule install NAME --every DURATION | remove NAME | list
+
+kuizer rules                              active detection rules
+kuizer config show | path | init | check
+
+FILTERS
+    --category NAME                      repeatable: dependencies, build, cache, temp
+    --rule NAME                          repeatable
+    --min-size SIZE                      10MB, 1.5GiB
+    --idle DURATION                      30d, 2w, 6mo; `--older-than` is an alias
+    --project GLOB                       repeatable, matched on the project path
+    --exclude GLOB                       repeatable, added to scan.exclude
+
+REMOVAL
+    --select safe|all|RULE               repeatable, default safe
+    --dry-run                            print the selection, touch nothing
+    --permanent                          skip the trash
+    -y, --yes                            skip the confirmation
 ```
+
+### 6.1 Filters and selection
+
+Filters decide which items are listed; `--select` decides which listed items are removed. `scan` and `clean` take the same filters, so `kuizer scan X` lists exactly what `kuizer clean X` considers. `scan --safe-only` stays as a hidden alias for `--select safe` applied as a filter. Within one flag, repeated values are a union; across flags, an intersection.
+
+### 6.2 Sources
+
+A source other than projects is a subcommand whose bare form lists and whose `clean` sub-verb removes. `cache --clean` stays as a hidden alias of `cache clean` for one minor release. A listing never gains a flag that turns it into a deletion.
+
+`duplicates` and `big` have no `clean`: removing the wrong copy of a file cannot be regenerated. Duplicate handling, when it comes, is `duplicates link`, which replaces copies with hard links or reflinks and deletes no content.
+
+`docker clean` removes through `docker image rm`, `docker builder prune` and `docker container rm`, never by deleting files under `/var/lib/docker`. Without a `docker` binary the source lists nothing and reports one issue.
+
+### 6.3 Idle time
+
+`--idle 60d` keeps items whose project has had no activity for 60 days. Project activity is the later of the newest modification time outside the project's artifacts and the last commit in its git repository. An artifact's own modification time is not used, because `npm install` and `cargo build` refresh it in a project that is otherwise abandoned. Other sources use their own signal: a toolchain's last use from its shims or tool metadata, a cache's newest entry, an image's last use by a container. An item whose activity cannot be determined never matches `--idle`.
+
+Durations accept `d`, `w`, `mo` (30 days) and `y` (365 days).
+
+### 6.4 History and restore
+
+Each session in the history file gets an id `s<N>`, and each item in it `s<N>.<M>`, numbered in order and never reused. Existing history files get ids assigned in file order on first load. `kuizer history` lists sessions newest first with id, time, command, item count, freed bytes and how much is still in the trash. `kuizer insight` stays as an alias.
+
+`kuizer restore s42` restores every item of a session that is still in the trash, `restore s42.3` one item, `restore --last` the latest session. A restore refuses an item when something now exists at its original path, or when the trash no longer holds it, and reports each refusal. It never overwrites. Every restore is appended to the history as its own session.
+
+### 6.5 Policies
+
+`kuizer policy list` prints the configured policies, `policy show NAME` the effective filters and selection, and `clean --policy NAME` runs one. Flags given next to `--policy` narrow it further but cannot widen its selection or make it permanent.
+
+### 6.6 Schedules
+
+`kuizer schedule install NAME --every 1w` writes a systemd user service and timer, `kuizer-NAME.service` and `.timer`, that run `kuizer clean --policy NAME --yes -q`, and enables the timer. `schedule remove` disables and deletes both, and `schedule list` shows each timer with its last and next run. Linux only; on other platforms the command exits with a usage error that says so.
+
+A scheduled run removes `review` items only when its policy says `select = "all"` or names their rules, and deletes permanently only when the policy says `permanent = true`. Neither can be set by a flag at install time. Runs are recorded in the history like any other session.
 
 Exit codes: `0` success, `1` error, `2` usage error. Unreadable paths are reported as issues and do not change the exit code; scripts read `issues` in the JSON.
 
-JSON (`--json`) is one document with `schema_version: 1`:
+JSON (`--json`) is one document with `schema_version: 1`. Items from every source share the `candidates` shape; `source`, `project_last_active` and, in history output, `id` are added fields:
 
 ```json
 {
@@ -179,17 +270,18 @@ JSON (`--json`) is one document with `schema_version: 1`:
   "roots": ["/home/me/projects"],
   "candidates": [{
     "id": 1, "path": "/home/me/projects/web/node_modules", "kind": "dir",
-    "rule": "node-modules", "category": "dependencies", "safety": "safe",
+    "source": "projects", "rule": "node-modules", "category": "dependencies", "safety": "safe",
     "ecosystem": "node", "project": "/home/me/projects/web",
     "allocated_bytes": 412000256, "apparent_bytes": 380112345,
-    "entries": 41231, "partial": false, "newest_modified": 1760000000
+    "entries": 41231, "partial": false, "newest_modified": 1760000000,
+    "project_last_active": 1752000000
   }],
   "issues": [{ "path": "/home/me/projects/locked", "kind": "permission-denied", "message": "..." }],
   "summary": { "progress": { "dirs": 0, "files": 0, "candidates": 0, "bytes": 0, "issues": 0 }, "duration": 812, "cancelled": false }
 }
 ```
 
-Fields are only added within a schema version; renames or removals bump it. `--json-lines` streaming output arrives in phase 6.
+Fields are only added within a schema version; renames or removals bump it. `--json-lines` prints one candidate per line as it is found, then one summary line with `"type": "summary"`.
 
 ## 7. TUI interaction model
 
@@ -207,7 +299,7 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | `c` | select or clear the current category |
 | `u` | clear selection |
 | `/` | filter by path or rule; `esc` clears |
-| `s` | cycle sort: size, path, category, age |
+| `s` | cycle sort: size, path, category, idle |
 | `1` `2` `3` `4` | views: artifacts, caches, duplicates, issues |
 | `enter` / `l` | expand detail or duplicate group |
 | `x` | exclude path (writes to config after confirmation) |
@@ -262,3 +354,7 @@ Phase 1 baseline (container, 4 cores, warm cache, 200 projects with 100 dependen
 | 5 | Duplicates: size groups, partial then full BLAKE3, optional byte compare, hard link awareness | Correct groups on crafted sets including same size different content, hard links, zero-length files; reclaimable bytes exclude one copy per group; no automatic selection when the original is ambiguous. |
 | 6 | Temp and editor files, global tool caches (`kuizer cache`), more ecosystems, `--json-lines`, documented schema file | Each rule has a positive and a negative test; schema documented and covered by a snapshot test. |
 | 7 | Benchmarks, profiling, fuzzing of config and names, macOS and Windows platform layer | Benchmarks in CI on a fixed dataset; regression threshold set; builds and tests pass on macOS and Windows runners. |
+| 8 | Shared `FILTERS` and `REMOVAL` on every source, `cache clean` with the old flag as an alias, `--idle`, idle column and sort, `--project`, `--rule`, `--exclude` | `scan` and `clean --dry-run` list the same items for every filter combination (property test). Idle time tests: artifact touched in an idle project, commit without file changes, project outside git, unknown activity never matches. |
+| 9 | History ids, `history`, `history show`, `restore` | Ids stable across reloads of an old history file. Restore tests in a temp trash: whole session, one item, item already emptied from the trash, path reoccupied, partial session. |
+| 10 | `toolchain`, `docker` and `big` sources | Each source has a positive and a negative test. A toolchain pinned by a `rust-toolchain.toml`, `.nvmrc` or `.python-version` under the scan roots is `review`, never `safe`. `docker` without a daemon reports one issue and exits `0`. |
+| 11 | Policies and schedules | `config check` rejects unknown policy keys. A flag next to `--policy` cannot widen it (test). Generated unit files match a snapshot; `schedule install` and `remove` leave no files behind on failure. |
