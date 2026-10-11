@@ -1,99 +1,59 @@
-# kuizer
+<h1 align="center">kuizer</h1>
 
-A terminal tool that finds generated project artifacts, development caches and duplicate files on a developer machine, and removes the ones you select.
+A terminal tool that finds build output, development caches and duplicate files on a developer machine, and removes the ones you select.
 
-kuizer reports `node_modules`, `.next`, Cargo `target` directories and other build output only when the surrounding project confirms them: a `dist` folder counts next to a `package.json`, a `target` folder next to a `Cargo.toml` with Cargo's cache tag inside. Each result is marked `safe` or `review`. Scanning never deletes anything.
+<p align="center">
+  <img src="https://shieldcn.dev/badge/core-Rust-black.svg?font=jetbrains-mono&logo=rust" alt="core: Rust" />
+  <img src="https://shieldcn.dev/badge/UI-ratatui-black.svg?font=jetbrains-mono" alt="UI: ratatui" />
+  <img src="https://shieldcn.dev/badge/deletes%20to-trash-black.svg?font=jetbrains-mono" alt="deletes to: trash" />
+  <img src="https://shieldcn.dev/badge/platform-Linux-black.svg?font=jetbrains-mono&logo=linux" alt="platform: Linux" />
+</p>
 
-## Status
+kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
 
-`kuizer scan` with live text output and JSON, configuration, the detection rules, an interactive list with selection and guarded deletion, `kuizer clean`, `kuizer duplicates` and `kuizer cache`. The plan is in [docs/design.md](docs/design.md).
+- **Each artifact is checked against its project.** A `dist` folder counts only next to a `package.json`, and a `target` folder only next to a `Cargo.toml` with Cargo's cache tag inside. Every result is marked `safe` or `review`.
+- Deleted items go to the trash by default. Before each removal kuizer checks again that the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home directory or a system directory.
+- Browser and app profiles are never entered or deleted: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The same goes for `~/.ssh`, `~/.gnupg` and the keyrings.
+- Projects with uncommitted git changes get a warning in the list and in the delete confirmation.
+- Every deletion is logged to `~/.kuizer-history.json`. `kuizer insight` shows what was freed and what is still in the trash.
+- `kuizer cache` lists global caches for npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven, Playwright and others.
+- `kuizer duplicates` finds files with identical contents by size and BLAKE3 hash. It never deletes them: you choose which copy to keep.
+
+```sh
+kuizer                                     # interactive list of the current directory
+kuizer ui ~/projects                       # interactive list of a folder, ? shows the keys
+kuizer scan ~/projects --min-size 50MB     # print large artifacts
+kuizer clean ~/projects --dry-run          # show what clean would remove
+kuizer clean ~/projects --select all       # remove safe and review items, after a confirmation
+kuizer cache --clean --select npm          # remove the npm cache
+kuizer duplicates ~/Downloads --verify     # duplicate files, compared byte by byte
+kuizer --json scan ~/projects              # every command prints JSON with --json
+```
+
+Configuration lives in `~/.config/kuizer/config.toml`; every key is optional. A directory containing a `.kuizerignore` file is skipped along with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. See [docs/config.example.toml](docs/config.example.toml) for the config keys, [docs/design.md](docs/design.md) for the design and roadmap, and [docs/kuizer-migration.md](docs/kuizer-migration.md) for the planned `kuizer code` dead-code command.
 
 ## Install
 
-```sh
-cargo install --path .
+### From source
+
+```bash
+git clone https://github.com/remcostoeten/kuizer
+cargo install --path kuizer
 ```
-
-## Usage
-
-```sh
-kuizer                  # interactive list of the current directory
-kuizer ui ~/projects    # interactive list of a folder
-```
-
-| Key | Action |
-| --- | --- |
-| `j` `k` or arrows | move |
-| `space` | select or unselect, then move down |
-| `a` | select every `safe` item in view |
-| `P` | select every item in the project under the cursor |
-| `u` | clear selection |
-| `d` | delete the selection, or the item under the cursor, after a confirmation |
-| `t` | in the confirmation: switch between trash and permanent deletion |
-| `/` | filter by path or rule |
-| `s` | sort by size, path or category |
-| `p` | group by rule (default) or by project |
-| `?` | all keys |
-| `q` | quit |
-
-Deletion moves items to the trash by default (`delete.mode` in the config). Before each item is removed, kuizer checks again that it is the same directory it scanned, not a symlink, not a mount point, inside a scanned root, and not your home directory, a scan root or a system directory.
-
-Every session that deletes something is appended to `~/.kuizer-history.json`: when it ran, the command, each removed path with its rule, mode, size and timestamp, the session total, and a cumulative total at the bottom. `kuizer insight` prints it and marks each trashed item as still in the trash or gone from it, with the total that emptying the trash would free. `kuizer --json insight` prints the file with an added `in_trash` total.
-
-The header shows the free space on the scanned filesystems. With a selection in permanent mode it also shows the free space after deleting it; in trash mode it notes that the selection stays on disk. The footer counts freed and trashed space separately.
-
-Projects inside a git repository with uncommitted changes get a warning with the change count, in the detail line, the project heading and the delete confirmation. It never blocks a delete: removing generated folders does not touch tracked files.
-
-```sh
-kuizer scan ~/projects
-kuizer scan ~/projects --safe-only --min-size 50MB
-kuizer --json scan ~/projects
-kuizer rules
-kuizer config show
-```
-
-`kuizer clean` scans, prints the selection and removes it after a confirmation. It selects `safe` items unless `--select` says otherwise: `all`, or a rule name such as `--select js-dist`, repeatable. A selection with `review` items asks you to type the item count. `--dry-run` prints the selection and touches nothing, `--permanent` skips the trash, and `--yes` skips the question, which scripts and piped input need.
-
-```sh
-kuizer clean ~/projects --dry-run
-kuizer clean ~/projects --select all --permanent
-kuizer --json clean ~/projects --yes
-```
-
-`kuizer duplicates` lists files with identical contents, largest reclaimable groups first. Files are compared by size, a BLAKE3 hash of the first 16 KiB, then a full hash; `--verify` adds a byte comparison. Hard links to the same file count once, and empty files and generated artifact folders are skipped. It never deletes: you choose which copy to keep.
-
-```sh
-kuizer duplicates ~/Downloads --min-size 1MB
-kuizer --json duplicates ~/Pictures --verify
-```
-
-`kuizer cache` lists global tool caches outside projects: npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven, Playwright and others, each marked `safe` or `review` with a note where removal has a catch. `--clean` removes the selection with the same flags and confirmation as `kuizer clean`.
-
-```sh
-kuizer cache
-kuizer cache --clean --select npm --select pip
-```
-
-kuizer never enters or deletes browser and app profile data. A directory with a Chromium `Local State`, a Firefox `profiles.ini`, or a profile's cookie store is skipped with everything under it, which covers Brave, Chrome, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The browser directories under `~/.config`, `~/.cache` and `~/.local/share`, Flatpak and Snap browsers, `~/.ssh`, `~/.gnupg` and the keyrings are skipped by path as well. The delete guard checks the same markers again before every removal.
-
-In a terminal, `kuizer scan` opens a full-screen view with a fixed header (scan progress, column names) and footer (totals, keys, position). Rows follow the scan as they arrive; scroll with `j` `k` or arrows, `ctrl-d` `ctrl-u` for half a page, `ctrl-f` `ctrl-b` or `pgup` `pgdn` for a page, `g` `G` for top and bottom. `G` resumes following. `q` leaves the view, cancels a running scan and prints the overview. `--no-live`, `--json` and piped output stay plain text.
-
-Configuration lives in `~/.config/kuizer/config.toml`. Every key is optional; see [docs/config.example.toml](docs/config.example.toml). A directory with a `.kuizerignore` file is skipped with everything under it.
-
-kuizer was called sweep until October 2026; it still skips directories with a `.sweepignore` file and reads `~/.sweep-history.json` until `~/.kuizer-history.json` exists, without deleting the old file.
 
 ## Development
 
+Requires Rust 1.85 or newer (edition 2024).
+
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo run --release --example synth -- /tmp/kuizer-bench 200 100
+cargo test                                          # unit and filesystem tests in temp dirs
+cargo clippy --all-targets -- -D warnings           # lint, as CI runs it
+cargo fmt --check                                   # formatting, as CI runs it
+cargo run --release --example synth -- /tmp/kuizer-bench 200 100   # build a synthetic tree to scan
 ```
 
-Tests build their trees in temporary directories. The permission tests skip themselves when run as root.
+<br/>
 
-xxx
-
-Remco Stoeten
-
+xxx,<br/>
+[Remco Stoeten](https://remcostoeten.com)<br/>
 <small>MIT</small>
