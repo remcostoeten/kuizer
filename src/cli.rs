@@ -15,22 +15,254 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .error(AnsiColor::Red.on_default().effects(Effects::BOLD));
 
-const TEMPLATE: &str = "\
-{before-help}{name} {version}
-{about-with-newline}
-{usage-heading} {usage}
+const HEADER: &str = "\x1b[1;32m";
+const LITERAL: &str = "\x1b[1;36m";
+const DIM: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
 
-{all-args}{after-help}";
+const ABOUT_UI: &str = "Open the interactive cleanup interface";
+const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
+const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
+const ABOUT_CACHE: &str = "List and remove global tool caches";
+const ABOUT_DUPLICATES: &str = "Find files with identical contents";
+const ABOUT_INSIGHT: &str = "Show what kuizer deleted and the space it freed";
+const ABOUT_RULES: &str = "List the active detection rules";
+const ABOUT_CONFIG: &str = "Show, create and validate the config file";
 
-const EXAMPLES: &str = "\
-\x1b[1;32mExamples:\x1b[0m
-  \x1b[1;36mkuizer\x1b[0m                               \x1b[90mBrowse the current directory\x1b[0m
-  \x1b[1;36mkuizer scan\x1b[0m ~/apps --min-size 50MB     \x1b[90mList large artifacts under ~/apps\x1b[0m
-  \x1b[1;36mkuizer scan\x1b[0m --category cache          \x1b[90mOnly show caches\x1b[0m
-  \x1b[1;36mkuizer duplicates\x1b[0m ~/Downloads         \x1b[90mFind duplicate files\x1b[0m
-  \x1b[1;36mkuizer insight\x1b[0m                       \x1b[90mShow what past runs deleted\x1b[0m
-  \x1b[1;36mkuizer\x1b[0m <command> --help                \x1b[90mShow help for a command\x1b[0m
-";
+const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
+    (
+        "Clean up",
+        &[
+            ("ui", ABOUT_UI),
+            ("scan", ABOUT_SCAN),
+            ("clean", ABOUT_CLEAN),
+            ("cache", ABOUT_CACHE),
+        ],
+    ),
+    (
+        "Report",
+        &[("duplicates", ABOUT_DUPLICATES), ("insight", ABOUT_INSIGHT)],
+    ),
+    (
+        "Setup",
+        &[
+            ("rules", ABOUT_RULES),
+            ("config", ABOUT_CONFIG),
+            ("help", "Show help for a command"),
+        ],
+    ),
+];
+
+fn examples(rows: &[(&str, &str, &str)]) -> String {
+    let width = rows
+        .iter()
+        .map(|(command, args, _)| plain_width(command, args))
+        .max()
+        .unwrap_or(0);
+    let mut out = format!("{HEADER}Examples:{RESET}\n");
+    for (command, args, description) in rows {
+        let padding = " ".repeat(width - plain_width(command, args) + 2);
+        let args = if args.is_empty() {
+            String::new()
+        } else {
+            format!(" {args}")
+        };
+        out.push_str(&format!(
+            "  {LITERAL}{command}{RESET}{args}{padding}{DIM}{description}{RESET}\n"
+        ));
+    }
+    out
+}
+
+fn plain_width(command: &str, args: &str) -> usize {
+    let args = if args.is_empty() {
+        0
+    } else {
+        args.chars().count() + 1
+    };
+    command.chars().count() + args
+}
+
+fn top_template() -> String {
+    let width = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, commands)| commands.iter())
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from("{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n");
+    for (heading, commands) in COMMAND_GROUPS {
+        out.push_str(&format!("\n{HEADER}{heading}:{RESET}\n"));
+        for (name, about) in commands {
+            out.push_str(&format!("  {LITERAL}{name:width$}{RESET}  {about}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\n{HEADER}Options:{RESET}\n{{options}}{{after-help}}"
+    ));
+    out
+}
+
+fn top_examples() -> String {
+    examples(&[
+        ("kuizer", "", "Browse the current directory"),
+        ("kuizer ui", "~/apps", "Browse a folder"),
+        (
+            "kuizer scan",
+            "~/apps --min-size 50MB",
+            "List large artifacts under ~/apps",
+        ),
+        (
+            "kuizer clean",
+            "~/apps --dry-run",
+            "Show what clean would remove",
+        ),
+        ("kuizer cache", "", "List global tool caches"),
+        ("kuizer duplicates", "~/Downloads", "Find duplicate files"),
+        ("kuizer insight", "", "Show what past runs deleted"),
+        ("kuizer", "<command> --help", "Show help for a command"),
+    ])
+}
+
+fn ui_help() -> String {
+    format!(
+        "Without a command, kuizer opens this interface. Press {LITERAL}?{RESET} in it for every key.\n\n{}",
+        examples(&[
+            ("kuizer", "", "Browse the current directory"),
+            ("kuizer ui", "~/apps ~/work", "Browse two folders at once"),
+        ])
+    )
+}
+
+fn scan_examples() -> String {
+    examples(&[
+        ("kuizer scan", "", "Scan the current directory"),
+        (
+            "kuizer scan",
+            "~/apps --min-size 50MB",
+            "Only artifacts of 50 MB or more",
+        ),
+        (
+            "kuizer scan",
+            "--category cache --safe-only",
+            "Only caches that are safe to delete",
+        ),
+        (
+            "kuizer scan",
+            "~/apps --sort path --limit 20",
+            "First 20 results by path",
+        ),
+        ("kuizer --json scan", "~/apps", "Print JSON for scripts"),
+    ])
+}
+
+fn clean_help() -> String {
+    format!(
+        "Selects safe items unless --select says otherwise, and moves them to the trash after a confirmation.\n\n{}",
+        examples(&[
+            (
+                "kuizer clean",
+                "~/apps --dry-run",
+                "Show what would be removed"
+            ),
+            (
+                "kuizer clean",
+                "~/apps",
+                "Remove safe items, after a confirmation"
+            ),
+            (
+                "kuizer clean",
+                "~/apps --select node-modules",
+                "Remove only node_modules folders"
+            ),
+            (
+                "kuizer clean",
+                "~/apps --select all --permanent",
+                "Remove everything, skipping the trash"
+            ),
+            (
+                "kuizer clean",
+                "~/apps --category build --yes",
+                "Remove build output without asking"
+            ),
+        ])
+    )
+}
+
+fn cache_examples() -> String {
+    examples(&[
+        ("kuizer cache", "", "List global tool caches"),
+        (
+            "kuizer cache",
+            "--clean --dry-run",
+            "Show which caches would be removed",
+        ),
+        (
+            "kuizer cache",
+            "--clean",
+            "Remove safe caches, after a confirmation",
+        ),
+        (
+            "kuizer cache",
+            "--clean --select npm --select pip",
+            "Remove the npm and pip caches",
+        ),
+    ])
+}
+
+fn duplicates_help() -> String {
+    format!(
+        "Reports only; kuizer never deletes duplicates.\n\n{}",
+        examples(&[
+            (
+                "kuizer duplicates",
+                "~/Downloads",
+                "Find duplicates in Downloads"
+            ),
+            (
+                "kuizer duplicates",
+                "~/Pictures --min-size 1MB",
+                "Skip files under 1 MB"
+            ),
+            (
+                "kuizer duplicates",
+                "~/Pictures --verify",
+                "Compare matches byte by byte"
+            ),
+        ])
+    )
+}
+
+fn insight_examples() -> String {
+    examples(&[
+        ("kuizer insight", "", "Show past deletions and totals"),
+        ("kuizer --json insight", "", "Print the history as JSON"),
+    ])
+}
+
+fn rules_examples() -> String {
+    examples(&[
+        ("kuizer rules", "", "List built-in and custom rules"),
+        ("kuizer --json rules", "", "Print the rules as JSON"),
+    ])
+}
+
+fn config_examples() -> String {
+    examples(&[
+        (
+            "kuizer config",
+            "init",
+            "Write a config file with the defaults",
+        ),
+        ("kuizer config", "check", "Validate the config file"),
+        ("kuizer config", "show", "Print the effective configuration"),
+        (
+            "kuizer --config",
+            "./kuizer.toml scan",
+            "Use another config file",
+        ),
+    ])
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,9 +270,8 @@ const EXAMPLES: &str = "\
     version,
     about = "Find and clean generated artifacts, caches and duplicates",
     styles = STYLES,
-    help_template = TEMPLATE,
-    after_help = EXAMPLES,
-    subcommand_help_heading = "Commands",
+    help_template = top_template(),
+    after_help = top_examples(),
     next_line_help = false
 )]
 pub struct Cli {
@@ -73,24 +304,24 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = "Open the interactive cleanup interface")]
+    #[command(about = ABOUT_UI, after_help = ui_help())]
     Ui(PathsArgs),
-    #[command(about = "Find generated artifacts and caches")]
+    #[command(about = ABOUT_SCAN, after_help = scan_examples())]
     Scan(ScanArgs),
-    #[command(about = "Find duplicate files", visible_alias = "deduplicate")]
+    #[command(about = ABOUT_DUPLICATES, visible_alias = "deduplicate", after_help = duplicates_help())]
     Duplicates(DuplicatesArgs),
-    #[command(about = "Clean generated artifacts")]
+    #[command(about = ABOUT_CLEAN, after_help = clean_help())]
     Clean(CleanArgs),
-    #[command(about = "Show and manage configuration")]
+    #[command(about = ABOUT_CONFIG, after_help = config_examples())]
     Config {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
-    #[command(about = "Find and clean global tool caches")]
+    #[command(about = ABOUT_CACHE, after_help = cache_examples())]
     Cache(CacheArgs),
-    #[command(about = "List active detection rules")]
+    #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
-    #[command(about = "Show everything kuizer has deleted and the space it freed")]
+    #[command(about = ABOUT_INSIGHT, after_help = insight_examples())]
     Insight(CommandArgs),
 }
 
@@ -118,23 +349,38 @@ pub struct ScanArgs {
         long = "category",
         value_name = "NAME",
         value_parser = parse_category,
-        help = "Only include this category, repeatable"
+        help = "Only include this category, repeatable: dependencies, build, cache, temp",
+        help_heading = "Filters"
     )]
     pub categories: Vec<Category>,
     #[arg(
         long,
         value_name = "SIZE",
-        help = "Skip entries smaller than this, e.g. 50MB"
+        help = "Skip entries smaller than this, e.g. 50MB",
+        help_heading = "Filters"
     )]
     pub min_size: Option<ByteSize>,
-    #[arg(long, value_enum, default_value_t = SortKey::Size, hide_possible_values = true,
-        help = "Sort by size, path or category")]
-    pub sort: SortKey,
-    #[arg(long, help = "Only include entries that are safe to delete")]
+    #[arg(
+        long,
+        help = "Only include entries that are safe to delete",
+        help_heading = "Filters"
+    )]
     pub safe_only: bool,
-    #[arg(long, value_name = "N", help = "Show at most N entries")]
+    #[arg(long, value_enum, default_value_t = SortKey::Size, hide_possible_values = true,
+        help = "Sort by size, path or category", help_heading = "Output")]
+    pub sort: SortKey,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Show at most N entries",
+        help_heading = "Output"
+    )]
     pub limit: Option<usize>,
-    #[arg(long, help = "Print results once the scan finishes")]
+    #[arg(
+        long,
+        help = "Print results once the scan finishes",
+        help_heading = "Output"
+    )]
     pub no_live: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
@@ -152,13 +398,15 @@ pub struct CleanArgs {
         long = "category",
         value_name = "NAME",
         value_parser = parse_category,
-        help = "Only include this category, repeatable"
+        help = "Only include this category, repeatable: dependencies, build, cache, temp",
+        help_heading = "Filters"
     )]
     pub categories: Vec<Category>,
     #[arg(
         long,
         value_name = "SIZE",
-        help = "Skip entries smaller than this, e.g. 50MB"
+        help = "Skip entries smaller than this, e.g. 50MB",
+        help_heading = "Filters"
     )]
     pub min_size: Option<ByteSize>,
     #[command(flatten)]
@@ -168,6 +416,7 @@ pub struct CleanArgs {
 }
 
 #[derive(Debug, Args, Default)]
+#[command(next_help_heading = "Removal")]
 pub struct RemovalArgs {
     #[arg(
         long,
@@ -213,7 +462,11 @@ pub struct DuplicatesArgs {
 #[derive(Debug, Args, Default)]
 #[command(subcommand_precedence_over_arg = true)]
 pub struct CacheArgs {
-    #[arg(long, help = "Remove the selected caches after a preview")]
+    #[arg(
+        long,
+        help = "Remove the selected caches after a preview",
+        help_heading = "Removal"
+    )]
     pub clean: bool,
     #[command(flatten)]
     pub removal: RemovalArgs,
@@ -336,6 +589,20 @@ mod tests {
         );
         assert!(args.removal.dry_run && args.removal.yes);
         assert!(Cli::try_parse_from(["kuizer", "clean", "--dry-run", "--permanent"]).is_err());
+    }
+
+    #[test]
+    fn help_groups_list_every_command() {
+        let mut grouped: Vec<&str> = COMMAND_GROUPS
+            .iter()
+            .flat_map(|(_, commands)| commands.iter().map(|(name, _)| *name))
+            .filter(|name| *name != "help")
+            .collect();
+        let command = Cli::command();
+        let mut actual: Vec<&str> = command.get_subcommands().map(|c| c.get_name()).collect();
+        grouped.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(grouped, actual);
     }
 
     #[test]
