@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -326,17 +327,29 @@ fn in_parallel<T: Sync, R: Send>(
     if items.is_empty() {
         return Vec::new();
     }
-    let size = items.len().div_ceil(workers.max(1));
-    thread::scope(|scope| {
-        let handles: Vec<_> = items
-            .chunks(size)
-            .map(|chunk| scope.spawn(|| chunk.iter().map(&work).collect::<Vec<R>>()))
+    let next = AtomicUsize::new(0);
+    let mut results: Vec<(usize, R)> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers.clamp(1, items.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break done;
+                        };
+                        done.push((index, work(item)));
+                    }
+                })
+            })
             .collect();
         handles
             .into_iter()
             .flat_map(|handle| handle.join().expect("hashing thread panicked"))
             .collect()
-    })
+    });
+    results.sort_unstable_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 fn regroup(
