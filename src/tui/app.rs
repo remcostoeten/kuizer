@@ -54,6 +54,8 @@ pub struct App {
     pub changes: HashMap<PathBuf, usize>,
     pub filter: String,
     pub filtering: bool,
+    pub category: Option<Category>,
+    pub safe_only: bool,
     pub progress: Progress,
     pub finished: Option<Summary>,
     pub issues: usize,
@@ -79,6 +81,8 @@ impl App {
             changes: HashMap::new(),
             filter: String::new(),
             filtering: false,
+            category: None,
+            safe_only: false,
             progress: Progress::default(),
             finished: None,
             issues: 0,
@@ -114,6 +118,15 @@ impl App {
     }
 
     fn matches(&self, item: &Item) -> bool {
+        if self
+            .category
+            .is_some_and(|only| item.candidate.rule.category != only)
+        {
+            return false;
+        }
+        if self.safe_only && item.candidate.rule.safety != Safety::Safe {
+            return false;
+        }
         if self.filter.is_empty() {
             return true;
         }
@@ -255,6 +268,34 @@ impl App {
             SortKey::Category => SortKey::Size,
         };
         self.dirty = true;
+    }
+
+    pub fn cycle_category(&mut self) {
+        self.category = match self.category {
+            None => Some(Category::ALL[0]),
+            Some(current) => Category::ALL
+                .iter()
+                .position(|&category| category == current)
+                .and_then(|index| Category::ALL.get(index + 1))
+                .copied(),
+        };
+        self.dirty = true;
+    }
+
+    pub fn toggle_safe_only(&mut self) {
+        self.safe_only = !self.safe_only;
+        self.dirty = true;
+    }
+
+    pub fn reset_filters(&mut self) {
+        self.category = None;
+        self.safe_only = false;
+        self.filter.clear();
+        self.dirty = true;
+    }
+
+    pub fn filtered(&self) -> bool {
+        self.category.is_some() || self.safe_only || !self.filter.is_empty()
     }
 
     pub fn set_filter(&mut self, filter: String) {
@@ -588,6 +629,23 @@ mod tests {
         app.move_to(0);
         app.open_confirm();
         assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn category_and_safe_filters_narrow_view() {
+        let mut app = app();
+        app.toggle_safe_only();
+        app.refresh();
+        assert_eq!(app.view.len(), 2);
+        app.cycle_category();
+        app.refresh();
+        assert_eq!(app.view.len(), 2);
+        app.cycle_category();
+        app.refresh();
+        assert_eq!(app.view.len(), 0);
+        app.reset_filters();
+        app.refresh();
+        assert_eq!(app.view.len(), 3);
     }
 
     #[test]

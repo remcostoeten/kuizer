@@ -88,6 +88,46 @@ pub fn available_space(_path: &Path) -> Option<u64> {
     None
 }
 
+#[cfg(unix)]
+pub fn total_space(path: &Path) -> Option<u64> {
+    let stats = rustix::fs::statvfs(path).ok()?;
+    Some(stats.f_blocks.saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+pub fn total_space(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// @name open_in_browser
+/// @description Opens a file with the desktop's default handler without waiting for it to exit.
+/// Returns an error when the opener program is missing or cannot be started.
+///
+/// @example
+/// platform::open_in_browser(Path::new("/tmp/report.html"))?;
+pub fn open_in_browser(path: &Path) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

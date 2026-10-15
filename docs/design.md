@@ -25,7 +25,7 @@ Every item comes from a source, and every source has the same verbs, filters, se
 | `duplicates` | groups of files with identical contents | no, report only |
 | `big` | large files and directories that match no artifact rule | no, report only |
 
-Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the platform layer exists. Scheduled cleanup comes after 1.0, as a systemd user timer that runs a policy (section 6.6), not as a daemon.
+Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the platform layer exists. Scheduled cleanup is out of scope; run `kuizer clean --policy NAME --yes` from cron or a timer you manage.
 
 ## 2. Architecture and module boundaries
 
@@ -160,7 +160,7 @@ ecosystem = "android"
 
 `kuizer rules` lists the active rules.
 
-A policy is a named set of filters and a selection, run with `kuizer clean --policy NAME` or by a schedule (section 6.6):
+A policy is a named set of filters and a selection, run with `kuizer clean --policy NAME`:
 
 ```toml
 [policy.stale-deps]
@@ -182,8 +182,7 @@ Every key except `source` is optional. Unknown keys and unknown rule names are a
 ```text
 kuizer [--config PATH] [--json | --json-lines] [-q] [COMMAND]
 
-kuizer [PATHS...]                         TUI on a terminal
-kuizer ui [PATHS...]                      same, explicitly
+kuizer [PATHS...] [--confirm]             TUI on a terminal, scan output otherwise
 kuizer scan  [PATHS...] [FILTERS]         list project items
     --sort size|path|category|idle
     --limit N
@@ -206,7 +205,6 @@ kuizer history show SESSION               every item of one session
 kuizer restore ID... | --last             put trashed items back
 
 kuizer policy list | show NAME
-kuizer schedule install NAME --every DURATION | remove NAME | list
 
 kuizer rules                              active detection rules
 kuizer config show | path | init | check
@@ -253,12 +251,6 @@ Each session in the history file gets an id `s<N>`, and each item in it `s<N>.<M
 ### 6.5 Policies
 
 `kuizer policy list` prints the configured policies, `policy show NAME` the effective filters and selection, and `clean --policy NAME` runs one. Flags given next to `--policy` narrow it further but cannot widen its selection or make it permanent.
-
-### 6.6 Schedules
-
-`kuizer schedule install NAME --every 1w` writes a systemd user service and timer, `kuizer-NAME.service` and `.timer`, that run `kuizer clean --policy NAME --yes -q`, and enables the timer. `schedule remove` disables and deletes both, and `schedule list` shows each timer with its last and next run. Linux only; on other platforms the command exits with a usage error that says so.
-
-A scheduled run removes `review` items only when its policy says `select = "all"` or names their rules, and deletes permanently only when the policy says `permanent = true`. Neither can be set by a flag at install time. Runs are recorded in the history like any other session.
 
 Exit codes: `0` success, `1` error, `2` usage error. Unreadable paths are reported as issues and do not change the exit code; scripts read `issues` in the JSON.
 
@@ -311,7 +303,7 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | `ctrl-c` / `q` | cancel the scan, then quit |
 | `?` | help |
 
-By default `d` and `enter` move the selection to the trash straight away. With `delete.confirm = true` in the config or `kuizer ui --confirm`, a dialog first lists every selected path with size and safety, shows the mode (trash or permanent), and needs `y` or `enter`. Permanent deletion always shows the dialog because it cannot be undone. Nothing is preselected for deletion.
+By default `d` and `enter` move the selection to the trash straight away. With `delete.confirm = true` in the config or `kuizer --confirm`, a dialog first lists every selected path with size and safety, shows the mode (trash or permanent), and needs `y` or `enter`. Permanent deletion always shows the dialog because it cannot be undone. Nothing is preselected for deletion.
 
 ## 8. Threat model
 
@@ -359,4 +351,4 @@ Phase 1 baseline (container, 4 cores, warm cache, 200 projects with 100 dependen
 | 8 | Shared `FILTERS` and `REMOVAL` on every source, `cache clean` with the old flag as an alias, `--idle`, idle column and sort, `--project`, `--rule`, `--exclude` | `scan` and `clean --dry-run` list the same items for every filter combination (property test). Idle time tests: artifact touched in an idle project, commit without file changes, project outside git, unknown activity never matches. |
 | 9 | History ids, `history`, `history show`, `restore` | Ids stable across reloads of an old history file. Restore tests in a temp trash: whole session, one item, item already emptied from the trash, path reoccupied, partial session. |
 | 10 | `toolchain`, `docker` and `big` sources | Each source has a positive and a negative test. A toolchain pinned by a `rust-toolchain.toml`, `.nvmrc` or `.python-version` under the scan roots is `review`, never `safe`. `docker` without a daemon reports one issue and exits `0`. |
-| 11 | Policies and schedules | `config check` rejects unknown policy keys. A flag next to `--policy` cannot widen it (test). Generated unit files match a snapshot; `schedule install` and `remove` leave no files behind on failure. |
+| 11 | Policies | `config check` rejects unknown policy keys. A flag next to `--policy` cannot widen it (test). |

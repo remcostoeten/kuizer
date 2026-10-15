@@ -11,7 +11,7 @@ use ratatui::widgets::{
 use super::app::{App, GroupKey, Grouping, Overlay, Status, age, project_of};
 use crate::cli::SortKey;
 use crate::delete::Mode;
-use crate::detect::Safety;
+use crate::detect::{Category, Safety};
 use crate::output::display_path;
 use crate::units::ByteSize;
 
@@ -19,10 +19,13 @@ pub(super) const MUTED: Color = Color::Indexed(244);
 const FAINT: Color = Color::Indexed(240);
 const CURSOR: Color = Color::Indexed(237);
 const WARNING: Color = Color::Yellow;
+const SAFE: Color = Color::Green;
+const SELECTED: Color = Color::Indexed(22);
+const BAR: usize = 8;
 type HelpRow = (&'static [&'static str], &'static str);
 type HelpSection = (&'static str, &'static [HelpRow]);
 
-const FIXED_COLUMNS: u16 = 3 + 10 + 6 + 12 + 20 + 6 + 7;
+const FIXED_COLUMNS: u16 = 3 + 10 + 9 + 8 + 12 + 20 + 6 + 8;
 
 pub(super) fn shorten(text: &str, width: usize) -> String {
     let count = text.chars().count();
@@ -31,6 +34,78 @@ pub(super) fn shorten(text: &str, width: usize) -> String {
     }
     let tail: String = text.chars().skip(count - (width - 1)).collect();
     format!("…{tail}")
+}
+
+fn category_color(category: Category) -> Color {
+    match category {
+        Category::Dependencies => Color::Cyan,
+        Category::Build => Color::Blue,
+        Category::Cache => Color::Magenta,
+        Category::Temp => Color::Indexed(180),
+    }
+}
+
+fn size_color(bytes: u64) -> Color {
+    match bytes {
+        b if b >= 1 << 30 => Color::Red,
+        b if b >= 100 << 20 => Color::Yellow,
+        _ => Color::Reset,
+    }
+}
+
+fn size_bar(bytes: u64, largest: u64) -> String {
+    let filled = if largest == 0 {
+        0
+    } else {
+        ((bytes as f64 / largest as f64) * BAR as f64).ceil() as usize
+    };
+    format!(
+        "{}{}",
+        "█".repeat(filled.min(BAR)),
+        "░".repeat(BAR - filled.min(BAR))
+    )
+}
+
+fn explain(candidate: &crate::scan::Candidate) -> &'static str {
+    match (candidate.rule.category, candidate.rule.safety) {
+        (Category::Dependencies, Safety::Safe) => {
+            "Installed packages. Deleting is safe, reinstall with your package manager."
+        }
+        (Category::Build, Safety::Safe) => {
+            "Build output. Deleting is safe, the next build recreates it."
+        }
+        (Category::Cache, Safety::Safe) => "Cache. Deleting is safe, it is rebuilt when needed.",
+        (Category::Temp, Safety::Safe) => "Temporary files. Deleting is safe.",
+        (_, Safety::Review) => {
+            "Check first: this may hold data that cannot be regenerated. Look inside before deleting."
+        }
+    }
+}
+
+fn filters(app: &App) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some(category) = app.category {
+        spans.push(Span::styled(
+            format!(" {} ", category.as_str()),
+            Style::new().fg(Color::Black).bg(category_color(category)),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if app.safe_only {
+        spans.push(Span::styled(
+            " safe only ",
+            Style::new().fg(Color::Black).bg(SAFE),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if !app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!(" \"{}\" ", app.filter),
+            Style::new().fg(Color::Black).bg(Color::White),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans
 }
 
 fn sort_label(sort: SortKey) -> &'static str {
@@ -70,6 +145,7 @@ fn header(app: &App) -> Line<'static> {
     if app.grouping == Grouping::Project {
         spans.push(Span::styled(" by project ", Style::new().fg(MUTED)));
     }
+    spans.extend(filters(app));
     spans.extend(disk(app));
     Line::from(spans)
 }
@@ -105,6 +181,12 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
         entry.0 += 1;
         entry.1 += app.items[index].candidate.usage.allocated;
     }
+    let largest = app
+        .view
+        .iter()
+        .map(|&index| app.items[index].candidate.usage.allocated)
+        .max()
+        .unwrap_or(0);
     let mut rows = Vec::with_capacity(app.view.len() + groups.len());
     let mut previous_group = None;
     let mut selected_row = None;
@@ -135,7 +217,7 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(warning) = warning {
                 title.push(Span::styled(warning, Style::new().fg(WARNING)));
             }
-            let mut cells = vec![Cell::from(""); 6];
+            let mut cells = vec![Cell::from(""); 7];
             cells.push(Cell::from(Line::from(title)));
             rows.push(Row::new(cells).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
             previous_group = Some(group);
@@ -153,19 +235,28 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
         let style = match (&item.status, candidate.rule.safety) {
             (Status::Deleted, _) => Style::new().fg(FAINT).add_modifier(Modifier::CROSSED_OUT),
             (Status::Deleting | Status::Failed(_), _) => Style::new().fg(MUTED),
-            (Status::Ready, _) if item.selected => Style::new().add_modifier(Modifier::BOLD),
-            (Status::Ready, Safety::Review) => Style::new().fg(MUTED),
-            (Status::Ready, Safety::Safe) => Style::new(),
+            (Status::Ready, _) if item.selected => Style::new().bg(SELECTED),
+            (Status::Ready, _) => Style::new(),
         };
+        let ready = item.status == Status::Ready;
+        let dim_if = |color: Color| if ready { color } else { MUTED };
+        let (badge, badge_color) = match candidate.rule.safety {
+            Safety::Safe => ("● safe", SAFE),
+            Safety::Review => ("▲ check", WARNING),
+        };
+        let bytes = candidate.usage.allocated;
         rows.push(
             Row::new(vec![
-                mark.to_owned(),
-                format!("{:>10}", ByteSize(candidate.usage.allocated).to_string()),
-                candidate.rule.safety.as_str().to_owned(),
-                candidate.rule.category.as_str().to_owned(),
-                candidate.rule.name.clone(),
-                age(candidate.newest),
-                shorten(&display_path(&candidate.path), path_width),
+                Cell::from(mark.to_owned()),
+                Cell::from(format!("{:>10}", ByteSize(bytes).to_string()))
+                    .style(Style::new().fg(dim_if(size_color(bytes)))),
+                Cell::from(size_bar(bytes, largest)).style(Style::new().fg(FAINT)),
+                Cell::from(badge).style(Style::new().fg(dim_if(badge_color))),
+                Cell::from(candidate.rule.category.as_str().to_owned())
+                    .style(Style::new().fg(dim_if(category_color(candidate.rule.category)))),
+                Cell::from(candidate.rule.name.clone()),
+                Cell::from(age(candidate.newest)).style(Style::new().fg(MUTED)),
+                Cell::from(shorten(&display_path(&candidate.path), path_width)),
             ])
             .style(style),
         );
@@ -173,7 +264,8 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Length(3),
         Constraint::Length(10),
-        Constraint::Length(6),
+        Constraint::Length(BAR as u16),
+        Constraint::Length(7),
         Constraint::Length(12),
         Constraint::Length(20),
         Constraint::Length(6),
@@ -184,7 +276,8 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
             Row::new([
                 "",
                 "      SIZE",
-                "SAFETY",
+                "",
+                "SAFE?",
                 "CATEGORY",
                 "RULE",
                 "AGE",
@@ -233,7 +326,15 @@ fn detail(app: &App) -> Vec<Line<'static>> {
             Style::new().fg(WARNING),
         ));
     }
-    vec![Line::from(first), Line::from(second)]
+    let advice = match candidate.rule.safety {
+        Safety::Safe => SAFE,
+        Safety::Review => WARNING,
+    };
+    vec![
+        Line::from(first),
+        Line::styled(format!(" {}", explain(candidate)), Style::new().fg(advice)),
+        Line::from(second),
+    ]
 }
 
 fn uncommitted(changes: usize) -> String {
@@ -276,17 +377,21 @@ fn footer(app: &App) -> Line<'static> {
     let delete_hint = if selected > 0 {
         ("enter", "delete selected")
     } else {
-        ("d", "delete")
+        ("d", "delete this")
     };
     spans.extend(key_hints(&[
         ("space", "select"),
-        ("a", "all safe"),
+        ("a", "select all safe"),
         delete_hint,
-        ("/", "filter"),
-        ("s", "sort"),
+        ("f", "safe only"),
+        ("c", "category"),
+        ("/", "search"),
         ("?", "help"),
         ("q", "quit"),
     ]));
+    if app.filtered() {
+        spans.extend(key_hints(&[("x", "clear filters")]));
+    }
     if selected > 0 {
         spans.push(Span::styled(
             format!(" {selected} selected  {} ", ByteSize(app.selected_bytes())),
@@ -431,7 +536,7 @@ fn confirm(frame: &mut Frame, app: &App, ids: &[u64], mode: crate::delete::Mode)
 }
 
 fn help(frame: &mut Frame) {
-    const SECTIONS: [HelpSection; 3] = [
+    const SECTIONS: [HelpSection; 4] = [
         (
             "Navigate",
             &[
@@ -451,11 +556,22 @@ fn help(frame: &mut Frame) {
             ],
         ),
         (
+            "Filter",
+            &[
+                (&["f"], "show only items that are safe to delete"),
+                (&["c"], "cycle category: dependencies, build, cache, temp"),
+                (&["/"], "search by path or rule"),
+                (&["x"], "clear all filters"),
+            ],
+        ),
+        (
             "Act",
             &[
-                (&["d", "del"], "delete selection or item under cursor"),
+                (
+                    &["d", "del"],
+                    "delete selection, or the item under the cursor",
+                ),
                 (&["enter"], "delete selection"),
-                (&["/"], "filter by path or rule"),
                 (&["s"], "cycle sort: size, path, category"),
                 (&["p"], "group by rule or by project"),
                 (&["q", "esc", "ctrl-c"], "quit and stop the scan"),
@@ -520,7 +636,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let [top, main, info, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Length(1),
     ])
     .areas(frame.area());

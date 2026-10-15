@@ -134,6 +134,9 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             KeyCode::Char('p') => app.toggle_grouping(),
             KeyCode::Char('P') => app.select_project(),
             KeyCode::Char('/') => app.filtering = true,
+            KeyCode::Char('c') => app.cycle_category(),
+            KeyCode::Char('f') => app.toggle_safe_only(),
+            KeyCode::Char('x') => app.reset_filters(),
             KeyCode::Char('?') => app.overlay = Overlay::Help,
             _ => {}
         },

@@ -16,13 +16,17 @@ kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `targ
 - Browser and app profiles are never entered or deleted: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The same goes for `~/.ssh`, `~/.gnupg` and the keyrings.
 - Projects with uncommitted git changes get a warning in the list and in the delete confirmation.
 - Every deletion is logged to `~/.kuizer-history.json`. `kuizer insight` shows what was freed and what is still in the trash.
+- `kuizer scan --report` writes a single HTML file with a zoomable treemap of every result, grouped by project, category or rule, and opens it in your browser. The file loads nothing from the network.
+- `kuizer dashboard` writes one HTML page with tabs for an overview with insights, project artifacts, a folder drill-down, global caches, duplicates and the deletion history with charts per week or month. Like the report, it loads nothing from the network.
 - `kuizer cache` lists global caches for npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven, Playwright and others.
 - `kuizer duplicates` finds files with identical contents by size and BLAKE3 hash. It never deletes them: you choose which copy to keep.
 
 ```sh
 kuizer                                     # interactive list of the current directory
-kuizer ui ~/projects                       # interactive list of a folder, ? shows the keys
+kuizer ~/projects                          # interactive list of a folder, ? shows the keys
 kuizer scan ~/projects --min-size 50MB     # print large artifacts
+kuizer scan ~/projects --report            # open an interactive treemap report
+kuizer dashboard ~/projects                # open a web overview of everything
 kuizer clean ~/projects --dry-run          # show what clean would remove
 kuizer clean ~/projects --select all       # remove safe and review items, after a confirmation
 kuizer cache --clean --select npm          # remove the npm cache

@@ -11,7 +11,7 @@ use crate::output;
 use crate::protect::Protected;
 use crate::scan::{self, Cancel, Candidate};
 
-fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
+pub(super) fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
     let cancel = Cancel::new();
     let mut entries: Vec<(KnownCache, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found

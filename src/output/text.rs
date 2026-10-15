@@ -101,19 +101,32 @@ struct Bucket {
     bytes: u64,
 }
 
-fn bucket_line(label: &str, bucket: &Bucket, total: u64) -> String {
+fn bar(bucket: &Bucket, total: u64) -> String {
     let share = if total == 0 {
         0.0
     } else {
         bucket.bytes as f64 / total as f64
     };
     let filled = (share * 20.0).round() as usize;
+    format!("{}{}", "█".repeat(filled), dim(&"░".repeat(20 - filled)))
+}
+
+fn bucket_line(label: &str, bucket: &Bucket, total: u64) -> String {
     format!(
-        "  {label:<22} {:>5}  {:>10}  {}{}",
+        "  {label:<22} {:>5}  {:>10}  {}",
         bucket.count,
         ByteSize(bucket.bytes).to_string(),
-        "█".repeat(filled),
-        dim(&"░".repeat(20 - filled)),
+        bar(bucket, total),
+    )
+}
+
+fn project_line(project: &Path, bucket: &Bucket, total: u64) -> String {
+    format!(
+        "  {:>10}  {}  {:>5}  {}",
+        ByteSize(bucket.bytes).to_string(),
+        bar(bucket, total),
+        bucket.count,
+        display_path(project),
     )
 }
 
@@ -121,6 +134,7 @@ fn print_distribution(candidates: &[Candidate], largest: usize) {
     let total: u64 = candidates.iter().map(|c| c.usage.allocated).sum();
     let mut categories: BTreeMap<Category, Bucket> = BTreeMap::new();
     let mut rules: BTreeMap<&str, Bucket> = BTreeMap::new();
+    let mut projects: BTreeMap<&Path, Bucket> = BTreeMap::new();
     for candidate in candidates {
         let category = categories.entry(candidate.rule.category).or_default();
         category.count += 1;
@@ -128,6 +142,11 @@ fn print_distribution(candidates: &[Candidate], largest: usize) {
         let rule = rules.entry(candidate.rule.name.as_str()).or_default();
         rule.count += 1;
         rule.bytes += candidate.usage.allocated;
+        let project = projects
+            .entry(candidate.project.as_deref().unwrap_or(&candidate.path))
+            .or_default();
+        project.count += 1;
+        project.bytes += candidate.usage.allocated;
     }
 
     let mut out = io::stdout().lock();
@@ -145,6 +164,23 @@ fn print_distribution(candidates: &[Candidate], largest: usize) {
     let _ = writeln!(out, "\n{}", bold("By rule"));
     for (rule, bucket) in &by_rule {
         let _ = writeln!(out, "{}", bucket_line(rule, bucket, total));
+    }
+
+    let mut by_project: Vec<(&Path, Bucket)> = projects.into_iter().collect();
+    by_project.sort_by_key(|entry| std::cmp::Reverse(entry.1.bytes));
+    let _ = writeln!(out, "\n{}", bold("By project"));
+    for (project, bucket) in by_project.iter().take(largest) {
+        let _ = writeln!(out, "{}", project_line(project, bucket, total));
+    }
+    if by_project.len() > largest {
+        let _ = writeln!(
+            out,
+            "{}",
+            dim(&format!(
+                "  and {} more projects",
+                by_project.len() - largest
+            ))
+        );
     }
 
     let mut biggest: Vec<&Candidate> = candidates.iter().collect();

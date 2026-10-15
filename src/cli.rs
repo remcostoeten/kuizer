@@ -20,12 +20,12 @@ const LITERAL: &str = "\x1b[1;36m";
 const DIM: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 
-const ABOUT_UI: &str = "Open the interactive cleanup interface";
 const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
 const ABOUT_INSIGHT: &str = "Show what kuizer deleted and the space it freed";
+const ABOUT_DASHBOARD: &str = "Open a web overview of artifacts, caches, duplicates and history";
 const ABOUT_RULES: &str = "List the active detection rules";
 const ABOUT_CONFIG: &str = "Show, create and validate the config file";
 
@@ -33,7 +33,6 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
     (
         "Clean up",
         &[
-            ("ui", ABOUT_UI),
             ("scan", ABOUT_SCAN),
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
@@ -41,7 +40,11 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
     ),
     (
         "Report",
-        &[("duplicates", ABOUT_DUPLICATES), ("insight", ABOUT_INSIGHT)],
+        &[
+            ("dashboard", ABOUT_DASHBOARD),
+            ("duplicates", ABOUT_DUPLICATES),
+            ("insight", ABOUT_INSIGHT),
+        ],
     ),
     (
         "Setup",
@@ -106,7 +109,12 @@ fn top_template() -> String {
 fn top_examples() -> String {
     examples(&[
         ("kuizer", "", "Browse the current directory"),
-        ("kuizer ui", "~/apps", "Browse a folder"),
+        ("kuizer", "~/apps ~/work", "Browse two folders at once"),
+        (
+            "kuizer",
+            "--confirm",
+            "Show a dialog before every trash move",
+        ),
         (
             "kuizer scan",
             "~/apps --min-size 50MB",
@@ -120,23 +128,13 @@ fn top_examples() -> String {
         ("kuizer cache", "", "List global tool caches"),
         ("kuizer duplicates", "~/Downloads", "Find duplicate files"),
         ("kuizer insight", "", "Show what past runs deleted"),
+        (
+            "kuizer dashboard",
+            "~/apps",
+            "Open a web overview of everything",
+        ),
         ("kuizer", "<command> --help", "Show help for a command"),
     ])
-}
-
-fn ui_help() -> String {
-    format!(
-        "Without a command, kuizer opens this interface. Press {LITERAL}?{RESET} in it for every key.\n\n{}",
-        examples(&[
-            ("kuizer", "", "Browse the current directory"),
-            ("kuizer ui", "~/apps ~/work", "Browse two folders at once"),
-            (
-                "kuizer ui",
-                "--confirm",
-                "Show a dialog before every trash move"
-            ),
-        ])
-    )
 }
 
 fn scan_examples() -> String {
@@ -156,6 +154,11 @@ fn scan_examples() -> String {
             "kuizer scan",
             "~/apps --sort path --limit 20",
             "First 20 results by path",
+        ),
+        (
+            "kuizer scan",
+            "~/apps --report",
+            "Open an interactive report",
         ),
         ("kuizer --json scan", "~/apps", "Print JSON for scripts"),
     ])
@@ -245,6 +248,35 @@ fn insight_examples() -> String {
     ])
 }
 
+fn dashboard_help() -> String {
+    format!(
+        "Scans the paths, measures global caches, searches for duplicates and reads the deletion history, then writes one HTML page and opens it. The page loads nothing from the network.\n\n{}",
+        examples(&[
+            ("kuizer dashboard", "", "Overview of the current directory"),
+            (
+                "kuizer dashboard",
+                "~/apps ~/work",
+                "Overview of two folders"
+            ),
+            (
+                "kuizer dashboard",
+                "~/apps --no-duplicates",
+                "Skip the duplicate search"
+            ),
+            (
+                "kuizer dashboard",
+                "--out=./kuizer.html --no-open",
+                "Write to a file without opening it"
+            ),
+            (
+                "kuizer --json dashboard",
+                "~/apps",
+                "Print the combined data as JSON"
+            ),
+        ])
+    )
+}
+
 fn rules_examples() -> String {
     examples(&[
         ("kuizer rules", "", "List built-in and custom rules"),
@@ -277,9 +309,20 @@ fn config_examples() -> String {
     styles = STYLES,
     help_template = top_template(),
     after_help = top_examples(),
-    next_line_help = false
+    next_line_help = false,
+    override_usage = "kuizer [OPTIONS] [PATH]...\n       kuizer [OPTIONS] <COMMAND>"
 )]
 pub struct Cli {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to browse without a command [default: current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Ask before moving items to the trash [config: delete.confirm]"
+    )]
+    pub confirm: bool,
     #[arg(
         long,
         global = true,
@@ -309,8 +352,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = ABOUT_UI, after_help = ui_help())]
-    Ui(UiArgs),
     #[command(about = ABOUT_SCAN, after_help = scan_examples())]
     Scan(ScanArgs),
     #[command(about = ABOUT_DUPLICATES, visible_alias = "deduplicate", after_help = duplicates_help())]
@@ -328,30 +369,8 @@ pub enum Command {
     Rules(CommandArgs),
     #[command(about = ABOUT_INSIGHT, after_help = insight_examples())]
     Insight(CommandArgs),
-}
-
-#[derive(Debug, Args, Default)]
-#[command(subcommand_precedence_over_arg = true)]
-pub struct PathsArgs {
-    #[arg(
-        value_name = "PATH",
-        help = "Directories to search [default: current directory]"
-    )]
-    pub paths: Vec<PathBuf>,
-    #[command(subcommand)]
-    pub command: Option<NestedCommand>,
-}
-
-#[derive(Debug, Args, Default)]
-#[command(subcommand_precedence_over_arg = true)]
-pub struct UiArgs {
-    #[command(flatten)]
-    pub paths: PathsArgs,
-    #[arg(
-        long,
-        help = "Ask before moving items to the trash [config: delete.confirm]"
-    )]
-    pub confirm: bool,
+    #[command(about = ABOUT_DASHBOARD, visible_alias = "web", after_help = dashboard_help())]
+    Dashboard(DashboardArgs),
 }
 
 #[derive(Debug, Args, Default)]
@@ -399,6 +418,22 @@ pub struct ScanArgs {
         help_heading = "Output"
     )]
     pub no_live: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 0..=1,
+        require_equals = true,
+        help = "Write an interactive HTML report and open it, to FILE if given",
+        help_heading = "Output"
+    )]
+    pub report: Option<Option<PathBuf>>,
+    #[arg(
+        long,
+        requires = "report",
+        help = "Write the report without opening a browser",
+        help_heading = "Output"
+    )]
+    pub no_open: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }
@@ -472,6 +507,45 @@ pub struct DuplicatesArgs {
     pub verify: bool,
     #[arg(long, value_name = "N", help = "Show at most N groups")]
     pub limit: Option<usize>,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct DashboardArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to scan [default: current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Skip the duplicate search, which reads every file",
+        help_heading = "Sources"
+    )]
+    pub no_duplicates: bool,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        help = "Skip duplicate files smaller than this [default: duplicates.min_size]",
+        help_heading = "Sources"
+    )]
+    pub min_size: Option<ByteSize>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        require_equals = true,
+        help = "Write the page to FILE [default: the kuizer cache directory]",
+        help_heading = "Output"
+    )]
+    pub out: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Write the page without opening a browser",
+        help_heading = "Output"
+    )]
+    pub no_open: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }
@@ -560,6 +634,24 @@ mod tests {
     }
 
     #[test]
+    fn bare_paths_open_the_interface() {
+        let cli = Cli::try_parse_from(["kuizer", "/tmp/a", "--confirm"]).expect("parses");
+        assert!(cli.command.is_none());
+        assert_eq!(cli.paths, [PathBuf::from("/tmp/a")]);
+        assert!(cli.confirm);
+
+        for argv in [
+            &["kuizer", "scan", "/tmp/a"][..],
+            &["kuizer", "--json", "scan", "/tmp/a"][..],
+            &["kuizer", "-q", "--config", "k.toml", "scan", "/tmp/a"][..],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parses");
+            assert!(matches!(cli.command, Some(Command::Scan(_))), "{argv:?}");
+            assert!(cli.paths.is_empty(), "{argv:?}");
+        }
+    }
+
+    #[test]
     fn parses_scan_flags() {
         let cli = Cli::try_parse_from([
             "kuizer",
@@ -581,6 +673,25 @@ mod tests {
         assert_eq!(args.categories, [Category::Cache]);
         assert_eq!(args.min_size, Some(ByteSize(10_000_000)));
         assert_eq!(args.sort, SortKey::Path);
+    }
+
+    #[test]
+    fn parses_report_flag() {
+        let cli = Cli::try_parse_from(["kuizer", "scan", "--report", "/tmp/a"]).expect("parses");
+        let Some(Command::Scan(args)) = cli.command else {
+            panic!("expected scan");
+        };
+        assert_eq!(args.report, Some(None));
+        assert_eq!(args.paths, [PathBuf::from("/tmp/a")]);
+
+        let cli = Cli::try_parse_from(["kuizer", "scan", "--report=out.html", "--no-open"])
+            .expect("parses");
+        let Some(Command::Scan(args)) = cli.command else {
+            panic!("expected scan");
+        };
+        assert_eq!(args.report, Some(Some(PathBuf::from("out.html"))));
+        assert!(args.no_open);
+        assert!(Cli::try_parse_from(["kuizer", "scan", "--no-open"]).is_err());
     }
 
     #[test]

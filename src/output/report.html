@@ -1,0 +1,1733 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kuizer report</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --panel: #ffffff;
+  --ink: #1b1b1a;
+  --muted: #6b6a66;
+  --faint: #9a9893;
+  --line: #e2e0db;
+  --hover: #efeeea;
+  --accent: #1b1b1a;
+  --accent-ink: #ffffff;
+  --dependencies: #3b6fd8;
+  --build: #d9822b;
+  --cache: #8a5cd1;
+  --temp: #219a8a;
+  --global: #c24f7e;
+  --dupes: #6f8a1f;
+  --review-stripe: rgba(255, 255, 255, 0.28);
+  --tile-ink: #ffffff;
+  --group-bg: rgba(0, 0, 0, 0.035);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 4px 16px rgba(0, 0, 0, 0.06);
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121211;
+    --panel: #1b1b1a;
+    --ink: #ecebe7;
+    --muted: #a3a19b;
+    --faint: #706e69;
+    --line: #2d2c2a;
+    --hover: #252523;
+    --accent: #ecebe7;
+    --accent-ink: #121211;
+    --dependencies: #4f82e6;
+    --build: #e08f3c;
+    --cache: #9b72dc;
+    --temp: #2aa897;
+    --global: #d6668f;
+    --dupes: #93ad3c;
+    --review-stripe: rgba(0, 0, 0, 0.26);
+    --group-bg: rgba(255, 255, 255, 0.03);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+button, input { font: inherit; color: inherit; }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 24px 16px 48px; }
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 20px; }
+.brand { font: 600 20px/1 var(--mono); letter-spacing: -0.02em; }
+.brand span { color: var(--muted); font-weight: 400; }
+.meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.stat .label { color: var(--muted); font-size: 12px; }
+.stat .value { font: 600 22px/1.25 var(--sans); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.stat .sub { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.split { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 8px; background: var(--line); }
+.split i { display: block; height: 100%; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 12px; }
+.seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+.seg button { border: 0; background: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.seg-label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 10px 4px 8px; cursor: pointer; }
+.chip[aria-pressed="false"] { opacity: 0.45; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.search { flex: 1 1 200px; min-width: 0; max-width: 360px; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 10px; }
+.search:focus, button:focus-visible { outline: 2px solid var(--dependencies); outline-offset: 1px; }
+.note { color: var(--muted); font-size: 12px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; align-items: start; }
+@media (max-width: 960px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.card h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+.card .body { padding: 14px; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--line); min-height: 42px; }
+.crumbs button { border: 0; background: none; padding: 3px 6px; border-radius: 5px; cursor: pointer; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crumbs button:hover { background: var(--hover); color: var(--ink); }
+.crumbs button:last-of-type { color: var(--ink); font-weight: 600; }
+.crumbs .sep { color: var(--faint); }
+.crumbs .hint { margin-left: auto; color: var(--faint); font-size: 12px; }
+.map { position: relative; height: min(68vh, 640px); min-height: 360px; margin: 8px; overflow: hidden; border-radius: 6px; }
+.tile, .group { position: absolute; overflow: hidden; }
+.tile { border-radius: 3px; color: var(--tile-ink); cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); transition: filter 0.12s; }
+.tile:hover { filter: brightness(1.12); }
+.tile.review { background-image: repeating-linear-gradient(135deg, var(--review-stripe) 0 4px, transparent 4px 9px); }
+.tile.selected { box-shadow: inset 0 0 0 2px var(--ink), 0 0 0 1px var(--panel); z-index: 2; }
+.tile .t { padding: 4px 6px; font-size: 12px; line-height: 1.25; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25); }
+.tile .t b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .t span { opacity: 0.88; font-variant-numeric: tabular-nums; }
+.group { border-radius: 5px; background: var(--group-bg); box-shadow: inset 0 0 0 1px var(--line); cursor: zoom-in; }
+.group:hover { box-shadow: inset 0 0 0 1px var(--faint); }
+.group .h { position: absolute; left: 0; right: 0; top: 0; height: 20px; padding: 2px 6px; font-size: 11.5px; display: flex; gap: 8px; white-space: nowrap; }
+.group .h b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.group .h span { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; margin-left: auto; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
+.tip { position: fixed; z-index: 10; pointer-events: none; background: var(--panel); color: var(--ink); border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: 420px; display: none; }
+.tip .p { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; margin-bottom: 4px; }
+.tip .r { color: var(--muted); font-variant-numeric: tabular-nums; }
+aside { display: grid; gap: 14px; }
+.detail .path { font: 12.5px/1.4 var(--mono); overflow-wrap: anywhere; margin-bottom: 10px; }
+.detail dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.detail .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 5px 10px; cursor: pointer; font-size: 12.5px; }
+.btn:hover { background: var(--hover); }
+.badge { display: inline-block; font-size: 11.5px; border-radius: 5px; padding: 1px 6px; border: 1px solid var(--line); }
+.badge.safe { color: var(--temp); border-color: currentColor; }
+.badge.review { color: var(--build); border-color: currentColor; }
+.bars { display: grid; gap: 8px; }
+.barrow { display: grid; gap: 4px; cursor: pointer; border-radius: 6px; padding: 4px 6px; margin: -4px -6px; border: 0; background: none; text-align: left; width: calc(100% + 12px); }
+.barrow:hover { background: var(--hover); }
+.barrow.off { opacity: 0.45; }
+.barrow .top { display: flex; gap: 8px; font-size: 13px; align-items: center; min-width: 0; }
+.barrow .top .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.barrow .top .s { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.track { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; display: flex; }
+.track i { display: block; height: 100%; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.tablecard { margin-top: 14px; }
+.tablehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 14px 14px 0; }
+.tablehead h2 { margin: 0; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; cursor: pointer; user-select: none; }
+table.plain th { cursor: default; }
+th[aria-sort="descending"]::after { content: " \2193"; }
+th[aria-sort="ascending"]::after { content: " \2191"; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.path { font-family: var(--mono); font-size: 12.5px; white-space: normal; overflow-wrap: anywhere; min-width: 240px; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--hover); }
+tbody tr.selected { background: var(--hover); box-shadow: inset 3px 0 0 var(--ink); }
+.more { padding: 12px 14px; }
+details.issues { margin-top: 14px; }
+details.issues summary { cursor: pointer; padding: 12px 14px; color: var(--muted); }
+details.issues ul { margin: 0; padding: 0 14px 14px 30px; font: 12.5px/1.6 var(--mono); overflow-wrap: anywhere; }
+.tabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--line); margin: -6px 0 18px; scrollbar-width: none; }
+.tabs button { border: 0; background: none; padding: 8px 12px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+.tabs .count { color: var(--faint); font-weight: 400; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.grid .card { min-width: 0; }
+.wide { margin-bottom: 14px; }
+.barrow.static { cursor: default; }
+.barrow.static:hover { background: none; }
+.stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--line); margin-bottom: 12px; }
+.stack i { display: block; height: 100%; min-width: 2px; cursor: pointer; }
+.stack i + i { box-shadow: inset 1px 0 0 var(--panel); }
+.chart { position: relative; }
+.cols { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 150px; border-bottom: 1px solid var(--line); }
+.cols .col { flex: 1 1 0; height: 100%; display: flex; align-items: flex-end; cursor: default; }
+.cols .col:hover i { filter: brightness(1.15); }
+.cols .col i { display: block; width: 100%; background: var(--dependencies); border-radius: 2px 2px 0 0; }
+.cols .col.zero i { background: none; }
+.cols .ref, .line .ref { position: absolute; left: 0; right: 0; top: 0; border-top: 1px dashed var(--line); pointer-events: none; }
+.cols .ref span, .line .ref span { position: absolute; top: 2px; left: 0; font-size: 11px; color: var(--faint); background: var(--panel); padding-right: 4px; font-variant-numeric: tabular-nums; }
+.ticks { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.line { position: relative; height: 150px; border-bottom: 1px solid var(--line); }
+.line svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.line .hits { position: absolute; inset: 0; display: flex; }
+.line .hits div { flex: 1 1 0; }
+.insights { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.insights li { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 4px 10px; align-items: baseline; }
+.insights .dot { transform: translateY(-1px); }
+.insights code { grid-column: 2; justify-self: start; max-width: 100%; font: 12px/1.4 var(--mono); background: var(--hover); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; cursor: copy; overflow-wrap: anywhere; text-align: left; }
+.gauge { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); margin: 8px 0 6px; }
+.gauge i { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rows { display: grid; }
+.frow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 8px 14px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; width: 100%; cursor: pointer; }
+.frow:hover { background: var(--hover); }
+.frow .n { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.frow .n b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow .n .ico { color: var(--faint); flex: none; width: 14px; }
+.frow .s { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.frow .track { grid-column: 1 / -1; height: 5px; }
+.frow.leaf .n b { font-family: var(--mono); font-size: 12.5px; font-weight: 400; }
+.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; cursor: pointer; }
+.group-row summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 9px 14px; cursor: pointer; border-bottom: 1px solid var(--line); list-style: none; }
+.group-row summary::-webkit-details-marker { display: none; }
+.group-row summary:hover { background: var(--hover); }
+.group-row summary b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-row summary .s { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.group-row summary .sub { grid-column: 1 / -1; color: var(--faint); font-size: 12px; }
+.group-row ul { list-style: none; margin: 0; padding: 6px 14px 10px 28px; border-bottom: 1px solid var(--line); background: var(--group-bg); }
+.group-row li { display: flex; gap: 10px; font: 12.5px/1.7 var(--mono); }
+.group-row li span:first-child { overflow-wrap: anywhere; flex: 1; }
+.group-row li .when { color: var(--faint); white-space: nowrap; font-family: var(--sans); font-size: 12px; }
+tr.entries td { background: var(--group-bg); padding: 0; cursor: default; }
+tr.entries table td { border-bottom: 0; padding: 4px 14px; }
+.placeholder { padding: 28px 16px; text-align: center; color: var(--muted); }
+@media (max-width: 600px) {
+  .map { height: min(60vh, 520px); min-height: 300px; }
+  .crumbs .hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .tile { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">kuizer <span id="kind">scan report</span></div>
+    <div class="meta" id="meta"></div>
+  </header>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Sections" hidden></nav>
+  <div class="view" id="view-overview" hidden>
+    <section class="stats" id="ov-stats"></section>
+    <div class="grid">
+      <section class="card"><div class="body"><h2>Where the space is</h2><div id="ov-stack"></div></div></section>
+      <section class="card"><div class="body"><h2>Insights</h2><ul class="insights" id="ov-insights"></ul></div></section>
+    </div>
+    <div class="grid">
+      <section class="card"><div class="body"><h2>Largest projects</h2><div class="bars" id="ov-projects"></div></div></section>
+      <section class="card"><div class="body"><h2>Largest caches</h2><div class="bars" id="ov-caches"></div></div></section>
+      <section class="card"><div class="body"><h2 id="ov-freed-title">Freed per week</h2><div id="ov-freed"></div></div></section>
+    </div>
+  </div>
+  <div class="view" id="view-folders" hidden>
+    <div class="toolbar">
+      <label class="toggle"><input type="checkbox" id="folder-caches" checked> Include global caches</label>
+      <span class="note" id="folder-note"></span>
+    </div>
+    <section class="card">
+      <nav class="crumbs" id="folder-crumbs" aria-label="Folder location"></nav>
+      <div class="rows" id="folder-rows"></div>
+      <div class="more" id="folder-more"></div>
+    </section>
+  </div>
+  <div class="view" id="view-caches" hidden>
+    <section class="stats" id="cache-stats"></section>
+    <div class="grid">
+      <section class="card"><div class="body"><h2>By tool</h2><div class="bars" id="cache-tools"></div></div></section>
+      <section class="card"><div class="body"><h2>By safety</h2><div class="bars" id="cache-safety"></div><p class="note">Safe caches are rebuilt on the next install or build. Review caches hold downloads or state that take longer to restore.</p></div></section>
+    </div>
+    <section class="card tablecard">
+      <div class="tablehead"><h2>Caches</h2><span class="note" id="cache-note"></span></div>
+      <div class="scroll"><table class="plain">
+        <thead><tr><th class="num">Size</th><th>Safety</th><th>Cache</th><th>Last change</th><th>Path</th></tr></thead>
+        <tbody id="cache-rows"></tbody>
+      </table></div>
+    </section>
+  </div>
+  <div class="view" id="view-duplicates" hidden>
+    <section class="stats" id="dupe-stats"></section>
+    <div class="grid" id="dupe-charts">
+      <section class="card"><div class="body"><h2>By file type</h2><div class="bars" id="dupe-types"></div></div></section>
+      <section class="card"><div class="body"><h2>Folders with the most copies</h2><div class="bars" id="dupe-folders"></div></div></section>
+    </div>
+    <section class="card">
+      <div class="tablehead"><h2>Groups</h2><span class="note" id="dupe-note"></span></div>
+      <div class="toolbar" style="padding: 10px 14px 0"><input class="search" id="dupe-search" type="search" placeholder="Filter by path" aria-label="Filter duplicate groups by path"></div>
+      <div id="dupe-groups"></div>
+      <div class="more" id="dupe-more"></div>
+    </section>
+  </div>
+  <div class="view" id="view-history" hidden>
+    <section class="stats" id="hist-stats"></section>
+    <div class="grid">
+      <section class="card"><div class="body"><h2 id="hist-freed-title">Freed per week</h2><div id="hist-freed"></div></div></section>
+      <section class="card"><div class="body"><h2>Total freed over time</h2><div id="hist-total"></div></div></section>
+    </div>
+    <div class="grid">
+      <section class="card"><div class="body"><h2>By category</h2><div class="bars" id="hist-cats"></div></div></section>
+      <section class="card"><div class="body"><h2>Top rules</h2><div class="bars" id="hist-rules"></div></div></section>
+      <section class="card"><div class="body"><h2>Most cleaned folders</h2><div class="bars" id="hist-folders"></div></div></section>
+    </div>
+    <section class="card tablecard">
+      <div class="tablehead"><h2>Runs</h2><span class="note" id="hist-note"></span></div>
+      <div class="scroll"><table class="plain">
+        <thead><tr><th>Started</th><th class="num">Items</th><th class="num">Freed</th><th>Trash</th><th>Command</th></tr></thead>
+        <tbody id="hist-rows"></tbody>
+      </table></div>
+    </section>
+  </div>
+  <div class="view" id="view-artifacts">
+  <section class="stats" id="stats"></section>
+  <div class="toolbar">
+    <div><span class="seg-label">Group by</span><div class="seg" id="group"></div></div>
+    <div><span class="seg-label">Safety</span><div class="seg" id="safety"></div></div>
+    <div class="chips" id="chips"></div>
+    <input class="search" id="search" type="search" placeholder="Filter by path or rule" aria-label="Filter by path or rule">
+    <span class="note" id="filtered"></span>
+  </div>
+  <div class="layout">
+    <section class="card">
+      <nav class="crumbs" id="crumbs" aria-label="Treemap location"></nav>
+      <div class="map" id="map"></div>
+    </section>
+    <aside>
+      <section class="card detail"><div class="body" id="detail"></div></section>
+      <section class="card"><div class="body"><h2>By category</h2><div class="bars" id="cats"></div></div></section>
+      <section class="card"><div class="body"><h2>Largest projects</h2><div class="bars" id="projects"></div></div></section>
+    </aside>
+  </div>
+  <section class="card tablecard">
+    <div class="tablehead"><h2>Items</h2><span class="note" id="tablenote"></span></div>
+    <div class="scroll"><table>
+      <thead><tr id="thead"></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <div class="more" id="more"></div>
+  </section>
+  <details class="card issues" id="issues" hidden></details>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = "__KUIZER_DATA__";
+const DASH = Boolean(DATA.dashboard);
+const SCAN = DATA.scan;
+const ITEMS = SCAN.candidates;
+const CATEGORIES = ["dependencies", "build", "cache", "temp"];
+const TABLE_STEP = 100;
+const HEADER = 20;
+const PAD = 2;
+
+const state = {
+  group: "project",
+  safety: "all",
+  categories: new Set(CATEGORIES),
+  query: "",
+  zoom: [],
+  selected: null,
+  sort: { key: "size", dir: -1 },
+  tableLimit: TABLE_STEP,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function bytes(value) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${value} B` : `${size.toFixed(1)} ${units[unit]}`;
+}
+
+function percent(part, whole) {
+  if (!whole) return "0%";
+  const share = (part / whole) * 100;
+  return share < 0.1 && share > 0 ? "<0.1%" : `${share.toFixed(share < 10 ? 1 : 0)}%`;
+}
+
+function display(path) {
+  if (!path) return "";
+  const home = DATA.home;
+  if (home && (path === home || path.startsWith(home + "/") || path.startsWith(home + "\\"))) {
+    return "~" + path.slice(home.length);
+  }
+  return path;
+}
+
+function color(category) {
+  return `var(--${category})`;
+}
+
+function projectOf(item) {
+  return item.project || item.path;
+}
+
+function relative(item) {
+  const project = item.project;
+  if (project && item.path.length > project.length && item.path.startsWith(project)) {
+    return item.path.slice(project.length).replace(/^[\\/]+/, "");
+  }
+  return display(item.path);
+}
+
+function projectLabel(project) {
+  for (const root of SCAN.roots) {
+    if (project.length > root.length && project.startsWith(root) && /[\\/]/.test(project[root.length])) {
+      return project.slice(root.length + 1);
+    }
+  }
+  return display(project);
+}
+
+function basename(path) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function leafLabel(item) {
+  if (state.group === "project") return relative(item);
+  return item.project ? `${basename(item.project)}/${relative(item)}` : display(item.path);
+}
+
+function matches(item) {
+  if (!state.categories.has(item.category)) return false;
+  if (state.safety !== "all" && item.safety !== state.safety) return false;
+  if (!state.query) return true;
+  const query = state.query.toLowerCase();
+  return display(item.path).toLowerCase().includes(query) || item.rule.toLowerCase().includes(query);
+}
+
+function filtered() {
+  return ITEMS.filter(matches);
+}
+
+function sum(items) {
+  return items.reduce((total, item) => total + item.allocated_bytes, 0);
+}
+
+function groupKeys(item) {
+  if (state.group === "category") return [[item.category, item.category], [item.rule, item.rule]];
+  if (state.group === "rule") return [[item.rule, item.rule]];
+  const project = projectOf(item);
+  return [[project, projectLabel(project)]];
+}
+
+function buildTree(items) {
+  const root = { kind: "group", key: "", label: "All", children: new Map(), leaves: [] };
+  for (const item of items) {
+    let node = root;
+    for (const [key, label] of groupKeys(item)) {
+      if (!node.children.has(key)) {
+        node.children.set(key, { kind: "group", key, label, children: new Map(), leaves: [] });
+      }
+      node = node.children.get(key);
+    }
+    node.leaves.push({ kind: "leaf", key: `#${item.id}`, item, value: item.allocated_bytes });
+  }
+  return finalize(root);
+}
+
+function finalize(node) {
+  const groups = [...node.children.values()].map(finalize);
+  const children = [...groups, ...node.leaves].sort((a, b) => b.value - a.value);
+  const items = children.flatMap((child) => (child.kind === "leaf" ? [child.item] : child.items));
+  return { kind: "group", key: node.key, label: node.label, children, items, value: sum(items) };
+}
+
+function worst(row, side) {
+  let total = 0;
+  let max = 0;
+  let min = Infinity;
+  for (const entry of row) {
+    total += entry.area;
+    max = Math.max(max, entry.area);
+    min = Math.min(min, entry.area);
+  }
+  const side2 = side * side;
+  const total2 = total * total;
+  return Math.max((side2 * max) / total2, total2 / (side2 * min));
+}
+
+function squarify(nodes, rect) {
+  const out = [];
+  const visible = nodes.filter((node) => node.value > 0);
+  const total = visible.reduce((acc, node) => acc + node.value, 0);
+  if (!total || rect.w <= 0 || rect.h <= 0) return out;
+  const scale = (rect.w * rect.h) / total;
+  let queue = visible.map((node) => ({ node, area: node.value * scale }));
+  let { x, y, w, h } = rect;
+  while (queue.length) {
+    const side = Math.min(w, h);
+    let row = [];
+    let best = Infinity;
+    let taken = 0;
+    while (taken < queue.length) {
+      const next = row.concat(queue[taken]);
+      const ratio = worst(next, side);
+      if (row.length && ratio > best) break;
+      row = next;
+      best = ratio;
+      taken += 1;
+    }
+    queue = queue.slice(taken);
+    const rowArea = row.reduce((acc, entry) => acc + entry.area, 0);
+    const thickness = rowArea / side;
+    let offset = 0;
+    for (const entry of row) {
+      const length = entry.area / thickness;
+      if (w >= h) out.push({ node: entry.node, x, y: y + offset, w: thickness, h: length });
+      else out.push({ node: entry.node, x: x + offset, y, w: length, h: thickness });
+      offset += length;
+    }
+    if (w >= h) {
+      x += thickness;
+      w -= thickness;
+    } else {
+      y += thickness;
+      h -= thickness;
+    }
+  }
+  return out;
+}
+
+function dominantCategory(node) {
+  const totals = new Map();
+  for (const item of node.items) {
+    totals.set(item.category, (totals.get(item.category) || 0) + item.allocated_bytes);
+  }
+  return [...totals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "build";
+}
+
+function place(node, box) {
+  node.style.left = `${box.x}px`;
+  node.style.top = `${box.y}px`;
+  node.style.width = `${Math.max(0, box.w)}px`;
+  node.style.height = `${Math.max(0, box.h)}px`;
+}
+
+function tileFor(node, box, total, path) {
+  const tile = el("div", "tile");
+  const inset = { x: box.x + 1, y: box.y + 1, w: box.w - 2, h: box.h - 2 };
+  place(tile, inset);
+  const isLeaf = node.kind === "leaf";
+  const category = isLeaf ? node.item.category : dominantCategory(node);
+  tile.style.backgroundColor = color(category);
+  if (isLeaf && node.item.safety === "review") tile.classList.add("review");
+  if (isLeaf && state.selected === node.item.id) tile.classList.add("selected");
+  if (inset.w > 56 && inset.h > 30) {
+    const text = el("div", "t");
+    text.append(el("b", "", isLeaf ? leafLabel(node.item) : node.label));
+    text.append(el("span", "", isLeaf ? bytes(node.value) : `${bytes(node.value)} · ${node.items.length}`));
+    tile.append(text);
+  }
+  tile.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (isLeaf) select(node.item.id, false);
+    else zoomTo([...path, node.key]);
+  });
+  tile.addEventListener("mousemove", (event) => showTip(event, node, total));
+  tile.addEventListener("mouseleave", hideTip);
+  return tile;
+}
+
+function groupFor(node, box, total, path) {
+  const group = el("div", "group");
+  const inset = { x: box.x + 1, y: box.y + 1, w: box.w - 2, h: box.h - 2 };
+  place(group, inset);
+  const roomy = inset.h > HEADER + 12 && inset.w > 40;
+  if (roomy) {
+    const head = el("div", "h");
+    head.append(el("b", "", node.label));
+    if (inset.w > 140) head.append(el("span", "", `${bytes(node.value)} · ${percent(node.value, total)}`));
+    group.append(head);
+  }
+  const top = roomy ? HEADER : PAD;
+  const inner = { x: PAD, y: top, w: inset.w - PAD * 2, h: inset.h - top - PAD };
+  if (inner.w > 6 && inner.h > 6) {
+    for (const box2 of squarify(node.children, inner)) {
+      if (box2.w * box2.h < 6) continue;
+      group.append(tileFor(box2.node, box2, total, [...path, node.key]));
+    }
+  } else {
+    group.style.backgroundColor = color(dominantCategory(node));
+  }
+  group.addEventListener("click", () => zoomTo([...path, node.key]));
+  group.addEventListener("mousemove", (event) => showTip(event, node, total));
+  group.addEventListener("mouseleave", hideTip);
+  return group;
+}
+
+function resolveZoom(root) {
+  let node = root;
+  const path = [];
+  for (const key of state.zoom) {
+    const next = node.children.find((child) => child.kind === "group" && child.key === key);
+    if (!next) break;
+    node = next;
+    path.push(key);
+  }
+  state.zoom = path;
+  return node;
+}
+
+function renderMap(root) {
+  const map = $("map");
+  map.replaceChildren();
+  const node = resolveZoom(root);
+  renderCrumbs(root);
+  if (!node.items.length) {
+    map.append(el("div", "empty", ITEMS.length ? "Nothing matches the current filters" : "The scan found nothing to clean"));
+    return node;
+  }
+  const rect = { x: 0, y: 0, w: map.clientWidth, h: map.clientHeight };
+  const total = node.value;
+  for (const box of squarify(node.children, rect)) {
+    const child = box.node;
+    if (child.kind === "group" && box.w > 30 && box.h > 30) map.append(groupFor(child, box, total, state.zoom));
+    else if (box.w * box.h >= 4) map.append(tileFor(child, box, total, state.zoom));
+  }
+  return node;
+}
+
+function renderCrumbs(root) {
+  const crumbs = $("crumbs");
+  crumbs.replaceChildren();
+  let node = root;
+  const trail = [{ label: "All", path: [] }];
+  state.zoom.forEach((key, index) => {
+    node = node.children.find((child) => child.key === key);
+    trail.push({ label: node.label, path: state.zoom.slice(0, index + 1) });
+  });
+  trail.forEach((step, index) => {
+    if (index) crumbs.append(el("span", "sep", "/"));
+    const button = el("button", "", step.label);
+    button.title = step.label;
+    button.addEventListener("click", () => zoomTo(step.path));
+    crumbs.append(button);
+  });
+  crumbs.append(el("span", "hint", state.zoom.length ? "Esc zooms out" : "Click a block to zoom in"));
+}
+
+function showTip(event, node, total) {
+  if (node.kind === "leaf") {
+    const item = node.item;
+    tipAt(event, display(item.path), [
+      `${bytes(item.allocated_bytes)} · ${percent(item.allocated_bytes, total)} of view`,
+      `${item.rule} · ${item.category} · ${item.safety}`,
+    ]);
+  } else {
+    tipAt(event, node.label, [`${bytes(node.value)} · ${percent(node.value, total)} of view`, `${node.items.length} items, click to zoom in`]);
+  }
+}
+
+function tipAt(event, title, lines) {
+  event.stopPropagation();
+  const tip = $("tip");
+  tip.replaceChildren(el("div", "p", title), ...lines.map((line) => el("div", "r", line)));
+  tip.style.display = "block";
+  const pad = 14;
+  const width = tip.offsetWidth;
+  const height = tip.offsetHeight;
+  const left = event.clientX + pad + width > window.innerWidth ? event.clientX - pad - width : event.clientX + pad;
+  const top = event.clientY + pad + height > window.innerHeight ? event.clientY - pad - height : event.clientY + pad;
+  tip.style.left = `${Math.max(4, left)}px`;
+  tip.style.top = `${Math.max(4, top)}px`;
+}
+
+function hideTip() {
+  $("tip").style.display = "none";
+}
+
+function stat(label, value, sub) {
+  const card = el("div", "stat");
+  card.append(el("div", "label", label));
+  card.append(el("div", "value", value));
+  if (sub) card.append(el("div", "sub", sub));
+  return card;
+}
+
+function renderStats(items) {
+  const total = sum(items);
+  const safe = sum(items.filter((item) => item.safety === "safe"));
+  const projects = new Set(items.map(projectOf)).size;
+  const summary = SCAN.summary;
+  const reclaim = stat("Reclaimable", bytes(total), `${items.length} items`);
+  const split = el("div", "split");
+  for (const category of CATEGORIES) {
+    const part = sum(items.filter((item) => item.category === category));
+    if (!part) continue;
+    const bar = el("i");
+    bar.style.width = `${(part / total) * 100}%`;
+    bar.style.background = color(category);
+    bar.title = `${category} ${bytes(part)}`;
+    split.append(bar);
+  }
+  reclaim.append(split);
+  $("stats").replaceChildren(
+    reclaim,
+    stat("Safe to delete", bytes(safe), percent(safe, total)),
+    stat("Needs review", bytes(total - safe), percent(total - safe, total)),
+    stat("Projects", String(projects), `${new Set(items.map((item) => item.rule)).size} rules matched`),
+    stat(
+      "Scanned",
+      `${(summary.duration / 1000).toFixed(2)} s`,
+      `${summary.progress.dirs.toLocaleString()} dirs, ${summary.progress.files.toLocaleString()} files${summary.cancelled ? ", cancelled" : ""}`,
+    ),
+  );
+}
+
+function barRow(label, value, total, swatch, onClick, off, suffix) {
+  const row = el(onClick ? "button" : "div", `barrow${off ? " off" : ""}${onClick ? "" : " static"}`);
+  if (onClick) row.type = "button";
+  const top = el("div", "top");
+  if (swatch) {
+    const dot = el("span", "dot");
+    dot.style.background = swatch;
+    top.append(dot);
+  }
+  const name = el("span", "n", label);
+  name.title = label;
+  top.append(name, el("span", "s", suffix || `${bytes(value)} · ${percent(value, total)}`));
+  const track = el("div", "track");
+  const fill = el("i");
+  fill.style.width = `${total ? (value / total) * 100 : 0}%`;
+  fill.style.background = swatch || "var(--ink)";
+  track.append(fill);
+  row.append(top, track);
+  if (onClick) row.addEventListener("click", onClick);
+  return row;
+}
+
+function renderSide(items) {
+  const unfiltered = ITEMS.filter((item) => {
+    if (state.safety !== "all" && item.safety !== state.safety) return false;
+    if (!state.query) return true;
+    const query = state.query.toLowerCase();
+    return display(item.path).toLowerCase().includes(query) || item.rule.toLowerCase().includes(query);
+  });
+  const catTotal = sum(unfiltered);
+  const cats = CATEGORIES.map((category) => [category, sum(unfiltered.filter((item) => item.category === category))])
+    .filter(([, value]) => value > 0)
+    .sort((a, b) => b[1] - a[1]);
+  $("cats").replaceChildren(
+    ...(cats.length
+      ? cats.map(([category, value]) =>
+          barRow(category, value, catTotal, color(category), () => toggleCategory(category), !state.categories.has(category)),
+        )
+      : [el("div", "note", "No items")]),
+  );
+
+  const total = sum(items);
+  const projects = new Map();
+  for (const item of items) {
+    const key = projectOf(item);
+    projects.set(key, (projects.get(key) || 0) + item.allocated_bytes);
+  }
+  const top = [...projects.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  $("projects").replaceChildren(
+    ...(top.length
+      ? top.map(([project, value]) =>
+          barRow(projectLabel(project), value, total, null, () => {
+            state.group = "project";
+            renderGroupButtons();
+            zoomTo([project]);
+          }),
+        )
+      : [el("div", "note", "No items")]),
+  );
+}
+
+function renderDetail(view) {
+  const detail = $("detail");
+  detail.replaceChildren();
+  const item = ITEMS.find((candidate) => candidate.id === state.selected);
+  if (!item) {
+    const head = el("h2", "", state.zoom.length ? "Current view" : "Overview");
+    detail.append(head);
+    detail.append(el("div", "path", view.label === "All" ? (SCAN.roots.map(display).join(", ") || "") : view.label));
+    const list = el("dl");
+    const safe = sum(view.items.filter((entry) => entry.safety === "safe"));
+    const rows = [
+      ["Size", bytes(view.value)],
+      ["Items", String(view.items.length)],
+      ["Safe", bytes(safe)],
+      ["Review", bytes(view.value - safe)],
+    ];
+    for (const [term, value] of rows) list.append(el("dt", "", term), el("dd", "", value));
+    detail.append(list);
+    detail.append(el("p", "note", "Click an item in the map or the table to see its details. Striped blocks need review before deleting."));
+    return;
+  }
+  detail.append(el("h2", "", "Selected item"));
+  detail.append(el("div", "path", display(item.path)));
+  const list = el("dl");
+  const safety = el("span", `badge ${item.safety}`, item.safety);
+  const modified = item.newest_modified ? new Date(item.newest_modified * 1000).toLocaleString() : "unknown";
+  const rows = [
+    ["Size", `${bytes(item.allocated_bytes)} on disk`],
+    ["Apparent", bytes(item.apparent_bytes)],
+    ["Entries", item.entries.toLocaleString()],
+    ["Safety", safety],
+    ["Rule", item.rule],
+    ["Category", item.category],
+    ["Ecosystem", item.ecosystem || "none"],
+    ["Project", item.project ? display(item.project) : "none"],
+    ["Last change", modified],
+  ];
+  for (const [term, value] of rows) {
+    const dd = el("dd");
+    if (typeof value === "string") dd.textContent = value;
+    else dd.append(value);
+    list.append(el("dt", "", term), dd);
+  }
+  detail.append(list);
+  if (item.partial) detail.append(el("p", "note", "Some entries could not be read, so the size is a lower bound."));
+  const actions = el("div", "actions");
+  const copy = el("button", "btn", "Copy path");
+  copy.type = "button";
+  copy.addEventListener("click", () => copyPath(item.path, copy));
+  const clear = el("button", "btn", "Clear selection");
+  clear.type = "button";
+  clear.addEventListener("click", () => select(null, false));
+  actions.append(copy, clear);
+  detail.append(actions);
+}
+
+function copyPath(path, button) {
+  navigator.clipboard
+    .writeText(path)
+    .then(() => {
+      button.textContent = "Copied";
+    })
+    .catch(() => {
+      button.textContent = "Copy failed, select the path above";
+    });
+}
+
+const COLUMNS = [
+  { key: "size", label: "Size", num: true, value: (item) => item.allocated_bytes },
+  { key: "safety", label: "Safety", value: (item) => item.safety },
+  { key: "category", label: "Category", value: (item) => item.category },
+  { key: "rule", label: "Rule", value: (item) => item.rule },
+  { key: "path", label: "Path", value: (item) => display(item.path) },
+];
+
+function renderTable(items) {
+  const column = COLUMNS.find((entry) => entry.key === state.sort.key);
+  const sorted = [...items].sort((a, b) => {
+    const left = column.value(a);
+    const right = column.value(b);
+    const order = left < right ? -1 : left > right ? 1 : 0;
+    return order * state.sort.dir || b.allocated_bytes - a.allocated_bytes;
+  });
+  const head = $("thead");
+  head.replaceChildren(
+    ...COLUMNS.map((entry) => {
+      const th = el("th", entry.num ? "num" : "", entry.label);
+      if (entry.key === state.sort.key) th.setAttribute("aria-sort", state.sort.dir < 0 ? "descending" : "ascending");
+      th.addEventListener("click", () => {
+        state.sort = entry.key === state.sort.key
+          ? { key: entry.key, dir: -state.sort.dir }
+          : { key: entry.key, dir: entry.num ? -1 : 1 };
+        render();
+      });
+      return th;
+    }),
+  );
+  const shown = sorted.slice(0, state.tableLimit);
+  $("rows").replaceChildren(
+    ...shown.map((item) => {
+      const row = el("tr", state.selected === item.id ? "selected" : "");
+      const safety = el("td");
+      safety.append(el("span", `badge ${item.safety}`, item.safety));
+      const category = el("td");
+      const dot = el("span", "dot");
+      dot.style.background = color(item.category);
+      dot.style.display = "inline-block";
+      dot.style.marginRight = "6px";
+      category.append(dot, document.createTextNode(item.category));
+      row.append(el("td", "num", bytes(item.allocated_bytes)), safety, category, el("td", "mono", item.rule), el("td", "path", display(item.path)));
+      row.addEventListener("click", () => select(item.id, true));
+      return row;
+    }),
+  );
+  $("tablenote").textContent = `${items.length} items, ${bytes(sum(items))}`;
+  const more = $("more");
+  more.replaceChildren();
+  if (sorted.length > shown.length) {
+    const button = el("button", "btn", `Show ${Math.min(TABLE_STEP, sorted.length - shown.length)} more of ${sorted.length - shown.length}`);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      state.tableLimit += TABLE_STEP;
+      render();
+    });
+    more.append(button);
+  }
+}
+
+function renderIssues() {
+  const issues = SCAN.issues;
+  const box = $("issues");
+  if (!issues.length) return;
+  box.hidden = false;
+  box.append(el("summary", "", `${issues.length} paths could not be read`));
+  const list = el("ul");
+  for (const issue of issues) list.append(el("li", "", `${display(issue.path)}: ${issue.message}`));
+  box.append(list);
+}
+
+function renderGroupButtons() {
+  for (const button of $("group").children) button.setAttribute("aria-pressed", String(button.dataset.value === state.group));
+}
+
+function renderSafetyButtons() {
+  for (const button of $("safety").children) button.setAttribute("aria-pressed", String(button.dataset.value === state.safety));
+}
+
+function renderChips() {
+  for (const chip of $("chips").children) chip.setAttribute("aria-pressed", String(state.categories.has(chip.dataset.value)));
+}
+
+function render() {
+  const items = filtered();
+  const tree = buildTree(items);
+  const view = renderMap(tree);
+  renderStats(items);
+  renderSide(items);
+  renderDetail(view);
+  renderTable(items);
+  renderChips();
+  const active = items.length !== ITEMS.length;
+  $("filtered").textContent = active ? `Showing ${items.length} of ${ITEMS.length} items` : "";
+}
+
+function zoomTo(path) {
+  state.zoom = path;
+  hideTip();
+  render();
+}
+
+function select(id, reveal) {
+  state.selected = id;
+  if (reveal && id !== null) {
+    const item = ITEMS.find((candidate) => candidate.id === id);
+    if (item) state.zoom = groupKeys(item).map(([key]) => key);
+  }
+  render();
+}
+
+function toggleCategory(category) {
+  if (state.categories.has(category) && state.categories.size === 1) state.categories = new Set(CATEGORIES);
+  else if (state.categories.has(category)) state.categories.delete(category);
+  else state.categories.add(category);
+  render();
+}
+
+function segmented(container, options, onPick) {
+  for (const [value, label] of options) {
+    const button = el("button", "", label);
+    button.type = "button";
+    button.dataset.value = value;
+    button.addEventListener("click", () => onPick(value));
+    container.append(button);
+  }
+}
+
+function setup() {
+  const roots = SCAN.roots.map(display).join(", ");
+  $("meta").textContent = `${roots} · ${DATA.generated}`;
+  segmented($("group"), [["project", "Project"], ["category", "Category"], ["rule", "Rule"]], (value) => {
+    state.group = value;
+    state.zoom = [];
+    renderGroupButtons();
+    render();
+  });
+  segmented($("safety"), [["all", "All"], ["safe", "Safe"], ["review", "Review"]], (value) => {
+    state.safety = value;
+    renderSafetyButtons();
+    render();
+  });
+  const present = CATEGORIES.filter((category) => ITEMS.some((item) => item.category === category));
+  for (const category of present) {
+    const chip = el("button", "chip");
+    chip.type = "button";
+    chip.dataset.value = category;
+    const dot = el("span", "dot");
+    dot.style.background = color(category);
+    chip.append(dot, document.createTextNode(category));
+    chip.addEventListener("click", () => toggleCategory(category));
+    $("chips").append(chip);
+  }
+  let pending = 0;
+  $("search").addEventListener("input", (event) => {
+    clearTimeout(pending);
+    pending = setTimeout(() => {
+      state.query = event.target.value.trim();
+      state.tableLimit = TABLE_STEP;
+      render();
+    }, 120);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.target instanceof HTMLInputElement || event.metaKey || event.ctrlKey || event.altKey) return;
+    const back = event.key === "Escape" || event.key === "Backspace";
+    const tab = DASH ? VIEWS[Number(event.key) - 1] : undefined;
+    if (tab) {
+      showView(tab[0]);
+    } else if (view === "artifacts" && back && state.zoom.length) {
+      event.preventDefault();
+      zoomTo(state.zoom.slice(0, -1));
+    } else if (view === "folders" && back && folderState.path.length) {
+      event.preventDefault();
+      folderState.path = folderState.path.slice(0, -1);
+      renderFolders();
+    } else if (event.key === "/" && (view === "artifacts" || view === "duplicates")) {
+      event.preventDefault();
+      $(view === "artifacts" ? "search" : "dupe-search").focus();
+    }
+  });
+  let frame = 0;
+  new ResizeObserver(() => {
+    cancelAnimationFrame(frame);
+    if (view === "artifacts") frame = requestAnimationFrame(render);
+  }).observe($("map"));
+  renderGroupButtons();
+  renderSafetyButtons();
+  renderIssues();
+  if (DASH) setupDashboard();
+  else render();
+}
+
+const VIEWS = [
+  ["overview", "Overview"],
+  ["artifacts", "Artifacts"],
+  ["folders", "Folders"],
+  ["caches", "Caches"],
+  ["duplicates", "Duplicates"],
+  ["history", "History"],
+];
+const CACHES = DATA.caches ? DATA.caches.caches : [];
+const DUPES = DATA.duplicates || null;
+const RUNS = DATA.history ? DATA.history.runs : [];
+const DAY = 86400000;
+const STALE_DAYS = 90;
+const LIST_STEP = 100;
+let view = "artifacts";
+const folderState = { path: [], caches: true, limit: LIST_STEP };
+const dupeState = { query: "", limit: LIST_STEP };
+const KEPT = new Set((DATA.history ? DATA.history.kept : []).map(([run, entry]) => `${run}:${entry}`));
+
+function sumBy(list, value) {
+  return list.reduce((total, entry) => total + value(entry), 0);
+}
+
+function totalsBy(list, key, value) {
+  const totals = new Map();
+  for (const entry of list) {
+    const name = key(entry);
+    totals.set(name, (totals.get(name) || 0) + value(entry));
+  }
+  return [...totals.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function parentOf(path) {
+  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return index > 0 ? path.slice(0, index) : path;
+}
+
+function extensionOf(path) {
+  const name = basename(path);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase() : "no extension";
+}
+
+function count(value, noun, plural) {
+  return `${value.toLocaleString()} ${value === 1 ? noun : plural || `${noun}s`}`;
+}
+
+function ago(time) {
+  const days = Math.floor((Date.now() - time) / DAY);
+  if (days < 1) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 60) return `${days} days ago`;
+  if (days < 730) return `${Math.round(days / 30)} months ago`;
+  return `${Math.round(days / 365)} years ago`;
+}
+
+function shortDate(time) {
+  return new Date(time).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function quote(path) {
+  return /[\s'"$`\\]/.test(path) ? `'${path.replace(/'/g, "'\\''")}'` : path;
+}
+
+function rootArgs() {
+  return SCAN.roots.map((root) => quote(display(root))).join(" ");
+}
+
+function freedEntries() {
+  return RUNS.flatMap((run, runIndex) =>
+    run.deleted
+      .map((entry, entryIndex) => ({ ...entry, time: Date.parse(entry.deleted_at), key: `${runIndex}:${entryIndex}` }))
+      .filter((entry) => entry.mode !== "dry-run" && Number.isFinite(entry.time)),
+  );
+}
+
+function inTrash(entries) {
+  return entries.filter((entry) => entry.mode === "trash" && KEPT.has(entry.key));
+}
+
+function startOfWeek(time) {
+  const date = new Date(time);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return date;
+}
+
+function buckets(entries) {
+  const now = Date.now();
+  const first = entries.length ? Math.min(...entries.map((entry) => entry.time)) : now;
+  const monthly = now - first > 182 * DAY;
+  const points = [];
+  if (monthly) {
+    const start = new Date(first);
+    for (let date = new Date(start.getFullYear(), start.getMonth(), 1); date.getTime() <= now; date = new Date(date.getFullYear(), date.getMonth() + 1, 1)) {
+      points.push({ start: date.getTime(), label: date.toLocaleDateString(undefined, { month: "short", year: "numeric" }), value: 0, items: 0 });
+    }
+  } else {
+    const earliest = Math.min(startOfWeek(first).getTime(), startOfWeek(now).getTime() - 11 * 7 * DAY);
+    for (let date = startOfWeek(earliest); date.getTime() <= now; date = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 7)) {
+      points.push({ start: date.getTime(), label: `Week of ${date.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`, value: 0, items: 0 });
+    }
+  }
+  for (const entry of entries) {
+    let index = points.length - 1;
+    while (index > 0 && points[index].start > entry.time) index -= 1;
+    points[index].value += entry.bytes;
+    points[index].items += 1;
+  }
+  return { unit: monthly ? "month" : "week", points };
+}
+
+function columnChart(points, swatch, empty) {
+  const box = el("div", "chart");
+  const max = Math.max(0, ...points.map((point) => point.value));
+  if (!max) {
+    box.append(el("div", "note", empty));
+    return box;
+  }
+  const plot = el("div", "cols");
+  const ref = el("div", "ref");
+  ref.append(el("span", "", bytes(max)));
+  plot.append(ref);
+  for (const point of points) {
+    const col = el("div", point.value ? "col" : "col zero");
+    const bar = el("i");
+    bar.style.height = point.value ? `max(2px, ${(point.value / max) * 100}%)` : "0";
+    bar.style.background = swatch;
+    col.append(bar);
+    col.addEventListener("mousemove", (event) => tipAt(event, point.label, [bytes(point.value), count(point.items, "item")]));
+    col.addEventListener("mouseleave", hideTip);
+    plot.append(col);
+  }
+  box.append(plot, ticks(points));
+  return box;
+}
+
+function ticks(points) {
+  const row = el("div", "ticks");
+  const name = (point) => point.label.replace(/^Week of /, "");
+  row.append(el("span", "", name(points[0])));
+  if (points.length > 2) row.append(el("span", "", name(points[Math.floor(points.length / 2)])));
+  if (points.length > 1) row.append(el("span", "", name(points[points.length - 1])));
+  return row;
+}
+
+function svg(tag, attributes) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+  return node;
+}
+
+function lineChart(points, swatch, empty) {
+  const box = el("div", "chart");
+  let running = 0;
+  const totals = points.map((point) => (running += point.value));
+  const max = running;
+  if (!max) {
+    box.append(el("div", "note", empty));
+    return box;
+  }
+  const plot = el("div", "line");
+  const step = points.length > 1 ? 100 / (points.length - 1) : 100;
+  const coords = totals.map((total, index) => `${(index * step).toFixed(2)},${(100 - (total / max) * 92).toFixed(2)}`);
+  const chart = svg("svg", { viewBox: "0 0 100 100", preserveAspectRatio: "none", "aria-hidden": "true" });
+  chart.append(
+    svg("polygon", { points: `0,100 ${coords.join(" ")} 100,100`, fill: swatch, "fill-opacity": "0.14" }),
+    svg("polyline", { points: coords.join(" "), fill: "none", stroke: swatch, "stroke-width": "2", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" }),
+  );
+  const ref = el("div", "ref");
+  ref.style.top = "8%";
+  ref.append(el("span", "", bytes(max)));
+  const hits = el("div", "hits");
+  points.forEach((point, index) => {
+    const hit = el("div");
+    hit.addEventListener("mousemove", (event) => tipAt(event, point.label, [`${bytes(totals[index])} in total`, `${bytes(point.value)} in this period`]));
+    hit.addEventListener("mouseleave", hideTip);
+    hits.append(hit);
+  });
+  plot.append(chart, ref, hits);
+  box.append(plot, ticks(points));
+  return box;
+}
+
+function placeholder(text) {
+  return el("div", "placeholder", text);
+}
+
+function bars(container, rows, empty) {
+  container.replaceChildren(...(rows.length ? rows : [el("div", "note", empty)]));
+}
+
+function renderTabs() {
+  const counts = {
+    artifacts: ITEMS.length,
+    caches: CACHES.length,
+    duplicates: DUPES ? DUPES.summary.groups : null,
+    history: RUNS.length,
+  };
+  const tabs = $("tabs");
+  tabs.hidden = false;
+  tabs.replaceChildren(
+    ...VIEWS.map(([key, label], index) => {
+      const button = el("button", "", label);
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.dataset.value = key;
+      button.title = `${label} (${index + 1})`;
+      if (counts[key]) button.append(el("span", "count", counts[key].toLocaleString()));
+      button.addEventListener("click", () => showView(key));
+      return button;
+    }),
+  );
+}
+
+function showView(name) {
+  view = name;
+  hideTip();
+  for (const [key] of VIEWS) $(`view-${key}`).hidden = key !== name;
+  for (const button of $("tabs").children) button.setAttribute("aria-selected", String(button.dataset.value === name));
+  if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+  if (name === "overview") renderOverview();
+  else if (name === "artifacts") render();
+  else if (name === "folders") renderFolders();
+  else if (name === "caches") renderCaches();
+  else if (name === "duplicates") renderDuplicates();
+  else renderHistory();
+}
+
+function openProject(project) {
+  state.group = "project";
+  state.zoom = [project];
+  renderGroupButtons();
+  showView("artifacts");
+}
+
+function insight(swatch, text, command) {
+  const row = el("li");
+  const dot = el("span", "dot");
+  dot.style.background = swatch;
+  row.append(dot, el("span", "", text));
+  if (command) {
+    const code = el("code", "", command);
+    code.title = "Click to copy";
+    code.addEventListener("click", () => {
+      navigator.clipboard
+        .writeText(command)
+        .then(() => {
+          code.textContent = "Copied";
+          setTimeout(() => (code.textContent = command), 1200);
+        })
+        .catch(() => {
+          code.title = "Copy failed, select the text";
+        });
+    });
+    row.append(code);
+  }
+  return row;
+}
+
+function insights() {
+  const rows = [];
+  const total = sum(ITEMS);
+  const safe = sum(ITEMS.filter((item) => item.safety === "safe"));
+  if (safe) {
+    rows.push(insight("var(--temp)", `${bytes(safe)} in projects is safe to delete and is rebuilt on the next install or build.`, `kuizer clean ${rootArgs()}`));
+  }
+  const cutoff = Date.now() / 1000 - STALE_DAYS * 86400;
+  const stale = ITEMS.filter((item) => item.newest_modified && item.newest_modified < cutoff);
+  if (stale.length) {
+    const projects = new Set(stale.map(projectOf)).size;
+    rows.push(insight("var(--build)", `${bytes(sum(stale))} sits in ${count(projects, "project")} untouched for over ${STALE_DAYS} days, ${percent(sum(stale), total)} of all artifacts.`));
+  }
+  const biggest = ITEMS[0];
+  if (biggest) {
+    rows.push(insight(color(biggest.category), `The largest single item is ${relative(biggest)} in ${biggest.project ? projectLabel(biggest.project) : display(parentOf(biggest.path))} at ${bytes(biggest.allocated_bytes)}.`));
+  }
+  const safeCaches = CACHES.filter((cache) => cache.safety === "safe");
+  if (safeCaches.length) {
+    const top = safeCaches[0];
+    rows.push(insight("var(--global)", `${bytes(sumBy(safeCaches, (cache) => cache.allocated_bytes))} of global caches is safe to clear, led by ${top.name} at ${bytes(top.allocated_bytes)}.`, "kuizer cache --clean"));
+  }
+  if (DUPES && DUPES.summary.reclaimable_bytes) {
+    rows.push(insight("var(--dupes)", `${count(DUPES.summary.duplicates, "extra copy", "extra copies")} of duplicate files take ${bytes(DUPES.summary.reclaimable_bytes)}. kuizer never deletes them; pick the copy to keep on the Duplicates tab.`));
+  }
+  const entries = freedEntries();
+  const trashed = inTrash(entries);
+  if (trashed.length) {
+    rows.push(insight("var(--cache)", `${bytes(sumBy(trashed, (entry) => entry.bytes))} from past runs is still in the trash. Emptying the trash frees it.`));
+  }
+  if (entries.length) {
+    const last = Math.max(...entries.map((entry) => entry.time));
+    if (Date.now() - last > 30 * DAY) rows.push(insight("var(--faint)", `The last cleanup was ${ago(last)}.`));
+  }
+  if (!rows.length) rows.push(insight("var(--temp)", "Nothing to clean right now."));
+  return rows;
+}
+
+function primaryDisk() {
+  return (DATA.disk || []).find((disk) => disk.total_bytes && disk.available_bytes !== null);
+}
+
+function renderOverview() {
+  const artifacts = sum(ITEMS);
+  const caches = sumBy(CACHES, (cache) => cache.allocated_bytes);
+  const duplicates = DUPES ? DUPES.summary.reclaimable_bytes : 0;
+  const entries = freedEntries();
+  const freed = sumBy(entries, (entry) => entry.bytes);
+  const disk = primaryDisk();
+  const tiles = [
+    stat("Project artifacts", bytes(artifacts), `${count(ITEMS.length, "item")} in ${count(new Set(ITEMS.map(projectOf)).size, "project")}`),
+    stat("Global caches", bytes(caches), count(CACHES.length, "cache")),
+    stat("Duplicate copies", DUPES ? bytes(duplicates) : "skipped", DUPES ? `${count(DUPES.summary.groups, "group")}` : "run without --no-duplicates"),
+    stat("Freed so far", bytes(freed), entries.length ? `${count(RUNS.length, "run")} since ${shortDate(Math.min(...entries.map((entry) => entry.time)))}` : "no runs yet"),
+  ];
+  if (disk) {
+    const card = stat("Free disk space", bytes(disk.available_bytes), `of ${bytes(disk.total_bytes)} on ${display(disk.path)}`);
+    const used = disk.total_bytes - disk.available_bytes;
+    const reclaim = Math.min(used, artifacts + caches + duplicates);
+    const gauge = el("div", "gauge");
+    for (const [value, swatch, label] of [
+      [used - reclaim, "var(--faint)", "used"],
+      [reclaim, "var(--temp)", "reclaimable"],
+    ]) {
+      const part = el("i");
+      part.style.width = `${(value / disk.total_bytes) * 100}%`;
+      part.style.background = swatch;
+      part.title = `${label} ${bytes(value)}`;
+      gauge.append(part);
+    }
+    card.append(gauge, el("div", "sub", `Cleaning everything leaves ${bytes(disk.available_bytes + reclaim)} free`));
+    tiles.push(card);
+  }
+  $("ov-stats").replaceChildren(...tiles);
+
+  const segments = [
+    ...CATEGORIES.map((category) => [category, `${category} in projects`, sum(ITEMS.filter((item) => item.category === category)), color(category), "artifacts"]),
+    ["global", "global caches", caches, "var(--global)", "caches"],
+    ["dupes", "duplicate copies", duplicates, "var(--dupes)", "duplicates"],
+  ].filter((segment) => segment[2] > 0);
+  const whole = sumBy(segments, (segment) => segment[2]);
+  const stack = el("div", "stack");
+  for (const [, label, value, swatch, target] of segments) {
+    const part = el("i");
+    part.style.width = `${(value / whole) * 100}%`;
+    part.style.background = swatch;
+    part.addEventListener("mousemove", (event) => tipAt(event, label, [`${bytes(value)} · ${percent(value, whole)}`]));
+    part.addEventListener("mouseleave", hideTip);
+    part.addEventListener("click", () => showView(target));
+    stack.append(part);
+  }
+  const legend = el("div", "bars");
+  for (const [, label, value, swatch, target] of segments) legend.append(barRow(label, value, whole, swatch, () => showView(target)));
+  $("ov-stack").replaceChildren(...(whole ? [stack, legend] : [el("div", "note", "Nothing found")]));
+  $("ov-insights").replaceChildren(...insights());
+
+  const projects = totalsBy(ITEMS, projectOf, (item) => item.allocated_bytes).slice(0, 6);
+  bars($("ov-projects"), projects.map(([project, value]) => barRow(projectLabel(project), value, artifacts, null, () => openProject(project))), "No artifacts found");
+  bars($("ov-caches"), CACHES.slice(0, 6).map((cache) => barRow(cache.name, cache.allocated_bytes, caches, "var(--global)", () => showView("caches"))), "No caches found");
+  const series = buckets(entries);
+  $("ov-freed-title").textContent = `Freed per ${series.unit}`;
+  $("ov-freed").replaceChildren(columnChart(series.points, "var(--temp)", "Nothing deleted yet"));
+}
+
+function folderItems() {
+  const items = ITEMS.map((item) => ({ path: item.path, bytes: item.allocated_bytes, category: item.category, label: item.rule, safety: item.safety, id: item.id }));
+  if (folderState.caches) {
+    for (const cache of CACHES) items.push({ path: cache.path, bytes: cache.allocated_bytes, category: "global", label: cache.name, safety: cache.safety, id: null });
+  }
+  return items;
+}
+
+function folderNode(name, full) {
+  return { name, full, children: new Map(), leaves: [], value: 0, items: [] };
+}
+
+function folderTree(items) {
+  const root = folderNode("", "");
+  for (const item of items) {
+    const sep = item.path.includes("/") ? "/" : "\\";
+    const parts = item.path.split(/[\\/]/).filter(Boolean);
+    const lead = item.path.startsWith("/") ? "/" : "";
+    let node = root;
+    node.value += item.bytes;
+    node.items.push(item);
+    parts.slice(0, -1).forEach((part, index) => {
+      if (!node.children.has(part)) node.children.set(part, folderNode(part, lead + parts.slice(0, index + 1).join(sep)));
+      node = node.children.get(part);
+      node.value += item.bytes;
+      node.items.push(item);
+    });
+    node.leaves.push(item);
+  }
+  let base = root;
+  while (base.children.size === 1 && !base.leaves.length) base = [...base.children.values()][0];
+  return base;
+}
+
+function splitTrack(items, total) {
+  const track = el("div", "track");
+  for (const [category, value] of totalsBy(items, (item) => item.category, (item) => item.bytes)) {
+    const part = el("i");
+    part.style.width = `${total ? (value / total) * 100 : 0}%`;
+    part.style.background = color(category);
+    track.append(part);
+  }
+  return track;
+}
+
+function renderFolders() {
+  const base = folderTree(folderItems());
+  let node = base;
+  const trail = [{ label: display(base.full) || "/", path: [] }];
+  const resolved = [];
+  for (const key of folderState.path) {
+    const next = node.children.get(key);
+    if (!next) break;
+    node = next;
+    resolved.push(key);
+    trail.push({ label: key, path: [...resolved] });
+  }
+  folderState.path = resolved;
+  const crumbs = $("folder-crumbs");
+  crumbs.replaceChildren();
+  trail.forEach((step, index) => {
+    if (index) crumbs.append(el("span", "sep", "/"));
+    const button = el("button", "", step.label);
+    button.title = step.label;
+    button.addEventListener("click", () => {
+      folderState.path = step.path;
+      folderState.limit = LIST_STEP;
+      renderFolders();
+    });
+    crumbs.append(button);
+  });
+  crumbs.append(el("span", "hint", folderState.path.length ? "Esc goes up" : "Click a folder to open it"));
+  $("folder-note").textContent = `${bytes(node.value)} in ${count(node.items.length, "item")}`;
+
+  const entries = [
+    ...[...node.children.values()].map((child) => ({ kind: "folder", child, value: child.value })),
+    ...node.leaves.map((item) => ({ kind: "leaf", item, value: item.bytes })),
+  ].sort((a, b) => b.value - a.value);
+  const shown = entries.slice(0, folderState.limit);
+  const rows = shown.map((entry) => {
+    const row = el("button", `frow${entry.kind === "leaf" ? " leaf" : ""}`);
+    row.type = "button";
+    const name = el("div", "n");
+    if (entry.kind === "folder") {
+      const child = entry.child;
+      name.append(el("span", "ico", "▸"), el("b", "", child.name), el("span", "note", count(child.items.length, "item")));
+      row.append(name, el("span", "s", `${bytes(child.value)} · ${percent(child.value, node.value)}`), splitTrack(child.items, node.value));
+      row.addEventListener("click", () => {
+        folderState.path = [...folderState.path, child.name];
+        folderState.limit = LIST_STEP;
+        renderFolders();
+      });
+    } else {
+      const item = entry.item;
+      const icon = el("span", "ico");
+      const dot = el("span", "dot");
+      dot.style.background = color(item.category);
+      icon.append(dot);
+      name.append(icon, el("b", "", basename(item.path)), el("span", "note", item.label), el("span", `badge ${item.safety}`, item.safety));
+      row.append(name, el("span", "s", `${bytes(item.bytes)} · ${percent(item.bytes, node.value)}`), splitTrack([item], node.value));
+      row.title = display(item.path);
+      row.addEventListener("click", () => {
+        if (item.id === null) {
+          showView("caches");
+          return;
+        }
+        state.selected = item.id;
+        state.zoom = groupKeys(ITEMS.find((candidate) => candidate.id === item.id)).map(([key]) => key);
+        showView("artifacts");
+      });
+    }
+    return row;
+  });
+  $("folder-rows").replaceChildren(...(rows.length ? rows : [placeholder("Nothing found in these folders")]));
+  const more = $("folder-more");
+  more.replaceChildren();
+  if (entries.length > shown.length) {
+    const button = el("button", "btn", `Show ${Math.min(LIST_STEP, entries.length - shown.length)} more of ${entries.length - shown.length}`);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      folderState.limit += LIST_STEP;
+      renderFolders();
+    });
+    more.append(button);
+  }
+}
+
+function renderCaches() {
+  const total = sumBy(CACHES, (cache) => cache.allocated_bytes);
+  const safe = sumBy(CACHES.filter((cache) => cache.safety === "safe"), (cache) => cache.allocated_bytes);
+  const newest = Math.max(0, ...CACHES.map((cache) => cache.newest_modified || 0));
+  $("cache-stats").replaceChildren(
+    stat("Global caches", bytes(total), count(CACHES.length, "cache")),
+    stat("Safe to clear", bytes(safe), percent(safe, total)),
+    stat("Needs review", bytes(total - safe), percent(total - safe, total)),
+    stat("Tools", String(new Set(CACHES.map((cache) => cache.tool)).size), newest ? `last write ${ago(newest * 1000)}` : ""),
+  );
+  bars($("cache-tools"), totalsBy(CACHES, (cache) => cache.tool, (cache) => cache.allocated_bytes).slice(0, 10).map(([tool, value]) => barRow(tool, value, total, "var(--global)")), "No caches found");
+  bars($("cache-safety"), totalsBy(CACHES, (cache) => cache.safety, (cache) => cache.allocated_bytes).map(([safety, value]) => barRow(safety, value, total, safety === "safe" ? "var(--temp)" : "var(--build)")), "No caches found");
+  $("cache-note").textContent = CACHES.length ? `${bytes(total)} in ${count(CACHES.length, "cache")}` : "";
+  $("cache-rows").replaceChildren(
+    ...CACHES.map((cache) => {
+      const row = el("tr");
+      row.style.cursor = "default";
+      const safety = el("td");
+      safety.append(el("span", `badge ${cache.safety}`, cache.safety));
+      const name = el("td");
+      name.append(el("div", "mono", cache.name));
+      if (cache.note) name.append(el("div", "note", cache.note));
+      name.style.whiteSpace = "normal";
+      const modified = cache.newest_modified ? ago(cache.newest_modified * 1000) : "unknown";
+      row.append(el("td", "num", bytes(cache.allocated_bytes)), safety, name, el("td", "", modified), el("td", "path", display(cache.path)));
+      return row;
+    }),
+  );
+  if (!CACHES.length) {
+    const row = el("tr");
+    const cell = el("td", "note", "No global caches found");
+    cell.colSpan = 5;
+    row.append(cell);
+    $("cache-rows").append(row);
+  }
+}
+
+function renderDuplicates() {
+  if (!DUPES) {
+    $("dupe-stats").replaceChildren();
+    $("dupe-charts").hidden = true;
+    $("dupe-note").textContent = "";
+    $("dupe-search").parentElement.hidden = true;
+    $("dupe-groups").replaceChildren(placeholder("The duplicate search was skipped. Run kuizer dashboard without --no-duplicates to include it."));
+    return;
+  }
+  const summary = DUPES.summary;
+  const groups = DUPES.groups;
+  const largest = groups[0];
+  $("dupe-stats").replaceChildren(
+    stat("Reclaimable", bytes(summary.reclaimable_bytes), count(summary.duplicates, "extra copy", "extra copies")),
+    stat("Groups", summary.groups.toLocaleString(), groups.some((group) => group.verified) ? "verified byte by byte" : "matched by BLAKE3 hash"),
+    stat("Largest group", largest ? bytes(largest.reclaimable_bytes) : "none", largest ? `${largest.members.length} copies of ${basename(largest.members[0].path)}` : ""),
+    stat("Files compared", summary.files.toLocaleString(), `${(summary.duration / 1000).toFixed(2)} s`),
+  );
+  const reclaim = summary.reclaimable_bytes;
+  bars(
+    $("dupe-types"),
+    totalsBy(groups, (group) => extensionOf(group.members[0].path), (group) => group.reclaimable_bytes).slice(0, 8).map(([type, value]) => barRow(type, value, reclaim, "var(--dupes)")),
+    "No duplicates found",
+  );
+  const copies = groups.flatMap((group) => group.members.map((member) => ({ folder: parentOf(member.path), bytes: group.allocated_bytes })));
+  const copyTotal = sumBy(copies, (copy) => copy.bytes);
+  bars(
+    $("dupe-folders"),
+    totalsBy(copies, (copy) => copy.folder, (copy) => copy.bytes).slice(0, 8).map(([folder, value]) => barRow(display(folder), value, copyTotal, "var(--dupes)", () => {
+      dupeState.query = display(folder);
+      $("dupe-search").value = dupeState.query;
+      renderDuplicates();
+    })),
+    "No duplicates found",
+  );
+  const query = dupeState.query.toLowerCase();
+  const matched = query ? groups.filter((group) => group.members.some((member) => display(member.path).toLowerCase().includes(query))) : groups;
+  const capped = summary.groups > groups.length ? `, showing the largest ${groups.length.toLocaleString()} of ${summary.groups.toLocaleString()}` : "";
+  $("dupe-note").textContent = `${count(matched.length, "group")}, ${bytes(sumBy(matched, (group) => group.reclaimable_bytes))} reclaimable${capped}`;
+  const shown = matched.slice(0, dupeState.limit);
+  $("dupe-groups").replaceChildren(
+    ...(shown.length
+      ? shown.map((group) => {
+          const details = el("details", "group-row");
+          const head = el("summary");
+          const first = group.members[0].path;
+          const name = el("b", "", basename(first));
+          name.title = display(first);
+          head.append(name, el("span", "s", `${bytes(group.reclaimable_bytes)} reclaimable`));
+          head.append(el("span", "sub", `${group.members.length} copies of ${bytes(group.size)} · ${new Set(group.members.map((member) => parentOf(member.path))).size === 1 ? "same folder" : "across folders"}`));
+          const list = el("ul");
+          const times = group.members.map((member) => member.modified || Infinity);
+          const oldest = Math.min(...times);
+          for (const member of group.members) {
+            const row = el("li");
+            const when = member.modified ? shortDate(member.modified * 1000) : "unknown";
+            row.append(el("span", "", display(member.path)), el("span", "when", member.modified === oldest && group.members.length > 1 ? `${when} · oldest` : when));
+            list.append(row);
+          }
+          details.append(head, list);
+          return details;
+        })
+      : [placeholder(groups.length ? "No groups match the filter" : "No duplicate files found")]),
+  );
+  const more = $("dupe-more");
+  more.replaceChildren();
+  if (matched.length > shown.length) {
+    const button = el("button", "btn", `Show ${Math.min(LIST_STEP, matched.length - shown.length)} more of ${matched.length - shown.length}`);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      dupeState.limit += LIST_STEP;
+      renderDuplicates();
+    });
+    more.append(button);
+  }
+}
+
+function commandLabel(command) {
+  const parts = command.split(" ");
+  return [basename(parts[0] || "kuizer"), ...parts.slice(1)].join(" ");
+}
+
+function renderHistory() {
+  const entries = freedEntries();
+  const freed = sumBy(entries, (entry) => entry.bytes);
+  const starts = RUNS.map((run) => Date.parse(run.started_at)).filter(Number.isFinite).sort((a, b) => a - b);
+  const gaps = starts.slice(1).map((time, index) => time - starts[index]);
+  const gap = gaps.length ? sumBy(gaps, (value) => value) / gaps.length : 0;
+  const trashed = inTrash(entries);
+  const tiles = [
+    stat("Freed all time", bytes(freed), count(entries.length, "item")),
+    stat("Runs", RUNS.length.toLocaleString(), starts.length ? `since ${shortDate(starts[0])}` : "none yet"),
+    stat("Last run", starts.length ? ago(starts[starts.length - 1]) : "never", starts.length ? shortDate(starts[starts.length - 1]) : ""),
+    stat("Run every", gaps.length ? (gap < DAY ? "daily" : count(Math.round(gap / DAY), "day")) : "n/a", gaps.length ? "average gap between runs" : "needs two runs"),
+  ];
+  if (DATA.history.trash_known) tiles.push(stat("Still in trash", bytes(sumBy(trashed, (entry) => entry.bytes)), count(trashed.length, "item")));
+  $("hist-stats").replaceChildren(...tiles);
+  const series = buckets(entries);
+  $("hist-freed-title").textContent = `Freed per ${series.unit}`;
+  $("hist-freed").replaceChildren(columnChart(series.points, "var(--temp)", "Nothing deleted yet"));
+  $("hist-total").replaceChildren(lineChart(series.points, "var(--dependencies)", "Nothing deleted yet"));
+  bars($("hist-cats"), totalsBy(entries, (entry) => entry.category, (entry) => entry.bytes).map(([category, value]) => barRow(category, value, freed, color(category))), "Nothing deleted yet");
+  bars($("hist-rules"), totalsBy(entries, (entry) => entry.rule, (entry) => entry.bytes).slice(0, 8).map(([rule, value]) => barRow(rule, value, freed, null)), "Nothing deleted yet");
+  bars($("hist-folders"), totalsBy(entries, (entry) => parentOf(entry.path), (entry) => entry.bytes).slice(0, 8).map(([folder, value]) => barRow(display(folder), value, freed, null)), "Nothing deleted yet");
+
+  $("hist-note").textContent = RUNS.length ? `${count(RUNS.length, "run")}, newest first` : "";
+  const body = $("hist-rows");
+  body.replaceChildren();
+  if (!RUNS.length) {
+    const row = el("tr");
+    const cell = el("td", "note", "Nothing deleted yet. kuizer clean, kuizer cache --clean and the interactive list record every deletion here.");
+    cell.colSpan = 5;
+    cell.style.whiteSpace = "normal";
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+  [...RUNS.keys()].reverse().forEach((runIndex) => {
+    const run = RUNS[runIndex];
+    const started = Date.parse(run.started_at);
+    const kept = run.deleted.filter((entry, index) => entry.mode === "trash" && KEPT.has(`${runIndex}:${index}`)).length;
+    const trash = !DATA.history.trash_known ? "unknown" : kept ? `${kept} of ${run.deleted.length} kept` : run.deleted.some((entry) => entry.mode === "trash") ? "emptied" : "permanent";
+    const row = el("tr");
+    const command = el("td", "mono", commandLabel(run.command));
+    command.style.whiteSpace = "normal";
+    row.append(
+      el("td", "", Number.isFinite(started) ? new Date(started).toLocaleString() : run.started_at),
+      el("td", "num", run.total.items.toLocaleString()),
+      el("td", "num", bytes(run.total.bytes)),
+      el("td", "", trash),
+      command,
+    );
+    const detail = el("tr", "entries");
+    detail.hidden = true;
+    const cell = el("td");
+    cell.colSpan = 5;
+    const table = el("table");
+    for (const [index, entry] of run.deleted.entries()) {
+      const line = el("tr");
+      const status = entry.mode === "permanent" ? "deleted" : entry.mode === "dry-run" ? "dry run" : !DATA.history.trash_known ? "trashed" : KEPT.has(`${runIndex}:${index}`) ? "in trash" : "left trash";
+      line.append(el("td", "num", bytes(entry.bytes)), el("td", "", status), el("td", "mono", entry.rule), el("td", "path", display(entry.path)));
+      table.append(line);
+    }
+    cell.append(table);
+    detail.append(cell);
+    row.addEventListener("click", () => {
+      detail.hidden = !detail.hidden;
+      row.classList.toggle("selected", !detail.hidden);
+    });
+    body.append(row, detail);
+  });
+}
+
+function setupDashboard() {
+  $("kind").textContent = "dashboard";
+  document.title = "kuizer dashboard";
+  renderTabs();
+  $("folder-caches").addEventListener("change", (event) => {
+    folderState.caches = event.target.checked;
+    folderState.path = [];
+    renderFolders();
+  });
+  let pending = 0;
+  $("dupe-search").addEventListener("input", (event) => {
+    clearTimeout(pending);
+    pending = setTimeout(() => {
+      dupeState.query = event.target.value.trim();
+      dupeState.limit = LIST_STEP;
+      renderDuplicates();
+    }, 120);
+  });
+  const requested = location.hash.slice(1);
+  showView(VIEWS.some(([key]) => key === requested) ? requested : "overview");
+}
+
+setup();
+</script>
+</body>
+</html>

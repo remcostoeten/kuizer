@@ -1,6 +1,7 @@
 mod cache;
 mod clean;
 mod config;
+mod dashboard;
 mod duplicates;
 mod insight;
 mod removal;
@@ -46,7 +47,6 @@ fn interactive() -> bool {
 
 fn nested_help(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Ui(args) if args.paths.command == Some(NestedCommand::Help) => Some("ui"),
         Command::Scan(args) if args.command == Some(NestedCommand::Help) => Some("scan"),
         Command::Duplicates(args) if args.command == Some(NestedCommand::Help) => {
             Some("duplicates")
@@ -55,6 +55,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::Insight(args) if args.command == Some(NestedCommand::Help) => Some("insight"),
+        Command::Dashboard(args) if args.command == Some(NestedCommand::Help) => Some("dashboard"),
         _ => None,
     }
 }
@@ -75,9 +76,14 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     }
     let loaded = Config::load(cli.config.as_deref())?;
     match cli.command {
-        None if !cli.json && interactive() => ui::run(&loaded.config, Vec::new(), false),
-        None => scan::run(&loaded.config, ScanArgs::default(), cli.json, cli.quiet),
-        Some(Command::Ui(args)) => ui::run(&loaded.config, args.paths.paths, args.confirm),
+        None if !cli.json && interactive() => ui::run(&loaded.config, cli.paths, cli.confirm),
+        None => {
+            let args = ScanArgs {
+                paths: cli.paths,
+                ..ScanArgs::default()
+            };
+            scan::run(&loaded.config, args, cli.json, cli.quiet)
+        }
         Some(Command::Scan(args)) => scan::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
@@ -87,5 +93,6 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
     }
 }

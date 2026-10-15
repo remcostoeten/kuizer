@@ -57,7 +57,7 @@ What carries over directly:
 | `detect::Detector` | Directories that match an artifact rule are pruned from source collection. |
 | `output::json` with `schema_version` | A new `code` report document. Adding a command adds a document; it does not bump `SCHEMA_VERSION`. |
 | `cli::RemovalArgs` (`--select`, `--dry-run`, `--permanent`, `--yes`) | Reused for `kuizer code --fix`, matching `kuizer cache --clean`. |
-| `tui` (ratatui `App` and `view`) | The v1 browser becomes a view in kuizer's TUI in phase 6. The design doc already reserves keys `1` to `4` for views. |
+| `tui` (ratatui `App` and `view`) | The v1 browser becomes a view in kuizer's TUI in slice 6. The design doc already reserves keys `1` to `4` for views. |
 | CI (`fmt`, `clippy -D warnings`, `test`) | Unchanged; the new crate is part of the workspace. |
 
 What does not fit as is:
@@ -73,6 +73,7 @@ What does not fit as is:
 kuizer code [PATHS...]                report findings for each project under PATHS
     --only ID|KIND                    repeatable: unused-files, unused-exports, unused-imports, or a kind
     --skip ID                         repeatable
+    --exclude-file GLOB               repeatable, never report matching files as unused
     --exclude-symbol GLOB             repeatable
     --tsconfig PATH                   override the tsconfig for a single project
     --fix                             plan fixes, show them, apply after confirmation
@@ -97,11 +98,31 @@ Global defaults in `~/.config/kuizer/config.toml`:
 [code]
 count_tests_as_consumers = false
 allowed_exports = []
+exclude_files = []            # globs, relative to each project root
 exclude_symbols = []          # globs
 snapshot = true
 ```
 
 Per-project settings come from the first of `kuizer-code.toml`, the `kuizer` key in `package.json` (the same key v1 used, so its contents are read as they are), or a v1 `kuizer.config.json`, `.kuizerrc` or `.kuizerrc.json` (read-only, with a notice to migrate). Keys: `tsconfig`, `entrypoints` (globs), `framework` (`auto`, `nextjs-app`, `nextjs-pages`, `vite`, `none`; `auto` detects from `package.json` dependencies and the presence of `app/` or `pages/`), `ignore.files`, `ignore.paths`, `ignore.symbols`, `detectors.<id>.{enabled,severity}`. `outputDir` and `dryRunByDefault` are dropped: snapshots move out of the project (section 4.8) and `kuizer code` without `--fix` never writes.
+
+### 3.1 Excluded files
+
+Some files are used in ways no import shows: scripts run by hand, files loaded by a tool's convention, fixtures read from disk. The exclude list marks them as used. It comes from four sources, merged per project:
+
+| Source | Form |
+| --- | --- |
+| `[code] exclude_files` in `~/.config/kuizer/config.toml` | globs, applied to every project |
+| `ignore.files` in the per-project config | globs, the key v1 used |
+| `--exclude-file GLOB` | repeatable, for one run |
+| a `// kuizer-keep` comment before the first statement of a file | marks that file alone |
+
+Globs are relative to the project root and resolved once at config load, so a pattern matches the same files everywhere (section 1, defect 4).
+
+An excluded file is still collected and parsed, and it is treated as an entry. Excluding `scripts/seed.ts` therefore also keeps the helpers it imports, instead of reporting them as unused one level down. Excluded files are never reported, never selected for removal and never touched by `--fix`.
+
+The report lists how many files each source excluded, and the `code` JSON document has an `excluded` array with each path and the source that excluded it. A glob that matches no file is reported as a warning, so stale entries surface instead of piling up.
+
+This is separate from source collection skips (`Excludes`, `skip_dirs`, `.kuizerignore`, artifact rules). Those remove paths from the analysis entirely; their imports count for nothing.
 
 ## 4. Design of `crates/kuizer-code`
 
@@ -165,7 +186,7 @@ This is the part ts-morph did for free through `getExportedDeclarations` and `ge
 
 ### 4.6 Caching
 
-None in the first version. oxc parses and analyses a large TypeScript repository in a fraction of the time ts-morph takes to load it, and v1's cache was wrong (section 1, defect 2). Measure with the benchmark in phase 7 before adding one. If one is added, key the whole module graph on the hashes of every file plus the tsconfig and package manifests, and store it under `dirs::cache_dir()/kuizer/code/`, not in `node_modules`.
+None in the first version. oxc parses and analyses a large TypeScript repository in a fraction of the time ts-morph takes to load it, and v1's cache was wrong (section 1, defect 2). Measure with the benchmark in slice 7 before adding one. If one is added, key the whole module graph on the hashes of every file plus the tsconfig and package manifests, and store it under `dirs::cache_dir()/kuizer/code/`, not in `node_modules`.
 
 ### 4.7 Fix planning and edits
 
@@ -184,20 +205,21 @@ Edits for one file are sorted by start offset, checked for overlap (overlap is a
 
 Snapshots live in `dirs::state_dir()/kuizer/snapshots/<id>/` (on Linux `~/.local/state`), out of the project tree so they never show up in `git status`. The manifest records the project root, each file's original path and BLAKE3 hash before and after the edit. Files removed through the trash need no copy: restoring them means taking them out of the trash, which `trash` supports on Linux. The snapshot id goes into the history entry. `kuizer code restore` refuses to overwrite a file whose current hash differs from the recorded post-edit hash, unless `--force` is given.
 
-## 5. Phases
+## 5. Slices
 
-Each phase is one pull request, in the style of `design.md` section 10.
+The port ships one feature at a time. Each slice is usable on its own and is one pull request, in the style of `design.md` section 10. The slices that edit source files come last, so the riskiest work only starts once the reports have proven useful. Stopping after slice 2 is a valid outcome.
 
-| Phase | Scope | Accepted when |
-| --- | --- | --- |
-| 0 | Create the workspace (`Cargo.toml` with `members = [".", "crates/kuizer-code"]`). Check out `v1-typescript`, run v1's `kuizer detect --json` from that checkout (not the Rust binary of the same name) on `__tests__/fixtures/sample` and on three real repositories (a library, a Next.js app router app, a Vite app), and commit the outputs as golden files under `crates/kuizer-code/tests/golden/`. Copy the fixture tree to `crates/kuizer-code/tests/fixtures/`. | Workspace builds, CI passes unchanged, golden files committed with the commands that produced them. |
-| 1 | `project.rs`, `files.rs`, `parse.rs`, `resolve.rs`, `graph.rs`. A debug command prints entries, reachable and test-reachable sets. | Graph matches v1 on the fixture. Tests for `tsconfig` `paths`, `.js` specifiers resolving to `.ts`, `index` files, `exports` maps, a workspace package import, a cycle, a non-literal `import()` boundary, and a symlink in the tree (not followed). |
-| 2 | `exports.rs`, the three detectors, framework rules. | Fixture findings equal the golden files, except where section 1 lists a defect, and each such difference has a named test. Re-export chains, `export *` ambiguity, `export * as ns`, namespace member access, escaping namespace bindings, `import().then(m => m.x)`, shadowed names, type-only imports, Next.js app and pages conventions. |
-| 3 | `kuizer code` report: text output in `output/text.rs` style, `code` JSON document, filters, `--fail-on-findings`, `[code]` config and per-project config, v1 config reader. | JSON snapshot test. `config check` rejects unknown `[code]` keys. Real-repository runs differ from the golden files only by documented defects. |
-| 4 | Fix planning, span edits, diff, `--fix` with `RemovalArgs`, dirty-file refusal, hash revalidation, atomic writes, re-parse check, snapshots, history entries, `kuizer code restore`. | Every destructive test runs in a temp dir. Dry run leaves a tree snapshot unchanged. Tests: file changed between analysis and fix, overlapping edits, parse failure after an edit rolls back, restore refuses a file edited after the fix, unused file goes to the trash and comes back, history file from the current release still loads. |
-| 5 | Remove-import fixes; grouped `export const a, b` (remove one declarator); `export { a, b }` lists (remove one specifier). v1 refused all three. | Positive and negative test per case; output re-parses and the fixture still type-checks with `tsc --noEmit`. |
-| 6 | TUI view `4`, code findings grouped by project and file, selection, `d` opens the fix preview with the diff. Replaces v1's 1,200-line interactive mode. | Same acceptance as `design.md` phase 2 and 3: input latency under 50 ms, terminal restored on panic, selection survives filtering. |
-| 7 | Benchmark on a fixed large repository against kuizer v1, decide on caching, document the schema. Retire v1: a final npm release prints a deprecation notice that points to the Rust binary, and the `v1-typescript` branch README says the same. | Numbers recorded in `design.md` section 9. Deprecation release published. |
+Before slice 1, `master` has no uncommitted work in progress.
+
+| Slice | Feature | Scope | Accepted when |
+| --- | --- | --- | --- |
+| 1 | Unused files, report only | Workspace (`members = [".", "crates/kuizer-code"]`). `project.rs`, `files.rs`, `parse.rs` with `oxc_parser` only (imports, re-export sources, dynamic imports, the `kuizer-keep` marker; no `oxc_semantic`), `resolve.rs`, `graph.rs`. Entry detection from `package.json`, root config files and test globs, plus the `nextjs-app`, `nextjs-pages` and `vite` presets and `auto` detection. The exclude list (section 3.1). `kuizer code` prints unused files in `output/text.rs` style and as a `code` JSON document. `[code]` config and the per-project config reader. | Tests for `tsconfig` `paths`, `.js` specifiers resolving to `.ts`, `index` files, `exports` maps, a workspace package import, a cycle, a non-literal `import()` boundary, a symlink in the tree (not followed), each exclude source, an excluded file keeping its imports alive, and a glob that matches nothing. A Next.js app router fixture reports no page, layout or route file. A project with no real entry says so instead of reporting files. No golden comparison with v1, which barely reports unused files (section 1, defect 1). |
+| 2 | Delete unused files | `kuizer code --fix` for files only, with `RemovalArgs`, `delete::Guard`, the trash by default, the dirty-file listing and history entries with `kind = "code"`. The trash is the undo, so no snapshots. | Every destructive test runs in a temp dir. Dry run leaves the tree unchanged. A file changed between analysis and fix is skipped. An excluded file is never removed, even with `--select all`. An unused file goes to the trash and comes back. A history file from the current release still loads. |
+| 3 | Unused imports, report only | `oxc_semantic` in `parse.rs`, the `unused-imports` detector, `--only` and `--skip`. | Tests for type-only imports, side-effect imports, shadowed names and JSX usage. |
+| 4 | Unused exports, report only | `exports.rs` (section 4.5), the `unused-exports` detector with `kind`, `test_only` and `internal_only`, framework-consumed exports, `--exclude-symbol`, `--fail-on-findings`. Before starting, run v1's `kuizer detect --json` from the `v1-typescript` checkout on its fixture and on three real repositories (a library, a Next.js app router app, a Vite app), and commit the outputs as golden files. | Export findings equal the golden files, except where section 1 lists a defect, and each such difference has a named test. Re-export chains, `export *` ambiguity, `export * as ns`, namespace member access, escaping namespace bindings, `import().then(m => m.x)`, Next.js app and pages conventions. |
+| 5 | Source edits | Fix planning, span edits, diff, hash revalidation, atomic writes, re-parse check, snapshots and `kuizer code restore`. Then remove-import fixes, one declarator of `export const a, b` and one specifier of `export { a, b }`. | Overlapping edits are refused. A parse failure after an edit rolls back. Restore refuses a file edited after the fix. Output re-parses and the fixture still type-checks with `tsc --noEmit`. |
+| 6 | TUI view | View `4`: findings grouped by project and file, selection, `d` opens the fix preview, `k` adds the file under the cursor to the project's exclude list. | Same acceptance as `design.md` phase 2 and 3: input latency under 50 ms, terminal restored on panic, selection survives filtering. |
+| 7 | Benchmark and retire v1 | Benchmark on a fixed large repository against v1, decide on caching, document the schema. A final npm release of v1 prints a deprecation notice that points to the Rust binary, and the `v1-typescript` branch README says the same. | Numbers recorded in `design.md` section 9. Deprecation release published. |
 
 ## 6. Risks
 

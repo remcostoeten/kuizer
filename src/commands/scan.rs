@@ -1,12 +1,13 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::AppError;
 use crate::cli::{ScanArgs, SortKey};
 use crate::config::Config;
 use crate::detect::Safety;
 use crate::output;
-use crate::scan::{self, Cancel, Candidate};
+use crate::platform;
+use crate::scan::{self, Cancel, Candidate, Issue, Summary};
 use crate::tui;
 
 pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
@@ -53,6 +54,8 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     let live = !json && !args.no_live && terminal;
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let safe_only = args.safe_only;
+    let report = args.report;
+    let open = !args.no_open && std::io::stderr().is_terminal();
     let collected = if live {
         tui::watch(&handle, safe_only)?
     } else {
@@ -72,6 +75,19 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
         candidates.retain(|candidate| candidate.rule.safety == Safety::Safe);
     }
 
+    sort_candidates(&mut candidates, args.sort);
+    let written = report
+        .map(|target| {
+            write_report(
+                target,
+                &roots,
+                &candidates,
+                &collected.issues,
+                &collected.summary,
+            )
+        })
+        .transpose()?;
+
     if live {
         output::print_overview(
             &candidates,
@@ -79,10 +95,10 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
             &collected.summary,
             output::largest_count(args.limit),
         );
+        announce_report(written.as_deref(), open);
         return Ok(());
     }
 
-    sort_candidates(&mut candidates, args.sort);
     if let Some(limit) = args.limit {
         candidates.truncate(limit);
     }
@@ -94,5 +110,56 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     } else {
         output::print_scan(&candidates, &collected.issues, &collected.summary, quiet);
     }
+    announce_report(written.as_deref(), open);
     Ok(())
+}
+
+pub(super) fn announce_report(path: Option<&Path>, open: bool) {
+    let Some(path) = path else {
+        return;
+    };
+    eprintln!("Report written to {}", output::display_path(path));
+    if open && let Err(error) = platform::open_in_browser(path) {
+        eprintln!("Could not open a browser: {error}");
+    }
+}
+
+fn default_page_path(prefix: &str) -> Result<PathBuf, AppError> {
+    let dir = dirs::cache_dir().ok_or(AppError::NoHome)?.join("kuizer");
+    let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S");
+    Ok(dir.join(format!("{prefix}-{stamp}.html")))
+}
+
+pub(super) fn generated_at() -> String {
+    jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string()
+}
+
+pub(super) fn write_page(
+    target: Option<PathBuf>,
+    prefix: &str,
+    page: &str,
+) -> Result<PathBuf, AppError> {
+    let path = match target {
+        Some(path) => path,
+        None => default_page_path(prefix)?,
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, page)?;
+    Ok(std::path::absolute(&path).unwrap_or(path))
+}
+
+fn write_report(
+    target: Option<PathBuf>,
+    roots: &[PathBuf],
+    candidates: &[Candidate],
+    issues: &[Issue],
+    summary: &Summary,
+) -> Result<PathBuf, AppError> {
+    let page = output::scan_html(roots, candidates, issues, summary, &generated_at());
+    write_page(target, "report", &page)
 }
