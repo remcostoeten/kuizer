@@ -23,9 +23,9 @@ pub struct FilterArgs {
 
 ### Filters apply after detection, not by removing rules
 
-Today `--category` works by narrowing `config.detect.categories` before the scan (`src/commands/clean.rs`, `src/commands/scan.rs`). That removes rules from the detector, and a removed rule no longer prunes the walk: `kuizer scan --category build` stops recognising `node_modules` as an artifact, descends into it, and reports `dist` folders of installed packages as build output. `--rule js-dist` would do the same.
+`--category` used to narrow `config.detect.categories`, which removed rules from the detector, and a removed rule no longer pruned the walk: `kuizer scan --category build` descended into `node_modules` and reported the `dist` folders of installed packages. Fixed in `Detector::reporting`: the detector keeps every enabled rule for pruning and reports only the wanted categories (`tests/scan.rs` `category_filter_keeps_pruning_other_artifacts`). `--rule` must follow the same rule: it filters candidates, it never removes rules from the detector.
 
-Decision: the detector always keeps every enabled rule so pruning is unchanged, and filters run on the candidates. A new `src/filter.rs` owns this:
+A new `src/filter.rs` owns this:
 
 ```rust
 pub struct Filter { categories, rules, min_size, idle, projects: GlobSet, now }
@@ -76,7 +76,7 @@ Phase 7's benchmark gives the cost of step 1 on a real home directory. If it is 
 ## Tests
 
 - Property test (`proptest` dev dependency) in `tests/filters.rs`: generate small project trees and random `FilterArgs`, run `kuizer --json scan` and `kuizer --json clean --dry-run --select all` with the same filters, and assert the same set of paths.
-- Regression test for the pruning bug: `scan --category build` on a tree with `node_modules/pkg/dist` reports no `dist`.
+- `scan --rule js-dist` on a tree with `node_modules/pkg/dist` reports no `dist` inside `node_modules`.
 - Idle tests in `tests/idle.rs`, setting times with `filetime` (dev dependency):
   - artifact touched recently in a project whose files are old: idle.
   - a commit with no file changes newer than the cutoff: active.

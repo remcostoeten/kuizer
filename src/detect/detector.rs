@@ -63,6 +63,7 @@ pub struct Detector {
     rules: Vec<Compiled>,
     dirs: Index,
     files: Index,
+    reported: Vec<Category>,
 }
 
 pub struct Listing {
@@ -152,7 +153,27 @@ impl Detector {
             });
         }
 
-        Ok(Self { rules, dirs, files })
+        Ok(Self {
+            rules,
+            dirs,
+            files,
+            reported: Category::ALL.to_vec(),
+        })
+    }
+
+    /// @name reporting
+    /// @description Limits which categories are reported. Rules of other categories still
+    /// match, so the walker keeps pruning at `node_modules` even when only build output is wanted.
+    ///
+    /// @example
+    /// let detector = Detector::new(&specs)?.reporting(vec![Category::Build]);
+    pub fn reporting(mut self, categories: Vec<Category>) -> Self {
+        self.reported = categories;
+        self
+    }
+
+    pub fn reports(&self, rule: &RuleInfo) -> bool {
+        self.reported.contains(&rule.category)
     }
 
     pub fn rule_count(&self) -> usize {

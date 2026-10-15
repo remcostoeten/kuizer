@@ -237,6 +237,14 @@ impl Config {
     }
 
     pub fn rule_specs(&self) -> Result<Vec<RuleSpec>, ConfigError> {
+        Ok(self
+            .enabled_rules()?
+            .into_iter()
+            .filter(|rule| self.detect.categories.contains(&rule.category))
+            .collect())
+    }
+
+    fn enabled_rules(&self) -> Result<Vec<RuleSpec>, ConfigError> {
         let builtins = if self.detect.builtin_rules {
             builtin_rules()
         } else {
@@ -257,12 +265,11 @@ impl Config {
             .cloned()
             .chain(builtins)
             .filter(|rule| !self.detect.disabled_rules.contains(&rule.name))
-            .filter(|rule| self.detect.categories.contains(&rule.category))
             .collect())
     }
 
     pub fn detector(&self) -> Result<Detector, ConfigError> {
-        Ok(Detector::new(&self.rule_specs()?)?)
+        Ok(Detector::new(&self.enabled_rules()?)?.reporting(self.detect.categories.clone()))
     }
 
     pub fn excludes(&self) -> Result<Excludes, ConfigError> {

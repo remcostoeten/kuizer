@@ -3,7 +3,7 @@ mod support;
 use std::fs;
 
 use kuizer::config::Config;
-use kuizer::detect::Safety;
+use kuizer::detect::{Category, Safety};
 use kuizer::scan::{self, Cancel, IssueKind};
 use kuizer::units::ByteSize;
 use support::{cachedir_tag, dir, file, found, pairs, run, scan};
@@ -47,6 +47,22 @@ fn finds_project_artifacts_with_context() {
     assert_eq!(dist.rule.safety, Safety::Review);
     assert!(collected.issues.is_empty());
     assert!(!collected.summary.cancelled);
+}
+
+#[test]
+fn category_filter_keeps_pruning_other_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    file(root, "web/package.json", 2);
+    file(root, "web/dist/app.js", 100);
+    file(root, "web/node_modules/pkg/package.json", 2);
+    file(root, "web/node_modules/pkg/dist/index.js", 100);
+    let mut config = Config::default();
+    config.detect.categories = vec![Category::Build];
+
+    let collected = run(&config, root);
+
+    assert_eq!(found(&collected, root), pairs(&[("web/dist", "js-dist")]));
 }
 
 #[test]

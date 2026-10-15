@@ -146,6 +146,9 @@ impl Walker<'_> {
                 .detector
                 .classify_dir(&pending.path, &pending.parent, &own)
         {
+            if !self.detector.reports(&rule) {
+                return Flow::Continue;
+            }
             return self.emit(Found {
                 path: pending.path,
                 kind: Kind::Dir,
@@ -204,6 +207,7 @@ impl Walker<'_> {
                     continue;
                 }
                 if let Some(rule) = self.detector.classify_file(&name, &own)
+                    && self.detector.reports(&rule)
                     && let Flow::Stop = self.emit(Found {
                         path,
                         kind: Kind::File,
