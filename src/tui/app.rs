@@ -59,6 +59,7 @@ pub struct App {
     pub issues: usize,
     pub overlay: Overlay,
     pub mode: Mode,
+    pub confirm_before_delete: bool,
     pub freed: u64,
     pub trashed: u64,
     pub free: Option<u64>,
@@ -68,7 +69,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mode: Mode) -> Self {
+    pub fn new(mode: Mode, confirm_before_delete: bool) -> Self {
         Self {
             items: Vec::new(),
             view: Vec::new(),
@@ -83,6 +84,7 @@ impl App {
             issues: 0,
             overlay: Overlay::None,
             mode,
+            confirm_before_delete,
             freed: 0,
             trashed: 0,
             free: None,
@@ -290,6 +292,21 @@ impl App {
         };
     }
 
+    pub fn delete(&mut self) -> Vec<(u64, Target, Mode)> {
+        self.open_confirm();
+        if self.confirm_before_delete || self.mode == Mode::Permanent {
+            return Vec::new();
+        }
+        self.confirm()
+    }
+
+    pub fn delete_selected(&mut self) -> Vec<(u64, Target, Mode)> {
+        if self.selected().next().is_none() {
+            return Vec::new();
+        }
+        self.delete()
+    }
+
     pub fn toggle_confirm_mode(&mut self) {
         if let Overlay::Confirm { mode, .. } = &mut self.overlay {
             *mode = match mode {
@@ -413,7 +430,11 @@ mod tests {
     }
 
     fn app() -> App {
-        let mut app = App::new(Mode::Trash);
+        app_with(Mode::Trash, true)
+    }
+
+    fn app_with(mode: Mode, confirm: bool) -> App {
+        let mut app = App::new(mode, confirm);
         app.push(candidate(1, "/p/a/node_modules", 10, Safety::Safe));
         app.push(candidate(2, "/p/b/node_modules", 30, Safety::Safe));
         app.push(candidate(3, "/p/c/dist", 20, Safety::Review));
@@ -444,6 +465,34 @@ mod tests {
         let ids: Vec<u64> = app.selected().map(|item| item.candidate.id).collect();
         assert_eq!(ids, [2, 3]);
         assert_eq!(app.selected_bytes(), 50);
+    }
+
+    #[test]
+    fn enter_opens_confirm_only_with_a_selection() {
+        let mut app = app();
+        assert!(app.delete_selected().is_empty());
+        assert!(matches!(app.overlay, Overlay::None));
+        app.toggle();
+        assert!(app.delete_selected().is_empty());
+        assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids == &[2]));
+    }
+
+    #[test]
+    fn trash_skips_the_dialog_unless_confirmation_is_on() {
+        let mut app = app_with(Mode::Trash, false);
+        app.toggle();
+        let jobs = app.delete_selected();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].2, Mode::Trash);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.item(2).unwrap().status, Status::Deleting);
+    }
+
+    #[test]
+    fn permanent_mode_always_asks() {
+        let mut app = app_with(Mode::Permanent, false);
+        assert!(app.delete().is_empty());
+        assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids == &[2]));
     }
 
     #[test]
@@ -493,7 +542,7 @@ mod tests {
 
     #[test]
     fn project_grouping_orders_by_project_and_selects_whole_project() {
-        let mut app = App::new(Mode::Trash);
+        let mut app = App::new(Mode::Trash, true);
         let mut cache = candidate(4, "/p/a/.cache", 50, Safety::Review);
         cache.project = Some(PathBuf::from("/p/a"));
         let mut modules = candidate(1, "/p/a/node_modules", 10, Safety::Safe);

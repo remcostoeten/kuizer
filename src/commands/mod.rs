@@ -46,7 +46,7 @@ fn interactive() -> bool {
 
 fn nested_help(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Ui(args) if args.command == Some(NestedCommand::Help) => Some("ui"),
+        Command::Ui(args) if args.paths.command == Some(NestedCommand::Help) => Some("ui"),
         Command::Scan(args) if args.command == Some(NestedCommand::Help) => Some("scan"),
         Command::Duplicates(args) if args.command == Some(NestedCommand::Help) => {
             Some("duplicates")
@@ -75,9 +75,9 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     }
     let loaded = Config::load(cli.config.as_deref())?;
     match cli.command {
-        None if !cli.json && interactive() => ui::run(&loaded.config, Vec::new()),
+        None if !cli.json && interactive() => ui::run(&loaded.config, Vec::new(), false),
         None => scan::run(&loaded.config, ScanArgs::default(), cli.json, cli.quiet),
-        Some(Command::Ui(args)) => ui::run(&loaded.config, args.paths),
+        Some(Command::Ui(args)) => ui::run(&loaded.config, args.paths.paths, args.confirm),
         Some(Command::Scan(args)) => scan::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),

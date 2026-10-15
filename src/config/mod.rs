@@ -147,6 +147,7 @@ pub enum DeleteMode {
 #[serde(default, deny_unknown_fields)]
 pub struct DeleteConfig {
     pub mode: DeleteMode,
+    pub confirm: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

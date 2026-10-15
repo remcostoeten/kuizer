@@ -120,7 +120,16 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             KeyCode::Char(' ') => app.toggle(),
             KeyCode::Char('a') => app.select_safe(),
             KeyCode::Char('u') => app.clear_selection(),
-            KeyCode::Char('d') | KeyCode::Delete => app.open_confirm(),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                for job in app.delete() {
+                    let _ = jobs.send(job);
+                }
+            }
+            KeyCode::Enter => {
+                for job in app.delete_selected() {
+                    let _ = jobs.send(job);
+                }
+            }
             KeyCode::Char('s') => app.cycle_sort(),
             KeyCode::Char('p') => app.toggle_grouping(),
             KeyCode::Char('P') => app.select_project(),
@@ -136,14 +145,14 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 /// and deletes confirmed selections on a background thread through the delete guard.
 ///
 /// @example
-/// tui::run(&config, &roots)?;
-pub fn run(config: &Config, roots: &[PathBuf]) -> std::io::Result<()> {
+/// tui::run(&config, &roots, false)?;
+pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result<()> {
     let handle = scan::start(config, roots, Cancel::new()).map_err(std::io::Error::other)?;
     let (job_tx, job_rx) = unbounded::<Job>();
     let (result_tx, result_rx) = unbounded::<Outcome>();
     let stop = Arc::new(AtomicBool::new(false));
     let deleter = spawn_deleter(Guard::new(roots), job_rx, result_tx, Arc::clone(&stop));
-    let mut app = App::new(config.delete.mode.into());
+    let mut app = App::new(config.delete.mode.into(), confirm);
     let started_at = history::now();
     let mut deleted = Vec::new();
     let filesystems = distinct_filesystems(roots);

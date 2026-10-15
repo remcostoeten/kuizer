@@ -130,6 +130,11 @@ fn ui_help() -> String {
         examples(&[
             ("kuizer", "", "Browse the current directory"),
             ("kuizer ui", "~/apps ~/work", "Browse two folders at once"),
+            (
+                "kuizer ui",
+                "--confirm",
+                "Show a dialog before every trash move"
+            ),
         ])
     )
 }
@@ -305,7 +310,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(about = ABOUT_UI, after_help = ui_help())]
-    Ui(PathsArgs),
+    Ui(UiArgs),
     #[command(about = ABOUT_SCAN, after_help = scan_examples())]
     Scan(ScanArgs),
     #[command(about = ABOUT_DUPLICATES, visible_alias = "deduplicate", after_help = duplicates_help())]
@@ -335,6 +340,18 @@ pub struct PathsArgs {
     pub paths: Vec<PathBuf>,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct UiArgs {
+    #[command(flatten)]
+    pub paths: PathsArgs,
+    #[arg(
+        long,
+        help = "Ask before moving items to the trash [config: delete.confirm]"
+    )]
+    pub confirm: bool,
 }
 
 #[derive(Debug, Args, Default)]

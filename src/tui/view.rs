@@ -273,10 +273,15 @@ fn footer(app: &App) -> Line<'static> {
     }
     let selected = app.selected().count();
     let mut spans = vec![Span::raw(" ")];
+    let delete_hint = if selected > 0 {
+        ("enter", "delete selected")
+    } else {
+        ("d", "delete")
+    };
     spans.extend(key_hints(&[
         ("space", "select"),
         ("a", "all safe"),
-        ("d", "delete"),
+        delete_hint,
         ("/", "filter"),
         ("s", "sort"),
         ("?", "help"),
@@ -449,6 +454,7 @@ fn help(frame: &mut Frame) {
             "Act",
             &[
                 (&["d", "del"], "delete selection or item under cursor"),
+                (&["enter"], "delete selection"),
                 (&["/"], "filter by path or rule"),
                 (&["s"], "cycle sort: size, path, category"),
                 (&["p"], "group by rule or by project"),

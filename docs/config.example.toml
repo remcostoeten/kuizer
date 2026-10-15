@@ -33,3 +33,4 @@ verify = false
 
 [delete]
 mode = "trash"
+confirm = false
