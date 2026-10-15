@@ -3,15 +3,16 @@ mod clean;
 mod config;
 mod dashboard;
 mod duplicates;
-mod insight;
+mod history;
 mod removal;
+mod restore;
 mod rules;
 mod scan;
 mod ui;
 
 use std::path::PathBuf;
 
-use crate::cli::{Cli, Command, NestedCommand, ScanArgs};
+use crate::cli::{Cli, Command, HistoryAction, NestedCommand, ScanArgs};
 use crate::config::{Config, ConfigError};
 use crate::history::HistoryError;
 use clap::CommandFactory;
@@ -38,6 +39,16 @@ pub enum AppError {
     ConfigExists(PathBuf),
     #[error("no config directory is known for this platform")]
     NoConfigDir,
+    #[error("no run or item `{0}` in the history, `kuizer history` lists the ids")]
+    UnknownRun(String),
+    #[error("restore needs a trash kuizer can read; on macOS use Put Back in Finder")]
+    RestoreUnsupported,
+    #[error("the history has no run with items to restore")]
+    NothingToRestore,
+    #[error("cannot read the trash: {0}")]
+    Trash(String),
+    #[error("{0} items could not be restored")]
+    RestoreFailed(usize),
 }
 
 fn interactive() -> bool {
@@ -54,7 +65,8 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
-        Command::Insight(args) if args.command == Some(NestedCommand::Help) => Some("insight"),
+        Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
+        Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
         Command::Dashboard(args) if args.command == Some(NestedCommand::Help) => Some("dashboard"),
         _ => None,
     }
@@ -87,7 +99,8 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Some(Command::Scan(args)) => scan::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
-        Some(Command::Insight(_)) => insight::run(cli.json),
+        Some(Command::History(args)) => history::run(args, cli.json),
+        Some(Command::Restore(args)) => restore::run(args, cli.json),
         Some(Command::Duplicates(args)) => {
             duplicates::run(&loaded.config, args, cli.json, cli.quiet)
         }

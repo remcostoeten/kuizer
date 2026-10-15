@@ -288,7 +288,7 @@ tr.entries table td { border-bottom: 0; padding: 4px 14px; }
     <section class="card tablecard">
       <div class="tablehead"><h2>Runs</h2><span class="note" id="hist-note"></span></div>
       <div class="scroll"><table class="plain">
-        <thead><tr><th>Started</th><th class="num">Items</th><th class="num">Freed</th><th>Trash</th><th>Command</th></tr></thead>
+        <thead><tr><th>Run</th><th>Started</th><th class="num">Items</th><th class="num">Size</th><th>Trash</th><th>Command</th></tr></thead>
         <tbody id="hist-rows"></tbody>
       </table></div>
     </section>
@@ -1042,6 +1042,15 @@ let view = "artifacts";
 const folderState = { path: [], caches: true, limit: LIST_STEP };
 const dupeState = { query: "", limit: LIST_STEP };
 const KEPT = new Set((DATA.history ? DATA.history.kept : []).map(([run, entry]) => `${run}:${entry}`));
+const RESTORED = new Set(RUNS.filter((run) => run.action === "restore").flatMap((run) => run.deleted.map((entry) => entry.restores).filter(Boolean)));
+
+function sessionOf(run, index) {
+  return `s${run.id || index + 1}`;
+}
+
+function isRestore(run) {
+  return run.action === "restore";
+}
 
 function sumBy(list, value) {
   return list.reduce((total, entry) => total + value(entry), 0);
@@ -1094,9 +1103,11 @@ function rootArgs() {
 
 function freedEntries() {
   return RUNS.flatMap((run, runIndex) =>
-    run.deleted
-      .map((entry, entryIndex) => ({ ...entry, time: Date.parse(entry.deleted_at), key: `${runIndex}:${entryIndex}` }))
-      .filter((entry) => entry.mode !== "dry-run" && Number.isFinite(entry.time)),
+    isRestore(run)
+      ? []
+      : run.deleted
+          .map((entry, entryIndex) => ({ ...entry, time: Date.parse(entry.deleted_at), key: `${runIndex}:${entryIndex}`, id: `${sessionOf(run, runIndex)}.${entryIndex + 1}` }))
+          .filter((entry) => entry.mode !== "dry-run" && Number.isFinite(entry.time) && !RESTORED.has(entry.id)),
   );
 }
 
@@ -1312,7 +1323,7 @@ function insights() {
   const entries = freedEntries();
   const trashed = inTrash(entries);
   if (trashed.length) {
-    rows.push(insight("var(--cache)", `${bytes(sumBy(trashed, (entry) => entry.bytes))} from past runs is still in the trash. Emptying the trash frees it.`));
+    rows.push(insight("var(--cache)", `${bytes(sumBy(trashed, (entry) => entry.bytes))} from past runs is still in the trash. Emptying the trash frees it, or put a run back with kuizer restore.`, "kuizer history"));
   }
   if (entries.length) {
     const last = Math.max(...entries.map((entry) => entry.time));
@@ -1637,7 +1648,7 @@ function commandLabel(command) {
 function renderHistory() {
   const entries = freedEntries();
   const freed = sumBy(entries, (entry) => entry.bytes);
-  const starts = RUNS.map((run) => Date.parse(run.started_at)).filter(Number.isFinite).sort((a, b) => a - b);
+  const starts = RUNS.filter((run) => !isRestore(run)).map((run) => Date.parse(run.started_at)).filter(Number.isFinite).sort((a, b) => a - b);
   const gaps = starts.slice(1).map((time, index) => time - starts[index]);
   const gap = gaps.length ? sumBy(gaps, (value) => value) / gaps.length : 0;
   const trashed = inTrash(entries);
@@ -1663,7 +1674,7 @@ function renderHistory() {
   if (!RUNS.length) {
     const row = el("tr");
     const cell = el("td", "note", "Nothing deleted yet. kuizer clean, kuizer cache --clean and the interactive list record every deletion here.");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     cell.style.whiteSpace = "normal";
     row.append(cell);
     body.append(row);
@@ -1671,13 +1682,34 @@ function renderHistory() {
   }
   [...RUNS.keys()].reverse().forEach((runIndex) => {
     const run = RUNS[runIndex];
+    const session = sessionOf(run, runIndex);
     const started = Date.parse(run.started_at);
-    const kept = run.deleted.filter((entry, index) => entry.mode === "trash" && KEPT.has(`${runIndex}:${index}`)).length;
-    const trash = !DATA.history.trash_known ? "unknown" : kept ? `${kept} of ${run.deleted.length} kept` : run.deleted.some((entry) => entry.mode === "trash") ? "emptied" : "permanent";
+    const restorable = run.deleted.filter((entry, index) => entry.mode === "trash" && KEPT.has(`${runIndex}:${index}`) && !RESTORED.has(`${session}.${index + 1}`)).length;
+    const trash = isRestore(run)
+      ? "restore"
+      : !DATA.history.trash_known
+        ? "unknown"
+        : restorable
+          ? `${restorable} of ${run.deleted.length} kept`
+          : run.deleted.some((entry) => entry.mode === "trash")
+            ? "emptied"
+            : "permanent";
     const row = el("tr");
     const command = el("td", "mono", commandLabel(run.command));
     command.style.whiteSpace = "normal";
+    if (restorable) {
+      const restore = `kuizer restore ${session}`;
+      const code = el("code", "", restore);
+      code.title = "Click to copy";
+      code.style.cssText = "display:inline-block;margin-left:8px;cursor:copy";
+      code.addEventListener("click", (event) => {
+        event.stopPropagation();
+        navigator.clipboard.writeText(restore).then(() => (code.textContent = "Copied")).catch(() => (code.title = "Copy failed, select the text"));
+      });
+      command.append(code);
+    }
     row.append(
+      el("td", "mono", session),
       el("td", "", Number.isFinite(started) ? new Date(started).toLocaleString() : run.started_at),
       el("td", "num", run.total.items.toLocaleString()),
       el("td", "num", bytes(run.total.bytes)),
@@ -1687,12 +1719,25 @@ function renderHistory() {
     const detail = el("tr", "entries");
     detail.hidden = true;
     const cell = el("td");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     const table = el("table");
     for (const [index, entry] of run.deleted.entries()) {
       const line = el("tr");
-      const status = entry.mode === "permanent" ? "deleted" : entry.mode === "dry-run" ? "dry run" : !DATA.history.trash_known ? "trashed" : KEPT.has(`${runIndex}:${index}`) ? "in trash" : "left trash";
-      line.append(el("td", "num", bytes(entry.bytes)), el("td", "", status), el("td", "mono", entry.rule), el("td", "path", display(entry.path)));
+      const id = `${session}.${index + 1}`;
+      const status = isRestore(run)
+        ? `restored from ${entry.restores}`
+        : RESTORED.has(id)
+          ? "restored"
+          : entry.mode === "permanent"
+            ? "deleted"
+            : entry.mode === "dry-run"
+              ? "dry run"
+              : !DATA.history.trash_known
+                ? "trashed"
+                : KEPT.has(`${runIndex}:${index}`)
+                  ? "in trash"
+                  : "left trash";
+      line.append(el("td", "mono", id), el("td", "num", bytes(entry.bytes)), el("td", "", status), el("td", "mono", entry.rule), el("td", "path", display(entry.path)));
       table.append(line);
     }
     cell.append(table);

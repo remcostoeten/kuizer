@@ -15,12 +15,25 @@ const LEGACY_FILE_NAME: &str = ".sweep-history.json";
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct History {
+    pub next_session: u64,
     pub runs: Vec<Run>,
     pub cumulative: Cumulative,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Action {
+    #[default]
+    Delete,
+    Restore,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
+    pub action: Action,
     pub started_at: String,
     pub finished_at: String,
     pub command: String,
@@ -38,6 +51,8 @@ pub struct Entry {
     pub mode: Mode,
     pub bytes: u64,
     pub size: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restores: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -56,6 +71,8 @@ pub struct Cumulative {
     pub size: String,
     pub first_run: Option<String>,
     pub last_run: Option<String>,
+    pub restored_items: usize,
+    pub restored_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +116,15 @@ impl Entry {
             mode,
             bytes,
             size: size(bytes),
+            restores: None,
+        }
+    }
+
+    pub fn restored(original: &Entry, id: String) -> Self {
+        Self {
+            deleted_at: now(),
+            restores: Some(id),
+            ..original.clone()
         }
     }
 }
@@ -123,6 +149,8 @@ impl Total {
 impl Run {
     pub fn new(started_at: String, roots: &[PathBuf], deleted: Vec<Entry>) -> Self {
         Self {
+            id: 0,
+            action: Action::Delete,
             started_at,
             finished_at: now(),
             command: std::env::args().collect::<Vec<_>>().join(" "),
@@ -131,19 +159,114 @@ impl Run {
             deleted,
         }
     }
+
+    pub fn restore(started_at: String, restored: Vec<Entry>) -> Self {
+        let roots = restored
+            .iter()
+            .filter_map(|entry| entry.path.parent().map(Path::to_path_buf))
+            .collect::<Vec<_>>();
+        Self {
+            action: Action::Restore,
+            ..Self::new(started_at, &roots, restored)
+        }
+    }
+
+    pub fn session(&self) -> String {
+        format!("s{}", self.id)
+    }
 }
 
 impl History {
     fn recompute(&mut self) {
-        let bytes = self.runs.iter().map(|run| run.total.bytes).sum();
+        let total = |action| {
+            self.runs
+                .iter()
+                .filter(|run| run.action == action)
+                .fold((0, 0), |(items, bytes), run| {
+                    (items + run.total.items, bytes + run.total.bytes)
+                })
+        };
+        let (items, bytes) = total(Action::Delete);
+        let (restored_items, restored_bytes) = total(Action::Restore);
+        let bytes = bytes.saturating_sub(restored_bytes);
         self.cumulative = Cumulative {
             runs: self.runs.len(),
-            items: self.runs.iter().map(|run| run.total.items).sum(),
+            items: items.saturating_sub(restored_items),
             bytes,
             size: size(bytes),
             first_run: self.runs.first().map(|run| run.started_at.clone()),
             last_run: self.runs.last().map(|run| run.started_at.clone()),
+            restored_items,
+            restored_bytes,
         };
+    }
+
+    fn assign_ids(&mut self) {
+        let mut next = self
+            .runs
+            .iter()
+            .map(|run| run.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.next_session.saturating_sub(1))
+            + 1;
+        for run in self.runs.iter_mut().filter(|run| run.id == 0) {
+            run.id = next;
+            next += 1;
+        }
+        self.next_session = next;
+    }
+
+    /// @name find
+    /// @description Resolves a session id such as `s42` or an item id such as `s42.3` to
+    /// `(run, entry)` indexes. A session id yields every entry of that run.
+    ///
+    /// @example
+    /// let targets = history.find("s42.3")?;
+    pub fn find(&self, id: &str) -> Option<Vec<(usize, usize)>> {
+        let (session, item) = parse_id(id)?;
+        let run_index = self.runs.iter().position(|run| run.id == session)?;
+        let run = &self.runs[run_index];
+        match item {
+            Some(item) => {
+                let entry = item
+                    .checked_sub(1)
+                    .filter(|&index| index < run.deleted.len())?;
+                Some(vec![(run_index, entry)])
+            }
+            None => Some(
+                (0..run.deleted.len())
+                    .map(|entry| (run_index, entry))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub fn item_id(&self, run: usize, entry: usize) -> String {
+        format!("{}.{}", self.runs[run].session(), entry + 1)
+    }
+
+    /// @name restored_ids
+    /// @description Returns the item ids that a later restore run put back.
+    ///
+    /// @example
+    /// let restored = history.restored_ids();
+    /// assert!(restored.contains("s4.2"));
+    pub fn restored_ids(&self) -> HashSet<&str> {
+        self.runs
+            .iter()
+            .filter(|run| run.action == Action::Restore)
+            .flat_map(|run| &run.deleted)
+            .filter_map(|entry| entry.restores.as_deref())
+            .collect()
+    }
+}
+
+fn parse_id(id: &str) -> Option<(u64, Option<usize>)> {
+    let rest = id.strip_prefix('s')?;
+    match rest.split_once('.') {
+        Some((session, item)) => Some((session.parse().ok()?, Some(item.parse().ok()?))),
+        None => Some((rest.parse().ok()?, None)),
     }
 }
 
@@ -193,7 +316,13 @@ pub fn still_in_trash(history: &History, trashed: &[PathBuf]) -> HashSet<(usize,
         *remaining.entry(path.as_path()).or_default() += 1;
     }
     let mut found = HashSet::new();
-    for (run_index, run) in history.runs.iter().enumerate().rev() {
+    for (run_index, run) in history
+        .runs
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, run)| run.action == Action::Delete)
+    {
         for (entry_index, entry) in run.deleted.iter().enumerate().rev() {
             if entry.mode != Mode::Trash {
                 continue;
@@ -207,6 +336,62 @@ pub fn still_in_trash(history: &History, trashed: &[PathBuf]) -> HashSet<(usize,
         }
     }
     found
+}
+
+const RESTORE_WINDOW_SECONDS: i64 = 300;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashRecord {
+    pub path: PathBuf,
+    pub deleted_at: Option<i64>,
+}
+
+/// @name match_trash
+/// @description Pairs each requested trashed entry with an item in the trash: the same original
+/// path, deleted closest to the entry's time and within five minutes of it. Items without a
+/// deletion time match only when no timed item does. Every trash item is used at most once.
+///
+/// @example
+/// let matched = history::match_trash(&history, &targets, &records);
+/// if let Some(item) = matched[0] { restore(&items[item]) }
+pub fn match_trash(
+    history: &History,
+    targets: &[(usize, usize)],
+    trash: &[TrashRecord],
+) -> Vec<Option<usize>> {
+    let mut used = vec![false; trash.len()];
+    targets
+        .iter()
+        .map(|&(run, entry)| {
+            let entry = &history.runs[run].deleted[entry];
+            if entry.mode != Mode::Trash {
+                return None;
+            }
+            let deleted = entry
+                .deleted_at
+                .parse::<jiff::Timestamp>()
+                .ok()
+                .map(|time| time.as_second());
+            let same_path = |index: &usize| !used[*index] && trash[*index].path == entry.path;
+            let timed = (0..trash.len())
+                .filter(same_path)
+                .filter_map(|index| {
+                    let gap = (trash[index].deleted_at? - deleted?).abs();
+                    (gap <= RESTORE_WINDOW_SECONDS).then_some((gap, index))
+                })
+                .min()
+                .map(|(_, index)| index);
+            let found = timed.or_else(|| {
+                (0..trash.len())
+                    .filter(same_path)
+                    .find(|&index| trash[index].deleted_at.is_none())
+            });
+            if let Some(index) = found {
+                used[index] = true;
+            }
+            found
+        })
+        .collect()
 }
 
 /// @name default_path
@@ -253,10 +438,13 @@ pub fn load(path: &Path) -> Result<History, HistoryError> {
             });
         }
     };
-    serde_json::from_str(&text).map_err(|source| HistoryError::Parse {
-        path: path.to_owned(),
-        source,
-    })
+    let mut history: History =
+        serde_json::from_str(&text).map_err(|source| HistoryError::Parse {
+            path: path.to_owned(),
+            source,
+        })?;
+    history.assign_ids();
+    Ok(history)
 }
 
 /// @name append
@@ -268,6 +456,9 @@ pub fn load(path: &Path) -> Result<History, HistoryError> {
 /// history::append(&source, &target, Run::new(started_at, &roots, entries))?;
 pub fn append(source: &Path, path: &Path, run: Run) -> Result<(), HistoryError> {
     let mut history = load(source)?;
+    let mut run = run;
+    run.id = history.next_session;
+    history.next_session += 1;
     history.runs.push(run);
     history.recompute();
     let write_error = |source| HistoryError::Write {
@@ -296,12 +487,17 @@ pub fn save(
     if deleted.is_empty() {
         return Ok(());
     }
+    record(Run::new(started_at, roots, deleted))
+}
+
+/// @name record
+/// @description Appends a finished run, delete or restore, to the default history file.
+///
+/// @example
+/// history::record(Run::restore(started_at, restored))?;
+pub fn record(run: Run) -> Result<(), HistoryError> {
     let home = dirs::home_dir().ok_or(HistoryError::NoHome)?;
-    append(
-        &readable_path_in(&home),
-        &home.join(FILE_NAME),
-        Run::new(started_at, roots, deleted),
-    )
+    append(&readable_path_in(&home), &home.join(FILE_NAME), run)
 }
 
 #[cfg(test)]
@@ -317,6 +513,22 @@ mod tests {
             mode: Mode::Trash,
             bytes,
             size: size(bytes),
+            restores: None,
+        }
+    }
+
+    fn entry_at(path: &str, deleted_at: &str) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            deleted_at: deleted_at.to_owned(),
+            ..entry(1)
+        }
+    }
+
+    fn record(path: &str, deleted_at: Option<i64>) -> TrashRecord {
+        TrashRecord {
+            path: PathBuf::from(path),
+            deleted_at,
         }
     }
 
@@ -349,6 +561,7 @@ mod tests {
         let mut permanent = entry(5);
         permanent.mode = Mode::Permanent;
         let history = History {
+            next_session: 0,
             runs: vec![
                 Run::new(now(), &[], vec![entry(1)]),
                 Run::new(now(), &[], vec![entry(2), permanent]),
@@ -389,5 +602,103 @@ mod tests {
         assert_eq!(readable_path_in(home.path()), current);
         assert_eq!(load(&current).expect("current").runs.len(), 2);
         assert_eq!(load(&legacy).expect("legacy kept").runs.len(), 1);
+    }
+
+    #[test]
+    fn old_files_get_ids_in_order_and_keep_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let old = r#"{"runs":[
+            {"started_at":"a","finished_at":"a","command":"kuizer clean","roots":[],"deleted":[],"total":{"items":0,"bytes":0,"size":"0 B"}},
+            {"started_at":"b","finished_at":"b","command":"kuizer clean","roots":[],"deleted":[],"total":{"items":0,"bytes":0,"size":"0 B"}}
+        ]}"#;
+        fs::write(&path, old).expect("write");
+
+        let first = load(&path).expect("load");
+        assert_eq!(
+            first.runs.iter().map(Run::session).collect::<Vec<_>>(),
+            ["s1", "s2"]
+        );
+        assert_eq!(first.next_session, 3);
+
+        append(&path, &path, Run::new(now(), &[], vec![entry(1)])).expect("append");
+        let second = load(&path).expect("reload");
+        assert_eq!(
+            second.runs.iter().map(Run::session).collect::<Vec<_>>(),
+            ["s1", "s2", "s3"]
+        );
+        assert_eq!(load(&path).expect("again"), second);
+    }
+
+    #[test]
+    fn finds_sessions_and_items_by_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        append(&path, &path, Run::new(now(), &[], vec![entry(1), entry(2)])).expect("append");
+        let history = load(&path).expect("load");
+
+        assert_eq!(history.find("s1"), Some(vec![(0, 0), (0, 1)]));
+        assert_eq!(history.find("s1.2"), Some(vec![(0, 1)]));
+        assert_eq!(history.item_id(0, 1), "s1.2");
+        for missing in ["s1.3", "s1.0", "s2", "1", "s", "sx.1"] {
+            assert_eq!(history.find(missing), None, "{missing}");
+        }
+    }
+
+    #[test]
+    fn restores_subtract_from_the_totals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        append(
+            &path,
+            &path,
+            Run::new(now(), &[], vec![entry(100), entry(50)]),
+        )
+        .expect("delete");
+        let deleted = load(&path).expect("load").runs[0].deleted[1].clone();
+        append(
+            &path,
+            &path,
+            Run::restore(now(), vec![Entry::restored(&deleted, "s1.2".to_owned())]),
+        )
+        .expect("restore");
+
+        let history = load(&path).expect("reload");
+        assert_eq!(history.cumulative.bytes, 100);
+        assert_eq!(history.cumulative.items, 1);
+        assert_eq!(history.cumulative.restored_bytes, 50);
+        assert_eq!(history.restored_ids(), HashSet::from(["s1.2"]));
+        let kept = still_in_trash(&history, &[PathBuf::from("/tmp/a/node_modules")]);
+        assert_eq!(kept, HashSet::from([(0, 1)]));
+    }
+
+    #[test]
+    fn matches_the_trash_item_closest_in_time() {
+        let history = History {
+            next_session: 2,
+            runs: vec![Run::new(
+                now(),
+                &[],
+                vec![
+                    entry_at("/w/a", "2026-10-15T12:00:00+00:00"),
+                    entry_at("/w/a", "2026-10-15T14:00:00+00:00"),
+                    entry_at("/w/b", "2026-10-15T12:00:00+00:00"),
+                    entry_at("/w/c", "2026-10-15T12:00:00+00:00"),
+                ],
+            )],
+            cumulative: Cumulative::default(),
+        };
+        let noon = 1_792_065_600;
+        let trash = [
+            record("/w/a", Some(noon + 2 * 3600 + 3)),
+            record("/w/a", Some(noon + 1)),
+            record("/w/b", Some(noon + 3600)),
+            record("/w/c", None),
+        ];
+        let targets = [(0, 0), (0, 1), (0, 2), (0, 3)];
+
+        let matched = match_trash(&history, &targets, &trash);
+
+        assert_eq!(matched, [Some(1), Some(0), None, Some(3)]);
     }
 }

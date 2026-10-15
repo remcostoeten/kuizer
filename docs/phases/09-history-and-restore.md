@@ -1,6 +1,6 @@
 # Phase 9: history ids and restore
 
-Status: plan. `src/history/mod.rs` stores runs in `~/.kuizer-history.json` with entries per deleted item, and `kuizer insight` lists them. Runs and entries have no ids, and nothing can be put back. Behaviour is specified in `design.md` section 6.4.
+Status: done on Linux (`tests/restore.rs`). Windows uses the same `trash::os_limited` calls and is verified once phase 7 adds a Windows CI runner. Behaviour is specified in `design.md` section 6.4. Two things differ from the first draft of this plan: run ids are stored as numbers (`"id": 4`) and shown as `s4`, and the `trash` crate's `chrono` feature is required, because without it trashed items get no `DeletionDate` and cannot be told apart by time.
 
 ## 1. Ids
 

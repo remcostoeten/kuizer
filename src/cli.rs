@@ -24,7 +24,8 @@ const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
-const ABOUT_INSIGHT: &str = "Show what kuizer deleted and the space it freed";
+const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
+const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
 const ABOUT_DASHBOARD: &str = "Open a web overview of artifacts, caches, duplicates and history";
 const ABOUT_RULES: &str = "List the active detection rules";
 const ABOUT_CONFIG: &str = "Show, create and validate the config file";
@@ -36,6 +37,7 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("scan", ABOUT_SCAN),
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
+            ("restore", ABOUT_RESTORE),
         ],
     ),
     (
@@ -43,7 +45,7 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
         &[
             ("dashboard", ABOUT_DASHBOARD),
             ("duplicates", ABOUT_DUPLICATES),
-            ("insight", ABOUT_INSIGHT),
+            ("history", ABOUT_HISTORY),
         ],
     ),
     (
@@ -127,7 +129,12 @@ fn top_examples() -> String {
         ),
         ("kuizer cache", "", "List global tool caches"),
         ("kuizer duplicates", "~/Downloads", "Find duplicate files"),
-        ("kuizer insight", "", "Show what past runs deleted"),
+        ("kuizer history", "", "Show what past runs deleted"),
+        (
+            "kuizer restore",
+            "--last",
+            "Put the last run back from the trash",
+        ),
         (
             "kuizer dashboard",
             "~/apps",
@@ -241,11 +248,28 @@ fn duplicates_help() -> String {
     )
 }
 
-fn insight_examples() -> String {
+fn history_examples() -> String {
     examples(&[
-        ("kuizer insight", "", "Show past deletions and totals"),
-        ("kuizer --json insight", "", "Print the history as JSON"),
+        ("kuizer history", "", "List past runs with their ids"),
+        ("kuizer history", "show s4", "Every item of run s4"),
+        ("kuizer --json history", "", "Print the history as JSON"),
     ])
+}
+
+fn restore_help() -> String {
+    format!(
+        "Moves items back from the trash to where they were. Never overwrites: an item whose path exists again, or that left the trash, is skipped and reported.\n\n{}",
+        examples(&[
+            ("kuizer restore", "--last", "Restore the latest run"),
+            ("kuizer restore", "s4", "Restore every item of run s4"),
+            ("kuizer restore", "s4.2 s4.5", "Restore two items"),
+            (
+                "kuizer restore",
+                "s4 --dry-run",
+                "Show what would be restored"
+            ),
+        ])
+    )
 }
 
 fn dashboard_help() -> String {
@@ -367,8 +391,10 @@ pub enum Command {
     Cache(CacheArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
-    #[command(about = ABOUT_INSIGHT, after_help = insight_examples())]
-    Insight(CommandArgs),
+    #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
+    History(HistoryArgs),
+    #[command(about = ABOUT_RESTORE, after_help = restore_help())]
+    Restore(RestoreArgs),
     #[command(about = ABOUT_DASHBOARD, visible_alias = "web", after_help = dashboard_help())]
     Dashboard(DashboardArgs),
 }
@@ -570,6 +596,41 @@ pub enum Selection {
     Safe,
     All,
     Rule(String),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub command: Option<HistoryAction>,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum HistoryAction {
+    #[command(about = "List every item of one run")]
+    Show {
+        #[arg(value_name = "RUN", help = "Run id, e.g. s4")]
+        run: String,
+    },
+    #[command(hide = true)]
+    Help,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true, subcommand_negates_reqs = true)]
+pub struct RestoreArgs {
+    #[arg(
+        value_name = "ID",
+        required_unless_present = "last",
+        help = "Run ids like s4 or item ids like s4.2"
+    )]
+    pub ids: Vec<String>,
+    #[arg(long, conflicts_with = "ids", help = "Restore the latest run")]
+    pub last: bool,
+    #[arg(long, help = "Show what would be restored without restoring it")]
+    pub dry_run: bool,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
 }
 
 #[derive(Debug, Args, Default)]
