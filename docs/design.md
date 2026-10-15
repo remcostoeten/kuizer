@@ -339,6 +339,8 @@ Phase 1 baseline (container, 4 cores, warm cache, 200 projects with 100 dependen
 
 ## 10. Phases and acceptance criteria
 
+Implementation plans for the open phases are in [`phases/`](phases/README.md).
+
 | Phase | Scope | Accepted when |
 | --- | --- | --- |
 | 1 | Crate, CLI, config, safe traversal, artifact rules, sizing, `scan` text and JSON | Done. 46 tests pass: rule context, pruning, excludes, ignore file, custom rules, symlinks, hard links, missing roots, mounts, cancellation, vanishing files. `clippy -D warnings` clean. Permission tests need a non-root user (CI). |
