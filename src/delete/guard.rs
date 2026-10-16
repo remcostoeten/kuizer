@@ -49,6 +49,7 @@ impl Guard {
     pub fn new(roots: &[PathBuf]) -> Self {
         let mut anchors: Vec<PathBuf> = roots.to_vec();
         anchors.extend(dirs::home_dir());
+        anchors.extend(platform::home_dir());
         anchors.push(PathBuf::from("/"));
         Self {
             roots: roots.to_vec(),

@@ -93,3 +93,18 @@ fn matches_under_hidden_home_dirs_need_review() {
         ]
     );
 }
+
+#[test]
+fn protection_holds_when_home_is_a_symlink() {
+    let (tmp, home) = real_home();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&home, &link).expect("symlink home");
+    node_project(&home, ".ssh/tool");
+    node_project(&home, ".vscode/extensions/some.ext-1.0.0");
+    node_project(&home, "code/web");
+
+    assert_eq!(
+        scan(&link, &link),
+        vec![("code/web/node_modules".to_owned(), "safe".to_owned())]
+    );
+}

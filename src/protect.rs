@@ -114,7 +114,7 @@ fn marked_on_disk(dir: &Path) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Protected {
     dirs: HashSet<PathBuf>,
-    home: Option<PathBuf>,
+    homes: Vec<PathBuf>,
 }
 
 impl Protected {
@@ -122,18 +122,20 @@ impl Protected {
         let Some(home) = home else {
             return Self::default();
         };
-        let mut dirs: HashSet<PathBuf> = HOME_DIRS
-            .iter()
-            .chain(TOOL_DIRS)
-            .map(|dir| home.join(dir))
-            .collect();
-        for parent in [".config", ".cache", ".local/share"] {
-            dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
+        let mut homes = vec![home.to_path_buf()];
+        if let Ok(resolved) = std::fs::canonicalize(home)
+            && resolved != home
+        {
+            homes.push(resolved);
         }
-        Self {
-            dirs,
-            home: Some(home.to_path_buf()),
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+        for home in &homes {
+            dirs.extend(HOME_DIRS.iter().chain(TOOL_DIRS).map(|dir| home.join(dir)));
+            for parent in [".config", ".cache", ".local/share"] {
+                dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
+            }
         }
+        Self { dirs, homes }
     }
 
     pub fn for_user() -> Self {
@@ -177,11 +179,11 @@ impl Protected {
     ///     safety = Safety::Review;
     /// }
     pub fn in_hidden_home_dir(&self, path: &Path) -> bool {
-        self.home
-            .as_deref()
-            .and_then(|home| path.strip_prefix(home).ok())
-            .and_then(|rest| rest.components().next())
-            .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'))
+        self.homes
+            .iter()
+            .filter_map(|home| path.strip_prefix(home).ok())
+            .filter_map(|rest| rest.components().next())
+            .any(|first| first.as_os_str().to_string_lossy().starts_with('.'))
     }
 }
 
@@ -249,6 +251,24 @@ mod tests {
         assert!(!protected.covers(&home.join(".local/share/pnpm/store")));
         assert!(!protected.covers(&home.join(".bun/install/cache")));
         assert!(!protected.covers(&home.join("code/web/node_modules")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protects_resolved_paths_of_a_symlinked_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = fs::canonicalize(tmp.path())
+            .expect("canonical")
+            .join("real");
+        fs::create_dir_all(&real).expect("real home");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let protected = Protected::new(Some(&link));
+        assert!(protected.is_known(&real.join(".ssh")));
+        assert!(protected.is_known(&link.join(".ssh")));
+        assert!(protected.covers(&real.join(".gnupg/private-keys-v1.d")));
+        assert!(protected.in_hidden_home_dir(&real.join(".config/x/node_modules")));
     }
 
     #[test]
