@@ -157,6 +157,11 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "spm/Package.swift", 2);
     file(root, "spm/.build/debug/app", 10);
     file(root, "make/.build/out.o", 10);
+    file(root, "java/pom.xml", 2);
+    file(root, "java/target/classes/App.class", 10);
+    file(root, "java/target/maven-status/x", 10);
+    file(root, "ops/pom.xml", 2);
+    file(root, "ops/target/hosts.txt", 10);
 
     let collected = scan(root);
 
@@ -168,6 +173,7 @@ fn finds_artifacts_of_other_ecosystems() {
             ("hs/.stack-work", "haskell-stack"),
             ("hs/dist-newstyle", "haskell-cabal"),
             ("ios/Pods", "cocoapods"),
+            ("java/target", "maven-target"),
             ("phx/_build", "elixir-build"),
             ("phx/deps", "elixir-deps"),
             ("spm/.build", "swift-build"),

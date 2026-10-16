@@ -363,6 +363,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "swift",
     },
     Builtin {
+        name: "maven-target",
+        kind: Kind::Dir,
+        pattern: "target",
+        markers: &["pom.xml"],
+        contains: &["maven-status", "maven-archiver", "classes"],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "maven",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",

@@ -412,6 +412,20 @@ mod tests {
                 Some("swift-build"),
             ),
             (".build", &["Makefile"], &["debug"], None),
+            (
+                "target",
+                &["pom.xml", "src"],
+                &["classes", "maven-status"],
+                Some("maven-target"),
+            ),
+            ("target", &["pom.xml"], &["deploy.yaml"], None),
+            ("target", &["build.xml"], &["classes"], None),
+            (
+                "target",
+                &["Cargo.toml", "pom.xml"],
+                &[".rustc_info.json", "classes"],
+                Some("cargo-target"),
+            ),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =
