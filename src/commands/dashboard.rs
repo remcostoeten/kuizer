@@ -6,7 +6,7 @@ use super::scan::{announce_report, generated_at, resolve_roots, sort_candidates,
 use crate::caches::{self, Locations};
 use crate::cli::{DashboardArgs, SortKey};
 use crate::config::Config;
-use crate::dupes::{self, Options, Stage};
+use crate::dupes::{self, Files, Options, Stage};
 use crate::history;
 use crate::output::{self, Dashboard};
 use crate::protect::Protected;
@@ -17,29 +17,25 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let open = !args.no_open && std::io::stderr().is_terminal();
 
-    let handle = scan::start(config, &roots, Cancel::new())?;
+    let options = (!args.no_duplicates).then(|| {
+        let mut options = Options::from_config(config);
+        if let Some(min_size) = args.min_size {
+            options.min_size = min_size.0;
+        }
+        options
+    });
+    let (handle, files) = scan::start_with(config, &roots, Cancel::new(), options.map(Files::new))?;
     let collected = scan::collect(&handle, |progress| {
         if show_progress {
             output::print_progress(progress);
         }
     });
+    let files = files.recv().ok().flatten();
     let mut candidates = collected.candidates;
     sort_candidates(&mut candidates, SortKey::Size);
 
-    if show_progress {
-        output::print_status("measuring global caches");
-    }
-    let locations = Locations::for_user().ok_or(AppError::NoHome)?;
-    let cache_entries = cache::measure(caches::find(&locations, &Protected::for_user()));
-
-    let duplicates = if args.no_duplicates {
-        None
-    } else {
-        let mut options = Options::from_config(config);
-        if let Some(min_size) = args.min_size {
-            options.min_size = min_size.0;
-        }
-        Some(dupes::find(config, &roots, options, |stage| {
+    let duplicates = options.zip(files).map(|(options, files)| {
+        dupes::group(files, options, |stage| {
             if !show_progress {
                 return;
             }
@@ -48,8 +44,14 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
                 Stage::Hashing { files } => format!("duplicates: hashing  {files} files"),
                 Stage::Verifying { groups } => format!("duplicates: comparing {groups} groups"),
             });
-        })?)
-    };
+        })
+    });
+
+    if show_progress {
+        output::print_status("measuring global caches");
+    }
+    let locations = Locations::for_user().ok_or(AppError::NoHome)?;
+    let cache_entries = cache::measure(caches::find(&locations, &Protected::for_user()));
     if show_progress {
         output::clear_progress();
     }

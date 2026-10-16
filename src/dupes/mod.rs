@@ -99,29 +99,35 @@ struct Candidate {
     member: Member,
 }
 
-struct Collector<'a> {
+pub struct Files {
     min_size: u64,
-    files: Vec<Seen>,
+    seen: Vec<Seen>,
     issues: Vec<Issue>,
     counted: u64,
-    on_stage: &'a mut dyn FnMut(Stage),
+    started: Instant,
 }
 
-impl Visitor for Collector<'_> {
+impl Files {
+    pub fn new(options: Options) -> Self {
+        Self {
+            min_size: options.min_size,
+            seen: Vec::new(),
+            issues: Vec::new(),
+            counted: 0,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Visitor for Files {
     fn issue(&mut self, issue: Issue) -> Flow {
         self.issues.push(issue);
         Flow::Continue
     }
 
     fn counted(&mut self, file_type: fs::FileType) {
-        if !file_type.is_file() {
-            return;
-        }
-        self.counted += 1;
-        if self.counted.is_multiple_of(4096) {
-            (self.on_stage)(Stage::Walking {
-                files: self.counted,
-            });
+        if file_type.is_file() {
+            self.counted += 1;
         }
     }
 
@@ -137,7 +143,7 @@ impl Visitor for Collector<'_> {
         if size == 0 || size < self.min_size {
             return Flow::Continue;
         }
-        self.files.push(Seen {
+        self.seen.push(Seen {
             path: path.to_path_buf(),
             size,
             allocated: platform::allocated(&metadata),
@@ -145,6 +151,30 @@ impl Visitor for Collector<'_> {
             modified: metadata.modified().ok(),
         });
         Flow::Continue
+    }
+}
+
+struct Reporting<'a> {
+    files: Files,
+    on_stage: &'a mut dyn FnMut(Stage),
+}
+
+impl Visitor for Reporting<'_> {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        self.files.issue(issue)
+    }
+
+    fn counted(&mut self, file_type: fs::FileType) {
+        self.files.counted(file_type);
+        if file_type.is_file() && self.files.counted.is_multiple_of(4096) {
+            (self.on_stage)(Stage::Walking {
+                files: self.files.counted,
+            });
+        }
+    }
+
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        self.files.file(path, file_type)
     }
 }
 
@@ -308,7 +338,6 @@ pub fn find(
     options: Options,
     mut on_stage: impl FnMut(Stage),
 ) -> Result<Duplicates, ConfigError> {
-    let started = Instant::now();
     let detector = config.detector()?;
     let excludes = config.excludes()?;
     let mounts = MountTable::load();
@@ -319,26 +348,37 @@ pub fn find(
         excludes: &excludes,
         mounts: &mounts,
         protected: &protected,
-        visitor: Collector {
-            min_size: options.min_size,
-            files: Vec::new(),
-            issues: Vec::new(),
-            counted: 0,
+        visitor: Reporting {
+            files: Files::new(options),
             on_stage: &mut on_stage,
         },
     };
     for root in roots {
         walker.walk_root(root);
     }
-    let Collector {
-        files,
+    let files = walker.visitor.files;
+    Ok(group(files, options, on_stage))
+}
+
+/// @name group
+/// @description Groups files collected during a walk into sets of identical contents, the same
+/// way `find` does after its own walk. Lets a caller that already walks the tree, such as the
+/// dashboard, collect `Files` alongside that walk instead of walking twice.
+///
+/// @example
+/// let (scan, files) = scan::start_with(&config, &roots, Cancel::new(), Files::new(options))?;
+/// let found = dupes::group(files.recv()?, options, |_| {});
+pub fn group(files: Files, options: Options, mut on_stage: impl FnMut(Stage)) -> Duplicates {
+    let Files {
+        seen,
         mut issues,
         counted,
+        started,
         ..
-    } = walker.visitor;
+    } = files;
 
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    for candidate in merge_links(files) {
+    for candidate in merge_links(seen) {
         by_size.entry(candidate.size).or_default().push(candidate);
     }
     let sized: Vec<Vec<Candidate>> = by_size
@@ -399,10 +439,52 @@ pub fn find(
             .cmp(&a.reclaimable())
             .then_with(|| a.members[0].path.cmp(&b.members[0].path))
     });
-    Ok(Duplicates {
+    Duplicates {
         groups,
         issues,
         files: counted,
         duration: started.elapsed(),
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::{self, Cancel};
+
+    #[test]
+    fn shared_scan_walk_finds_the_same_duplicates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        for relative in ["a/one.txt", "b/two.txt", "c/three.txt"] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"identical contents").unwrap();
+        }
+        fs::write(root.join("unique.txt"), b"something else").unwrap();
+        let config = Config::default();
+        let options = Options {
+            min_size: 1,
+            threads: 2,
+            verify: true,
+        };
+        let roots = vec![root];
+
+        let alone = find(&config, &roots, options, |_| {}).unwrap();
+        let (handle, files) =
+            scan::start_with(&config, &roots, Cancel::new(), Files::new(options)).unwrap();
+        scan::collect(&handle, |_| {});
+        let shared = group(files.recv().unwrap(), options, |_| {});
+
+        let members = |found: &Duplicates| -> Vec<Vec<PathBuf>> {
+            found
+                .groups
+                .iter()
+                .map(|group| group.members.iter().map(|m| m.path.clone()).collect())
+                .collect()
+        };
+        assert_eq!(members(&alone).len(), 1);
+        assert_eq!(members(&alone), members(&shared));
+        assert_eq!(alone.files, shared.files);
+    }
 }

@@ -40,6 +40,34 @@ pub trait Visitor {
     }
 }
 
+impl Visitor for () {
+    fn issue(&mut self, _issue: Issue) -> Flow {
+        Flow::Continue
+    }
+}
+
+impl<V: Visitor> Visitor for Option<V> {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        match self {
+            Some(visitor) => visitor.issue(issue),
+            None => Flow::Continue,
+        }
+    }
+
+    fn counted(&mut self, file_type: fs::FileType) {
+        if let Some(visitor) = self {
+            visitor.counted(file_type);
+        }
+    }
+
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        match self {
+            Some(visitor) => visitor.file(path, file_type),
+            None => Flow::Continue,
+        }
+    }
+}
+
 pub struct Walker<'a, V> {
     pub scan: &'a ScanConfig,
     pub detector: &'a Detector,
