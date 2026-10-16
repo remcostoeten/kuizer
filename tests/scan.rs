@@ -180,6 +180,11 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "insource/CMakeLists.txt", 2);
     file(root, "insource/CMakeCache.txt", 10);
     file(root, "insource/main.c", 10);
+    file(root, "game/ProjectSettings/ProjectVersion.txt", 2);
+    file(root, "game/Assets/main.cs", 10);
+    file(root, "game/Library/ArtifactDB", 10);
+    file(root, "game/Temp/x", 10);
+    file(root, "notes/Temp/draft.txt", 10);
 
     let collected = scan(root);
 
@@ -192,6 +197,8 @@ fn finds_artifacts_of_other_ecosystems() {
             ("cpp/build", "cmake-build"),
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
+            ("game/Library", "unity-library"),
+            ("game/Temp", "unity-temp"),
             ("hs/.stack-work", "haskell-stack"),
             ("hs/dist-newstyle", "haskell-cabal"),
             ("infra/.terraform", "terraform"),

@@ -487,6 +487,21 @@ mod tests {
                 &["CMakeCache.txt", "CMakeLists.txt"],
                 None,
             ),
+            (
+                "Library",
+                &["Assets", "ProjectSettings", "Packages"],
+                &["ArtifactDB", "PackageCache"],
+                Some("unity-library"),
+            ),
+            ("Library", &["ProjectSettings"], &["Fonts"], None),
+            ("Library", &["Assets"], &["ArtifactDB"], None),
+            (
+                "Temp",
+                &["Assets", "ProjectSettings"],
+                &["UnityTempFile-1"],
+                Some("unity-temp"),
+            ),
+            ("Temp", &["Assets"], &["UnityTempFile-1"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

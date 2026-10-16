@@ -28,6 +28,8 @@ const ZIG_BUILD: &[&str] = &["build.zig"];
 
 const PUBSPEC: &[&str] = &["pubspec.yaml"];
 
+const UNITY_PROJECT: &[&str] = &["ProjectSettings"];
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "node-modules",
@@ -383,6 +385,26 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Build,
         safety: Safety::Review,
         ecosystem: "cmake",
+    },
+    Builtin {
+        name: "unity-library",
+        kind: Kind::Dir,
+        pattern: "Library",
+        markers: UNITY_PROJECT,
+        contains: &["ArtifactDB", "SourceAssetDB", "PackageCache"],
+        category: Category::Cache,
+        safety: Safety::Review,
+        ecosystem: "unity",
+    },
+    Builtin {
+        name: "unity-temp",
+        kind: Kind::Dir,
+        pattern: "Temp",
+        markers: UNITY_PROJECT,
+        contains: &[],
+        category: Category::Temp,
+        safety: Safety::Review,
+        ecosystem: "unity",
     },
     Builtin {
         name: "typescript-buildinfo",
