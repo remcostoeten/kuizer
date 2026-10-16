@@ -33,9 +33,14 @@ pub enum RuleError {
     NotAName { name: String, value: String },
 }
 
+enum Marker {
+    Name(OsString),
+    Glob(GlobMatcher),
+}
+
 struct Compiled {
     info: Match,
-    markers: Vec<OsString>,
+    markers: Vec<Marker>,
     contains: Vec<OsString>,
 }
 
@@ -81,6 +86,10 @@ impl Listing {
             .binary_search_by(|probe| probe.as_os_str().cmp(name))
             .is_ok()
     }
+
+    pub fn any(&self, glob: &GlobMatcher) -> bool {
+        self.names.iter().any(|name| glob.is_match(name))
+    }
 }
 
 fn is_plain_name(value: &str) -> bool {
@@ -89,6 +98,16 @@ fn is_plain_name(value: &str) -> bool {
 
 fn has_glob_meta(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', ']', '{', '}'])
+}
+
+fn compile_glob(name: &str, pattern: &str) -> Result<GlobMatcher, RuleError> {
+    Glob::new(pattern)
+        .map(|glob| glob.compile_matcher())
+        .map_err(|source| RuleError::Pattern {
+            name: name.to_owned(),
+            pattern: pattern.to_owned(),
+            source,
+        })
 }
 
 fn valid_cachedir_tag(dir: &Path) -> bool {
@@ -123,12 +142,9 @@ impl Detector {
                 Kind::File => &mut files,
             };
             if has_glob_meta(&spec.pattern) {
-                let glob = Glob::new(&spec.pattern).map_err(|source| RuleError::Pattern {
-                    name: spec.name.clone(),
-                    pattern: spec.pattern.clone(),
-                    source,
-                })?;
-                target.globs.push((index, glob.compile_matcher()));
+                target
+                    .globs
+                    .push((index, compile_glob(&spec.name, &spec.pattern)?));
             } else if is_plain_name(&spec.pattern) {
                 target
                     .literal
@@ -141,6 +157,17 @@ impl Detector {
                     value: spec.pattern.clone(),
                 });
             }
+            let markers = spec
+                .markers
+                .iter()
+                .map(|marker| {
+                    if has_glob_meta(marker) {
+                        compile_glob(&spec.name, marker).map(Marker::Glob)
+                    } else {
+                        Ok(Marker::Name(OsString::from(marker)))
+                    }
+                })
+                .collect::<Result<_, _>>()?;
             rules.push(Compiled {
                 info: Arc::new(RuleInfo {
                     name: spec.name.clone(),
@@ -148,7 +175,7 @@ impl Detector {
                     safety: spec.safety,
                     ecosystem: spec.ecosystem.clone(),
                 }),
-                markers: spec.markers.iter().map(OsString::from).collect(),
+                markers,
                 contains: spec.contains.iter().map(OsString::from).collect(),
             });
         }
@@ -181,7 +208,11 @@ impl Detector {
     }
 
     fn markers_match(rule: &Compiled, parent: &Listing) -> bool {
-        rule.markers.is_empty() || rule.markers.iter().any(|m| parent.has(m))
+        rule.markers.is_empty()
+            || rule.markers.iter().any(|marker| match marker {
+                Marker::Name(name) => parent.has(name),
+                Marker::Glob(glob) => parent.any(glob),
+            })
     }
 
     pub fn classify_dir(&self, path: &Path, parent: &Listing, own: &Listing) -> Option<Match> {
@@ -352,12 +383,43 @@ mod tests {
     }
 
     #[test]
+    fn markers_can_be_globs() {
+        let mut spec = builtin_rules().remove(0);
+        spec.markers = vec!["*.csproj".to_owned()];
+        let detector = Detector::new(&[spec]).expect("compiles");
+        let path = Path::new("/p/node_modules");
+        let own = listing(&[]);
+        assert!(
+            detector
+                .classify_dir(path, &listing(&["App.csproj", "node_modules"]), &own)
+                .is_some()
+        );
+        assert!(
+            detector
+                .classify_dir(path, &listing(&["App.csproj.user", "node_modules"]), &own)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn rejects_bad_rules() {
         let mut spec = builtin_rules().remove(0);
         spec.markers = vec!["../package.json".to_owned()];
         assert!(matches!(
             Detector::new(&[spec]),
             Err(RuleError::NotAName { .. })
+        ));
+        let mut spec = builtin_rules().remove(0);
+        spec.markers = vec!["*/x.csproj".to_owned()];
+        assert!(matches!(
+            Detector::new(&[spec]),
+            Err(RuleError::NotAName { .. })
+        ));
+        let mut spec = builtin_rules().remove(0);
+        spec.markers = vec!["[.csproj".to_owned()];
+        assert!(matches!(
+            Detector::new(&[spec]),
+            Err(RuleError::Pattern { .. })
         ));
         let twice = vec![builtin_rules().remove(0), builtin_rules().remove(0)];
         assert!(matches!(
