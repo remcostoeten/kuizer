@@ -279,6 +279,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "dotnet",
     },
     Builtin {
+        name: "cocoapods",
+        kind: Kind::Dir,
+        pattern: "Pods",
+        markers: &["Podfile"],
+        contains: &["Manifest.lock"],
+        category: Category::Dependencies,
+        safety: Safety::Review,
+        ecosystem: "cocoapods",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",

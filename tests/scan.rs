@@ -137,12 +137,20 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "dotnet/bin/Debug/App.dll", 10);
     file(root, "dotnet/obj/project.assets.json", 10);
     file(root, "scripts/bin/Debug/run.sh", 10);
+    file(root, "ios/Podfile", 2);
+    file(root, "ios/Pods/Manifest.lock", 10);
+    file(root, "ios/Pods/Alamofire/Source.swift", 10);
+    file(root, "photos/Pods/Manifest.lock", 10);
 
     let collected = scan(root);
 
     assert_eq!(
         found(&collected, root),
-        pairs(&[("dotnet/bin", "dotnet-bin"), ("dotnet/obj", "dotnet-obj")])
+        pairs(&[
+            ("dotnet/bin", "dotnet-bin"),
+            ("dotnet/obj", "dotnet-obj"),
+            ("ios/Pods", "cocoapods"),
+        ])
     );
 }
 

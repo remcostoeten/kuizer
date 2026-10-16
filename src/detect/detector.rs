@@ -358,6 +358,14 @@ mod tests {
             ),
             ("obj", &["Lib.csproj"], &["notes"], None),
             ("obj", &["README.md"], &["project.assets.json"], None),
+            (
+                "Pods",
+                &["Podfile", "Podfile.lock"],
+                &["Manifest.lock", "Alamofire"],
+                Some("cocoapods"),
+            ),
+            ("Pods", &["Podfile"], &["notes.md"], None),
+            ("Pods", &["README.md"], &["Manifest.lock"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =
