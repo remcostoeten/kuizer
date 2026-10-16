@@ -24,6 +24,8 @@ const DOTNET_PROJECT: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
 
 const MIX: &[&str] = &["mix.exs"];
 
+const ZIG_BUILD: &[&str] = &["build.zig"];
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "node-modules",
@@ -309,6 +311,26 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Dependencies,
         safety: Safety::Safe,
         ecosystem: "elixir",
+    },
+    Builtin {
+        name: "zig-cache",
+        kind: Kind::Dir,
+        pattern: "{.zig-cache,zig-cache}",
+        markers: ZIG_BUILD,
+        contains: &[],
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "zig",
+    },
+    Builtin {
+        name: "zig-out",
+        kind: Kind::Dir,
+        pattern: "zig-out",
+        markers: ZIG_BUILD,
+        contains: &[],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "zig",
     },
     Builtin {
         name: "typescript-buildinfo",

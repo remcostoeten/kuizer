@@ -375,6 +375,16 @@ mod tests {
             ("_build", &["CMakeLists.txt"], &["dev"], None),
             ("deps", &["mix.exs"], &["phoenix"], Some("elixir-deps")),
             ("deps", &["Makefile"], &["phoenix"], None),
+            (
+                ".zig-cache",
+                &["build.zig", "build.zig.zon"],
+                &["o", "h"],
+                Some("zig-cache"),
+            ),
+            ("zig-cache", &["build.zig"], &["o"], Some("zig-cache")),
+            (".zig-cache", &["main.zig"], &["o"], None),
+            ("zig-out", &["build.zig"], &["bin"], Some("zig-out")),
+            ("zig-out", &["README.md"], &["bin"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

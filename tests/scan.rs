@@ -145,6 +145,10 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "phx/_build/dev/lib/app.beam", 10);
     file(root, "phx/deps/phoenix/mix.exs", 2);
     file(root, "docs/deps/graph.svg", 10);
+    file(root, "ziggy/build.zig", 2);
+    file(root, "ziggy/.zig-cache/o/abc", 10);
+    file(root, "ziggy/zig-out/bin/app", 10);
+    file(root, "loose/zig-out/bin/app", 10);
 
     let collected = scan(root);
 
@@ -156,6 +160,8 @@ fn finds_artifacts_of_other_ecosystems() {
             ("ios/Pods", "cocoapods"),
             ("phx/_build", "elixir-build"),
             ("phx/deps", "elixir-deps"),
+            ("ziggy/.zig-cache", "zig-cache"),
+            ("ziggy/zig-out", "zig-out"),
         ])
     );
 }
