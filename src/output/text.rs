@@ -325,7 +325,7 @@ pub fn print_removal_summary(removals: &[Removal], mode: Mode) {
         println!(
             "{}",
             dim(
-                "The space is freed when the trash is emptied. `kuizer insight` shows what is still there."
+                "The space is freed when the trash is emptied. `kuizer history` shows what is still there and `kuizer restore` brings it back."
             )
         );
     }
