@@ -13,6 +13,12 @@ pub struct SizeError(String);
 impl FromStr for ByteSize {
     type Err = SizeError;
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "sizes accept fractions like 1.5GiB and are checked to be finite and non-negative"
+    )]
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let text = input.trim();
         let split = text
@@ -40,6 +46,10 @@ impl FromStr for ByteSize {
 }
 
 impl fmt::Display for ByteSize {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "display rounds to one decimal, so precision past 2^53 bytes does not matter"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
         let mut value = self.0 as f64;
