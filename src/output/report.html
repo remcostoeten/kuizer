@@ -1101,7 +1101,7 @@ function rootArgs() {
   return SCAN.roots.map((root) => quote(display(root))).join(" ");
 }
 
-function freedEntries() {
+function removedEntries() {
   return RUNS.flatMap((run, runIndex) =>
     isRestore(run)
       ? []
@@ -1113,6 +1113,11 @@ function freedEntries() {
 
 function inTrash(entries) {
   return entries.filter((entry) => entry.mode === "trash" && KEPT.has(entry.key));
+}
+
+function freedOnly(entries) {
+  const trashKnown = Boolean(DATA.history && DATA.history.trash_known);
+  return entries.filter((entry) => entry.mode === "permanent" || (entry.mode === "trash" && trashKnown && !KEPT.has(entry.key)));
 }
 
 function startOfWeek(time) {
@@ -1320,7 +1325,7 @@ function insights() {
   if (DUPES && DUPES.summary.reclaimable_bytes) {
     rows.push(insight("var(--dupes)", `${count(DUPES.summary.duplicates, "extra copy", "extra copies")} of duplicate files take ${bytes(DUPES.summary.reclaimable_bytes)}. kuizer never deletes them; pick the copy to keep on the Duplicates tab.`));
   }
-  const entries = freedEntries();
+  const entries = removedEntries();
   const trashed = inTrash(entries);
   if (trashed.length) {
     rows.push(insight("var(--cache)", `${bytes(sumBy(trashed, (entry) => entry.bytes))} from past runs is still in the trash. Emptying the trash frees it, or put a run back with kuizer restore.`, "kuizer history"));
@@ -1341,14 +1346,15 @@ function renderOverview() {
   const artifacts = sum(ITEMS);
   const caches = sumBy(CACHES, (cache) => cache.allocated_bytes);
   const duplicates = DUPES ? DUPES.summary.reclaimable_bytes : 0;
-  const entries = freedEntries();
-  const freed = sumBy(entries, (entry) => entry.bytes);
+  const entries = removedEntries();
+  const freedItems = freedOnly(entries);
+  const freed = sumBy(freedItems, (entry) => entry.bytes);
   const disk = primaryDisk();
   const tiles = [
     stat("Project artifacts", bytes(artifacts), `${count(ITEMS.length, "item")} in ${count(new Set(ITEMS.map(projectOf)).size, "project")}`),
     stat("Global caches", bytes(caches), count(CACHES.length, "cache")),
     stat("Duplicate copies", DUPES ? bytes(duplicates) : "skipped", DUPES ? `${count(DUPES.summary.groups, "group")}` : "run without --no-duplicates"),
-    stat("Freed so far", bytes(freed), entries.length ? `${count(RUNS.length, "run")} since ${shortDate(Math.min(...entries.map((entry) => entry.time)))}` : "no runs yet"),
+    stat("Freed so far", bytes(freed), entries.length ? `${count(RUNS.length, "run")} since ${shortDate(Math.min(...entries.map((entry) => entry.time)))}, trash not counted until emptied` : "no runs yet"),
   ];
   if (disk) {
     const card = stat("Free disk space", bytes(disk.available_bytes), `of ${bytes(disk.total_bytes)} on ${display(disk.path)}`);
@@ -1394,7 +1400,7 @@ function renderOverview() {
   const projects = totalsBy(ITEMS, projectOf, (item) => item.allocated_bytes).slice(0, 6);
   bars($("ov-projects"), projects.map(([project, value]) => barRow(projectLabel(project), value, artifacts, null, () => openProject(project))), "No artifacts found");
   bars($("ov-caches"), CACHES.slice(0, 6).map((cache) => barRow(cache.name, cache.allocated_bytes, caches, "var(--global)", () => showView("caches"))), "No caches found");
-  const series = buckets(entries);
+  const series = buckets(freedOnly(removedEntries()));
   $("ov-freed-title").textContent = `Freed per ${series.unit}`;
   $("ov-freed").replaceChildren(columnChart(series.points, "var(--temp)", "Nothing deleted yet"));
 }
@@ -1646,27 +1652,29 @@ function commandLabel(command) {
 }
 
 function renderHistory() {
-  const entries = freedEntries();
-  const freed = sumBy(entries, (entry) => entry.bytes);
+  const entries = removedEntries();
+  const freedItems = freedOnly(entries);
+  const freed = sumBy(freedItems, (entry) => entry.bytes);
+  const removed = sumBy(entries, (entry) => entry.bytes);
   const starts = RUNS.filter((run) => !isRestore(run)).map((run) => Date.parse(run.started_at)).filter(Number.isFinite).sort((a, b) => a - b);
   const gaps = starts.slice(1).map((time, index) => time - starts[index]);
   const gap = gaps.length ? sumBy(gaps, (value) => value) / gaps.length : 0;
   const trashed = inTrash(entries);
   const tiles = [
-    stat("Freed all time", bytes(freed), count(entries.length, "item")),
+    stat("Freed all time", bytes(freed), `${count(freedItems.length, "item")}, ${bytes(removed)} removed in total`),
     stat("Runs", RUNS.length.toLocaleString(), starts.length ? `since ${shortDate(starts[0])}` : "none yet"),
     stat("Last run", starts.length ? ago(starts[starts.length - 1]) : "never", starts.length ? shortDate(starts[starts.length - 1]) : ""),
     stat("Run every", gaps.length ? (gap < DAY ? "daily" : count(Math.round(gap / DAY), "day")) : "n/a", gaps.length ? "average gap between runs" : "needs two runs"),
   ];
   if (DATA.history.trash_known) tiles.push(stat("Still in trash", bytes(sumBy(trashed, (entry) => entry.bytes)), count(trashed.length, "item")));
   $("hist-stats").replaceChildren(...tiles);
-  const series = buckets(entries);
+  const series = buckets(freedItems);
   $("hist-freed-title").textContent = `Freed per ${series.unit}`;
   $("hist-freed").replaceChildren(columnChart(series.points, "var(--temp)", "Nothing deleted yet"));
   $("hist-total").replaceChildren(lineChart(series.points, "var(--dependencies)", "Nothing deleted yet"));
-  bars($("hist-cats"), totalsBy(entries, (entry) => entry.category, (entry) => entry.bytes).map(([category, value]) => barRow(category, value, freed, color(category))), "Nothing deleted yet");
-  bars($("hist-rules"), totalsBy(entries, (entry) => entry.rule, (entry) => entry.bytes).slice(0, 8).map(([rule, value]) => barRow(rule, value, freed, null)), "Nothing deleted yet");
-  bars($("hist-folders"), totalsBy(entries, (entry) => parentOf(entry.path), (entry) => entry.bytes).slice(0, 8).map(([folder, value]) => barRow(display(folder), value, freed, null)), "Nothing deleted yet");
+  bars($("hist-cats"), totalsBy(entries, (entry) => entry.category, (entry) => entry.bytes).map(([category, value]) => barRow(category, value, removed, color(category))), "Nothing deleted yet");
+  bars($("hist-rules"), totalsBy(entries, (entry) => entry.rule, (entry) => entry.bytes).slice(0, 8).map(([rule, value]) => barRow(rule, value, removed, null)), "Nothing deleted yet");
+  bars($("hist-folders"), totalsBy(entries, (entry) => parentOf(entry.path), (entry) => entry.bytes).slice(0, 8).map(([folder, value]) => barRow(display(folder), value, removed, null)), "Nothing deleted yet");
 
   $("hist-note").textContent = RUNS.length ? `${count(RUNS.length, "run")}, newest first` : "";
   const body = $("hist-rows");

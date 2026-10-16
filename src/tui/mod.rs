@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{
 use crate::config::Config;
 use crate::delete::{self, Guard, Mode, Target};
 use crate::git;
-use crate::history::{self, Entry};
+use crate::history::{self, Entry, Recorder};
 use crate::platform;
 use crate::scan::{self, Cancel, Event};
 use app::{App, Overlay, project_of};
@@ -156,8 +156,7 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
     let stop = Arc::new(AtomicBool::new(false));
     let deleter = spawn_deleter(Guard::new(roots), job_rx, result_tx, Arc::clone(&stop));
     let mut app = App::new(config.delete.mode.into(), confirm);
-    let started_at = history::now();
-    let mut deleted = Vec::new();
+    let mut recorder = Recorder::for_user(history::now(), roots);
     let filesystems = distinct_filesystems(roots);
     let mut measured: Option<Instant> = None;
     let (project_tx, project_rx) = unbounded::<PathBuf>();
@@ -197,7 +196,7 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
             }
             let mut removed = false;
             while let Ok(outcome) = result_rx.try_recv() {
-                record(&mut app, &mut deleted, outcome);
+                record(&mut app, &mut recorder, outcome);
                 removed = true;
             }
             if removed || measured.is_none_or(|at| at.elapsed() >= DISK_REFRESH) {
@@ -226,18 +225,20 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
     drop(handle);
     let _ = deleter.join();
     while let Ok(result) = result_rx.try_recv() {
-        record(&mut app, &mut deleted, result);
+        record(&mut app, &mut recorder, result);
     }
-    save_history(started_at, roots, deleted);
+    if let Err(error) = recorder.finish() {
+        eprintln!("kuizer: {error}");
+    }
     outcome
 }
 
-fn record(app: &mut App, deleted: &mut Vec<Entry>, (id, mode, result): Outcome) {
+fn record(app: &mut App, recorder: &mut Recorder, (id, mode, result): Outcome) {
     if result.is_ok()
         && mode != Mode::DryRun
         && let Some(item) = app.item(id)
     {
-        deleted.push(Entry::new(&item.candidate, mode));
+        recorder.add(Entry::new(&item.candidate, mode));
     }
     app.finish(id, mode, result);
 }
@@ -260,10 +261,4 @@ fn available_space(filesystems: &[PathBuf]) -> Option<u64> {
         .filter_map(|path| platform::available_space(path))
         .collect();
     (!sizes.is_empty()).then(|| sizes.iter().sum())
-}
-
-fn save_history(started_at: String, roots: &[PathBuf], deleted: Vec<Entry>) {
-    if let Err(error) = history::save(started_at, roots, deleted) {
-        eprintln!("kuizer: {error}");
-    }
 }

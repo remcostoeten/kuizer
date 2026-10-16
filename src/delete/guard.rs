@@ -23,7 +23,7 @@ pub enum Refusal {
     ContainsCwd,
     #[error("path is inside a protected system directory")]
     Protected,
-    #[error("path holds browser or application data such as cookies, sessions or keys")]
+    #[error("path holds browser data, credentials or installed tools and extensions")]
     AppData,
     #[error("path is a symlink now")]
     Symlink,
@@ -49,6 +49,7 @@ impl Guard {
     pub fn new(roots: &[PathBuf]) -> Self {
         let mut anchors: Vec<PathBuf> = roots.to_vec();
         anchors.extend(dirs::home_dir());
+        anchors.extend(platform::home_dir());
         anchors.push(PathBuf::from("/"));
         Self {
             roots: roots.to_vec(),

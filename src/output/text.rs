@@ -7,6 +7,7 @@ use crate::caches::KnownCache;
 use crate::delete::{Mode, Removal, Status};
 use crate::detect::{Category, Safety};
 use crate::dupes::{Duplicates, Group};
+use crate::platform;
 use crate::scan::{Candidate, Issue, Progress, Summary};
 use crate::units::ByteSize;
 
@@ -14,7 +15,7 @@ const MAX_ISSUES: usize = 10;
 const LARGEST: usize = 10;
 
 pub fn display_path(path: &Path) -> String {
-    let display: String = match dirs::home_dir()
+    let display: String = match platform::home_dir()
         .and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
     {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),

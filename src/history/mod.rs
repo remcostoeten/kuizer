@@ -73,6 +73,8 @@ pub struct Cumulative {
     pub last_run: Option<String>,
     pub restored_items: usize,
     pub restored_bytes: u64,
+    pub permanent_bytes: u64,
+    pub trashed_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +191,17 @@ impl History {
         let (items, bytes) = total(Action::Delete);
         let (restored_items, restored_bytes) = total(Action::Restore);
         let bytes = bytes.saturating_sub(restored_bytes);
+        let by_mode = |mode| {
+            self.runs
+                .iter()
+                .filter(|run| run.action == Action::Delete)
+                .flat_map(|run| &run.deleted)
+                .filter(|entry| entry.mode == mode)
+                .map(|entry| entry.bytes)
+                .sum::<u64>()
+        };
+        let permanent_bytes = by_mode(Mode::Permanent);
+        let trashed_bytes = by_mode(Mode::Trash).saturating_sub(restored_bytes);
         self.cumulative = Cumulative {
             runs: self.runs.len(),
             items: items.saturating_sub(restored_items),
@@ -198,6 +211,8 @@ impl History {
             last_run: self.runs.last().map(|run| run.started_at.clone()),
             restored_items,
             restored_bytes,
+            permanent_bytes,
+            trashed_bytes,
         };
     }
 
@@ -268,6 +283,37 @@ fn parse_id(id: &str) -> Option<(u64, Option<usize>)> {
         Some((session, item)) => Some((session.parse().ok()?, Some(item.parse().ok()?))),
         None => Some((rest.parse().ok()?, None)),
     }
+}
+
+/// @name freed_bytes
+/// @description Sums the space that past runs actually freed: everything deleted permanently, plus
+/// trashed entries that are no longer in the trash. Restored entries never count. With `kept`
+/// unknown, because the trash cannot be read, trashed entries are left out.
+///
+/// @example
+/// let kept = history::still_in_trash(&history, &trashed);
+/// let freed = history::freed_bytes(&history, Some(&kept));
+pub fn freed_bytes(history: &History, kept: Option<&HashSet<(usize, usize)>>) -> u64 {
+    let restored = history.restored_ids();
+    history
+        .runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.action == Action::Delete)
+        .flat_map(|(run_index, run)| {
+            run.deleted
+                .iter()
+                .enumerate()
+                .map(move |(entry_index, entry)| (run_index, entry_index, entry))
+        })
+        .filter(|&(run, entry, _)| !restored.contains(history.item_id(run, entry).as_str()))
+        .filter(|&(run, entry, item)| match item.mode {
+            Mode::Permanent => true,
+            Mode::Trash => kept.is_some_and(|kept| !kept.contains(&(run, entry))),
+            Mode::DryRun => false,
+        })
+        .map(|(_, _, entry)| entry.bytes)
+        .sum()
 }
 
 /// @name trashed_paths
@@ -449,45 +495,150 @@ pub fn load(path: &Path) -> Result<History, HistoryError> {
 
 /// @name append
 /// @description Reads the history at `source`, adds a run, recomputes the cumulative totals and
-/// writes the result atomically to `target` through a temporary sibling. `source` is never
-/// modified when it differs from `target`.
+/// writes the result atomically to `target` through a temporary sibling, holding a lock so two
+/// kuizer processes never drop each other's runs. `source` is never modified when it differs
+/// from `target`.
 ///
 /// @example
 /// history::append(&source, &target, Run::new(started_at, &roots, entries))?;
-pub fn append(source: &Path, path: &Path, run: Run) -> Result<(), HistoryError> {
-    let mut history = load(source)?;
-    let mut run = run;
-    run.id = history.next_session;
-    history.next_session += 1;
-    history.runs.push(run);
-    history.recompute();
+pub fn append(source: &Path, path: &Path, run: Run) -> Result<u64, HistoryError> {
+    update(source, path, |history| {
+        let mut run = run;
+        run.id = history.next_session;
+        history.next_session += 1;
+        history.runs.push(run);
+        history.next_session - 1
+    })
+}
+
+fn update<T>(
+    source: &Path,
+    path: &Path,
+    change: impl FnOnce(&mut History) -> T,
+) -> Result<T, HistoryError> {
     let write_error = |source| HistoryError::Write {
         path: path.to_owned(),
         source,
     };
+    let _lock = Lock::acquire(path).map_err(write_error)?;
+    let mut history = load(source)?;
+    history.assign_ids();
+    let result = change(&mut history);
+    history.recompute();
     let text = serde_json::to_string_pretty(&history)
         .map_err(io::Error::other)
         .map_err(write_error)?;
-    let temporary = path.with_extension("json.tmp");
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&temporary, text + "\n").map_err(write_error)?;
-    fs::rename(&temporary, path).map_err(write_error)
+    fs::rename(&temporary, path).map_err(write_error)?;
+    Ok(result)
 }
 
-/// @name save
-/// @description Appends one run with its deleted entries to the default history file. A run that
-/// deleted nothing is not recorded.
-///
-/// @example
-/// history::save(started_at, &roots, deleted)?;
-pub fn save(
-    started_at: String,
-    roots: &[PathBuf],
-    deleted: Vec<Entry>,
-) -> Result<(), HistoryError> {
-    if deleted.is_empty() {
-        return Ok(());
+struct Lock {
+    _file: fs::File,
+}
+
+impl Lock {
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("json.lock"))?;
+        #[cfg(unix)]
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+        Ok(Self { _file: file })
     }
-    record(Run::new(started_at, roots, deleted))
+}
+
+pub struct Recorder {
+    source: PathBuf,
+    target: PathBuf,
+    started_at: String,
+    roots: Vec<PathBuf>,
+    session: Option<u64>,
+    error: Option<HistoryError>,
+}
+
+impl Recorder {
+    /// @name for_user
+    /// @description Starts recording a delete run into the default history file. Nothing is
+    /// written until the first entry arrives, so a run that removes nothing leaves no trace.
+    ///
+    /// @example
+    /// let mut recorder = Recorder::for_user(history::now(), &roots);
+    pub fn for_user(started_at: String, roots: &[PathBuf]) -> Self {
+        let home = dirs::home_dir();
+        let mut recorder = Self::at(
+            home.as_deref().map(readable_path_in).unwrap_or_default(),
+            home.map(|home| home.join(FILE_NAME)).unwrap_or_default(),
+            started_at,
+            roots,
+        );
+        if recorder.target.as_os_str().is_empty() {
+            recorder.error = Some(HistoryError::NoHome);
+        }
+        recorder
+    }
+
+    pub fn at(source: PathBuf, target: PathBuf, started_at: String, roots: &[PathBuf]) -> Self {
+        Self {
+            source,
+            target,
+            started_at,
+            roots: roots.to_vec(),
+            session: None,
+            error: None,
+        }
+    }
+
+    /// @name add
+    /// @description Writes one removed entry to the history file straight away, so an interrupted
+    /// or crashed run still leaves a record that `kuizer restore` can use. The first entry opens
+    /// the run; later entries are added to it. The first write error is kept for `finish`.
+    ///
+    /// @example
+    /// recorder.add(Entry::new(&candidate, mode));
+    pub fn add(&mut self, entry: Entry) {
+        if matches!(self.error, Some(HistoryError::NoHome)) {
+            return;
+        }
+        let source = if self.session.is_some() {
+            &self.target
+        } else {
+            &self.source
+        };
+        let result = update(source, &self.target, |history| {
+            let open = self
+                .session
+                .and_then(|session| history.runs.iter_mut().find(|run| run.id == session));
+            match open {
+                Some(run) => {
+                    run.deleted.push(entry);
+                    run.total = Total::of(&run.deleted);
+                    run.finished_at = now();
+                    run.id
+                }
+                None => {
+                    let mut run = Run::new(self.started_at.clone(), &self.roots, vec![entry]);
+                    run.id = history.next_session;
+                    history.next_session += 1;
+                    history.runs.push(run);
+                    history.next_session - 1
+                }
+            }
+        });
+        match result {
+            Ok(session) => self.session = Some(session),
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+    }
+
+    pub fn finish(self) -> Result<(), HistoryError> {
+        self.error.map_or(Ok(()), Err)
+    }
 }
 
 /// @name record
@@ -497,7 +648,7 @@ pub fn save(
 /// history::record(Run::restore(started_at, restored))?;
 pub fn record(run: Run) -> Result<(), HistoryError> {
     let home = dirs::home_dir().ok_or(HistoryError::NoHome)?;
-    append(&readable_path_in(&home), &home.join(FILE_NAME), run)
+    append(&readable_path_in(&home), &home.join(FILE_NAME), run).map(drop)
 }
 
 #[cfg(test)]
@@ -554,6 +705,65 @@ mod tests {
 
         let text = fs::read_to_string(&path).expect("read");
         assert!(text.find("\"runs\"") < text.find("\"cumulative\""));
+    }
+
+    #[test]
+    fn recorder_writes_each_entry_into_one_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut fresh = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        fresh.add(entry(7));
+        fresh.add(entry(0));
+        assert_eq!(load(&path).expect("fresh").runs[0].total.items, 2);
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+
+        recorder.add(entry(1));
+        let partial = load(&path).expect("after one");
+        assert_eq!(partial.runs.len(), 2);
+        assert_eq!(partial.runs[1].total.items, 1);
+
+        recorder.add(entry(2));
+        recorder.finish().expect("no errors");
+        let history = load(&path).expect("after two");
+        assert_eq!(history.runs.len(), 2);
+        assert_eq!(history.runs[1].session(), "s2");
+        assert_eq!(history.runs[1].total.bytes, 3);
+        assert_eq!(history.cumulative.items, 4);
+    }
+
+    #[test]
+    fn recorder_without_entries_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        Recorder::at(path.clone(), path.clone(), now(), &[])
+            .finish()
+            .expect("no errors");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_appends_keep_every_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..5 {
+                        append(&path, &path, Run::new(now(), &[], vec![entry(1)])).expect("append");
+                    }
+                });
+            }
+        });
+        let history = load(&path).expect("load");
+        assert_eq!(history.runs.len(), 40);
+        let ids: HashSet<u64> = history.runs.iter().map(|run| run.id).collect();
+        assert_eq!(ids.len(), 40);
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
@@ -670,6 +880,35 @@ mod tests {
         assert_eq!(history.restored_ids(), HashSet::from(["s1.2"]));
         let kept = still_in_trash(&history, &[PathBuf::from("/tmp/a/node_modules")]);
         assert_eq!(kept, HashSet::from([(0, 1)]));
+    }
+
+    #[test]
+    fn counts_trashed_bytes_as_freed_only_once_they_leave_the_trash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut permanent = entry(1000);
+        permanent.mode = Mode::Permanent;
+        append(
+            &path,
+            &path,
+            Run::new(now(), &[], vec![entry(100), entry(10), permanent]),
+        )
+        .expect("delete");
+        let restored = load(&path).expect("load").runs[0].deleted[1].clone();
+        append(
+            &path,
+            &path,
+            Run::restore(now(), vec![Entry::restored(&restored, "s1.2".to_owned())]),
+        )
+        .expect("restore");
+        let history = load(&path).expect("reload");
+
+        assert_eq!(history.cumulative.bytes, 1100);
+        assert_eq!(history.cumulative.permanent_bytes, 1000);
+        assert_eq!(history.cumulative.trashed_bytes, 100);
+        assert_eq!(freed_bytes(&history, None), 1000);
+        assert_eq!(freed_bytes(&history, Some(&HashSet::from([(0, 0)]))), 1000);
+        assert_eq!(freed_bytes(&history, Some(&HashSet::new())), 1100);
     }
 
     #[test]

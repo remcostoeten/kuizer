@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::caches::KnownCache;
 use crate::dupes::Duplicates;
 use crate::history::History;
+use crate::platform;
 use crate::scan::{Candidate, Issue, Summary};
 
 const TEMPLATE: &str = include_str!("report.html");
@@ -63,7 +64,7 @@ pub fn scan_html(
     summary: &Summary,
     generated: &str,
 ) -> String {
-    let home = dirs::home_dir().map(|home| home.display().to_string());
+    let home = platform::home_dir().map(|home| home.display().to_string());
     let data = format!(
         "{{\"home\":{},\"generated\":{},\"scan\":{}}}",
         json(&home),
@@ -81,7 +82,7 @@ pub fn scan_html(
 /// @example
 /// println!("{}", output::dashboard_data(&dashboard));
 pub fn dashboard_data(dashboard: &Dashboard) -> String {
-    let home = dirs::home_dir().map(|home| home.display().to_string());
+    let home = platform::home_dir().map(|home| home.display().to_string());
     let duplicates = dashboard.duplicates.map_or_else(
         || "null".to_owned(),
         |found| {
