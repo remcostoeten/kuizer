@@ -426,6 +426,14 @@ mod tests {
                 &[".rustc_info.json", "classes"],
                 Some("cargo-target"),
             ),
+            (
+                ".terraform",
+                &["main.tf", "variables.tf"],
+                &["providers"],
+                Some("terraform"),
+            ),
+            (".terraform", &["main.tf"], &["notes"], None),
+            (".terraform", &["main.tf.bak"], &["providers"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

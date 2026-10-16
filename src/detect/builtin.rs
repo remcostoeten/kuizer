@@ -373,6 +373,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "maven",
     },
     Builtin {
+        name: "terraform",
+        kind: Kind::Dir,
+        pattern: ".terraform",
+        markers: &["*.tf"],
+        contains: &["providers", "modules"],
+        category: Category::Cache,
+        safety: Safety::Review,
+        ecosystem: "terraform",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",

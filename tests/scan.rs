@@ -162,6 +162,9 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "java/target/maven-status/x", 10);
     file(root, "ops/pom.xml", 2);
     file(root, "ops/target/hosts.txt", 10);
+    file(root, "infra/main.tf", 2);
+    file(root, "infra/.terraform/providers/x", 10);
+    file(root, "old/.terraform/providers/x", 10);
 
     let collected = scan(root);
 
@@ -172,6 +175,7 @@ fn finds_artifacts_of_other_ecosystems() {
             ("dotnet/obj", "dotnet-obj"),
             ("hs/.stack-work", "haskell-stack"),
             ("hs/dist-newstyle", "haskell-cabal"),
+            ("infra/.terraform", "terraform"),
             ("ios/Pods", "cocoapods"),
             ("java/target", "maven-target"),
             ("phx/_build", "elixir-build"),
