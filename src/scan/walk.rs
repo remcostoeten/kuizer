@@ -8,7 +8,7 @@ use crossbeam_channel::Sender;
 use super::cancel::Cancel;
 use super::types::{Counters, Event, Issue, IssueKind};
 use crate::config::{Excludes, ScanConfig};
-use crate::detect::{Detector, Kind, Listing, Match};
+use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
 use crate::platform::{self, MountTable};
 use crate::protect::{self, Protected};
 
@@ -51,7 +51,13 @@ impl Walker<'_> {
         }
     }
 
-    fn emit(&self, found: Found) -> Flow {
+    fn emit(&self, mut found: Found) -> Flow {
+        if found.rule.safety == Safety::Safe && self.protected.in_hidden_home_dir(&found.path) {
+            found.rule = Arc::new(RuleInfo {
+                safety: Safety::Review,
+                ..RuleInfo::clone(&found.rule)
+            });
+        }
         match self.found.send(found) {
             Ok(()) => Flow::Continue,
             Err(_) => Flow::Stop,

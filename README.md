@@ -13,7 +13,7 @@ kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `targ
 
 - **Each artifact is checked against its project.** A `dist` folder counts only next to a `package.json`, and a `target` folder only next to a `Cargo.toml` with Cargo's cache tag inside. Every result is marked `safe` or `review`.
 - Deleted items go to the trash by default. Before each removal kuizer checks again that the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home directory or a system directory.
-- Browser and app profiles are never entered or deleted: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The same goes for `~/.ssh`, `~/.gnupg` and the keyrings.
+- Browser and app profiles are never entered or deleted: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The same goes for `~/.ssh`, `~/.gnupg` and the keyrings, and for globally installed tools and editor extensions (`~/.vscode/extensions`, pnpm, bun and yarn global installs). Anything else found inside a hidden folder of your home directory is marked `review`, never `safe`.
 - Projects with uncommitted git changes get a warning in the list and in the delete confirmation.
 - Every deletion is logged to `~/.kuizer-history.json`. `kuizer history` lists past runs with ids like `s4`, shows what was freed and what is still in the trash, and `kuizer restore s4` puts a run back from the trash without overwriting anything.
 - `kuizer scan --report` writes a single HTML file with a zoomable treemap of every result, grouped by project, category or rule, and opens it in your browser. The file loads nothing from the network.

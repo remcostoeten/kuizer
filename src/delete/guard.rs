@@ -23,7 +23,7 @@ pub enum Refusal {
     ContainsCwd,
     #[error("path is inside a protected system directory")]
     Protected,
-    #[error("path holds browser or application data such as cookies, sessions or keys")]
+    #[error("path holds browser data, credentials or installed tools and extensions")]
     AppData,
     #[error("path is a symlink now")]
     Symlink,
