@@ -169,10 +169,7 @@ pub fn run(args: RestoreArgs, json: bool) -> Result<(), AppError> {
     let items = backend::list()?;
     let records: Vec<TrashRecord> = items
         .iter()
-        .map(|item| TrashRecord {
-            path: item.original_path(),
-            deleted_at: (item.time_deleted >= 0).then_some(item.time_deleted),
-        })
+        .map(|item| TrashRecord::new(item.original_path(), item.time_deleted))
         .collect();
 
     let (eligible, refused): (Vec<_>, Vec<_>) = targets

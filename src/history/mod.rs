@@ -389,12 +389,31 @@ const RESTORE_WINDOW_SECONDS: i64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrashRecord {
     pub path: PathBuf,
-    pub deleted_at: Option<i64>,
+    pub deleted_at: Option<jiff::civil::DateTime>,
+}
+
+impl TrashRecord {
+    /// @name TrashRecord::new
+    /// @description Builds a record from a trash item's original path and the Unix time the
+    /// trash library reports. Freedesktop `.trashinfo` files store local wall-clock time without
+    /// an offset and the library reads it in today's time zone, so the time is turned back into
+    /// that wall-clock time, which stays comparable after a time zone or DST change.
+    ///
+    /// @example
+    /// let record = TrashRecord::new(item.original_path(), item.time_deleted);
+    pub fn new(path: PathBuf, time_deleted: i64) -> Self {
+        let deleted_at = (time_deleted >= 0)
+            .then(|| jiff::Timestamp::from_second(time_deleted).ok())
+            .flatten()
+            .map(|time| time.to_zoned(jiff::tz::TimeZone::system()).datetime());
+        Self { path, deleted_at }
+    }
 }
 
 /// @name match_trash
 /// @description Pairs each requested trashed entry with an item in the trash: the same original
-/// path, deleted closest to the entry's time and within five minutes of it. Items without a
+/// path, deleted closest to the entry's local wall-clock time and within five minutes of it,
+/// so a time zone or DST change between delete and restore does not matter. Items without a
 /// deletion time match only when no timed item does. Every trash item is used at most once.
 ///
 /// @example
@@ -413,16 +432,16 @@ pub fn match_trash(
             if entry.mode != Mode::Trash {
                 return None;
             }
-            let deleted = entry
-                .deleted_at
-                .parse::<jiff::Timestamp>()
-                .ok()
-                .map(|time| time.as_second());
+            let deleted = entry.deleted_at.parse::<jiff::civil::DateTime>().ok();
             let same_path = |index: &usize| !used[*index] && trash[*index].path == entry.path;
             let timed = (0..trash.len())
                 .filter(same_path)
                 .filter_map(|index| {
-                    let gap = (trash[index].deleted_at? - deleted?).abs();
+                    let gap = trash[index]
+                        .deleted_at?
+                        .duration_since(deleted?)
+                        .as_secs()
+                        .abs();
                     (gap <= RESTORE_WINDOW_SECONDS).then_some((gap, index))
                 })
                 .min()
@@ -676,10 +695,10 @@ mod tests {
         }
     }
 
-    fn record(path: &str, deleted_at: Option<i64>) -> TrashRecord {
+    fn record(path: &str, deleted_at: Option<&str>) -> TrashRecord {
         TrashRecord {
             path: PathBuf::from(path),
-            deleted_at,
+            deleted_at: deleted_at.map(|time| time.parse().unwrap()),
         }
     }
 
@@ -927,11 +946,10 @@ mod tests {
             )],
             cumulative: Cumulative::default(),
         };
-        let noon = 1_792_065_600;
         let trash = [
-            record("/w/a", Some(noon + 2 * 3600 + 3)),
-            record("/w/a", Some(noon + 1)),
-            record("/w/b", Some(noon + 3600)),
+            record("/w/a", Some("2026-10-15T14:00:03")),
+            record("/w/a", Some("2026-10-15T12:00:01")),
+            record("/w/b", Some("2026-10-15T13:00:00")),
             record("/w/c", None),
         ];
         let targets = [(0, 0), (0, 1), (0, 2), (0, 3)];
@@ -939,5 +957,41 @@ mod tests {
         let matched = match_trash(&history, &targets, &trash);
 
         assert_eq!(matched, [Some(1), Some(0), None, Some(3)]);
+    }
+
+    #[test]
+    fn matches_by_wall_clock_time_after_a_time_zone_change() {
+        let history = History {
+            next_session: 2,
+            runs: vec![Run::new(
+                now(),
+                &[],
+                vec![
+                    entry_at("/w/a", "2026-10-15T12:00:00+02:00"),
+                    entry_at("/w/b", "2026-03-29T01:59:00+01:00"),
+                ],
+            )],
+            cumulative: Cumulative::default(),
+        };
+        let trash = [
+            record("/w/a", Some("2026-10-15T12:00:02")),
+            record("/w/b", Some("2026-03-29T01:59:00")),
+        ];
+
+        let matched = match_trash(&history, &[(0, 0), (0, 1)], &trash);
+
+        assert_eq!(matched, [Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn trash_record_keeps_the_wall_clock_time() {
+        let zone = jiff::tz::TimeZone::system();
+        let wall: jiff::civil::DateTime = "2026-10-15T12:00:00".parse().unwrap();
+        let unix = wall.to_zoned(zone).unwrap().timestamp().as_second();
+
+        let record = TrashRecord::new(PathBuf::from("/w/a"), unix);
+
+        assert_eq!(record.deleted_at, Some(wall));
+        assert_eq!(TrashRecord::new(PathBuf::from("/w/a"), -1).deleted_at, None);
     }
 }
