@@ -26,6 +26,8 @@ const MIX: &[&str] = &["mix.exs"];
 
 const ZIG_BUILD: &[&str] = &["build.zig"];
 
+const PUBSPEC: &[&str] = &["pubspec.yaml"];
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "node-modules",
@@ -351,6 +353,26 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Build,
         safety: Safety::Safe,
         ecosystem: "gradle",
+    },
+    Builtin {
+        name: "dart-tool",
+        kind: Kind::Dir,
+        pattern: ".dart_tool",
+        markers: PUBSPEC,
+        contains: &[],
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "dart",
+    },
+    Builtin {
+        name: "flutter-build",
+        kind: Kind::Dir,
+        pattern: "build",
+        markers: PUBSPEC,
+        contains: &[],
+        category: Category::Build,
+        safety: Safety::Review,
+        ecosystem: "flutter",
     },
     Builtin {
         name: "typescript-buildinfo",

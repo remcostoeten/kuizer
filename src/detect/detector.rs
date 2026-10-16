@@ -448,6 +448,20 @@ mod tests {
             ),
             ("build", &["build.gradle"], &["index.html"], None),
             ("build", &["settings.gradle"], &["tmp"], None),
+            (
+                ".dart_tool",
+                &["pubspec.yaml", "lib"],
+                &["package_config.json"],
+                Some("dart-tool"),
+            ),
+            (".dart_tool", &["README.md"], &["package_config.json"], None),
+            (
+                "build",
+                &["pubspec.yaml", "package.json"],
+                &["web"],
+                Some("flutter-build"),
+            ),
+            ("build", &["analysis_options.yaml"], &["web"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

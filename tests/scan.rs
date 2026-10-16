@@ -170,6 +170,10 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "android/app/build/outputs/apk/app.apk", 10);
     file(root, "site/build.gradle", 2);
     file(root, "site/build/index.html", 10);
+    file(root, "app/pubspec.yaml", 2);
+    file(root, "app/.dart_tool/package_config.json", 10);
+    file(root, "app/build/web/main.dart.js", 10);
+    file(root, "sketch/.dart_tool/package_config.json", 10);
 
     let collected = scan(root);
 
@@ -177,6 +181,8 @@ fn finds_artifacts_of_other_ecosystems() {
         found(&collected, root),
         pairs(&[
             ("android/app/build", "gradle-build"),
+            ("app/.dart_tool", "dart-tool"),
+            ("app/build", "flutter-build"),
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
             ("hs/.stack-work", "haskell-stack"),
