@@ -5,8 +5,31 @@ use crate::platform;
 use crate::protect::Protected;
 
 const PROTECTED: &[&str] = &[
-    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/opt", "/proc", "/root", "/run",
-    "/sbin", "/srv", "/sys", "/usr", "/var/lib", "/var/log",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/efi",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/nix",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/snap",
+    "/srv",
+    "/sys",
+    "/usr",
+    "/var/lib",
+    "/var/log",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/private/etc",
+    "/private/var/db",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -162,6 +185,26 @@ mod tests {
                 .check_path(Path::new("/home/me/projects/web/node_modules"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn refuses_system_folders_of_other_platforms() {
+        let guard = Guard::new(&[PathBuf::from("/")]).with_cwd(None);
+        for path in [
+            "/nix/store/abc-pkg/lib/node_modules",
+            "/snap/code/current/node_modules",
+            "/efi/EFI/cache",
+            "/System/Library/Caches",
+            "/Library/Caches/com.example",
+            "/Applications/Editor.app/Contents/node_modules",
+            "/private/var/db/cache",
+        ] {
+            assert_eq!(
+                guard.check_path(Path::new(path)),
+                Err(Refusal::Protected),
+                "{path}"
+            );
+        }
     }
 
     #[test]
