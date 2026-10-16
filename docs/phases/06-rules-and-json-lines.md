@@ -1,10 +1,10 @@
 # Phase 6: more rules, `--json-lines` and the JSON reference
 
-Status: plan. Global caches (`kuizer cache`, `src/caches.rs`) are done. Temp and editor files, more ecosystems, `--json-lines` and a documented schema are open.
+Status: plan. Global caches (`kuizer cache`, `src/caches.rs`), glob markers and the ecosystem rules for Python, .NET, CocoaPods, Elixir, Zig, Haskell, Dart, Swift, Maven, Gradle, CMake, Terraform and Unity are done. Temp and editor files, the remaining rules in the table, `--json-lines` and a documented schema are open.
 
 ## 1. Rules
 
-Built-in rules live in `src/detect/builtin.rs`. There are 19 today, all JavaScript, Rust, Gradle and Python except `typescript-buildinfo` and the generic `cachedir-tag`. The `temp` category has no rules yet.
+Built-in rules live in `src/detect/builtin.rs`. Ecosystem rules come first and the generic JavaScript fallbacks (`js-dist`, `js-build`, `js-out`, `js-tool-cache`) and `cachedir-tag` last, so a folder with stronger evidence is named by its own rule. The `temp` category has only `unity-temp` so far.
 
 ### Detector change: glob markers
 
@@ -23,20 +23,30 @@ Rule markers are plain names (`is_plain_name` in `src/detect/detector.rs`). .NET
 | `pytest-cache` | dir | `.pytest_cache` | contains `CACHEDIR.TAG` | cache | safe |
 | `mypy-cache` | dir | `.mypy_cache` | contains `CACHEDIR.TAG` | cache | safe |
 | `ruff-cache` | dir | `.ruff_cache` | contains `CACHEDIR.TAG` | cache | safe |
-| `tox-env` | dir | `.tox`, `.nox` | `tox.ini`, `noxfile.py`, `pyproject.toml` | dependencies | safe |
+| `tox-env` | dir | `.tox` | `tox.ini`, `pyproject.toml`, `setup.cfg` | dependencies | safe |
+| `nox-env` | dir | `.nox` | `noxfile.py` | dependencies | safe |
 | `python-venv` | dir | `.venv`, `venv` | contains `pyvenv.cfg` | dependencies | review (may hold hand-installed packages) |
 | `dart-tool` | dir | `.dart_tool` | `pubspec.yaml` | cache | safe |
-| `flutter-build` | dir | `build` | `pubspec.yaml` | build | safe |
-| `dotnet-bin-obj` | dir | `bin`, `obj` | `*.csproj`, `*.fsproj`, `*.vbproj` | build | safe |
-| `zig-cache` | dir | `.zig-cache`, `zig-cache`, `zig-out` | `build.zig` | build | safe |
-| `elixir-build` | dir | `_build`, `deps` | `mix.exs` | build / dependencies | safe |
+| `flutter-build` | dir | `build` | `pubspec.yaml` | build | review (nothing inside proves Flutter made it) |
+| `dotnet-bin` | dir | `bin` | `*.csproj`, `*.fsproj`, `*.vbproj`, contains `Debug` or `Release` | build | safe |
+| `dotnet-obj` | dir | `obj` | `*.csproj`, `*.fsproj`, `*.vbproj`, contains `project.assets.json` | build | safe |
+| `zig-cache` | dir | `.zig-cache`, `zig-cache` | `build.zig` | cache | safe |
+| `zig-out` | dir | `zig-out` | `build.zig` | build | safe |
+| `elixir-build` | dir | `_build` | `mix.exs` | build | safe |
+| `elixir-deps` | dir | `deps` | `mix.exs` | dependencies | safe |
 | `haskell-stack` | dir | `.stack-work` | `stack.yaml` | build | safe |
 | `haskell-cabal` | dir | `dist-newstyle` | `cabal.project`, `*.cabal` | build | safe |
 | `elm-stuff` | dir | `elm-stuff` | `elm.json` | dependencies | safe |
 | `go-vendor` | dir | `vendor` | `go.mod`, contains `modules.txt` | dependencies | review (vendoring is often committed) |
 | `php-vendor` | dir | `vendor` | `composer.json`, contains `autoload.php` | dependencies | safe |
-| `cocoapods` | dir | `Pods` | `Podfile` | dependencies | review |
-| `terraform` | dir | `.terraform` | any `*.tf` | cache | review (holds provider state) |
+| `cocoapods` | dir | `Pods` | `Podfile`, contains `Manifest.lock` | dependencies | review |
+| `terraform` | dir | `.terraform` | any `*.tf`, contains `providers` or `modules` | cache | review (holds provider state) |
+| `swift-build` | dir | `.build` | `Package.swift` | build | safe |
+| `maven-target` | dir | `target` | `pom.xml`, contains `maven-status`, `maven-archiver` or `classes` | build | safe |
+| `gradle-build` | dir | `build` | `build.gradle`, `build.gradle.kts`, contains `intermediates`, `outputs`, `tmp` or `classes` | build | safe |
+| `cmake-build` | dir | `build`, `build-*`, `cmake-build-*` | contains `CMakeCache.txt` | build | review (the cache holds configure options) |
+| `unity-library` | dir | `Library` | `ProjectSettings`, contains `ArtifactDB`, `SourceAssetDB` or `PackageCache` | cache | review (reimport is slow) |
+| `unity-temp` | dir | `Temp` | `ProjectSettings` | temp | review (in use while the editor is open) |
 | `astro-docusaurus` | dir | `.astro`, `.docusaurus` | `package.json` | cache | safe |
 | `storybook-static` | dir | `storybook-static` | `package.json` | build | safe |
 
