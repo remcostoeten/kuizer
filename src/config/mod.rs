@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::detect::{Category, Detector, Listing, RuleError, RuleSpec, builtin_rules};
+use crate::platform;
 use crate::units::ByteSize;
 
 pub use exclude::{ExcludeError, Excludes};
@@ -180,7 +181,7 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 pub fn expand_home(path: &Path) -> PathBuf {
-    match (path.strip_prefix("~"), dirs::home_dir()) {
+    match (path.strip_prefix("~"), platform::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => path.to_path_buf(),
     }

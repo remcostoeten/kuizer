@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Row, Table};
 
-use super::view::{MUTED, shorten};
+use super::view::{MUTED, cells, shorten};
 use crate::detect::Safety;
 use crate::output::display_path;
 use crate::scan::{Candidate, Collected, Event, Issue, Scan, Summary};
@@ -55,7 +55,7 @@ impl Scroll {
     }
 
     fn page(&self) -> isize {
-        self.height.max(1) as isize
+        isize::try_from(self.height.max(1)).unwrap_or(isize::MAX)
     }
 }
 
@@ -203,7 +203,7 @@ fn draw(frame: &mut Frame, watch: &mut Watch, scan: &Scan) {
     let position = position(watch);
     let [keys, place] = Layout::horizontal([
         Constraint::Fill(1),
-        Constraint::Length(position.len() as u16),
+        Constraint::Length(cells(position.len())),
     ])
     .areas(bottom);
     frame.render_widget(Paragraph::new(footer(watch)), keys);

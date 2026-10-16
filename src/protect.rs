@@ -69,6 +69,26 @@ const HOME_DIRS: &[&str] = &[
     "Library/Keychains",
 ];
 
+const TOOL_DIRS: &[&str] = &[
+    ".vscode/extensions",
+    ".vscode-insiders/extensions",
+    ".vscode-oss/extensions",
+    ".vscode-server",
+    ".vscode-server-insiders",
+    ".cursor/extensions",
+    ".cursor-server",
+    ".windsurf/extensions",
+    ".windsurf-server",
+    ".local/share/pnpm/global",
+    ".bun/install/global",
+    ".config/yarn/global",
+    ".yarn/global",
+    ".npm-global",
+    ".volta/tools",
+    ".local/share/nvim",
+    ".config/coc/extensions",
+];
+
 /// @name holds_app_data
 /// @description Reports whether a directory listing belongs to a browser or Electron profile:
 /// a Chromium user data directory (`Local State`), a Firefox profile root (`profiles.ini`), or a
@@ -94,6 +114,7 @@ fn marked_on_disk(dir: &Path) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Protected {
     dirs: HashSet<PathBuf>,
+    homes: Vec<PathBuf>,
 }
 
 impl Protected {
@@ -101,11 +122,20 @@ impl Protected {
         let Some(home) = home else {
             return Self::default();
         };
-        let mut dirs: HashSet<PathBuf> = HOME_DIRS.iter().map(|dir| home.join(dir)).collect();
-        for parent in [".config", ".cache", ".local/share"] {
-            dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
+        let mut homes = vec![home.to_path_buf()];
+        if let Ok(resolved) = std::fs::canonicalize(home)
+            && resolved != home
+        {
+            homes.push(resolved);
         }
-        Self { dirs }
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+        for home in &homes {
+            dirs.extend(HOME_DIRS.iter().chain(TOOL_DIRS).map(|dir| home.join(dir)));
+            for parent in [".config", ".cache", ".local/share"] {
+                dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
+            }
+        }
+        Self { dirs, homes }
     }
 
     pub fn for_user() -> Self {
@@ -127,7 +157,7 @@ impl Protected {
 
     /// @name covers
     /// @description Checks whether `path` lies inside protected application data: inside a known
-    /// browser or credential directory, or under a directory that holds browser or Electron
+    /// browser, credential or tool install directory, or under a directory that holds browser or Electron
     /// profile markers on disk.
     ///
     /// @example
@@ -137,6 +167,23 @@ impl Protected {
     pub fn covers(&self, path: &Path) -> bool {
         path.ancestors()
             .any(|dir| self.dirs.contains(dir) || marked_on_disk(dir))
+    }
+
+    /// @name in_hidden_home_dir
+    /// @description Checks whether `path` lies inside a hidden folder directly under the home
+    /// directory, such as `~/.config` or `~/.local`. Tools and editors install their own
+    /// dependencies there, so matches in those places should never be offered as safe.
+    ///
+    /// @example
+    /// if protected.in_hidden_home_dir(&found.path) {
+    ///     safety = Safety::Review;
+    /// }
+    pub fn in_hidden_home_dir(&self, path: &Path) -> bool {
+        self.homes
+            .iter()
+            .filter_map(|home| path.strip_prefix(home).ok())
+            .filter_map(|rest| rest.components().next())
+            .any(|first| first.as_os_str().to_string_lossy().starts_with('.'))
     }
 }
 
@@ -184,5 +231,52 @@ mod tests {
         fs::write(app.join("Local State"), "{}").expect("marker");
         assert!(protected.covers(&app.join("modules/node_modules")));
         assert!(!protected.covers(&home.join(".config/other/node_modules")));
+    }
+
+    #[test]
+    fn covers_global_tool_installs() {
+        let home = Path::new("/home/me");
+        let protected = Protected::new(Some(home));
+        for path in [
+            ".vscode/extensions/esbenp.prettier-vscode-11.0.0/node_modules",
+            ".vscode-server/extensions/x/node_modules",
+            ".cursor/extensions/x/node_modules",
+            ".local/share/pnpm/global/5/node_modules",
+            ".bun/install/global/node_modules",
+            ".config/yarn/global/node_modules",
+        ] {
+            assert!(protected.covers(&home.join(path)), "{path}");
+        }
+        assert!(protected.is_known(&home.join(".vscode/extensions")));
+        assert!(!protected.covers(&home.join(".local/share/pnpm/store")));
+        assert!(!protected.covers(&home.join(".bun/install/cache")));
+        assert!(!protected.covers(&home.join("code/web/node_modules")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protects_resolved_paths_of_a_symlinked_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = fs::canonicalize(tmp.path())
+            .expect("canonical")
+            .join("real");
+        fs::create_dir_all(&real).expect("real home");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let protected = Protected::new(Some(&link));
+        assert!(protected.is_known(&real.join(".ssh")));
+        assert!(protected.is_known(&link.join(".ssh")));
+        assert!(protected.covers(&real.join(".gnupg/private-keys-v1.d")));
+        assert!(protected.in_hidden_home_dir(&real.join(".config/x/node_modules")));
+    }
+
+    #[test]
+    fn detects_hidden_home_dirs() {
+        let protected = Protected::new(Some(Path::new("/home/me")));
+        assert!(protected.in_hidden_home_dir(Path::new("/home/me/.config/tool/node_modules")));
+        assert!(!protected.in_hidden_home_dir(Path::new("/home/me/code/.hidden/node_modules")));
+        assert!(!protected.in_hidden_home_dir(Path::new("/srv/.cache/node_modules")));
+        assert!(!Protected::default().in_hidden_home_dir(Path::new("/home/me/.config/x")));
     }
 }

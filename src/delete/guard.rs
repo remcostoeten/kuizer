@@ -5,8 +5,31 @@ use crate::platform;
 use crate::protect::Protected;
 
 const PROTECTED: &[&str] = &[
-    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/opt", "/proc", "/root", "/run",
-    "/sbin", "/srv", "/sys", "/usr", "/var/lib", "/var/log",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/efi",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/nix",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/snap",
+    "/srv",
+    "/sys",
+    "/usr",
+    "/var/lib",
+    "/var/log",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/private/etc",
+    "/private/var/db",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -23,7 +46,7 @@ pub enum Refusal {
     ContainsCwd,
     #[error("path is inside a protected system directory")]
     Protected,
-    #[error("path holds browser or application data such as cookies, sessions or keys")]
+    #[error("path holds browser data, credentials or installed tools and extensions")]
     AppData,
     #[error("path is a symlink now")]
     Symlink,
@@ -49,6 +72,7 @@ impl Guard {
     pub fn new(roots: &[PathBuf]) -> Self {
         let mut anchors: Vec<PathBuf> = roots.to_vec();
         anchors.extend(dirs::home_dir());
+        anchors.extend(platform::home_dir());
         anchors.push(PathBuf::from("/"));
         Self {
             roots: roots.to_vec(),
@@ -161,6 +185,26 @@ mod tests {
                 .check_path(Path::new("/home/me/projects/web/node_modules"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn refuses_system_folders_of_other_platforms() {
+        let guard = Guard::new(&[PathBuf::from("/")]).with_cwd(None);
+        for path in [
+            "/nix/store/abc-pkg/lib/node_modules",
+            "/snap/code/current/node_modules",
+            "/efi/EFI/cache",
+            "/System/Library/Caches",
+            "/Library/Caches/com.example",
+            "/Applications/Editor.app/Contents/node_modules",
+            "/private/var/db/cache",
+        ] {
+            assert_eq!(
+                guard.check_path(Path::new(path)),
+                Err(Refusal::Protected),
+                "{path}"
+            );
+        }
     }
 
     #[test]

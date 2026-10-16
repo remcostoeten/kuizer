@@ -11,7 +11,13 @@ use crate::output;
 use crate::protect::Protected;
 use crate::scan::{self, Cancel, Candidate};
 
-pub(super) fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
+/// @name measure
+/// @description Measures every known global cache in parallel and returns the ones that hold
+/// entries, largest first, each paired with a removal candidate.
+///
+/// @example
+/// let entries = measure(caches::find(&locations, &Protected::for_user()));
+pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
     let cancel = Cancel::new();
     let mut entries: Vec<(KnownCache, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found

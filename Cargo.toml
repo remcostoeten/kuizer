@@ -1,11 +1,17 @@
 [package]
 name = "kuizer"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Keyboard-driven disk cleanup for developers: generated artifacts, caches and duplicates"
 license = "MIT"
 publish = false
+
+[workspace]
+members = [".", "crates/kuizer-gui"]
+
+[workspace.package]
+version = "0.1.0"
 
 [[bin]]
 name = "kuizer"

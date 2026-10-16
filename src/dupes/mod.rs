@@ -1,18 +1,16 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{Config, ConfigError};
-use crate::detect::Listing;
-use crate::platform;
-use crate::protect::{self, Protected};
-use crate::scan::{Issue, IssueKind};
+use crate::platform::{self, MountTable};
+use crate::protect::Protected;
+use crate::scan::walk::{Flow, Visitor, Walker};
+use crate::scan::{self, Cancel, Issue, Scan};
 
 const PARTIAL: u64 = 16 * 1024;
 const CHUNK: usize = 64 * 1024;
@@ -101,163 +99,82 @@ struct Candidate {
     member: Member,
 }
 
-struct Pending {
-    path: PathBuf,
-    parent: Arc<Listing>,
-    depth: usize,
-    device: u64,
-}
-
-struct Walk<'a> {
-    config: &'a Config,
-    detector: crate::detect::Detector,
-    excludes: crate::config::Excludes,
-    protected: Protected,
+pub struct Files {
     min_size: u64,
-    files: Vec<Seen>,
+    seen: Vec<Seen>,
     issues: Vec<Issue>,
     counted: u64,
+    started: Instant,
+}
+
+impl Files {
+    pub fn new(options: Options) -> Self {
+        Self {
+            min_size: options.min_size,
+            seen: Vec::new(),
+            issues: Vec::new(),
+            counted: 0,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Visitor for Files {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        self.issues.push(issue);
+        Flow::Continue
+    }
+
+    fn counted(&mut self, file_type: fs::FileType) {
+        if file_type.is_file() {
+            self.counted += 1;
+        }
+    }
+
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        if !file_type.is_file() {
+            return Flow::Continue;
+        }
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => return self.issue(Issue::from_io(path.to_path_buf(), &error)),
+        };
+        let size = metadata.len();
+        if size == 0 || size < self.min_size {
+            return Flow::Continue;
+        }
+        self.seen.push(Seen {
+            path: path.to_path_buf(),
+            size,
+            allocated: platform::allocated(&metadata),
+            identity: platform::identity(&metadata),
+            modified: metadata.modified().ok(),
+        });
+        Flow::Continue
+    }
+}
+
+struct Reporting<'a> {
+    files: Files,
     on_stage: &'a mut dyn FnMut(Stage),
 }
 
-impl Walk<'_> {
-    fn excluded_mount(&self, path: &Path) -> bool {
-        self.config
-            .scan
-            .excluded_mounts
-            .iter()
-            .any(|mount| path.starts_with(mount))
+impl Visitor for Reporting<'_> {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        self.files.issue(issue)
     }
 
-    fn root(&mut self, root: &Path) {
-        let metadata = match fs::metadata(root) {
-            Ok(metadata) if metadata.is_dir() => metadata,
-            Ok(_) => {
-                self.issues.push(Issue {
-                    path: root.to_path_buf(),
-                    kind: IssueKind::InvalidRoot,
-                    message: "not a directory".to_owned(),
-                });
-                return;
-            }
-            Err(error) => {
-                self.issues.push(Issue::from_io(root.to_path_buf(), &error));
-                return;
-            }
-        };
-        if self.protected.covers(root) {
-            self.issues.push(Issue {
-                path: root.to_path_buf(),
-                kind: IssueKind::Protected,
-                message: "root holds browser or application data".to_owned(),
+    fn counted(&mut self, file_type: fs::FileType) {
+        self.files.counted(file_type);
+        if file_type.is_file() && self.files.counted.is_multiple_of(4096) {
+            (self.on_stage)(Stage::Walking {
+                files: self.files.counted,
             });
-            return;
-        }
-        let mut stack = vec![Pending {
-            path: root.to_path_buf(),
-            parent: Arc::new(Listing::new(Vec::new())),
-            depth: 0,
-            device: platform::device(&metadata),
-        }];
-        while let Some(pending) = stack.pop() {
-            self.visit(pending, &mut stack);
         }
     }
 
-    fn visit(&mut self, pending: Pending, stack: &mut Vec<Pending>) {
-        let entries = match fs::read_dir(&pending.path) {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.issues.push(Issue::from_io(pending.path, &error));
-                return;
-            }
-        };
-        let mut children: Vec<(OsString, fs::FileType)> = Vec::new();
-        for entry in entries {
-            match entry.and_then(|entry| Ok((entry.file_name(), entry.file_type()?))) {
-                Ok(child) => children.push(child),
-                Err(error) => self
-                    .issues
-                    .push(Issue::from_io(pending.path.clone(), &error)),
-            }
-        }
-        let own = Listing::new(children.iter().map(|(name, _)| name.clone()).collect());
-        let scan = &self.config.scan;
-        if scan.ignores(&own) || protect::holds_app_data(&own) {
-            return;
-        }
-        if pending.depth > 0
-            && self
-                .detector
-                .classify_dir(&pending.path, &pending.parent, &own)
-                .is_some()
-        {
-            return;
-        }
-        if scan.max_depth.is_some_and(|max| pending.depth >= max) {
-            return;
-        }
-        let own = Arc::new(own);
-        for (name, file_type) in children {
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = pending.path.join(&name);
-            if file_type.is_dir() {
-                if scan.skip_dirs.iter().any(|skip| name == skip.as_str())
-                    || self.excludes.path(&path)
-                    || self.protected.is_known(&path)
-                    || self.excluded_mount(&path)
-                {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.issues.push(Issue::from_io(path, &error));
-                        continue;
-                    }
-                };
-                let device = platform::device(&metadata);
-                if device != pending.device && scan.one_file_system {
-                    continue;
-                }
-                stack.push(Pending {
-                    path,
-                    parent: Arc::clone(&own),
-                    depth: pending.depth + 1,
-                    device,
-                });
-            } else if file_type.is_file() {
-                self.counted += 1;
-                if self.counted % 4096 == 0 {
-                    (self.on_stage)(Stage::Walking {
-                        files: self.counted,
-                    });
-                }
-                if self.excludes.extension(&name) || self.excludes.path(&path) {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.issues.push(Issue::from_io(path, &error));
-                        continue;
-                    }
-                };
-                let size = metadata.len();
-                if size == 0 || size < self.min_size {
-                    continue;
-                }
-                self.files.push(Seen {
-                    path,
-                    size,
-                    allocated: platform::allocated(&metadata),
-                    identity: platform::identity(&metadata),
-                    modified: metadata.modified().ok(),
-                });
-            }
-        }
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        self.files.file(path, file_type)
     }
 }
 
@@ -421,30 +338,65 @@ pub fn find(
     options: Options,
     mut on_stage: impl FnMut(Stage),
 ) -> Result<Duplicates, ConfigError> {
-    let started = Instant::now();
-    let mut walk = Walk {
-        config,
-        detector: config.detector()?,
-        excludes: config.excludes()?,
-        protected: Protected::for_user(),
-        min_size: options.min_size,
-        files: Vec::new(),
-        issues: Vec::new(),
-        counted: 0,
-        on_stage: &mut on_stage,
+    let detector = config.detector()?;
+    let excludes = config.excludes()?;
+    let mounts = MountTable::load();
+    let protected = Protected::for_user();
+    let mut walker = Walker {
+        scan: &config.scan,
+        detector: &detector,
+        excludes: &excludes,
+        mounts: &mounts,
+        protected: &protected,
+        visitor: Reporting {
+            files: Files::new(options),
+            on_stage: &mut on_stage,
+        },
     };
     for root in roots {
-        walk.root(root);
+        walker.walk_root(root);
     }
-    let Walk {
-        files,
+    let files = walker.visitor.files;
+    Ok(group(files, options, on_stage))
+}
+
+/// @name start_scan
+/// @description Starts an artifact scan that also collects files for duplicate detection during
+/// the same walk, like the dashboard does. Pass `None` to skip duplicates. The returned receiver
+/// yields the collected files once the walk ends; hand them to `group`.
+///
+/// @example
+/// let (scan, files) = dupes::start_scan(&config, &roots, Cancel::new(), Some(options))?;
+/// let collected = scan::collect(&scan, |_| {});
+/// let found = files.recv().ok().flatten().map(|files| dupes::group(files, options, |_| {}));
+pub fn start_scan(
+    config: &Config,
+    roots: &[PathBuf],
+    cancel: Cancel,
+    options: Option<Options>,
+) -> Result<(Scan, crossbeam_channel::Receiver<Option<Files>>), ConfigError> {
+    scan::start_with(config, roots, cancel, options.map(Files::new))
+}
+
+/// @name group
+/// @description Groups files collected during a walk into sets of identical contents, the same
+/// way `find` does after its own walk. Lets a caller that already walks the tree, such as the
+/// dashboard, collect `Files` alongside that walk instead of walking twice.
+///
+/// @example
+/// let (scan, files) = scan::start_with(&config, &roots, Cancel::new(), Files::new(options))?;
+/// let found = dupes::group(files.recv()?, options, |_| {});
+pub fn group(files: Files, options: Options, mut on_stage: impl FnMut(Stage)) -> Duplicates {
+    let Files {
+        seen,
         mut issues,
         counted,
+        started,
         ..
-    } = walk;
+    } = files;
 
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    for candidate in merge_links(files) {
+    for candidate in merge_links(seen) {
         by_size.entry(candidate.size).or_default().push(candidate);
     }
     let sized: Vec<Vec<Candidate>> = by_size
@@ -505,10 +457,52 @@ pub fn find(
             .cmp(&a.reclaimable())
             .then_with(|| a.members[0].path.cmp(&b.members[0].path))
     });
-    Ok(Duplicates {
+    Duplicates {
         groups,
         issues,
         files: counted,
         duration: started.elapsed(),
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::{self, Cancel};
+
+    #[test]
+    fn shared_scan_walk_finds_the_same_duplicates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        for relative in ["a/one.txt", "b/two.txt", "c/three.txt"] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"identical contents").unwrap();
+        }
+        fs::write(root.join("unique.txt"), b"something else").unwrap();
+        let config = Config::default();
+        let options = Options {
+            min_size: 1,
+            threads: 2,
+            verify: true,
+        };
+        let roots = vec![root];
+
+        let alone = find(&config, &roots, options, |_| {}).unwrap();
+        let (handle, files) =
+            scan::start_with(&config, &roots, Cancel::new(), Files::new(options)).unwrap();
+        scan::collect(&handle, |_| {});
+        let shared = group(files.recv().unwrap(), options, |_| {});
+
+        let members = |found: &Duplicates| -> Vec<Vec<PathBuf>> {
+            found
+                .groups
+                .iter()
+                .map(|group| group.members.iter().map(|m| m.path.clone()).collect())
+                .collect()
+        };
+        assert_eq!(members(&alone).len(), 1);
+        assert_eq!(members(&alone), members(&shared));
+        assert_eq!(alone.files, shared.files);
+    }
 }

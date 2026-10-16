@@ -1,0 +1,15 @@
+[package]
+name = "kuizer-gui"
+version.workspace = true
+edition = "2024"
+description = "Desktop interface for kuizer, built on GPUI"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "kuizer-gui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "=0.2.2"
+kuizer = { path = "../.." }

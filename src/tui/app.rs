@@ -335,10 +335,21 @@ impl App {
 
     pub fn delete(&mut self) -> Vec<(u64, Target, Mode)> {
         self.open_confirm();
-        if self.confirm_before_delete || self.mode == Mode::Permanent {
+        if self.confirm_before_delete || self.mode == Mode::Permanent || self.pending_needs_review()
+        {
             return Vec::new();
         }
         self.confirm()
+    }
+
+    fn pending_needs_review(&self) -> bool {
+        let Overlay::Confirm { ids, .. } = &self.overlay else {
+            return false;
+        };
+        ids.iter().filter_map(|&id| self.item(id)).any(|item| {
+            item.candidate.rule.safety == Safety::Review
+                || self.changes_in(&item.candidate).is_some()
+        })
     }
 
     pub fn delete_selected(&mut self) -> Vec<(u64, Target, Mode)> {
@@ -527,6 +538,25 @@ mod tests {
         assert_eq!(jobs[0].2, Mode::Trash);
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.item(2).unwrap().status, Status::Deleting);
+    }
+
+    #[test]
+    fn review_items_always_ask() {
+        let mut app = app_with(Mode::Trash, false);
+        app.move_to(1);
+        assert!(app.delete().is_empty());
+        assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids == &[3]));
+        assert_eq!(app.item(3).unwrap().status, Status::Ready);
+    }
+
+    #[test]
+    fn projects_with_uncommitted_changes_always_ask() {
+        let mut app = app_with(Mode::Trash, false);
+        app.changes.insert(PathBuf::from("/p/a"), 2);
+        app.select_safe();
+        assert!(app.delete_selected().is_empty());
+        assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids.len() == 2));
+        assert_eq!(app.confirm().len(), 2);
     }
 
     #[test]

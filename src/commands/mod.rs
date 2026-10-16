@@ -17,6 +17,7 @@ use crate::config::{Config, ConfigError};
 use crate::history::HistoryError;
 use clap::CommandFactory;
 
+pub use cache::measure as measure_caches;
 pub use scan::sort_candidates;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +36,8 @@ pub enum AppError {
     RemovalFailed(usize),
     #[error("no home directory is known for this platform")]
     NoHome,
+    #[error("{0} already exists, pass --force to overwrite it")]
+    PageExists(PathBuf),
     #[error("config file already exists at {0}")]
     ConfigExists(PathBuf),
     #[error("no config directory is known for this platform")]

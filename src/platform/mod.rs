@@ -2,6 +2,7 @@
 mod linux;
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
@@ -33,6 +34,18 @@ impl MountTable {
             .find(|mount| path.starts_with(&mount.point))
             .map(|mount| mount.fs_type.as_str())
     }
+}
+
+/// @name home_dir
+/// @description Returns the home directory with symlinks resolved, so it compares equal to the
+/// canonicalized scan roots. Falls back to the raw path when it cannot be resolved.
+///
+/// @example
+/// let protected = Protected::new(platform::home_dir().as_deref());
+pub fn home_dir() -> Option<PathBuf> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| dirs::home_dir().map(|home| std::fs::canonicalize(&home).unwrap_or(home)))
+        .clone()
 }
 
 #[cfg(unix)]
