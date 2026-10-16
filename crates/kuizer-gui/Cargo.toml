@@ -4,7 +4,11 @@ version.workspace = true
 edition = "2024"
 description = "Desktop interface for kuizer, built on GPUI"
 license = "MIT"
-publish = false
+rust-version = "1.88"
+repository = "https://github.com/remcostoeten/kuizer"
+homepage = "https://github.com/remcostoeten/kuizer"
+keywords = ["cleanup", "disk", "gui", "gpui"]
+categories = ["filesystem", "gui"]
 
 [[bin]]
 name = "kuizer-gui"
@@ -12,4 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = "=0.2.2"
-kuizer = { path = "../.." }
+kuizer = { path = "../..", version = "0.1.0" }
+
+[package.metadata.dist]
+installers = ["shell"]
+include = ["../../packaging/kuizer-gui.desktop", "../../packaging/kuizer-gui.svg"]
