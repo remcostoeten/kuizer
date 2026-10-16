@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.88"
 description = "Keyboard-driven disk cleanup for developers: generated artifacts, caches and duplicates"
 license = "MIT"
-publish = false
+repository = "https://github.com/remcostoeten/kuizer"
+homepage = "https://github.com/remcostoeten/kuizer"
+readme = "README.md"
+keywords = ["cleanup", "disk", "node-modules", "cache", "cli"]
+categories = ["command-line-utilities", "filesystem"]
 
 [workspace]
 members = [".", "crates/kuizer-gui"]
@@ -46,5 +50,14 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/kuizer-{ target }{ archive-suffix }"
+bin-dir = "kuizer-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"

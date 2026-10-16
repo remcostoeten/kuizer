@@ -51,20 +51,31 @@ On Linux GPUI needs the X11, Wayland, Vulkan and font development packages. On A
 
 ## Install
 
-### From a release
-
-Each release on GitHub has a Linux x86_64 tarball with `kuizer`, `kuizer-gui`, a menu entry and an icon.
+Prebuilt binaries are available for Linux and macOS on x86_64 and ARM.
 
 ```sh
-tar xzf kuizer-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-./kuizer-0.1.0-x86_64-unknown-linux-gnu/install.sh    # installs into ~/.local, set PREFIX to change that
+npx kuizer                                          # run without installing, needs Node
+npm install -g kuizer                               # or keep it installed
+curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-installer.sh | sh
+cargo binstall kuizer                               # prebuilt binary through cargo-binstall
+cargo install kuizer                                # compile from crates.io
 ```
+
+The desktop app installs the same way under its own name:
+
+```sh
+curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-gui-installer.sh | sh
+cargo install kuizer-gui
+```
+
+Release archives for every platform are on the [releases page](https://github.com/remcostoeten/kuizer/releases). The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
 
 ### From source
 
-```bash
+```sh
 git clone https://github.com/remcostoeten/kuizer
 cargo install --path kuizer
+cargo install --path kuizer/crates/kuizer-gui
 ```
 
 ## Development
@@ -77,7 +88,7 @@ cargo test -p kuizer-gui                            # desktop app tests
 cargo clippy --all-targets -- -D warnings           # lint, as CI runs it
 cargo fmt --check                                   # formatting, as CI runs it
 cargo deny check                                    # advisories, licenses and duplicate crates
-packaging/package.sh 0.1.0 x86_64-unknown-linux-gnu dist   # build a release tarball after cargo build --release --workspace
+dist plan                                           # list what a release builds, see dist-workspace.toml
 cargo run --release --example synth -- /tmp/kuizer-bench 200 100   # build a synthetic tree to scan
 ```
 
