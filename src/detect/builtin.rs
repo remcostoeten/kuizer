@@ -20,6 +20,8 @@ const GRADLE: &[&str] = &[
     "settings.gradle.kts",
 ];
 
+const DOTNET_PROJECT: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "node-modules",
@@ -255,6 +257,26 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Cache,
         safety: Safety::Safe,
         ecosystem: "python",
+    },
+    Builtin {
+        name: "dotnet-bin",
+        kind: Kind::Dir,
+        pattern: "bin",
+        markers: DOTNET_PROJECT,
+        contains: &["Debug", "Release"],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "dotnet",
+    },
+    Builtin {
+        name: "dotnet-obj",
+        kind: Kind::Dir,
+        pattern: "obj",
+        markers: DOTNET_PROJECT,
+        contains: &["project.assets.json"],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "dotnet",
     },
     Builtin {
         name: "typescript-buildinfo",

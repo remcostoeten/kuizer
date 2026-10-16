@@ -130,6 +130,23 @@ fn python_tool_caches_need_their_cache_tag() {
 }
 
 #[test]
+fn finds_artifacts_of_other_ecosystems() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    file(root, "dotnet/App.csproj", 2);
+    file(root, "dotnet/bin/Debug/App.dll", 10);
+    file(root, "dotnet/obj/project.assets.json", 10);
+    file(root, "scripts/bin/Debug/run.sh", 10);
+
+    let collected = scan(root);
+
+    assert_eq!(
+        found(&collected, root),
+        pairs(&[("dotnet/bin", "dotnet-bin"), ("dotnet/obj", "dotnet-obj")])
+    );
+}
+
+#[test]
 fn ignore_file_and_skip_dirs_hide_subtrees() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

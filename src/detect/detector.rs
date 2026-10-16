@@ -346,6 +346,18 @@ mod tests {
             (".tox", &["README.md"], &["py312"], None),
             (".nox", &["noxfile.py"], &["tests"], Some("nox-env")),
             (".nox", &["pyproject.toml"], &["tests"], None),
+            ("bin", &["App.csproj"], &["Debug"], Some("dotnet-bin")),
+            ("bin", &["App.fsproj"], &["Release"], Some("dotnet-bin")),
+            ("bin", &["App.csproj"], &["deploy.sh"], None),
+            ("bin", &["Makefile"], &["Debug"], None),
+            (
+                "obj",
+                &["Lib.vbproj"],
+                &["project.assets.json", "Debug"],
+                Some("dotnet-obj"),
+            ),
+            ("obj", &["Lib.csproj"], &["notes"], None),
+            ("obj", &["README.md"], &["project.assets.json"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =
