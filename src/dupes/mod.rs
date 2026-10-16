@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::config::{Config, ConfigError};
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
-use crate::scan::Issue;
 use crate::scan::walk::{Flow, Visitor, Walker};
+use crate::scan::{self, Cancel, Issue, Scan};
 
 const PARTIAL: u64 = 16 * 1024;
 const CHUNK: usize = 64 * 1024;
@@ -358,6 +358,24 @@ pub fn find(
     }
     let files = walker.visitor.files;
     Ok(group(files, options, on_stage))
+}
+
+/// @name start_scan
+/// @description Starts an artifact scan that also collects files for duplicate detection during
+/// the same walk, like the dashboard does. Pass `None` to skip duplicates. The returned receiver
+/// yields the collected files once the walk ends; hand them to `group`.
+///
+/// @example
+/// let (scan, files) = dupes::start_scan(&config, &roots, Cancel::new(), Some(options))?;
+/// let collected = scan::collect(&scan, |_| {});
+/// let found = files.recv().ok().flatten().map(|files| dupes::group(files, options, |_| {}));
+pub fn start_scan(
+    config: &Config,
+    roots: &[PathBuf],
+    cancel: Cancel,
+    options: Option<Options>,
+) -> Result<(Scan, crossbeam_channel::Receiver<Option<Files>>), ConfigError> {
+    scan::start_with(config, roots, cancel, options.map(Files::new))
 }
 
 /// @name group

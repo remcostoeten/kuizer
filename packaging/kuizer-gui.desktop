@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=kuizer
+GenericName=Disk Cleanup
+Comment=Find and clean build output, caches and duplicate files
+Exec=kuizer-gui
+Icon=kuizer-gui
+Terminal=false
+Categories=Utility;
+Keywords=disk;cleanup;cache;node_modules;target;duplicates;
+StartupWMClass=kuizer-gui
