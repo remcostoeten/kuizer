@@ -230,7 +230,7 @@ impl Walk<'_> {
                 });
             } else if file_type.is_file() {
                 self.counted += 1;
-                if self.counted % 4096 == 0 {
+                if self.counted.is_multiple_of(4096) {
                     (self.on_stage)(Stage::Walking {
                         files: self.counted,
                     });
