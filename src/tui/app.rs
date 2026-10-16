@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use crate::cli::SortKey;
 use crate::delete::{Mode, Target};
@@ -158,14 +157,14 @@ impl App {
             let left = &items[*a];
             let right = &items[*b];
             let group_order = match self.sort {
-                SortKey::Size => group_totals
+                SortKey::Size | SortKey::Idle => group_totals
                     .get(right_group)
                     .cmp(&group_totals.get(left_group))
                     .then_with(|| left_group.cmp(right_group)),
                 SortKey::Path | SortKey::Category => left_group.cmp(right_group),
             };
             group_order.then_with(|| match self.sort {
-                SortKey::Size | SortKey::Category => right
+                SortKey::Size | SortKey::Category | SortKey::Idle => right
                     .candidate
                     .usage
                     .allocated
@@ -265,7 +264,7 @@ impl App {
         self.sort = match self.sort {
             SortKey::Size => SortKey::Path,
             SortKey::Path => SortKey::Category,
-            SortKey::Category => SortKey::Size,
+            SortKey::Category | SortKey::Idle => SortKey::Size,
         };
         self.dirty = true;
     }
@@ -432,22 +431,6 @@ impl App {
             .iter()
             .filter(|item| item.status == Status::Deleting)
             .count()
-    }
-}
-
-pub fn age(newest: Option<SystemTime>) -> String {
-    let Some(days) = newest
-        .and_then(|time| SystemTime::now().duration_since(time).ok())
-        .map(|elapsed| elapsed.as_secs() / 86_400)
-    else {
-        return "-".to_owned();
-    };
-    match days {
-        0 => "today".to_owned(),
-        1..=13 => format!("{days}d"),
-        14..=59 => format!("{}w", days / 7),
-        60..=729 => format!("{}mo", days / 30),
-        _ => format!("{}y", days / 365),
     }
 }
 

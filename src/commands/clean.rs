@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 
 use super::AppError;
 use super::removal::{self, Request};
-use super::scan::resolve_roots;
+use super::scan::{keep_idle, resolve_roots};
 use crate::cli::CleanArgs;
 use crate::config::Config;
 use crate::output;
@@ -37,6 +37,8 @@ pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<
         yes: args.removal.yes,
         json,
     };
-    let selected = removal::select(collected.candidates, &args.removal.select);
+    let mut candidates = collected.candidates;
+    keep_idle(&config, &mut candidates, args.idle, false)?;
+    let selected = removal::select(candidates, &args.removal.select);
     removal::run(&request, selected, &collected.issues)
 }

@@ -1,6 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -122,6 +122,28 @@ impl FromStr for Idle {
 impl fmt::Display for Idle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}d", self.0.as_secs() / 86_400)
+    }
+}
+
+/// @name age
+/// @description Formats the time elapsed since `time` as a short age such as `today`, `5d`,
+/// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future.
+///
+/// @example
+/// let label = units::age(candidate.newest);
+pub fn age(time: Option<SystemTime>) -> String {
+    let Some(days) = time
+        .and_then(|time| SystemTime::now().duration_since(time).ok())
+        .map(|elapsed| elapsed.as_secs() / 86_400)
+    else {
+        return "-".to_owned();
+    };
+    match days {
+        0 => "today".to_owned(),
+        1..=13 => format!("{days}d"),
+        14..=59 => format!("{}w", days / 7),
+        60..=729 => format!("{}mo", days / 30),
+        _ => format!("{}y", days / 365),
     }
 }
 

@@ -9,7 +9,7 @@ use crate::detect::{Category, Safety};
 use crate::dupes::{Duplicates, Group};
 use crate::platform;
 use crate::scan::{Candidate, Issue, Progress, Summary};
-use crate::units::ByteSize;
+use crate::units::{ByteSize, age};
 
 const MAX_ISSUES: usize = 10;
 const LARGEST: usize = 10;
@@ -50,14 +50,24 @@ pub fn clear_progress() {
     let _ = err.flush();
 }
 
-fn header() -> String {
+fn header(idle: bool) -> String {
     format!(
-        "{:>10}  {:<6}  {:<12}  {:<20}  PATH",
-        "SIZE", "SAFETY", "CATEGORY", "RULE"
+        "{:>10}  {:<6}  {:<12}  {:<20}  {}PATH",
+        "SIZE",
+        "SAFETY",
+        "CATEGORY",
+        "RULE",
+        if idle { "IDLE   " } else { "" }
     )
 }
 
-fn row(candidate: &Candidate) -> String {
+fn shows_idle(candidates: &[Candidate]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.project_last_active.is_some())
+}
+
+fn row(candidate: &Candidate, idle: bool) -> String {
     let partial = if candidate.usage.partial {
         dim(" (partial)")
     } else {
@@ -67,8 +77,13 @@ fn row(candidate: &Candidate) -> String {
         Safety::Safe => candidate.rule.safety.as_str().to_owned(),
         Safety::Review => dim(candidate.rule.safety.as_str()),
     };
+    let idle = if idle {
+        format!("{:<5}  ", age(candidate.project_last_active))
+    } else {
+        String::new()
+    };
     format!(
-        "{}  {safety:<pad$}  {:<12}  {:<20}  {}{partial}",
+        "{}  {safety:<pad$}  {:<12}  {:<20}  {idle}{}{partial}",
         bold(&format!(
             "{:>10}",
             ByteSize(candidate.usage.allocated).to_string()
@@ -82,11 +97,12 @@ fn row(candidate: &Candidate) -> String {
 
 pub fn print_scan(candidates: &[Candidate], issues: &[Issue], summary: &Summary, quiet: bool) {
     let mut out = io::stdout().lock();
+    let idle = shows_idle(candidates);
     if !candidates.is_empty() {
-        let _ = writeln!(out, "{}", dim(&header()));
+        let _ = writeln!(out, "{}", dim(&header(idle)));
     }
     for candidate in candidates {
-        let _ = writeln!(out, "{}", row(candidate));
+        let _ = writeln!(out, "{}", row(candidate, idle));
     }
     drop(out);
     if !quiet {
@@ -260,9 +276,10 @@ fn print_issues(issues: &[Issue]) {
 
 pub fn print_candidates(candidates: &[Candidate]) {
     let mut out = io::stdout().lock();
-    let _ = writeln!(out, "{}", dim(&header()));
+    let idle = shows_idle(candidates);
+    let _ = writeln!(out, "{}", dim(&header(idle)));
     for candidate in candidates {
-        let _ = writeln!(out, "{}", row(candidate));
+        let _ = writeln!(out, "{}", row(candidate, idle));
     }
 }
 

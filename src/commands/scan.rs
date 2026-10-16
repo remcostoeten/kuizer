@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use super::AppError;
 use crate::cli::{ScanArgs, SortKey};
@@ -9,6 +10,7 @@ use crate::output;
 use crate::platform;
 use crate::scan::{self, Cancel, Candidate, Issue, Summary};
 use crate::tui;
+use crate::units::Idle;
 
 pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
     match key {
@@ -25,7 +27,48 @@ pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
                 .cmp(&b.rule.category)
                 .then_with(|| b.usage.allocated.cmp(&a.usage.allocated))
         }),
+        SortKey::Idle => candidates.sort_by(|a, b| {
+            a.project_last_active
+                .is_none()
+                .cmp(&b.project_last_active.is_none())
+                .then_with(|| a.project_last_active.cmp(&b.project_last_active))
+                .then_with(|| b.usage.allocated.cmp(&a.usage.allocated))
+        }),
     }
+}
+
+/// @name keep_idle
+/// @description Measures project activity when `idle` is set or `annotate` asks for it, then
+/// keeps only candidates whose project has been inactive for at least `idle`. A candidate whose
+/// activity is unknown never matches `idle`.
+///
+/// @example
+/// commands::scan::keep_idle(&config, &mut candidates, args.idle, false)?;
+pub fn keep_idle(
+    config: &Config,
+    candidates: &mut Vec<Candidate>,
+    idle: Option<Idle>,
+    annotate: bool,
+) -> Result<(), AppError> {
+    if idle.is_none() && !annotate {
+        return Ok(());
+    }
+    let cutoff = idle.and_then(|Idle(age)| SystemTime::now().checked_sub(age));
+    scan::annotate(
+        candidates,
+        &config.detector()?,
+        &config.scan.skip_dirs,
+        cutoff,
+        scan::size_threads(config),
+    );
+    if let Some(cutoff) = cutoff {
+        candidates.retain(|candidate| {
+            candidate
+                .project_last_active
+                .is_some_and(|active| active <= cutoff)
+        });
+    }
+    Ok(())
 }
 
 pub fn resolve_roots(config: &Config, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, AppError> {
@@ -54,7 +97,8 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     let terminal = std::io::stdout().is_terminal()
         && std::io::stderr().is_terminal()
         && std::io::stdin().is_terminal();
-    let live = !json && !args.no_live && terminal;
+    let annotate = args.sort == SortKey::Idle;
+    let live = !json && !args.no_live && terminal && args.idle.is_none() && !annotate;
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let safe_only = args.safe_only;
     let report = args.report;
@@ -78,6 +122,7 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     if safe_only {
         candidates.retain(|candidate| candidate.rule.safety == Safety::Safe);
     }
+    keep_idle(&config, &mut candidates, args.idle, annotate)?;
 
     sort_candidates(&mut candidates, args.sort);
     let written = report
