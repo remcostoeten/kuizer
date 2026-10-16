@@ -165,12 +165,18 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "infra/main.tf", 2);
     file(root, "infra/.terraform/providers/x", 10);
     file(root, "old/.terraform/providers/x", 10);
+    file(root, "android/app/build.gradle", 2);
+    file(root, "android/app/build/intermediates/x", 10);
+    file(root, "android/app/build/outputs/apk/app.apk", 10);
+    file(root, "site/build.gradle", 2);
+    file(root, "site/build/index.html", 10);
 
     let collected = scan(root);
 
     assert_eq!(
         found(&collected, root),
         pairs(&[
+            ("android/app/build", "gradle-build"),
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
             ("hs/.stack-work", "haskell-stack"),

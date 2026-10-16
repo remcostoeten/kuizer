@@ -148,14 +148,14 @@ A rule:
 
 ```toml
 [[rules]]
-name = "android-build"
+name = "jekyll-site"
 kind = "dir"              # dir or file
-pattern = "build"         # name or glob on the name
-markers = ["build.gradle", "build.gradle.kts"]   # any of these beside it; globs such as "*.csproj" allowed
-contains = ["intermediates", "outputs"]          # any of these inside it
+pattern = "_site"         # name or glob on the name
+markers = ["_config.yml"] # any of these beside it; globs such as "*.csproj" allowed
+contains = ["index.html"] # any of these inside it
 category = "build"
 safety = "review"         # custom rules default to review
-ecosystem = "android"
+ecosystem = "jekyll"
 ```
 
 `kuizer rules` lists the active rules.

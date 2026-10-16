@@ -434,6 +434,20 @@ mod tests {
             ),
             (".terraform", &["main.tf"], &["notes"], None),
             (".terraform", &["main.tf.bak"], &["providers"], None),
+            (
+                "build",
+                &["build.gradle.kts", "package.json"],
+                &["intermediates", "outputs"],
+                Some("gradle-build"),
+            ),
+            (
+                "build",
+                &["build.gradle"],
+                &["classes", "libs"],
+                Some("gradle-build"),
+            ),
+            ("build", &["build.gradle"], &["index.html"], None),
+            ("build", &["settings.gradle"], &["tmp"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

@@ -343,6 +343,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "terraform",
     },
     Builtin {
+        name: "gradle-build",
+        kind: Kind::Dir,
+        pattern: "build",
+        markers: &["build.gradle", "build.gradle.kts"],
+        contains: &["intermediates", "outputs", "tmp", "classes"],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "gradle",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",
