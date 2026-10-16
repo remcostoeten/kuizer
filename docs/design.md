@@ -142,7 +142,7 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `duplicates.threads` | `0` | Phase 5 |
 | `duplicates.verify` | `false` | Byte compare after hash match, phase 5 |
 | `delete.mode` | `trash` | `trash` or `permanent`, phase 4 |
-| `delete.confirm` | `false` | Ask before moving to the trash in the TUI. Permanent deletion always asks |
+| `delete.confirm` | `false` | Ask before moving to the trash in the TUI. Permanent deletion, `review` items and projects with uncommitted changes always ask |
 
 A rule:
 
@@ -303,7 +303,7 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | `ctrl-c` / `q` | cancel the scan, then quit |
 | `?` | help |
 
-By default `d` and `enter` move the selection to the trash straight away. With `delete.confirm = true` in the config or `kuizer --confirm`, a dialog first lists every selected path with size and safety, shows the mode (trash or permanent), and needs `y` or `enter`. Permanent deletion always shows the dialog because it cannot be undone. Nothing is preselected for deletion.
+By default `d` and `enter` move the selection to the trash straight away, unless it holds a `review` item or a project with uncommitted changes: then the dialog always shows. With `delete.confirm = true` in the config or `kuizer --confirm`, a dialog first lists every selected path with size and safety, shows the mode (trash or permanent), and needs `y` or `enter`. Permanent deletion always shows the dialog because it cannot be undone. Nothing is preselected for deletion.
 
 ## 8. Threat model
 
