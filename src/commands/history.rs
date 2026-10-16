@@ -13,6 +13,7 @@ struct Report<'a> {
     #[serde(flatten)]
     history: &'a History,
     in_trash: Option<Total>,
+    freed_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -80,10 +81,12 @@ pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
         return show(&history, &trash, &run, json);
     }
     let in_trash = trash.known.then(|| kept_total(&history, &trash.kept));
+    let freed = history::freed_bytes(&history, trash.known.then_some(&trash.kept));
     if json {
         let report = Report {
             history: &history,
             in_trash,
+            freed_bytes: freed,
         };
         println!(
             "{}",
@@ -113,12 +116,21 @@ pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
         );
     }
     match in_trash {
-        Some(trash) if trash.items > 0 => println!(
-            "{} of that is still in the trash across {} items, `kuizer restore ID` puts it back",
-            trash.size, trash.items
+        Some(trash) if trash.items > 0 => {
+            println!(
+                "{} of that is freed, deleted permanently or emptied from the trash",
+                ByteSize(freed)
+            );
+            println!(
+                "{} is still in the trash across {} items and frees once the trash is emptied, `kuizer restore ID` puts it back",
+                trash.size, trash.items
+            );
+        }
+        Some(_) => println!("all of it is freed, none of it is still in the trash"),
+        None => println!(
+            "{} of that was deleted permanently and is freed; the trash cannot be read on this platform",
+            ByteSize(freed)
         ),
-        Some(_) => println!("none of it is still in the trash"),
-        None => println!("the trash cannot be read on this platform"),
     }
     println!("{}", path.display());
     Ok(())

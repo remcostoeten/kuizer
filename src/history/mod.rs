@@ -73,6 +73,8 @@ pub struct Cumulative {
     pub last_run: Option<String>,
     pub restored_items: usize,
     pub restored_bytes: u64,
+    pub permanent_bytes: u64,
+    pub trashed_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +191,17 @@ impl History {
         let (items, bytes) = total(Action::Delete);
         let (restored_items, restored_bytes) = total(Action::Restore);
         let bytes = bytes.saturating_sub(restored_bytes);
+        let by_mode = |mode| {
+            self.runs
+                .iter()
+                .filter(|run| run.action == Action::Delete)
+                .flat_map(|run| &run.deleted)
+                .filter(|entry| entry.mode == mode)
+                .map(|entry| entry.bytes)
+                .sum::<u64>()
+        };
+        let permanent_bytes = by_mode(Mode::Permanent);
+        let trashed_bytes = by_mode(Mode::Trash).saturating_sub(restored_bytes);
         self.cumulative = Cumulative {
             runs: self.runs.len(),
             items: items.saturating_sub(restored_items),
@@ -198,6 +211,8 @@ impl History {
             last_run: self.runs.last().map(|run| run.started_at.clone()),
             restored_items,
             restored_bytes,
+            permanent_bytes,
+            trashed_bytes,
         };
     }
 
@@ -268,6 +283,37 @@ fn parse_id(id: &str) -> Option<(u64, Option<usize>)> {
         Some((session, item)) => Some((session.parse().ok()?, Some(item.parse().ok()?))),
         None => Some((rest.parse().ok()?, None)),
     }
+}
+
+/// @name freed_bytes
+/// @description Sums the space that past runs actually freed: everything deleted permanently, plus
+/// trashed entries that are no longer in the trash. Restored entries never count. With `kept`
+/// unknown, because the trash cannot be read, trashed entries are left out.
+///
+/// @example
+/// let kept = history::still_in_trash(&history, &trashed);
+/// let freed = history::freed_bytes(&history, Some(&kept));
+pub fn freed_bytes(history: &History, kept: Option<&HashSet<(usize, usize)>>) -> u64 {
+    let restored = history.restored_ids();
+    history
+        .runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.action == Action::Delete)
+        .flat_map(|(run_index, run)| {
+            run.deleted
+                .iter()
+                .enumerate()
+                .map(move |(entry_index, entry)| (run_index, entry_index, entry))
+        })
+        .filter(|&(run, entry, _)| !restored.contains(history.item_id(run, entry).as_str()))
+        .filter(|&(run, entry, item)| match item.mode {
+            Mode::Permanent => true,
+            Mode::Trash => kept.is_some_and(|kept| !kept.contains(&(run, entry))),
+            Mode::DryRun => false,
+        })
+        .map(|(_, _, entry)| entry.bytes)
+        .sum()
 }
 
 /// @name trashed_paths
@@ -834,6 +880,35 @@ mod tests {
         assert_eq!(history.restored_ids(), HashSet::from(["s1.2"]));
         let kept = still_in_trash(&history, &[PathBuf::from("/tmp/a/node_modules")]);
         assert_eq!(kept, HashSet::from([(0, 1)]));
+    }
+
+    #[test]
+    fn counts_trashed_bytes_as_freed_only_once_they_leave_the_trash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut permanent = entry(1000);
+        permanent.mode = Mode::Permanent;
+        append(
+            &path,
+            &path,
+            Run::new(now(), &[], vec![entry(100), entry(10), permanent]),
+        )
+        .expect("delete");
+        let restored = load(&path).expect("load").runs[0].deleted[1].clone();
+        append(
+            &path,
+            &path,
+            Run::restore(now(), vec![Entry::restored(&restored, "s1.2".to_owned())]),
+        )
+        .expect("restore");
+        let history = load(&path).expect("reload");
+
+        assert_eq!(history.cumulative.bytes, 1100);
+        assert_eq!(history.cumulative.permanent_bytes, 1000);
+        assert_eq!(history.cumulative.trashed_bytes, 100);
+        assert_eq!(freed_bytes(&history, None), 1000);
+        assert_eq!(freed_bytes(&history, Some(&HashSet::from([(0, 0)]))), 1000);
+        assert_eq!(freed_bytes(&history, Some(&HashSet::new())), 1100);
     }
 
     #[test]
