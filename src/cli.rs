@@ -159,6 +159,11 @@ fn scan_examples() -> String {
         ),
         (
             "kuizer scan",
+            "~/apps --idle 3mo",
+            "Only projects untouched for three months",
+        ),
+        (
+            "kuizer scan",
             "~/apps --sort path --limit 20",
             "First 20 results by path",
         ),
@@ -189,6 +194,11 @@ fn clean_help() -> String {
                 "kuizer clean",
                 "~/apps --select node-modules",
                 "Remove only node_modules folders"
+            ),
+            (
+                "kuizer clean",
+                "~/apps --idle 60d",
+                "Only projects idle for 60 days"
             ),
             (
                 "kuizer clean",
