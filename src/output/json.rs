@@ -26,6 +26,7 @@ struct CandidateJson<'a> {
     entries: u64,
     partial: bool,
     newest_modified: Option<u64>,
+    project_last_active: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +65,7 @@ pub fn scan_report(
                 entries: candidate.usage.entries,
                 partial: candidate.usage.partial,
                 newest_modified: seconds(candidate.newest),
+                project_last_active: seconds(candidate.project_last_active),
             })
             .collect(),
         issues,
@@ -81,6 +83,7 @@ struct RemovalJson<'a> {
     safety: Safety,
     ecosystem: &'a str,
     allocated_bytes: u64,
+    project_last_active: Option<u64>,
     status: Status,
     error: Option<&'a str>,
 }
@@ -133,6 +136,7 @@ pub fn removal_report(
                     safety: candidate.rule.safety,
                     ecosystem: &candidate.rule.ecosystem,
                     allocated_bytes: candidate.usage.allocated,
+                    project_last_active: seconds(candidate.project_last_active),
                     status: removal.status,
                     error: removal.error.as_deref(),
                 }

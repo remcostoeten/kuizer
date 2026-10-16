@@ -8,12 +8,12 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
 };
 
-use super::app::{App, GroupKey, Grouping, Overlay, Status, age, project_of};
+use super::app::{App, GroupKey, Grouping, Overlay, Status, project_of};
 use crate::cli::SortKey;
 use crate::delete::Mode;
 use crate::detect::{Category, Safety};
 use crate::output::display_path;
-use crate::units::ByteSize;
+use crate::units::{ByteSize, age};
 
 pub(super) const MUTED: Color = Color::Indexed(244);
 const FAINT: Color = Color::Indexed(240);
@@ -116,6 +116,7 @@ fn sort_label(sort: SortKey) -> &'static str {
         SortKey::Size => "size",
         SortKey::Path => "path",
         SortKey::Category => "category",
+        SortKey::Idle => "idle",
     }
 }
 

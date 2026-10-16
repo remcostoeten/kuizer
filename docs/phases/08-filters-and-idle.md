@@ -1,6 +1,6 @@
 # Phase 8: shared filters, idle time and `cache clean`
 
-Status: plan. `scan` and `clean` take `--category` and `--min-size`; `scan` also has `--safe-only`. `cache` takes `--clean` and the removal flags. Behaviour is specified in `design.md` sections 6.1 to 6.3.
+Status: idle time (section 2) is done for `scan` and `clean`: `--idle` with the `--older-than` alias, `--sort idle`, the `IDLE` text column and `project_last_active` in JSON. The TUI idle column, the dashboard insight, the shared `FilterArgs`, `--rule`, `--project`, `--exclude` and `cache clean` are still open. `scan` and `clean` take `--category` and `--min-size`; `scan` also has `--safe-only`. `cache` takes `--clean` and the removal flags. Behaviour is specified in `design.md` sections 6.1 to 6.3.
 
 ## 1. One filter type
 

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -87,6 +88,65 @@ impl<'de> Deserialize<'de> for ByteSize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Idle(pub Duration);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("invalid duration `{0}`: use a whole number with d, w, mo or y, e.g. 60d")]
+pub struct IdleError(String);
+
+impl FromStr for Idle {
+    type Err = IdleError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let text = input.trim();
+        let split = text
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(split);
+        let count: u64 = number.parse().map_err(|_| IdleError(input.to_owned()))?;
+        let days: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+            "d" => 1,
+            "w" => 7,
+            "mo" => 30,
+            "y" => 365,
+            _ => return Err(IdleError(input.to_owned())),
+        };
+        count
+            .checked_mul(days * 86_400)
+            .map(|seconds| Self(Duration::from_secs(seconds)))
+            .ok_or_else(|| IdleError(input.to_owned()))
+    }
+}
+
+impl fmt::Display for Idle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}d", self.0.as_secs() / 86_400)
+    }
+}
+
+/// @name age
+/// @description Formats the time elapsed since `time` as a short age such as `today`, `5d`,
+/// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future.
+///
+/// @example
+/// let label = units::age(candidate.newest);
+pub fn age(time: Option<SystemTime>) -> String {
+    let Some(days) = time
+        .and_then(|time| SystemTime::now().duration_since(time).ok())
+        .map(|elapsed| elapsed.as_secs() / 86_400)
+    else {
+        return "-".to_owned();
+    };
+    match days {
+        0 => "today".to_owned(),
+        1..=13 => format!("{days}d"),
+        14..=59 => format!("{}w", days / 7),
+        60..=729 => format!("{}mo", days / 30),
+        _ => format!("{}y", days / 365),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +172,18 @@ mod tests {
         assert_eq!(ByteSize(900).to_string(), "900 B");
         assert_eq!(ByteSize(1536).to_string(), "1.5 KiB");
         assert_eq!(ByteSize(3 << 30).to_string(), "3.0 GiB");
+    }
+
+    #[test]
+    fn parses_idle_durations() {
+        let days = |n: u64| Ok(Idle(Duration::from_secs(n * 86_400)));
+        assert_eq!("60d".parse(), days(60));
+        assert_eq!("2w".parse(), days(14));
+        assert_eq!("6mo".parse(), days(180));
+        assert_eq!(" 1y ".parse(), days(365));
+        assert!("60".parse::<Idle>().is_err());
+        assert!("1.5d".parse::<Idle>().is_err());
+        assert!("d".parse::<Idle>().is_err());
+        assert!("3h".parse::<Idle>().is_err());
     }
 }

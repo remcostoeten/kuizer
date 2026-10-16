@@ -4,7 +4,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::detect::Category;
-use crate::units::ByteSize;
+use crate::units::{ByteSize, Idle};
 
 const STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -159,6 +159,11 @@ fn scan_examples() -> String {
         ),
         (
             "kuizer scan",
+            "~/apps --idle 3mo",
+            "Only projects untouched for three months",
+        ),
+        (
+            "kuizer scan",
             "~/apps --sort path --limit 20",
             "First 20 results by path",
         ),
@@ -189,6 +194,11 @@ fn clean_help() -> String {
                 "kuizer clean",
                 "~/apps --select node-modules",
                 "Remove only node_modules folders"
+            ),
+            (
+                "kuizer clean",
+                "~/apps --idle 60d",
+                "Only projects idle for 60 days"
             ),
             (
                 "kuizer clean",
@@ -424,12 +434,20 @@ pub struct ScanArgs {
     pub min_size: Option<ByteSize>,
     #[arg(
         long,
+        visible_alias = "older-than",
+        value_name = "AGE",
+        help = "Only include projects without changes for AGE, e.g. 60d, 8w, 6mo or 1y",
+        help_heading = "Filters"
+    )]
+    pub idle: Option<Idle>,
+    #[arg(
+        long,
         help = "Only include entries that are safe to delete",
         help_heading = "Filters"
     )]
     pub safe_only: bool,
     #[arg(long, value_enum, default_value_t = SortKey::Size, hide_possible_values = true,
-        help = "Sort by size, path or category", help_heading = "Output")]
+        help = "Sort by size, path, category or idle", help_heading = "Output")]
     pub sort: SortKey,
     #[arg(
         long,
@@ -494,6 +512,14 @@ pub struct CleanArgs {
         help_heading = "Filters"
     )]
     pub min_size: Option<ByteSize>,
+    #[arg(
+        long,
+        visible_alias = "older-than",
+        value_name = "AGE",
+        help = "Only include projects without changes for AGE, e.g. 60d, 8w, 6mo or 1y",
+        help_heading = "Filters"
+    )]
+    pub idle: Option<Idle>,
     #[command(flatten)]
     pub removal: RemovalArgs,
     #[command(subcommand)]
@@ -677,6 +703,7 @@ pub enum SortKey {
     Size,
     Path,
     Category,
+    Idle,
 }
 
 fn parse_selection(value: &str) -> Result<Selection, String> {
