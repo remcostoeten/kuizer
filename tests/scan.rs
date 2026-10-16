@@ -149,6 +149,11 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "ziggy/.zig-cache/o/abc", 10);
     file(root, "ziggy/zig-out/bin/app", 10);
     file(root, "loose/zig-out/bin/app", 10);
+    file(root, "hs/stack.yaml", 2);
+    file(root, "hs/hs.cabal", 2);
+    file(root, "hs/.stack-work/dist/x", 10);
+    file(root, "hs/dist-newstyle/cache/plan.json", 10);
+    file(root, "copied/dist-newstyle/cache/plan.json", 10);
 
     let collected = scan(root);
 
@@ -157,6 +162,8 @@ fn finds_artifacts_of_other_ecosystems() {
         pairs(&[
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
+            ("hs/.stack-work", "haskell-stack"),
+            ("hs/dist-newstyle", "haskell-cabal"),
             ("ios/Pods", "cocoapods"),
             ("phx/_build", "elixir-build"),
             ("phx/deps", "elixir-deps"),

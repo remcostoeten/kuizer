@@ -385,6 +385,26 @@ mod tests {
             (".zig-cache", &["main.zig"], &["o"], None),
             ("zig-out", &["build.zig"], &["bin"], Some("zig-out")),
             ("zig-out", &["README.md"], &["bin"], None),
+            (
+                ".stack-work",
+                &["stack.yaml", "app.cabal"],
+                &["dist"],
+                Some("haskell-stack"),
+            ),
+            (".stack-work", &["README.md"], &["dist"], None),
+            (
+                "dist-newstyle",
+                &["cabal.project"],
+                &["cache"],
+                Some("haskell-cabal"),
+            ),
+            (
+                "dist-newstyle",
+                &["my-lib.cabal"],
+                &["cache"],
+                Some("haskell-cabal"),
+            ),
+            ("dist-newstyle", &["Setup.hs"], &["cache"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =
