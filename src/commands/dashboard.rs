@@ -2,7 +2,9 @@ use std::io::IsTerminal;
 
 use super::AppError;
 use super::cache;
-use super::scan::{announce_report, generated_at, resolve_roots, sort_candidates, write_page};
+use super::scan::{
+    announce_report, generated_at, refuse_overwrite, resolve_roots, sort_candidates, write_page,
+};
 use crate::caches::{self, Locations};
 use crate::cli::{DashboardArgs, SortKey};
 use crate::config::Config;
@@ -13,6 +15,9 @@ use crate::protect::Protected;
 use crate::scan::{self, Cancel};
 
 pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Result<(), AppError> {
+    if let Some(target) = &args.out {
+        refuse_overwrite(target, args.force)?;
+    }
     let roots = scan::normalize_roots(&resolve_roots(config, args.paths)?);
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let open = !args.no_open && std::io::stderr().is_terminal();
@@ -80,7 +85,12 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
         println!("{}", output::dashboard_data(&dashboard));
         return Ok(());
     }
-    let path = write_page(args.out, "dashboard", &output::dashboard_html(&dashboard))?;
+    let path = write_page(
+        args.out,
+        args.force,
+        "dashboard",
+        &output::dashboard_html(&dashboard),
+    )?;
     announce_report(Some(&path), open);
     Ok(())
 }
