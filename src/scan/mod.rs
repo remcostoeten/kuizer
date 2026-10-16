@@ -1,7 +1,7 @@
 mod cancel;
 mod size;
 mod types;
-mod walk;
+pub(crate) mod walk;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
 pub use cancel::Cancel;
 pub use size::{Measured, measure};
@@ -18,7 +18,7 @@ pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary,
 use crate::config::{Config, ConfigError};
 use crate::platform::MountTable;
 use crate::protect::Protected;
-use walk::{Found, Walker};
+use walk::{Flow, Found, Visitor, Walker};
 
 const FOUND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1024;
@@ -70,6 +70,48 @@ pub fn normalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     kept
 }
 
+struct Sink<'a, C> {
+    cancel: &'a Cancel,
+    counters: &'a Counters,
+    found: &'a Sender<Found>,
+    events: &'a Sender<Event>,
+    companion: C,
+}
+
+impl<C: Visitor> Visitor for Sink<'_, C> {
+    fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    fn issue(&mut self, issue: Issue) -> Flow {
+        Counters::add(&self.counters.issues, 1);
+        match self.events.send(Event::Issue(issue)) {
+            Ok(()) => Flow::Continue,
+            Err(_) => Flow::Stop,
+        }
+    }
+
+    fn entered(&mut self) {
+        Counters::add(&self.counters.dirs, 1);
+    }
+
+    fn counted(&mut self, file_type: std::fs::FileType) {
+        Counters::add(&self.counters.files, 1);
+        self.companion.counted(file_type);
+    }
+
+    fn file(&mut self, path: &Path, file_type: std::fs::FileType) -> Flow {
+        self.companion.file(path, file_type)
+    }
+
+    fn artifact(&mut self, found: Found) -> Flow {
+        match self.found.send(found) {
+            Ok(()) => Flow::Continue,
+            Err(_) => Flow::Stop,
+        }
+    }
+}
+
 fn size_threads(config: &Config) -> usize {
     match config.scan.size_threads {
         0 => thread::available_parallelism().map_or(4, |n| n.get().min(8)),
@@ -82,6 +124,15 @@ fn parent_project(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan, ConfigError> {
+    start_with(config, roots, cancel, ()).map(|(scan, _)| scan)
+}
+
+pub(crate) fn start_with<C: Visitor + Send + 'static>(
+    config: &Config,
+    roots: &[PathBuf],
+    cancel: Cancel,
+    companion: C,
+) -> Result<(Scan, Receiver<C>), ConfigError> {
     let detector = Arc::new(config.detector()?);
     let excludes = Arc::new(config.excludes()?);
     let scan_config = Arc::new(config.scan.clone());
@@ -93,6 +144,7 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
     let next_id = Arc::new(AtomicU64::new(1));
     let min_size = config.scan.min_size.0;
     let started = Instant::now();
+    let (companion_tx, companion_rx) = bounded::<C>(1);
 
     let walker = {
         let counters = Arc::clone(&counters);
@@ -103,16 +155,19 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
             .spawn(move || {
                 let mounts = MountTable::load();
                 let protected = Protected::for_user();
-                let walker = Walker {
+                let mut walker = Walker {
                     scan: &scan_config,
                     detector: &detector,
                     excludes: &excludes,
                     mounts: &mounts,
                     protected: &protected,
-                    cancel: &cancel,
-                    counters: &counters,
-                    found: &found_tx,
-                    events: &events,
+                    visitor: Sink {
+                        cancel: &cancel,
+                        counters: &counters,
+                        found: &found_tx,
+                        events: &events,
+                        companion,
+                    },
                 };
                 for root in &roots {
                     if cancel.is_cancelled() {
@@ -120,6 +175,7 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
                     }
                     walker.walk_root(root);
                 }
+                let _ = companion_tx.send(walker.visitor.companion);
             })
             .expect("spawn walker thread")
     };
@@ -188,12 +244,15 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
             .expect("spawn coordinator thread")
     };
 
-    Ok(Scan {
-        events: event_rx,
-        counters,
-        cancel,
-        coordinator: Some(coordinator),
-    })
+    Ok((
+        Scan {
+            events: event_rx,
+            counters,
+            cancel,
+            coordinator: Some(coordinator),
+        },
+        companion_rx,
+    ))
 }
 
 pub struct Collected {

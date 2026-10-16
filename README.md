@@ -54,6 +54,7 @@ Requires Rust 1.88 or newer (edition 2024).
 cargo test                                          # unit and filesystem tests in temp dirs
 cargo clippy --all-targets -- -D warnings           # lint, as CI runs it
 cargo fmt --check                                   # formatting, as CI runs it
+cargo deny check                                    # advisories, licenses and duplicate crates
 cargo run --release --example synth -- /tmp/kuizer-bench 200 100   # build a synthetic tree to scan
 ```
 

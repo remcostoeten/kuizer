@@ -130,3 +130,33 @@ fn respects_min_size() {
     let found = dupes::find(&Config::default(), &[root], options, |_| {}).unwrap();
     assert!(found.groups.is_empty());
 }
+
+#[test]
+fn skips_roots_on_excluded_filesystem_types() {
+    let tmp = TempDir::new().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    write(&root, "a/photo.jpg", b"same bytes here");
+    write(&root, "b/photo.jpg", b"same bytes here");
+    let Some(fs_type) = kuizer::platform::MountTable::load()
+        .fs_type(&root)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let mut config = Config::default();
+    config.scan.one_file_system = false;
+    config.scan.excluded_fs_types = vec![fs_type];
+    let options = Options {
+        min_size: 1,
+        threads: 2,
+        verify: false,
+    };
+    let found = dupes::find(&config, std::slice::from_ref(&root), options, |_| {}).unwrap();
+    assert!(found.groups.is_empty());
+    assert!(
+        found
+            .issues
+            .iter()
+            .any(|issue| issue.kind == kuizer::scan::IssueKind::SkippedMount)
+    );
+}

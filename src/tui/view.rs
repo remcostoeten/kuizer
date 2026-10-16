@@ -21,7 +21,7 @@ const CURSOR: Color = Color::Indexed(237);
 const WARNING: Color = Color::Yellow;
 const SAFE: Color = Color::Green;
 const SELECTED: Color = Color::Indexed(22);
-const BAR: usize = 8;
+const BAR: u16 = 8;
 type HelpRow = (&'static [&'static str], &'static str);
 type HelpSection = (&'static str, &'static [HelpRow]);
 
@@ -54,15 +54,18 @@ fn size_color(bytes: u64) -> Color {
 }
 
 fn size_bar(bytes: u64, largest: u64) -> String {
-    let filled = if largest == 0 {
-        0
-    } else {
-        ((bytes as f64 / largest as f64) * BAR as f64).ceil() as usize
+    let width = usize::from(BAR);
+    let filled = match largest {
+        0 => 0,
+        largest => (u128::from(bytes) * u128::from(BAR))
+            .div_ceil(u128::from(largest))
+            .try_into()
+            .unwrap_or(width),
     };
     format!(
         "{}{}",
-        "█".repeat(filled.min(BAR)),
-        "░".repeat(BAR - filled.min(BAR))
+        "█".repeat(filled.min(width)),
+        "░".repeat(width - filled.min(width))
     )
 }
 
@@ -264,7 +267,7 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Length(3),
         Constraint::Length(10),
-        Constraint::Length(BAR as u16),
+        Constraint::Length(BAR),
         Constraint::Length(7),
         Constraint::Length(12),
         Constraint::Length(20),
@@ -417,6 +420,10 @@ fn footer(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+pub(super) fn cells(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -452,7 +459,7 @@ fn confirm(frame: &mut Frame, app: &App, ids: &[u64], mode: crate::delete::Mode)
     let area = centered(
         frame.area(),
         90,
-        (items.len().min(SHOWN) + 10 + dirty_lines) as u16,
+        cells(items.len().min(SHOWN) + 10 + dirty_lines),
     );
     let inner_width = usize::from(area.width.saturating_sub(16));
     let mut lines = vec![Line::raw("")];
@@ -614,8 +621,8 @@ fn help(frame: &mut Frame) {
     lines.push(Line::raw(""));
     lines.push(Line::styled("  any key to close", Style::new().fg(FAINT)));
 
-    let width = (2 + key_width + 1 + action_width + 3) as u16;
-    let area = centered(frame.area(), width, lines.len() as u16 + 2);
+    let width = cells(2 + key_width + 1 + action_width + 3);
+    let area = centered(frame.area(), width, cells(lines.len()).saturating_add(2));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -659,5 +666,22 @@ mod tests {
     fn shortens_from_the_left() {
         assert_eq!(shorten("~/projects/web/node_modules", 14), "…/node_modules");
         assert_eq!(shorten("short", 10), "short");
+    }
+
+    #[test]
+    fn size_bar_rounds_up_and_stays_in_bounds() {
+        assert_eq!(size_bar(0, 0), "░".repeat(8));
+        assert_eq!(size_bar(1, 1000), format!("█{}", "░".repeat(7)));
+        assert_eq!(
+            size_bar(500, 1000),
+            format!("{}{}", "█".repeat(4), "░".repeat(4))
+        );
+        assert_eq!(size_bar(u64::MAX, 1), "█".repeat(8));
+    }
+
+    #[test]
+    fn cells_saturates_at_the_terminal_limit() {
+        assert_eq!(cells(12), 12);
+        assert_eq!(cells(usize::MAX), u16::MAX);
     }
 }

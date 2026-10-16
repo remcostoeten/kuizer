@@ -103,12 +103,14 @@ struct Bucket {
 }
 
 fn bar(bucket: &Bucket, total: u64) -> String {
-    let share = if total == 0 {
-        0.0
-    } else {
-        bucket.bytes as f64 / total as f64
+    let filled = match total {
+        0 => 0,
+        total => usize::try_from(
+            (u128::from(bucket.bytes) * 40 + u128::from(total)) / (2 * u128::from(total)),
+        )
+        .unwrap_or(20)
+        .min(20),
     };
-    let filled = (share * 20.0).round() as usize;
     format!("{}{}", "█".repeat(filled), dim(&"░".repeat(20 - filled)))
 }
 
@@ -325,7 +327,7 @@ pub fn print_removal_summary(removals: &[Removal], mode: Mode) {
         println!(
             "{}",
             dim(
-                "The space is freed when the trash is emptied. `kuizer insight` shows what is still there."
+                "The space is freed when the trash is emptied. `kuizer history` shows what is still there and `kuizer restore` brings it back."
             )
         );
     }

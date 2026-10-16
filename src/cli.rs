@@ -460,6 +460,13 @@ pub struct ScanArgs {
         help_heading = "Output"
     )]
     pub no_open: bool,
+    #[arg(
+        long,
+        requires = "report",
+        help = "Overwrite the report file if it already exists",
+        help_heading = "Output"
+    )]
+    pub force: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }
@@ -572,6 +579,13 @@ pub struct DashboardArgs {
         help_heading = "Output"
     )]
     pub no_open: bool,
+    #[arg(
+        long,
+        requires = "out",
+        help = "Overwrite the page file if it already exists",
+        help_heading = "Output"
+    )]
+    pub force: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }

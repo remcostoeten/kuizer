@@ -46,6 +46,9 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     if let Some(min_size) = args.min_size {
         config.scan.min_size = min_size;
     }
+    if let Some(Some(target)) = &args.report {
+        refuse_overwrite(target, args.force)?;
+    }
     let roots = scan::normalize_roots(&resolve_roots(&config, args.paths)?);
     let handle = scan::start(&config, &roots, Cancel::new())?;
     let terminal = std::io::stdout().is_terminal()
@@ -55,6 +58,7 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let safe_only = args.safe_only;
     let report = args.report;
+    let force = args.force;
     let open = !args.no_open && std::io::stderr().is_terminal();
     let collected = if live {
         tui::watch(&handle, safe_only)?
@@ -80,6 +84,7 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
         .map(|target| {
             write_report(
                 target,
+                force,
                 &roots,
                 &candidates,
                 &collected.issues,
@@ -134,8 +139,16 @@ pub(super) fn generated_at() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string()
 }
 
+pub(super) fn refuse_overwrite(target: &Path, force: bool) -> Result<(), AppError> {
+    if force || std::fs::symlink_metadata(target).is_err() {
+        return Ok(());
+    }
+    Err(AppError::PageExists(target.to_path_buf()))
+}
+
 pub(super) fn write_page(
     target: Option<PathBuf>,
+    force: bool,
     prefix: &str,
     page: &str,
 ) -> Result<PathBuf, AppError> {
@@ -149,17 +162,63 @@ pub(super) fn write_page(
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, page)?;
+    let mut options = std::fs::OpenOptions::new();
+    if force {
+        options.write(true).create(true).truncate(true);
+    } else {
+        options.write(true).create_new(true);
+    }
+    let mut file = options.open(&path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AlreadyExists => AppError::PageExists(path.clone()),
+        _ => AppError::Io(error),
+    })?;
+    std::io::Write::write_all(&mut file, page.as_bytes())?;
     Ok(std::path::absolute(&path).unwrap_or(path))
 }
 
 fn write_report(
     target: Option<PathBuf>,
+    force: bool,
     roots: &[PathBuf],
     candidates: &[Candidate],
     issues: &[Issue],
     summary: &Summary,
 ) -> Result<PathBuf, AppError> {
     let page = output::scan_html(roots, candidates, issues, summary, &generated_at());
-    write_page(target, "report", &page)
+    write_page(target, force, "report", &page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_page_keeps_an_existing_file_unless_forced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("report.html");
+        std::fs::write(&path, "mine").unwrap();
+
+        assert!(matches!(
+            refuse_overwrite(&path, false),
+            Err(AppError::PageExists(_))
+        ));
+        assert!(matches!(
+            write_page(Some(path.clone()), false, "report", "new"),
+            Err(AppError::PageExists(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+
+        refuse_overwrite(&path, true).unwrap();
+        write_page(Some(path.clone()), true, "report", "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn write_page_creates_a_new_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nested/report.html");
+        refuse_overwrite(&path, false).unwrap();
+        write_page(Some(path.clone()), false, "report", "page").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "page");
+    }
 }
