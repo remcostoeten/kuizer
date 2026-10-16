@@ -478,6 +478,7 @@ mod tests {
             },
             newest: None,
             identity: None,
+            project_last_active: None,
         }
     }
 

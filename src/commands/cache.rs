@@ -41,6 +41,7 @@ pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
                         usage: measured.usage,
                         newest: measured.newest,
                         identity: measured.identity,
+                        project_last_active: None,
                     };
                     (cache, candidate)
                 })

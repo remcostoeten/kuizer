@@ -1,3 +1,4 @@
+mod activity;
 mod cancel;
 mod size;
 mod types;
@@ -11,6 +12,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
+pub use activity::annotate;
 pub use cancel::Cancel;
 pub use size::{Measured, measure};
 pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary, Usage};
@@ -112,7 +114,7 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
     }
 }
 
-fn size_threads(config: &Config) -> usize {
+pub fn size_threads(config: &Config) -> usize {
     match config.scan.size_threads {
         0 => thread::available_parallelism().map_or(4, |n| n.get().min(8)),
         n => n,
@@ -213,6 +215,7 @@ pub(crate) fn start_with<C: Visitor + Send + 'static>(
                             usage,
                             newest,
                             identity,
+                            project_last_active: None,
                         };
                         if events.send(Event::Candidate(candidate)).is_err() {
                             cancel.cancel();

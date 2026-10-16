@@ -25,6 +25,7 @@ pub struct Candidate {
     pub usage: Usage,
     pub newest: Option<SystemTime>,
     pub identity: Option<(u64, u64)>,
+    pub project_last_active: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
