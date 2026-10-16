@@ -1,7 +1,7 @@
 mod cancel;
 mod size;
 mod types;
-mod walk;
+pub(crate) mod walk;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
 pub use cancel::Cancel;
 pub use size::{Measured, measure};
@@ -18,7 +18,7 @@ pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary,
 use crate::config::{Config, ConfigError};
 use crate::platform::MountTable;
 use crate::protect::Protected;
-use walk::{Found, Walker};
+use walk::{Flow, Found, Visitor, Walker};
 
 const FOUND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1024;
@@ -70,6 +70,42 @@ pub fn normalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     kept
 }
 
+struct Sink<'a> {
+    cancel: &'a Cancel,
+    counters: &'a Counters,
+    found: &'a Sender<Found>,
+    events: &'a Sender<Event>,
+}
+
+impl Visitor for Sink<'_> {
+    fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    fn issue(&mut self, issue: Issue) -> Flow {
+        Counters::add(&self.counters.issues, 1);
+        match self.events.send(Event::Issue(issue)) {
+            Ok(()) => Flow::Continue,
+            Err(_) => Flow::Stop,
+        }
+    }
+
+    fn entered(&mut self) {
+        Counters::add(&self.counters.dirs, 1);
+    }
+
+    fn counted(&mut self, _file_type: std::fs::FileType) {
+        Counters::add(&self.counters.files, 1);
+    }
+
+    fn artifact(&mut self, found: Found) -> Flow {
+        match self.found.send(found) {
+            Ok(()) => Flow::Continue,
+            Err(_) => Flow::Stop,
+        }
+    }
+}
+
 fn size_threads(config: &Config) -> usize {
     match config.scan.size_threads {
         0 => thread::available_parallelism().map_or(4, |n| n.get().min(8)),
@@ -103,16 +139,18 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
             .spawn(move || {
                 let mounts = MountTable::load();
                 let protected = Protected::for_user();
-                let walker = Walker {
+                let mut walker = Walker {
                     scan: &scan_config,
                     detector: &detector,
                     excludes: &excludes,
                     mounts: &mounts,
                     protected: &protected,
-                    cancel: &cancel,
-                    counters: &counters,
-                    found: &found_tx,
-                    events: &events,
+                    visitor: Sink {
+                        cancel: &cancel,
+                        counters: &counters,
+                        found: &found_tx,
+                        events: &events,
+                    },
                 };
                 for root in &roots {
                     if cancel.is_cancelled() {

@@ -1,18 +1,16 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{Config, ConfigError};
-use crate::detect::Listing;
-use crate::platform;
-use crate::protect::{self, Protected};
-use crate::scan::{Issue, IssueKind};
+use crate::platform::{self, MountTable};
+use crate::protect::Protected;
+use crate::scan::Issue;
+use crate::scan::walk::{Flow, Visitor, Walker};
 
 const PARTIAL: u64 = 16 * 1024;
 const CHUNK: usize = 64 * 1024;
@@ -101,18 +99,7 @@ struct Candidate {
     member: Member,
 }
 
-struct Pending {
-    path: PathBuf,
-    parent: Arc<Listing>,
-    depth: usize,
-    device: u64,
-}
-
-struct Walk<'a> {
-    config: &'a Config,
-    detector: crate::detect::Detector,
-    excludes: crate::config::Excludes,
-    protected: Protected,
+struct Collector<'a> {
     min_size: u64,
     files: Vec<Seen>,
     issues: Vec<Issue>,
@@ -120,144 +107,44 @@ struct Walk<'a> {
     on_stage: &'a mut dyn FnMut(Stage),
 }
 
-impl Walk<'_> {
-    fn excluded_mount(&self, path: &Path) -> bool {
-        self.config
-            .scan
-            .excluded_mounts
-            .iter()
-            .any(|mount| path.starts_with(mount))
+impl Visitor for Collector<'_> {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        self.issues.push(issue);
+        Flow::Continue
     }
 
-    fn root(&mut self, root: &Path) {
-        let metadata = match fs::metadata(root) {
-            Ok(metadata) if metadata.is_dir() => metadata,
-            Ok(_) => {
-                self.issues.push(Issue {
-                    path: root.to_path_buf(),
-                    kind: IssueKind::InvalidRoot,
-                    message: "not a directory".to_owned(),
-                });
-                return;
-            }
-            Err(error) => {
-                self.issues.push(Issue::from_io(root.to_path_buf(), &error));
-                return;
-            }
-        };
-        if self.protected.covers(root) {
-            self.issues.push(Issue {
-                path: root.to_path_buf(),
-                kind: IssueKind::Protected,
-                message: "root holds browser or application data".to_owned(),
+    fn counted(&mut self, file_type: fs::FileType) {
+        if !file_type.is_file() {
+            return;
+        }
+        self.counted += 1;
+        if self.counted.is_multiple_of(4096) {
+            (self.on_stage)(Stage::Walking {
+                files: self.counted,
             });
-            return;
-        }
-        let mut stack = vec![Pending {
-            path: root.to_path_buf(),
-            parent: Arc::new(Listing::new(Vec::new())),
-            depth: 0,
-            device: platform::device(&metadata),
-        }];
-        while let Some(pending) = stack.pop() {
-            self.visit(pending, &mut stack);
         }
     }
 
-    fn visit(&mut self, pending: Pending, stack: &mut Vec<Pending>) {
-        let entries = match fs::read_dir(&pending.path) {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.issues.push(Issue::from_io(pending.path, &error));
-                return;
-            }
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        if !file_type.is_file() {
+            return Flow::Continue;
+        }
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => return self.issue(Issue::from_io(path.to_path_buf(), &error)),
         };
-        let mut children: Vec<(OsString, fs::FileType)> = Vec::new();
-        for entry in entries {
-            match entry.and_then(|entry| Ok((entry.file_name(), entry.file_type()?))) {
-                Ok(child) => children.push(child),
-                Err(error) => self
-                    .issues
-                    .push(Issue::from_io(pending.path.clone(), &error)),
-            }
+        let size = metadata.len();
+        if size == 0 || size < self.min_size {
+            return Flow::Continue;
         }
-        let own = Listing::new(children.iter().map(|(name, _)| name.clone()).collect());
-        let scan = &self.config.scan;
-        if scan.ignores(&own) || protect::holds_app_data(&own) {
-            return;
-        }
-        if pending.depth > 0
-            && self
-                .detector
-                .classify_dir(&pending.path, &pending.parent, &own)
-                .is_some()
-        {
-            return;
-        }
-        if scan.max_depth.is_some_and(|max| pending.depth >= max) {
-            return;
-        }
-        let own = Arc::new(own);
-        for (name, file_type) in children {
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = pending.path.join(&name);
-            if file_type.is_dir() {
-                if scan.skip_dirs.iter().any(|skip| name == skip.as_str())
-                    || self.excludes.path(&path)
-                    || self.protected.is_known(&path)
-                    || self.excluded_mount(&path)
-                {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.issues.push(Issue::from_io(path, &error));
-                        continue;
-                    }
-                };
-                let device = platform::device(&metadata);
-                if device != pending.device && scan.one_file_system {
-                    continue;
-                }
-                stack.push(Pending {
-                    path,
-                    parent: Arc::clone(&own),
-                    depth: pending.depth + 1,
-                    device,
-                });
-            } else if file_type.is_file() {
-                self.counted += 1;
-                if self.counted.is_multiple_of(4096) {
-                    (self.on_stage)(Stage::Walking {
-                        files: self.counted,
-                    });
-                }
-                if self.excludes.extension(&name) || self.excludes.path(&path) {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.issues.push(Issue::from_io(path, &error));
-                        continue;
-                    }
-                };
-                let size = metadata.len();
-                if size == 0 || size < self.min_size {
-                    continue;
-                }
-                self.files.push(Seen {
-                    path,
-                    size,
-                    allocated: platform::allocated(&metadata),
-                    identity: platform::identity(&metadata),
-                    modified: metadata.modified().ok(),
-                });
-            }
-        }
+        self.files.push(Seen {
+            path: path.to_path_buf(),
+            size,
+            allocated: platform::allocated(&metadata),
+            identity: platform::identity(&metadata),
+            modified: metadata.modified().ok(),
+        });
+        Flow::Continue
     }
 }
 
@@ -422,26 +309,33 @@ pub fn find(
     mut on_stage: impl FnMut(Stage),
 ) -> Result<Duplicates, ConfigError> {
     let started = Instant::now();
-    let mut walk = Walk {
-        config,
-        detector: config.detector()?,
-        excludes: config.excludes()?,
-        protected: Protected::for_user(),
-        min_size: options.min_size,
-        files: Vec::new(),
-        issues: Vec::new(),
-        counted: 0,
-        on_stage: &mut on_stage,
+    let detector = config.detector()?;
+    let excludes = config.excludes()?;
+    let mounts = MountTable::load();
+    let protected = Protected::for_user();
+    let mut walker = Walker {
+        scan: &config.scan,
+        detector: &detector,
+        excludes: &excludes,
+        mounts: &mounts,
+        protected: &protected,
+        visitor: Collector {
+            min_size: options.min_size,
+            files: Vec::new(),
+            issues: Vec::new(),
+            counted: 0,
+            on_stage: &mut on_stage,
+        },
     };
     for root in roots {
-        walk.root(root);
+        walker.walk_root(root);
     }
-    let Walk {
+    let Collector {
         files,
         mut issues,
         counted,
         ..
-    } = walk;
+    } = walker.visitor;
 
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
     for candidate in merge_links(files) {

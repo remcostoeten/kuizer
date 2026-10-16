@@ -3,10 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crossbeam_channel::Sender;
-
-use super::cancel::Cancel;
-use super::types::{Counters, Event, Issue, IssueKind};
+use super::types::{Issue, IssueKind};
 use crate::config::{Excludes, ScanConfig};
 use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
 use crate::platform::{self, MountTable};
@@ -18,16 +15,38 @@ pub struct Found {
     pub rule: Match,
 }
 
-pub struct Walker<'a> {
+pub enum Flow {
+    Continue,
+    Stop,
+}
+
+pub trait Visitor {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn issue(&mut self, issue: Issue) -> Flow;
+
+    fn entered(&mut self) {}
+
+    fn counted(&mut self, _file_type: fs::FileType) {}
+
+    fn artifact(&mut self, _found: Found) -> Flow {
+        Flow::Continue
+    }
+
+    fn file(&mut self, _path: &Path, _file_type: fs::FileType) -> Flow {
+        Flow::Continue
+    }
+}
+
+pub struct Walker<'a, V> {
     pub scan: &'a ScanConfig,
     pub detector: &'a Detector,
     pub excludes: &'a Excludes,
     pub mounts: &'a MountTable,
     pub protected: &'a Protected,
-    pub cancel: &'a Cancel,
-    pub counters: &'a Counters,
-    pub found: &'a Sender<Found>,
-    pub events: &'a Sender<Event>,
+    pub visitor: V,
 }
 
 struct Pending {
@@ -37,31 +56,15 @@ struct Pending {
     device: u64,
 }
 
-enum Flow {
-    Continue,
-    Stop,
-}
-
-impl Walker<'_> {
-    fn issue(&self, issue: Issue) -> Flow {
-        Counters::add(&self.counters.issues, 1);
-        match self.events.send(Event::Issue(issue)) {
-            Ok(()) => Flow::Continue,
-            Err(_) => Flow::Stop,
-        }
-    }
-
-    fn emit(&self, mut found: Found) -> Flow {
+impl<V: Visitor> Walker<'_, V> {
+    fn emit(&mut self, mut found: Found) -> Flow {
         if found.rule.safety == Safety::Safe && self.protected.in_hidden_home_dir(&found.path) {
             found.rule = Arc::new(RuleInfo {
                 safety: Safety::Review,
                 ..RuleInfo::clone(&found.rule)
             });
         }
-        match self.found.send(found) {
-            Ok(()) => Flow::Continue,
-            Err(_) => Flow::Stop,
-        }
+        self.visitor.artifact(found)
     }
 
     fn excluded_mount(&self, path: &Path) -> bool {
@@ -77,11 +80,11 @@ impl Walker<'_> {
             })
     }
 
-    pub fn walk_root(&self, root: &Path) {
+    pub fn walk_root(&mut self, root: &Path) {
         let metadata = match fs::metadata(root) {
             Ok(metadata) if metadata.is_dir() => metadata,
             Ok(_) => {
-                self.issue(Issue {
+                self.visitor.issue(Issue {
                     path: root.to_path_buf(),
                     kind: IssueKind::InvalidRoot,
                     message: "not a directory".to_owned(),
@@ -89,12 +92,13 @@ impl Walker<'_> {
                 return;
             }
             Err(error) => {
-                self.issue(Issue::from_io(root.to_path_buf(), &error));
+                self.visitor
+                    .issue(Issue::from_io(root.to_path_buf(), &error));
                 return;
             }
         };
         if self.excluded_mount(root) {
-            self.issue(Issue {
+            self.visitor.issue(Issue {
                 path: root.to_path_buf(),
                 kind: IssueKind::SkippedMount,
                 message: "root is on an excluded mount or filesystem type".to_owned(),
@@ -102,7 +106,7 @@ impl Walker<'_> {
             return;
         }
         if self.protected.covers(root) {
-            self.issue(Issue {
+            self.visitor.issue(Issue {
                 path: root.to_path_buf(),
                 kind: IssueKind::Protected,
                 message: "root holds browser or application data".to_owned(),
@@ -116,7 +120,7 @@ impl Walker<'_> {
             device: platform::device(&metadata),
         }];
         while let Some(pending) = stack.pop() {
-            if self.cancel.is_cancelled() {
+            if self.visitor.cancelled() {
                 return;
             }
             if let Flow::Stop = self.visit(pending, &mut stack) {
@@ -125,18 +129,21 @@ impl Walker<'_> {
         }
     }
 
-    fn visit(&self, pending: Pending, stack: &mut Vec<Pending>) -> Flow {
-        Counters::add(&self.counters.dirs, 1);
+    fn visit(&mut self, pending: Pending, stack: &mut Vec<Pending>) -> Flow {
+        self.visitor.entered();
         let entries = match fs::read_dir(&pending.path) {
             Ok(entries) => entries,
-            Err(error) => return self.issue(Issue::from_io(pending.path, &error)),
+            Err(error) => return self.visitor.issue(Issue::from_io(pending.path, &error)),
         };
         let mut children: Vec<(OsString, fs::FileType)> = Vec::new();
         for entry in entries {
             match entry.and_then(|entry| Ok((entry.file_name(), entry.file_type()?))) {
                 Ok(child) => children.push(child),
                 Err(error) => {
-                    if let Flow::Stop = self.issue(Issue::from_io(pending.path.clone(), &error)) {
+                    if let Flow::Stop = self
+                        .visitor
+                        .issue(Issue::from_io(pending.path.clone(), &error))
+                    {
                         return Flow::Stop;
                     }
                 }
@@ -181,7 +188,7 @@ impl Walker<'_> {
                 let metadata = match fs::symlink_metadata(&path) {
                     Ok(metadata) => metadata,
                     Err(error) => {
-                        if let Flow::Stop = self.issue(Issue::from_io(path, &error)) {
+                        if let Flow::Stop = self.visitor.issue(Issue::from_io(path, &error)) {
                             return Flow::Stop;
                         }
                         continue;
@@ -208,9 +215,12 @@ impl Walker<'_> {
                     device,
                 });
             } else {
-                Counters::add(&self.counters.files, 1);
+                self.visitor.counted(file_type);
                 if self.excludes.extension(&name) || self.excludes.path(&path) {
                     continue;
+                }
+                if let Flow::Stop = self.visitor.file(&path, file_type) {
+                    return Flow::Stop;
                 }
                 if let Some(rule) = self.detector.classify_file(&name, &own)
                     && self.detector.reports(&rule)
