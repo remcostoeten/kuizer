@@ -366,6 +366,15 @@ mod tests {
             ),
             ("Pods", &["Podfile"], &["notes.md"], None),
             ("Pods", &["README.md"], &["Manifest.lock"], None),
+            (
+                "_build",
+                &["mix.exs", "mix.lock"],
+                &["dev"],
+                Some("elixir-build"),
+            ),
+            ("_build", &["CMakeLists.txt"], &["dev"], None),
+            ("deps", &["mix.exs"], &["phoenix"], Some("elixir-deps")),
+            ("deps", &["Makefile"], &["phoenix"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

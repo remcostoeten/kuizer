@@ -141,6 +141,10 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "ios/Pods/Manifest.lock", 10);
     file(root, "ios/Pods/Alamofire/Source.swift", 10);
     file(root, "photos/Pods/Manifest.lock", 10);
+    file(root, "phx/mix.exs", 2);
+    file(root, "phx/_build/dev/lib/app.beam", 10);
+    file(root, "phx/deps/phoenix/mix.exs", 2);
+    file(root, "docs/deps/graph.svg", 10);
 
     let collected = scan(root);
 
@@ -150,6 +154,8 @@ fn finds_artifacts_of_other_ecosystems() {
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
             ("ios/Pods", "cocoapods"),
+            ("phx/_build", "elixir-build"),
+            ("phx/deps", "elixir-deps"),
         ])
     );
 }

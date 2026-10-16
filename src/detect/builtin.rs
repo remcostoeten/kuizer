@@ -22,6 +22,8 @@ const GRADLE: &[&str] = &[
 
 const DOTNET_PROJECT: &[&str] = &["*.csproj", "*.fsproj", "*.vbproj"];
 
+const MIX: &[&str] = &["mix.exs"];
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "node-modules",
@@ -287,6 +289,26 @@ const BUILTINS: &[Builtin] = &[
         category: Category::Dependencies,
         safety: Safety::Review,
         ecosystem: "cocoapods",
+    },
+    Builtin {
+        name: "elixir-build",
+        kind: Kind::Dir,
+        pattern: "_build",
+        markers: MIX,
+        contains: &[],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "elixir",
+    },
+    Builtin {
+        name: "elixir-deps",
+        kind: Kind::Dir,
+        pattern: "deps",
+        markers: MIX,
+        contains: &[],
+        category: Category::Dependencies,
+        safety: Safety::Safe,
+        ecosystem: "elixir",
     },
     Builtin {
         name: "typescript-buildinfo",
