@@ -174,6 +174,12 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "app/.dart_tool/package_config.json", 10);
     file(root, "app/build/web/main.dart.js", 10);
     file(root, "sketch/.dart_tool/package_config.json", 10);
+    file(root, "cpp/CMakeLists.txt", 2);
+    file(root, "cpp/build/CMakeCache.txt", 10);
+    file(root, "cpp/build/app", 10);
+    file(root, "insource/CMakeLists.txt", 2);
+    file(root, "insource/CMakeCache.txt", 10);
+    file(root, "insource/main.c", 10);
 
     let collected = scan(root);
 
@@ -183,6 +189,7 @@ fn finds_artifacts_of_other_ecosystems() {
             ("android/app/build", "gradle-build"),
             ("app/.dart_tool", "dart-tool"),
             ("app/build", "flutter-build"),
+            ("cpp/build", "cmake-build"),
             ("dotnet/bin", "dotnet-bin"),
             ("dotnet/obj", "dotnet-obj"),
             ("hs/.stack-work", "haskell-stack"),

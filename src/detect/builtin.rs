@@ -375,6 +375,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "flutter",
     },
     Builtin {
+        name: "cmake-build",
+        kind: Kind::Dir,
+        pattern: "{build,build-*,cmake-build-*}",
+        markers: &[],
+        contains: &["CMakeCache.txt"],
+        category: Category::Build,
+        safety: Safety::Review,
+        ecosystem: "cmake",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",

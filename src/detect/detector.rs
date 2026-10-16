@@ -462,6 +462,31 @@ mod tests {
                 Some("flutter-build"),
             ),
             ("build", &["analysis_options.yaml"], &["web"], None),
+            (
+                "build",
+                &["CMakeLists.txt", "package.json"],
+                &["CMakeCache.txt", "CMakeFiles"],
+                Some("cmake-build"),
+            ),
+            (
+                "cmake-build-debug",
+                &["CMakeLists.txt"],
+                &["CMakeCache.txt"],
+                Some("cmake-build"),
+            ),
+            (
+                "build-release",
+                &[],
+                &["CMakeCache.txt"],
+                Some("cmake-build"),
+            ),
+            ("build", &["CMakeLists.txt"], &["notes.md"], None),
+            (
+                "engine",
+                &["CMakeLists.txt"],
+                &["CMakeCache.txt", "CMakeLists.txt"],
+                None,
+            ),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =
