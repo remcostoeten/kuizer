@@ -154,6 +154,9 @@ fn finds_artifacts_of_other_ecosystems() {
     file(root, "hs/.stack-work/dist/x", 10);
     file(root, "hs/dist-newstyle/cache/plan.json", 10);
     file(root, "copied/dist-newstyle/cache/plan.json", 10);
+    file(root, "spm/Package.swift", 2);
+    file(root, "spm/.build/debug/app", 10);
+    file(root, "make/.build/out.o", 10);
 
     let collected = scan(root);
 
@@ -167,6 +170,7 @@ fn finds_artifacts_of_other_ecosystems() {
             ("ios/Pods", "cocoapods"),
             ("phx/_build", "elixir-build"),
             ("phx/deps", "elixir-deps"),
+            ("spm/.build", "swift-build"),
             ("ziggy/.zig-cache", "zig-cache"),
             ("ziggy/zig-out", "zig-out"),
         ])

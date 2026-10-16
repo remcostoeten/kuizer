@@ -405,6 +405,13 @@ mod tests {
                 Some("haskell-cabal"),
             ),
             ("dist-newstyle", &["Setup.hs"], &["cache"], None),
+            (
+                ".build",
+                &["Package.swift", "Package.resolved"],
+                &["debug", "checkouts"],
+                Some("swift-build"),
+            ),
+            (".build", &["Makefile"], &["debug"], None),
         ];
         for (dir, parent, own, expected) in cases {
             let hit =

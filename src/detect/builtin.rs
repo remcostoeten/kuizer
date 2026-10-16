@@ -353,6 +353,16 @@ const BUILTINS: &[Builtin] = &[
         ecosystem: "haskell",
     },
     Builtin {
+        name: "swift-build",
+        kind: Kind::Dir,
+        pattern: ".build",
+        markers: &["Package.swift"],
+        contains: &[],
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "swift",
+    },
+    Builtin {
         name: "typescript-buildinfo",
         kind: Kind::File,
         pattern: "*.tsbuildinfo",
