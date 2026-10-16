@@ -209,6 +209,13 @@ mod tests {
     use super::*;
     use crate::detect::builtin_rules;
 
+    type Case = (
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        Option<&'static str>,
+    );
+
     fn listing(names: &[&str]) -> Listing {
         Listing::new(names.iter().map(OsString::from).collect())
     }
@@ -290,6 +297,34 @@ mod tests {
                 .classify_file(OsStr::new("index.ts"), &parent)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ecosystem_rules_need_their_evidence() {
+        let detector = detector();
+        let cases: &[Case] = &[
+            (
+                ".venv",
+                &["pyproject.toml"],
+                &["pyvenv.cfg", "lib"],
+                Some("python-venv"),
+            ),
+            ("venv", &[], &["pyvenv.cfg", "bin"], Some("python-venv")),
+            (".venv", &["pyproject.toml"], &["lib"], None),
+            (".tox", &["tox.ini"], &["py312"], Some("tox-env")),
+            (".tox", &["README.md"], &["py312"], None),
+            (".nox", &["noxfile.py"], &["tests"], Some("nox-env")),
+            (".nox", &["pyproject.toml"], &["tests"], None),
+        ];
+        for (dir, parent, own, expected) in cases {
+            let hit =
+                detector.classify_dir(&Path::new("/p").join(dir), &listing(parent), &listing(own));
+            assert_eq!(
+                hit.map(|m| m.name.clone()).as_deref(),
+                *expected,
+                "{dir} beside {parent:?} holding {own:?}"
+            );
+        }
     }
 
     #[test]

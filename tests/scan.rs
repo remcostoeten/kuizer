@@ -101,6 +101,35 @@ fn cachedir_tag_requires_a_valid_signature() {
 }
 
 #[test]
+fn python_tool_caches_need_their_cache_tag() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    file(root, "py/pyproject.toml", 2);
+    for cache in [".pytest_cache", ".mypy_cache", ".ruff_cache"] {
+        cachedir_tag(&root.join("py").join(cache));
+        file(root, &format!("py/{cache}/blob"), 10);
+        file(root, &format!("untagged/{cache}/blob"), 10);
+    }
+
+    let collected = scan(root);
+
+    assert_eq!(
+        found(&collected, root),
+        pairs(&[
+            ("py/.mypy_cache", "mypy-cache"),
+            ("py/.pytest_cache", "pytest-cache"),
+            ("py/.ruff_cache", "ruff-cache"),
+        ])
+    );
+    assert!(
+        collected
+            .candidates
+            .iter()
+            .all(|c| c.rule.safety == Safety::Safe)
+    );
+}
+
+#[test]
 fn ignore_file_and_skip_dirs_hide_subtrees() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
