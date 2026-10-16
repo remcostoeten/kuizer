@@ -6,7 +6,7 @@ use crate::cli::{RemovalArgs, Selection};
 use crate::config::Config;
 use crate::delete::{self, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
-use crate::history::{self, Entry};
+use crate::history::{self, Entry, Recorder};
 use crate::output;
 use crate::scan::{Candidate, Issue};
 
@@ -167,11 +167,11 @@ pub fn run(
     let started_at = history::now();
     let guard = Guard::new(request.roots);
     let mut removals = Vec::with_capacity(candidates.len());
-    let mut deleted = Vec::new();
+    let mut recorder = Recorder::for_user(started_at, request.roots);
     for candidate in candidates {
         let removal = match delete::delete(&guard, &target(&candidate), mode) {
             Ok(()) => {
-                deleted.push(Entry::new(&candidate, mode));
+                recorder.add(Entry::new(&candidate, mode));
                 Removal {
                     candidate,
                     status: Status::Removed,
@@ -189,7 +189,7 @@ pub fn run(
         }
         removals.push(removal);
     }
-    if let Err(error) = history::save(started_at, request.roots, deleted) {
+    if let Err(error) = recorder.finish() {
         eprintln!("kuizer: {error}");
     }
     if request.json {

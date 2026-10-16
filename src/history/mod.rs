@@ -476,6 +476,7 @@ fn update<T>(
     };
     let _lock = Lock::acquire(path).map_err(write_error)?;
     let mut history = load(source)?;
+    history.assign_ids();
     let result = change(&mut history);
     history.recompute();
     let text = serde_json::to_string_pretty(&history)
@@ -504,21 +505,94 @@ impl Lock {
     }
 }
 
-/// @name save
-/// @description Appends one run with its deleted entries to the default history file. A run that
-/// deleted nothing is not recorded.
-///
-/// @example
-/// history::save(started_at, &roots, deleted)?;
-pub fn save(
+pub struct Recorder {
+    source: PathBuf,
+    target: PathBuf,
     started_at: String,
-    roots: &[PathBuf],
-    deleted: Vec<Entry>,
-) -> Result<(), HistoryError> {
-    if deleted.is_empty() {
-        return Ok(());
+    roots: Vec<PathBuf>,
+    session: Option<u64>,
+    error: Option<HistoryError>,
+}
+
+impl Recorder {
+    /// @name for_user
+    /// @description Starts recording a delete run into the default history file. Nothing is
+    /// written until the first entry arrives, so a run that removes nothing leaves no trace.
+    ///
+    /// @example
+    /// let mut recorder = Recorder::for_user(history::now(), &roots);
+    pub fn for_user(started_at: String, roots: &[PathBuf]) -> Self {
+        let home = dirs::home_dir();
+        let mut recorder = Self::at(
+            home.as_deref().map(readable_path_in).unwrap_or_default(),
+            home.map(|home| home.join(FILE_NAME)).unwrap_or_default(),
+            started_at,
+            roots,
+        );
+        if recorder.target.as_os_str().is_empty() {
+            recorder.error = Some(HistoryError::NoHome);
+        }
+        recorder
     }
-    record(Run::new(started_at, roots, deleted))
+
+    pub fn at(source: PathBuf, target: PathBuf, started_at: String, roots: &[PathBuf]) -> Self {
+        Self {
+            source,
+            target,
+            started_at,
+            roots: roots.to_vec(),
+            session: None,
+            error: None,
+        }
+    }
+
+    /// @name add
+    /// @description Writes one removed entry to the history file straight away, so an interrupted
+    /// or crashed run still leaves a record that `kuizer restore` can use. The first entry opens
+    /// the run; later entries are added to it. The first write error is kept for `finish`.
+    ///
+    /// @example
+    /// recorder.add(Entry::new(&candidate, mode));
+    pub fn add(&mut self, entry: Entry) {
+        if matches!(self.error, Some(HistoryError::NoHome)) {
+            return;
+        }
+        let source = if self.session.is_some() {
+            &self.target
+        } else {
+            &self.source
+        };
+        let result = update(source, &self.target, |history| {
+            let open = self
+                .session
+                .and_then(|session| history.runs.iter_mut().find(|run| run.id == session));
+            match open {
+                Some(run) => {
+                    run.deleted.push(entry);
+                    run.total = Total::of(&run.deleted);
+                    run.finished_at = now();
+                    run.id
+                }
+                None => {
+                    let mut run = Run::new(self.started_at.clone(), &self.roots, vec![entry]);
+                    run.id = history.next_session;
+                    history.next_session += 1;
+                    history.runs.push(run);
+                    history.next_session - 1
+                }
+            }
+        });
+        match result {
+            Ok(session) => self.session = Some(session),
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+    }
+
+    pub fn finish(self) -> Result<(), HistoryError> {
+        self.error.map_or(Ok(()), Err)
+    }
 }
 
 /// @name record
@@ -585,6 +659,40 @@ mod tests {
 
         let text = fs::read_to_string(&path).expect("read");
         assert!(text.find("\"runs\"") < text.find("\"cumulative\""));
+    }
+
+    #[test]
+    fn recorder_writes_each_entry_into_one_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut fresh = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        fresh.add(entry(7));
+        fresh.add(entry(0));
+        assert_eq!(load(&path).expect("fresh").runs[0].total.items, 2);
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+
+        recorder.add(entry(1));
+        let partial = load(&path).expect("after one");
+        assert_eq!(partial.runs.len(), 2);
+        assert_eq!(partial.runs[1].total.items, 1);
+
+        recorder.add(entry(2));
+        recorder.finish().expect("no errors");
+        let history = load(&path).expect("after two");
+        assert_eq!(history.runs.len(), 2);
+        assert_eq!(history.runs[1].session(), "s2");
+        assert_eq!(history.runs[1].total.bytes, 3);
+        assert_eq!(history.cumulative.items, 4);
+    }
+
+    #[test]
+    fn recorder_without_entries_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        Recorder::at(path.clone(), path.clone(), now(), &[])
+            .finish()
+            .expect("no errors");
+        assert!(!path.exists());
     }
 
     #[test]
