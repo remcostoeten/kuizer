@@ -143,6 +143,7 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `duplicates.verify` | `false` | Byte compare after hash match, phase 5 |
 | `delete.mode` | `trash` | `trash` or `permanent`, phase 4 |
 | `delete.confirm` | `false` | Ask before moving to the trash in the TUI. Permanent deletion, `review` items and projects with uncommitted changes always ask |
+| `appearance.motion` | `true` | Animations in the GUI: tooltips, loaders and skeletons. Off, or the desktop asking for reduced motion, shows them without movement |
 
 A rule:
 

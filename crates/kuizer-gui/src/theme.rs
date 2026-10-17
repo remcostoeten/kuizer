@@ -61,6 +61,22 @@ pub fn bar() -> Rgba {
     rgb(0x008c_8c8c)
 }
 
+pub fn bar_strong() -> Rgba {
+    rgb(0x00c8_c8c8)
+}
+
+pub fn bar_soft() -> Rgba {
+    rgb(0x0062_6262)
+}
+
+pub fn bar_rest() -> Rgba {
+    rgb(0x0038_3838)
+}
+
+pub fn skeleton() -> Rgba {
+    rgb(0x0027_2727)
+}
+
 pub fn track() -> Rgba {
     rgb(0x0026_2626)
 }

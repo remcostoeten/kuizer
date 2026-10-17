@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FocusHandle, FontWeight,
@@ -19,10 +19,13 @@ use kuizer::history::Action;
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
+use kuizer::stats;
 
+use crate::chart::{self, Measure, Segment};
 use crate::frame;
 use crate::glossary::Term;
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
+use crate::motion;
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
 use crate::tooltip::{self, Tip, Tooltip};
@@ -183,6 +186,7 @@ impl Kuizer {
             .map(|path| display_path(path))
             .unwrap_or_default();
         cx.set_global(tooltip::Typeface(font.clone()));
+        motion::configure(config.appearance.motion);
         let mut app = Self {
             options: ScanOptions::from_config(&config),
             config,
@@ -953,39 +957,7 @@ impl Kuizer {
     fn render_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match &self.phase {
             Phase::Start => self.render_start(cx),
-            Phase::Loading(stage) => {
-                centered(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(unit(6.))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(self.tab.label()),
-                        )
-                        .child({
-                            let status = self.tab.status(*stage, &self.options);
-                            div()
-                                .debug_selector(|| status.to_owned())
-                                .text_color(theme::muted())
-                                .child(status)
-                        })
-                        .child(
-                            div()
-                                .text_size(unit(12.))
-                                .text_color(theme::faint())
-                                .child(stage.describe()),
-                        )
-                        .child(div().text_size(unit(12.)).text_color(theme::faint()).child(
-                            format!(
-                                "{}s elapsed, press Escape to cancel",
-                                self.started.elapsed().as_secs()
-                            ),
-                        )),
-                )
-            }
+            Phase::Loading(stage) => self.render_loading(*stage),
             Phase::Failed(error) => centered(
                 div()
                     .flex()
@@ -1340,6 +1312,57 @@ impl Kuizer {
             .into_any_element()
     }
 
+    fn render_loading(&self, stage: Stage) -> AnyElement {
+        let status = self.tab.status(stage, &self.options);
+        let header = div()
+            .flex()
+            .items_end()
+            .gap(unit(16.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(unit(2.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(self.tab.label()),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| status.to_owned())
+                            .text_color(theme::muted())
+                            .child(status),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(unit(2.))
+                    .flex_none()
+                    .text_size(unit(12.))
+                    .text_color(theme::faint())
+                    .child(stage.describe())
+                    .child(format!(
+                        "{}s elapsed, press Escape to cancel",
+                        self.started.elapsed().as_secs()
+                    )),
+            );
+        let body = match self.tab {
+            Tab::Overview => skeleton_overview(stage).into_any_element(),
+            _ => skeleton_table().into_any_element(),
+        };
+        scroll("loading")
+            .debug_selector(|| "skeleton".to_owned())
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
     fn render_overview(&self) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
@@ -1428,6 +1451,7 @@ impl Kuizer {
                         .tip(tooltip::term(Term::DiskFree)),
                     ),
             )
+            .child(overview_disk(report))
             .child(
                 div()
                     .flex()
@@ -1497,6 +1521,7 @@ impl Kuizer {
                             }),
                     ),
             )
+            .child(overview_trends(report))
             .child(
                 div()
                     .text_size(unit(12.))
@@ -2435,14 +2460,324 @@ impl Render for Kuizer {
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .when(!start, |this| this.child(self.render_sidebar(cx)))
-                    .child(div().flex().flex_col().flex_1().min_w_0().child(content)),
+                    .child(div().flex().flex_col().flex_1().min_w_0().child(content))
+                    .when(self.busy(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .child(chart::loader()),
+                        )
+                    }),
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
             .children(dialog)
             .child(tooltip::layer(cx));
         frame::frame(root, window)
     }
+}
+
+const WIDTHS: [f32; 6] = [0.62, 0.44, 0.71, 0.38, 0.56, 0.49];
+const HEIGHTS: [f32; 6] = [0.35, 0.8, 0.55, 1.0, 0.25, 0.6];
+
+fn overview_disk(report: &Report) -> Div {
+    let safe = report.total(Some(Safety::Safe));
+    let review = report.total(Some(Safety::Review));
+    let caches = report.cache_total(None);
+    let duplicates = report
+        .duplicates
+        .as_ref()
+        .map_or(0, kuizer::dupes::Duplicates::reclaimable);
+    let reclaimable = safe + review + caches + duplicates;
+    let mut segments = vec![
+        Segment {
+            label: "Safe artifacts".into(),
+            bytes: safe,
+            fill: theme::bar_strong(),
+        },
+        Segment {
+            label: "Needs review".into(),
+            bytes: review,
+            fill: theme::review(),
+        },
+        Segment {
+            label: "Global caches".into(),
+            bytes: caches,
+            fill: theme::bar(),
+        },
+        Segment {
+            label: "Duplicates".into(),
+            bytes: duplicates,
+            fill: theme::bar_soft(),
+        },
+    ];
+    let disk = report
+        .disks
+        .first()
+        .and_then(|disk| Some((disk.available?, disk.total?)));
+    let whole = match disk {
+        Some((free, size)) => {
+            let used = size.saturating_sub(free);
+            segments.push(Segment {
+                label: "Other files".into(),
+                bytes: used.saturating_sub(reclaimable),
+                fill: theme::bar_rest(),
+            });
+            segments.push(Segment {
+                label: "Free".into(),
+                bytes: free,
+                fill: theme::track(),
+            });
+            size.max(reclaimable)
+        }
+        None => reclaimable,
+    };
+    let title = if disk.is_some() {
+        format!(
+            "Disk  {} of {} could be reclaimed",
+            theme::bytes(reclaimable),
+            theme::bytes(whole)
+        )
+    } else {
+        format!("Reclaimable  {}", theme::bytes(reclaimable))
+    };
+    ui::card(title).child(chart::composition("disk", &segments, whole))
+}
+
+fn overview_trends(report: &Report) -> Div {
+    let ages = stats::by_age(&report.candidates, SystemTime::now());
+    let sizes = stats::by_size(&report.candidates);
+    let ecosystems = stats::by_ecosystem(&report.candidates);
+    let largest = ecosystems.first().map_or(0, |bucket| bucket.bytes);
+    let total = report.total(None);
+    let empty = report.candidates.is_empty();
+    let removed = report
+        .history
+        .as_ref()
+        .ok()
+        .map(|view| stats::removed_by_month(&view.history, &kuizer::history::now(), 12));
+    div()
+        .flex()
+        .flex_col()
+        .gap(unit(10.))
+        .child(
+            div()
+                .flex()
+                .gap(unit(10.))
+                .items_start()
+                .child(
+                    ui::card("Idle since")
+                        .flex_1()
+                        .debug_selector(|| "chart-ages".to_owned())
+                        .when(!empty, |this| {
+                            this.child(chart::columns("age", &ages, Measure::Bytes, "Items"))
+                        })
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
+                )
+                .child(
+                    ui::card("Artifact sizes")
+                        .flex_1()
+                        .when(!empty, |this| {
+                            this.child(chart::columns("size", &sizes, Measure::Count, "Items"))
+                        })
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
+                )
+                .child(
+                    ui::card("By ecosystem")
+                        .flex_1()
+                        .children(
+                            ecosystems
+                                .iter()
+                                .take(6)
+                                .enumerate()
+                                .map(|(index, bucket)| {
+                                    ui::bar_row(
+                                        format!(
+                                            "{}  {}",
+                                            bucket.label,
+                                            plural(bucket.count, "item")
+                                        ),
+                                        theme::bytes(bucket.bytes),
+                                        theme::share(bucket.bytes, largest),
+                                        theme::bar(),
+                                    )
+                                    .id(("ecosystem", index))
+                                    .tip(
+                                        Tooltip::details(bucket.label.clone())
+                                            .row("Size", theme::bytes(bucket.bytes))
+                                            .row("Items", bucket.count.to_string())
+                                            .row(
+                                                "Share",
+                                                chart::percent(theme::share(bucket.bytes, total)),
+                                            )
+                                            .build(),
+                                    )
+                                }),
+                        )
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
+                ),
+        )
+        .children(removed.map(|months| {
+            let total: u64 = months.iter().map(|month| month.bytes).sum();
+            ui::card(format!(
+                "Removed in the last 12 months  {}",
+                theme::bytes(total)
+            ))
+            .child(chart::columns("removed", &months, Measure::Bytes, "Items"))
+        }))
+}
+
+fn skeleton_stat(label: &'static str, index: usize, live: Option<String>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(unit(6.))
+        .flex_1()
+        .min_w(unit(140.))
+        .p(unit(14.))
+        .rounded(theme::radius_panel())
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(
+            div()
+                .text_size(unit(12.))
+                .text_color(theme::muted())
+                .child(label),
+        )
+        .child(match live {
+            Some(value) => div()
+                .h(unit(24.))
+                .text_size(unit(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(value)
+                .into_any_element(),
+            None => chart::block("stat-value", index, unit(96.), unit(24.)),
+        })
+        .child(chart::block("stat-sub", index, unit(72.), unit(12.)))
+}
+
+fn skeleton_bars(id: &'static str, title: &'static str) -> Div {
+    ui::card(title).flex_1().children((0..5).map(move |index| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(unit(6.))
+            .child(chart::block(
+                id,
+                index,
+                gpui::relative(WIDTHS[index]),
+                unit(12.),
+            ))
+            .child(chart::block(id, index + 10, gpui::relative(1.), unit(4.)))
+    }))
+}
+
+fn skeleton_columns(id: &'static str, title: &'static str) -> Div {
+    ui::card(title).flex_1().child(
+        div()
+            .flex()
+            .items_end()
+            .gap(unit(4.))
+            .h(unit(88.))
+            .children(HEIGHTS.iter().enumerate().map(move |(index, height)| {
+                div()
+                    .flex_1()
+                    .h(gpui::relative(*height))
+                    .child(chart::block(
+                        id,
+                        index,
+                        gpui::relative(1.),
+                        gpui::relative(1.),
+                    ))
+            })),
+    )
+}
+
+fn skeleton_overview(stage: Stage) -> Div {
+    let found = match stage {
+        Stage::Scanning(progress) => Some(plural(progress.candidates as usize, "item")),
+        _ => None,
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(unit(14.))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(unit(10.))
+                .child(skeleton_stat("Project artifacts", 0, found))
+                .child(skeleton_stat("Safe to remove", 1, None))
+                .child(skeleton_stat("Needs review", 2, None))
+                .child(skeleton_stat("Global caches", 3, None))
+                .child(skeleton_stat("Duplicate files", 4, None))
+                .child(skeleton_stat("Disk free", 5, None)),
+        )
+        .child(
+            ui::card("Disk")
+                .child(chart::block("disk", 0, gpui::relative(1.), unit(12.)))
+                .child(div().flex().gap(unit(16.)).children(
+                    (1..6).map(|index| chart::block("disk", index, unit(84.), unit(12.))),
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(unit(10.))
+                .items_start()
+                .child(skeleton_bars("space", "Where the space is"))
+                .child(skeleton_bars("projects", "Largest projects"))
+                .child(skeleton_bars("caches", "Largest caches")),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(unit(10.))
+                .items_start()
+                .child(skeleton_columns("ages", "Idle since"))
+                .child(skeleton_columns("sizes", "Artifact sizes"))
+                .child(skeleton_bars("ecosystems", "By ecosystem")),
+        )
+}
+
+fn skeleton_table() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(theme::radius_panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(table_header().child(chart::block("head", 0, unit(120.), unit(10.))))
+        .children((0..12).map(|index| {
+            div()
+                .flex()
+                .items_center()
+                .gap(unit(12.))
+                .h(unit(30.))
+                .px(unit(14.))
+                .border_b_1()
+                .border_color(theme::border())
+                .child(chart::block("row-check", index, unit(14.), unit(14.)))
+                .child(div().flex_1().min_w_0().child(chart::block(
+                    "row-path",
+                    index,
+                    gpui::relative(WIDTHS[index % WIDTHS.len()]),
+                    unit(10.),
+                )))
+                .child(chart::block("row-size", index, unit(64.), unit(10.)))
+        }))
 }
 
 fn centered(child: impl IntoElement) -> AnyElement {
@@ -2757,6 +3092,34 @@ mod tests {
             );
             app.cancel_scan(cx);
         });
+    }
+
+    #[gpui::test]
+    fn a_scan_shows_skeletons_then_charts_with_tooltips(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("skeleton").is_some());
+        assert!(cx.debug_bounds("loader").is_some());
+        wait_for_scan(&view, cx);
+        view.read_with(cx, |app, _| assert!(!app.busy()));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chart-ages").is_some());
+        let segment = cx
+            .debug_bounds("disk-0")
+            .expect("the safe artifacts segment");
+        cx.simulate_event(MouseMoveEvent {
+            position: segment.center(),
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        });
+        cx.executor().advance_clock(Duration::from_millis(700));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("tooltip").is_some());
     }
 
     #[gpui::test]

@@ -1,4 +1,5 @@
 mod app;
+mod chart;
 mod frame;
 mod glossary;
 mod model;

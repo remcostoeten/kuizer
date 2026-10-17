@@ -34,3 +34,6 @@ verify = false
 [delete]
 mode = "trash"
 confirm = false
+
+[appearance]
+motion = true

@@ -1,5 +1,8 @@
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static OFF: AtomicBool = AtomicBool::new(false);
 
 /// @name ease_out
 /// @description The strong UI ease-out, `cubic-bezier(0.23, 1, 0.32, 1)`, as a GPUI easing.
@@ -8,6 +11,15 @@ use std::sync::OnceLock;
 /// assert_eq!(ease_out(1.0), 1.0);
 pub fn ease_out(progress: f32) -> f32 {
     cubic_bezier(0.23, 1.0, 0.32, 1.0, progress)
+}
+
+/// @name ease_in_out
+/// @description A symmetric ease, `cubic-bezier(0.65, 0, 0.35, 1)`, for motion that loops.
+///
+/// @example
+/// assert_eq!(ease_in_out(0.0), 0.0);
+pub fn ease_in_out(progress: f32) -> f32 {
+    cubic_bezier(0.65, 0.0, 0.35, 1.0, progress)
 }
 
 /// @name cubic_bezier
@@ -58,13 +70,27 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, progress: f32) -> f32 {
     curve(y1, y2, t)
 }
 
+/// @name configure
+/// @description Applies `appearance.motion` from the config: `false` stills every animation.
+///
+/// @example
+/// configure(config.appearance.motion);
+pub fn configure(enabled: bool) {
+    OFF.store(!enabled, Ordering::Relaxed);
+}
+
 /// @name reduced
-/// @description Whether the desktop asks for less motion: KDE with its animation speed set
-/// to instant, or GTK with animations turned off. Read once per process.
+/// @description Whether animations should stand still: `appearance.motion` is off, or the
+/// desktop asks for less motion (KDE with its animation speed set to instant, or GTK with
+/// animations turned off). The desktop settings are read once per process.
 ///
 /// @example
 /// let _ = reduced();
 pub fn reduced() -> bool {
+    OFF.load(Ordering::Relaxed) || desktop()
+}
+
+fn desktop() -> bool {
     static REDUCED: OnceLock<bool> = OnceLock::new();
     *REDUCED.get_or_init(|| {
         dirs::config_dir().is_some_and(|config| {

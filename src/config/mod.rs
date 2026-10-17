@@ -21,6 +21,7 @@ pub struct Config {
     pub rules: Vec<RuleSpec>,
     pub duplicates: DuplicateConfig,
     pub delete: DeleteConfig,
+    pub appearance: AppearanceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +150,18 @@ pub enum DeleteMode {
 pub struct DeleteConfig {
     pub mode: DeleteMode,
     pub confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppearanceConfig {
+    pub motion: bool,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self { motion: true }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -316,6 +329,14 @@ mod tests {
         assert_eq!(config.rules.len(), 1);
         assert_eq!(config.rules[0].safety, Safety::Review);
         assert_eq!(config.delete.mode, DeleteMode::Trash);
+        assert!(config.appearance.motion);
+    }
+
+    #[test]
+    fn motion_can_be_turned_off() {
+        let config = parse("[appearance]\nmotion = false\n").expect("parses");
+        assert!(!config.appearance.motion);
+        assert!(Config::default().appearance.motion);
     }
 
     #[test]

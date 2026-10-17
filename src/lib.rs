@@ -11,5 +11,6 @@ pub mod output;
 pub mod platform;
 pub mod protect;
 pub mod scan;
+pub mod stats;
 pub mod tui;
 pub mod units;
