@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 dirs = "7.0.0"
 gpui = "=0.2.2"
-kuizer = { path = "../..", version = "0.1.0" }
+kuizer = { path = "../..", version = "0.1.1" }
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }
