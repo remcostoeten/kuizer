@@ -1,4 +1,5 @@
 mod app;
+mod frame;
 mod model;
 mod start;
 mod theme;
@@ -9,8 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use gpui::{
-    App, Application, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
-    prelude::*, px, size,
+    App, Application, Bounds, SharedString, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use kuizer::config::Config;
 
@@ -47,10 +47,8 @@ fn main() -> ExitCode {
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("kuizer".into()),
-                    ..TitlebarOptions::default()
-                }),
+                titlebar: Some(frame::titlebar()),
+                window_decorations: frame::decorations(),
                 app_id: Some("kuizer-gui".to_owned()),
                 window_min_size: Some(size(px(860.), px(520.))),
                 ..WindowOptions::default()
