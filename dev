@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+
+import curses
+import os
+import platform
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+ROOT = Path(__file__).resolve().parent
+SITE = ROOT / "site"
+REPOSITORY_URL = "https://github.com/remcostoeten/kuizer"
+TEST_FLAGS = ("-j", "2", "--", "--test-threads=2")
+SITE_PORT = "4173"
+PACKAGES = ROOT / "target/packages"
+SYSTEM = platform.system()
+SYSTEM_NAMES = {"Linux": "Linux", "Darwin": "macOS"}
+
+
+@dataclass(frozen=True)
+class Step:
+    argv: tuple[str, ...] = ()
+    cwd: Path = ROOT
+    action: Optional[Callable[[list[str]], None]] = None
+    label: str = ""
+    env: tuple[tuple[str, str], ...] = ()
+    system: str = ""
+    requires: str = ""
+
+    def describe(self) -> str:
+        if self.action is not None:
+            return self.label
+        location = "" if self.cwd == ROOT else f"({self.cwd.relative_to(ROOT)}) "
+        return location + shlex.join(self.argv).replace(f"{ROOT}/", "")
+
+
+@dataclass(frozen=True)
+class Prompt:
+    label: str
+    default: str = ""
+
+
+@dataclass
+class Item:
+    key: str
+    label: str
+    hint: str = ""
+    steps: list[Step] = field(default_factory=list)
+    children: list["Item"] = field(default_factory=list)
+    prompt: Optional[Prompt] = None
+    confirm: bool = False
+    separator: bool = False
+
+    @property
+    def is_group(self) -> bool:
+        return bool(self.children)
+
+    @property
+    def system(self) -> str:
+        return next((step.system for step in self.steps if step.system and step.system != SYSTEM), "")
+
+    @property
+    def available(self) -> bool:
+        return not self.system
+
+
+def cargo(*args: str) -> Step:
+    return Step(("cargo", *args))
+
+
+def bun(*args: str) -> Step:
+    return Step(("bun", *args), cwd=SITE)
+
+
+def packager(*formats: str, system: str = "Linux") -> Step:
+    return Step(
+        ("cargo", "packager", "-p", "kuizer-gui", "--release", "-f", ",".join(formats), "-o", str(PACKAGES)),
+        # linuxdeploy's bundled strip cannot read the .relr.dyn sections that newer distros ship
+        env=(("NO_STRIP", "1"),),
+        system=system,
+        requires="cargo-packager",
+    )
+
+
+def generate_rpm() -> Step:
+    return Step(("cargo", "generate-rpm", "-p", "crates/kuizer-gui", "-o", str(PACKAGES)), system="Linux", requires="cargo-generate-rpm")
+
+
+def separator(label: str) -> Item:
+    return Item("", label, separator=True)
+
+
+def leaf(key: str, label: str, *steps: Step, hint: str = "", prompt: Optional[Prompt] = None, confirm: bool = False) -> Item:
+    return Item(key, label, hint or (steps[0].describe() if len(steps) == 1 else f"{len(steps)} steps"), list(steps), prompt=prompt, confirm=confirm)
+
+
+def group(key: str, label: str, hint: str, *children: Item, all_label: str = "All") -> Item:
+    combined = [step for child in children for step in child.steps]
+    needs_confirm = any(child.confirm for child in children)
+    everything = Item("all", all_label, " + ".join(child.label for child in children), combined, confirm=needs_confirm)
+    return Item(key, label, hint, children=[everything, *children])
+
+
+def remove_paths(*paths: Path) -> Callable[[list[str]], None]:
+    def run(_: list[str]) -> None:
+        for path in paths:
+            if path.exists():
+                shutil.rmtree(path)
+                print(f"removed {path.relative_to(ROOT)}")
+
+    return run
+
+
+def install_desktop_entry(_: list[str]) -> None:
+    if platform.system() != "Linux":
+        print("desktop entry only applies to Linux, skipped")
+        return
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    applications = data / "applications"
+    icons = data / "icons/hicolor/scalable/apps"
+    applications.mkdir(parents=True, exist_ok=True)
+    icons.mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / "packaging/kuizer-gui.desktop", applications / "kuizer-gui.desktop")
+    shutil.copy(ROOT / "packaging/kuizer-gui.svg", icons / "kuizer-gui.svg")
+    print(f"installed desktop entry in {applications}")
+
+
+def remove_desktop_entry(_: list[str]) -> None:
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    for path in (data / "applications/kuizer-gui.desktop", data / "icons/hicolor/scalable/apps/kuizer-gui.svg"):
+        if path.exists():
+            path.unlink()
+            print(f"removed {path}")
+
+
+def open_repository(_: list[str]) -> None:
+    opener = {"Darwin": "open", "Linux": "xdg-open"}.get(platform.system())
+    if opener and shutil.which(opener):
+        subprocess.Popen([opener, REPOSITORY_URL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    print(REPOSITORY_URL)
+
+
+def run_appimage(extra: list[str]) -> None:
+    images = sorted(PACKAGES.glob("*.AppImage"), key=lambda path: path.stat().st_mtime)
+    if not images:
+        raise FileNotFoundError(f"no AppImage in {PACKAGES.relative_to(ROOT)}")
+    code = subprocess.call([str(images[-1]), *extra])
+    if code != 0:
+        raise OSError(f"{images[-1].name} exited with {code}")
+
+
+def desktop_builds() -> Item:
+    binary = leaf("binary", "Binary", cargo("build", "--release", "-p", "kuizer-gui"))
+    linux = leaf("linux", "All Linux", packager("appimage", "deb", "pacman"), generate_rpm(), hint="AppImage, deb, rpm, pacman")
+    apple = leaf("apple", "All Apple", packager("app", "dmg", system="Darwin"), hint=".app bundle, dmg")
+    native = {"Linux": linux, "Darwin": apple}.get(SYSTEM, binary)
+    return Item("desktop", "Desktop app", f"binary and packages in {PACKAGES.relative_to(ROOT)}", children=[
+        leaf("all", "All builds", *native.steps, hint=f"every package {SYSTEM_NAMES.get(SYSTEM, SYSTEM)} can build"),
+        linux,
+        apple,
+        separator("individual builds"),
+        binary,
+        leaf("appimage", "AppImage", packager("appimage"), hint="cargo packager -f appimage"),
+        leaf("deb", "deb", packager("deb"), hint="cargo packager -f deb"),
+        leaf("rpm", "rpm", *binary.steps, generate_rpm(), hint="cargo build + cargo generate-rpm"),
+        leaf("pacman", "pacman", packager("pacman"), hint="cargo packager -f pacman"),
+        leaf("app", ".app bundle", packager("app", system="Darwin"), hint="cargo packager -f app"),
+        leaf("dmg", "dmg", packager("dmg", system="Darwin"), hint="cargo packager -f dmg"),
+    ])
+
+
+def build_tree() -> Item:
+    build_cli = leaf("cli", "CLI", cargo("build", "--release", "-p", "kuizer"))
+    build_desktop = desktop_builds()
+    build_site = leaf("site", "Site", bun("run", "build"))
+    build_all = leaf("all", "All", *build_cli.steps, *next(child for child in build_desktop.children if child.key == "binary").steps, *build_site.steps, hint="CLI + desktop binary + site")
+
+    test_cli = leaf("cli", "CLI", cargo("test", "-p", "kuizer", "--all-targets", *TEST_FLAGS))
+    test_desktop = leaf("desktop", "Desktop app", cargo("test", "-p", "kuizer-gui", *TEST_FLAGS))
+    test_site = leaf("site", "Site typecheck", bun("run", "typecheck"))
+
+    check_fmt = leaf("fmt", "Rust format", cargo("fmt", "--all", "--check"))
+    check_clippy = leaf("clippy", "Clippy", cargo("clippy", "--workspace", "--all-targets", "--", "-D", "warnings"))
+    check_lint = leaf("lint", "Site lint", bun("run", "lint"))
+    check_types = leaf("types", "Site typecheck", bun("run", "typecheck"))
+    check_site_fmt = leaf("site-fmt", "Site format", bun("run", "format:check"))
+
+    format_rust = leaf("rust", "Rust", cargo("fmt", "--all"))
+    format_site = leaf("site", "Site", bun("run", "format"))
+
+    clean_cargo = leaf("cargo", "Cargo target", cargo("clean"), confirm=True)
+    clean_site = leaf("site", "Site output", Step(action=remove_paths(SITE / ".next", SITE / "out"), label="remove site/.next and site/out"))
+    clean_packages = leaf("packages", "Desktop packages", Step(action=remove_paths(PACKAGES), label=f"remove {PACKAGES.relative_to(ROOT)}"))
+
+    root = Item("", "kuizer", children=[
+        Item("build", "Build", "binaries, packages, site", children=[build_all, build_desktop, build_cli, build_site]),
+        Item("run", "Run", "start an app", children=[
+            Item("desktop", "Desktop app", "release, debug or AppImage", children=[
+                leaf("release", "Release", cargo("run", "--release", "-p", "kuizer-gui", "--"), prompt=Prompt("folder to open", ".")),
+                leaf("debug", "Debug", cargo("run", "-p", "kuizer-gui", "--"), prompt=Prompt("folder to open", ".")),
+                leaf("appimage", "AppImage", packager("appimage"), Step(action=run_appimage, label="run the newest AppImage", system="Linux"), prompt=Prompt("folder to open", "."), hint="package, then launch it"),
+            ]),
+            leaf("cli", "CLI", cargo("run", "--release", "-p", "kuizer", "--"), prompt=Prompt("kuizer arguments")),
+            leaf("site", "Site dev server", bun("run", "dev")),
+            leaf("site-preview", "Site static preview", bun("run", "build"), Step(("python3", "-m", "http.server", SITE_PORT, "--directory", str(SITE / "out"))), hint=f"build, then serve site/out on :{SITE_PORT}"),
+        ]),
+        group("test", "Test", "2 workers", test_cli, test_desktop, test_site),
+        group("check", "Check", "what CI runs", check_fmt, check_clippy, check_lint, check_types, check_site_fmt,
+              leaf("msrv", "MSRV 1.88", cargo("+1.88", "check", "--all-targets")),
+              leaf("deny", "cargo deny", cargo("deny", "check"))),
+        group("format", "Format", "rewrite files", format_rust, format_site),
+        Item("install", "Install", "binaries and dependencies", children=[
+            leaf("cli", "CLI", cargo("install", "--path", ".", "--locked", "--force")),
+            leaf("desktop", "Desktop app", cargo("install", "--path", "crates/kuizer-gui", "--locked", "--force"), Step(action=install_desktop_entry, label="install desktop entry and icon"), hint="cargo install + desktop entry"),
+            leaf("site-deps", "Site dependencies", bun("install")),
+            leaf("packaging-tools", "Packaging tools", cargo("install", "cargo-packager", "cargo-generate-rpm", "--locked")),
+            leaf("uninstall-cli", "Uninstall CLI", cargo("uninstall", "kuizer"), confirm=True),
+            leaf("uninstall-desktop", "Uninstall desktop app", cargo("uninstall", "kuizer-gui"), Step(action=remove_desktop_entry, label="remove desktop entry and icon"), hint="cargo uninstall + desktop entry", confirm=True),
+        ]),
+        Item("release", "Release", "cargo-dist", children=[
+            leaf("plan", "Plan", Step(("dist", "plan"))),
+            leaf("build", "Build artifacts", Step(("dist", "build"))),
+        ]),
+        group("clean", "Clean", "remove build output", clean_cargo, clean_site, clean_packages),
+        leaf("repo", "Open GitHub", Step(action=open_repository, label=REPOSITORY_URL)),
+    ])
+    return root
+
+
+def wait_for_key(message: str) -> None:
+    print(f"\n\033[2m{message}\033[0m", end="", flush=True)
+    if not sys.stdin.isatty():
+        print()
+        return
+    descriptor = sys.stdin.fileno()
+    previous = termios.tcgetattr(descriptor)
+    try:
+        tty.setcbreak(descriptor)
+        os.read(descriptor, 32)
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+        print()
+
+
+def run_step(step: Step, extra: list[str]) -> int:
+    print(f"\n\033[2m$ {step.describe()}\033[0m\n", flush=True)
+    if step.system and step.system != SYSTEM:
+        print(f"\033[31mthis step needs {SYSTEM_NAMES.get(step.system, step.system)}\033[0m")
+        return 1
+    if step.action is not None:
+        try:
+            step.action(extra)
+            return 0
+        except OSError as error:
+            print(f"\033[31m{error}\033[0m")
+            return 1
+    if not step.cwd.is_dir():
+        print(f"\033[31m{step.cwd.relative_to(ROOT)} does not exist on this branch\033[0m")
+        return 1
+    for tool in (step.argv[0], step.requires):
+        if tool and shutil.which(tool) is None:
+            hint = ", install it with ./dev install packaging-tools" if tool == step.requires else ""
+            print(f"\033[31m{tool} is not installed or not on PATH{hint}\033[0m")
+            return 127
+    process = subprocess.Popen(step.argv + tuple(extra), cwd=step.cwd, env={**os.environ, **dict(step.env)})
+    interrupts = 0
+    while True:
+        try:
+            return process.wait()
+        except KeyboardInterrupt:
+            interrupts += 1
+            if interrupts > 1:
+                process.terminate()
+
+
+def run_item(item: Item, path: list[str], extra: list[str]) -> int:
+    steps = list(item.steps)
+    title = " › ".join(path)
+    print(f"\033[1;36m◆ {title}\033[0m")
+    started = time.monotonic()
+    code = 0
+    for index, step in enumerate(steps):
+        code = run_step(step, extra if index == len(steps) - 1 else [])
+        if code != 0:
+            break
+    elapsed = time.monotonic() - started
+    if code == 0:
+        print(f"\n\033[32m✓ {title} finished in {elapsed:.1f}s\033[0m")
+    elif code in (130, -signal.SIGINT):
+        print(f"\n\033[33m■ {title} interrupted after {elapsed:.1f}s\033[0m")
+    else:
+        print(f"\n\033[31m✗ {title} failed with exit code {code} after {elapsed:.1f}s\033[0m")
+    return code
+
+
+class Menu:
+    def __init__(self, screen: "curses.window", root: Item) -> None:
+        self.screen = screen
+        self.stack: list[Item] = [root]
+        self.cursors: dict[int, int] = {}
+        self.filter: Optional[str] = None
+        self.message = ""
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for index, color in enumerate((curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_RED), start=1):
+            curses.init_pair(index, color, -1)
+        screen.keypad(True)
+
+    @property
+    def current(self) -> Item:
+        return self.stack[-1]
+
+    @property
+    def visible(self) -> list[Item]:
+        children = self.current.children
+        if not self.filter:
+            return children
+        needle = self.filter.lower()
+        return [child for child in children if not child.separator and (needle in child.label.lower() or needle in child.key)]
+
+    @property
+    def selectable(self) -> list[int]:
+        return [index for index, item in enumerate(self.visible) if not item.separator]
+
+    @property
+    def cursor(self) -> int:
+        return min(self.cursors.get(id(self.current), 0), max(len(self.visible) - 1, 0))
+
+    @cursor.setter
+    def cursor(self, value: int) -> None:
+        count = len(self.visible)
+        self.cursors[id(self.current)] = value % count if count else 0
+
+    def move(self, delta: int) -> None:
+        choices = self.selectable
+        if not choices:
+            return
+        position = choices.index(self.cursor) if self.cursor in choices else 0
+        self.cursor = choices[(position + delta) % len(choices)]
+
+    def jump(self, delta: int) -> None:
+        choices = self.selectable
+        if not choices:
+            return
+        position = choices.index(self.cursor) if self.cursor in choices else 0
+        self.cursor = choices[max(0, min(position + delta, len(choices) - 1))]
+
+    def put(self, row: int, column: int, text: str, attributes: int = 0) -> None:
+        height, width = self.screen.getmaxyx()
+        if 0 <= row < height and column < width - 1:
+            self.screen.addnstr(row, column, text, width - column - 1, attributes)
+
+    def breadcrumb(self) -> list[str]:
+        return [item.label for item in self.stack]
+
+    def draw(self) -> None:
+        self.screen.erase()
+        height, _ = self.screen.getmaxyx()
+        self.put(1, 2, "◆ ", curses.color_pair(1) | curses.A_BOLD)
+        self.put(1, 4, " › ".join(self.breadcrumb()), curses.A_BOLD)
+        if self.filter is not None:
+            self.put(2, 4, f"/{self.filter}", curses.color_pair(2))
+        items = self.visible
+        top = 4
+        room = max(height - top - 4, 1)
+        offset = max(0, self.cursor - room + 1)
+        numbers = {index: number for number, index in enumerate(self.selectable, start=1)}
+        for row, item in enumerate(items[offset:offset + room]):
+            index = offset + row
+            if item.separator:
+                self.put(top + row, 6, f"── {item.label} " + "─" * max(40 - len(item.label), 4), curses.A_DIM)
+                continue
+            selected = index == self.cursor
+            marker = "❯ " if selected else "  "
+            number = numbers[index]
+            shortcut = str(number) if number <= 9 and self.filter is None else " "
+            label = item.label + (" ›" if item.is_group else "")
+            style = curses.color_pair(1) | curses.A_BOLD if selected else 0
+            hint = item.hint
+            if not item.available:
+                style |= curses.A_DIM
+                hint = f"{SYSTEM_NAMES.get(item.system, item.system)} only"
+            self.put(top + row, 2, marker, curses.color_pair(1))
+            self.put(top + row, 4, shortcut, curses.A_DIM)
+            self.put(top + row, 6, f"{label:<24}", style)
+            self.put(top + row, 31, hint, curses.A_DIM)
+        if not items:
+            self.put(top, 6, "no matches", curses.A_DIM)
+        if self.message:
+            self.put(height - 3, 2, self.message, curses.color_pair(2))
+        keys = "↑↓/jk move  enter/→ open  ⌫/←/esc back  1-9 jump  / filter  q quit"
+        self.put(height - 2, 2, keys, curses.A_DIM)
+        self.screen.refresh()
+
+    def read_line(self, label: str, default: str) -> Optional[str]:
+        text = list(default)
+        position = len(text)
+        curses.curs_set(1)
+        try:
+            while True:
+                height, width = self.screen.getmaxyx()
+                row = height - 3
+                self.screen.move(row, 0)
+                self.screen.clrtoeol()
+                prefix = f"  {label}: "
+                self.put(row, 0, prefix, curses.color_pair(2) | curses.A_BOLD)
+                visible_width = max(width - len(prefix) - 2, 1)
+                start = max(0, position - visible_width + 1)
+                self.put(row, len(prefix), "".join(text[start:start + visible_width]))
+                self.put(height - 2, 2, f"{'enter run  esc cancel  ctrl-u clear  ctrl-w delete word':<{width - 3}}", curses.A_DIM)
+                self.screen.move(row, min(len(prefix) + position - start, width - 2))
+                self.screen.refresh()
+                key = self.screen.get_wch()
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    return "".join(text)
+                if key == "\x1b":
+                    return None
+                if key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if position:
+                        position -= 1
+                        del text[position]
+                elif key == curses.KEY_DC:
+                    if position < len(text):
+                        del text[position]
+                elif key == curses.KEY_LEFT:
+                    position = max(position - 1, 0)
+                elif key == curses.KEY_RIGHT:
+                    position = min(position + 1, len(text))
+                elif key in (curses.KEY_HOME, "\x01"):
+                    position = 0
+                elif key in (curses.KEY_END, "\x05"):
+                    position = len(text)
+                elif key == "\x15":
+                    del text[:position]
+                    position = 0
+                elif key == "\x17":
+                    end = position
+                    while position and text[position - 1] == " ":
+                        position -= 1
+                    while position and text[position - 1] != " ":
+                        position -= 1
+                    del text[position:end]
+                elif isinstance(key, str) and key.isprintable():
+                    text.insert(position, key)
+                    position += 1
+        finally:
+            curses.curs_set(0)
+
+    def confirm(self, question: str) -> bool:
+        height, _ = self.screen.getmaxyx()
+        self.screen.move(height - 3, 0)
+        self.screen.clrtoeol()
+        self.put(height - 3, 2, f"{question} [y/N]", curses.color_pair(4) | curses.A_BOLD)
+        self.screen.refresh()
+        key = self.screen.get_wch()
+        return key in ("y", "Y")
+
+    def go_back(self) -> bool:
+        if self.filter is not None:
+            self.filter = None
+            return True
+        if len(self.stack) > 1:
+            self.stack.pop()
+            return True
+        return False
+
+    def activate(self, item: Item) -> None:
+        if item.is_group:
+            self.stack.append(item)
+            self.filter = None
+            return
+        if not item.available:
+            self.message = f"{item.label} needs {SYSTEM_NAMES.get(item.system, item.system)}"
+            return
+        extra: list[str] = []
+        if item.prompt is not None:
+            answer = self.read_line(item.prompt.label, item.prompt.default)
+            if answer is None:
+                return
+            try:
+                extra = shlex.split(answer)
+            except ValueError as error:
+                self.message = f"could not parse arguments: {error}"
+                return
+        if item.confirm and not self.confirm(f"Run {' › '.join(self.breadcrumb()[1:] + [item.label])}?"):
+            self.message = "cancelled"
+            return
+        curses.def_prog_mode()
+        curses.endwin()
+        print("\033[2J\033[H", end="")
+        code = run_item(item, self.breadcrumb()[1:] + [item.label], extra)
+        wait_for_key("press any key to return to the menu")
+        curses.reset_prog_mode()
+        self.screen.clear()
+        self.message = "last run succeeded" if code == 0 else f"last run exited with {code}"
+
+    def handle(self, key: object) -> bool:
+        items = self.visible
+        if self.filter is not None and isinstance(key, str) and key.isprintable():
+            self.filter += key
+            self.cursor = 0
+            return True
+        if items and items[self.cursor].separator:
+            self.move(1)
+        if self.filter is not None and key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            if self.filter:
+                self.filter = self.filter[:-1]
+            else:
+                self.filter = None
+            return True
+        if key in (curses.KEY_UP, "k", "\x10", curses.KEY_BTAB):
+            self.move(-1)
+        elif key in (curses.KEY_DOWN, "j", "\x0e", "\t"):
+            self.move(1)
+        elif key in (curses.KEY_HOME, "g"):
+            self.jump(-len(items))
+        elif key in (curses.KEY_END, "G"):
+            self.jump(len(items))
+        elif key == curses.KEY_PPAGE:
+            self.jump(-5)
+        elif key == curses.KEY_NPAGE:
+            self.jump(5)
+        elif key in ("\n", "\r", curses.KEY_ENTER, curses.KEY_RIGHT, "l", " "):
+            if items:
+                self.activate(items[self.cursor])
+        elif key in (curses.KEY_BACKSPACE, "\x7f", "\b", curses.KEY_LEFT, "h", "\x1b"):
+            if not self.go_back() and key == "\x1b":
+                return False
+        elif key == "/":
+            self.filter = ""
+            self.cursor = 0
+        elif isinstance(key, str) and key in "123456789" and self.filter is None:
+            choices = self.selectable
+            number = int(key) - 1
+            if number < len(choices):
+                self.cursor = choices[number]
+                self.activate(items[choices[number]])
+        elif key in ("q", "Q", "\x03", "\x04"):
+            return False
+        return True
+
+    def loop(self) -> None:
+        while True:
+            self.draw()
+            try:
+                key = self.screen.get_wch()
+            except KeyboardInterrupt:
+                return
+            if key == curses.KEY_RESIZE:
+                continue
+            self.message = ""
+            if not self.handle(key):
+                return
+
+
+def find_item(root: Item, words: list[str]) -> tuple[Optional[Item], list[str], list[str]]:
+    node = root
+    path: list[str] = []
+    for index, word in enumerate(words):
+        if word == "--":
+            return node, path, words[index + 1:]
+        match = next((child for child in node.children if child.key == word and not child.separator), None)
+        if match is None:
+            return (node, path, words[index:]) if not node.is_group else (None, path, words[index:])
+        node = match
+        path.append(match.label)
+    return node, path, []
+
+
+def print_tree(item: Item, prefix: str = "") -> None:
+    for child in item.children:
+        if child.separator:
+            continue
+        command = f"{prefix} {child.key}".strip()
+        hint = child.hint if child.available else f"{SYSTEM_NAMES.get(child.system, child.system)} only"
+        print(f"  {command:<32} {hint}")
+        print_tree(child, command)
+
+
+def print_help(root: Item) -> None:
+    print("Usage: ./dev [group] [action] [-- extra args]\n")
+    print("Run without arguments for the interactive menu. A group on its own runs its 'all' action.\n")
+    print_tree(root)
+
+
+def run_command_line(root: Item, words: list[str]) -> int:
+    if words[0] in ("-h", "--help", "help", "list", "--list"):
+        print_help(root)
+        return 0
+    item, path, rest = find_item(root, words)
+    if item is None:
+        print(f"unknown command: {' '.join(words)}\n", file=sys.stderr)
+        print_help(root)
+        return 2
+    if item.is_group:
+        default = next((child for child in item.children if child.key == "all"), None)
+        if default is None:
+            print(f"choose an action for {' '.join(words)}:\n")
+            print_tree(item, " ".join(words))
+            return 2
+        item, path = default, path + [default.label]
+    if rest and item.prompt is None:
+        print(f"unexpected arguments: {' '.join(rest)}", file=sys.stderr)
+        return 2
+    if not rest and item.prompt is not None and item.prompt.default:
+        rest = shlex.split(item.prompt.default)
+    if item.confirm and sys.stdin.isatty():
+        answer = input(f"Run {' › '.join(path)}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            return 1
+    return run_item(item, path, rest)
+
+
+def main() -> int:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    sys.stdout.reconfigure(line_buffering=True)
+    root = build_tree()
+    words = sys.argv[1:]
+    if words:
+        return run_command_line(root, words)
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print_help(root)
+        return 0
+    os.environ.setdefault("ESCDELAY", "25")
+    curses.wrapper(lambda screen: Menu(screen, root).loop())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
