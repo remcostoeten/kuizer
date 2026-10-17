@@ -148,14 +148,14 @@ A rule:
 
 ```toml
 [[rules]]
-name = "android-build"
+name = "jekyll-site"
 kind = "dir"              # dir or file
-pattern = "build"         # name or glob on the name
-markers = ["build.gradle", "build.gradle.kts"]   # any of these beside it
-contains = ["intermediates", "outputs"]          # any of these inside it
+pattern = "_site"         # name or glob on the name
+markers = ["_config.yml"] # any of these beside it; globs such as "*.csproj" allowed
+contains = ["index.html"] # any of these inside it
 category = "build"
 safety = "review"         # custom rules default to review
-ecosystem = "android"
+ecosystem = "jekyll"
 ```
 
 `kuizer rules` lists the active rules.
@@ -313,7 +313,7 @@ Assets: user source code, personal files, application data. Attacker: anything t
 | --- | --- |
 | Symlink in a scanned tree points at `/` or `$HOME` | Symlinks are never followed in discovery or sizing, and never become candidates. Tested. |
 | Directory replaced by a symlink between scan and delete (TOCTOU) | Phase 4: before deleting, `lstat` the path again and require the same device and inode as at scan time and not a symlink. On Linux, delete through `openat` with `O_NOFOLLOW` and `unlinkat` relative to a verified parent descriptor, so a swapped parent path component cannot redirect the delete. |
-| Path traversal through rule patterns or config | Rule markers and contains entries must be plain names (no `/`, `..`); rejected at load. Candidates are always produced by the walker, never from user input. |
+| Path traversal through rule patterns or config | Rule markers and contains entries must be plain names (no `/`, `..`); a marker may be a glob on a sibling name such as `*.csproj`. Rejected at load. Candidates are always produced by the walker, never from user input. |
 | Deleting a root or important parent | Phase 4 guard refuses `/`, home, any scan root, any mount point, any ancestor of the current directory, and system prefixes (`/usr`, `/etc`, `/bin`, `/boot`, `/var/lib`), regardless of selection. |
 | Mislabelled user data (`dist` with handwritten files) | Context markers, content checks, `review` level for ambiguous names, no bulk selection of `review` by default. |
 | Persistent data marked as cache | `CACHEDIR.TAG` only means "do not back up". uv, for example, tags its installed tool environments under `~/.local/share/uv/tools`. The generic tag rule is therefore `review`. Found on a real machine during Phase 1. |

@@ -17,14 +17,14 @@ builtin_rules = true
 disabled_rules = ["js-out"]
 
 [[rules]]
-name = "android-build"
+name = "jekyll-site"
 kind = "dir"
-pattern = "build"
-markers = ["build.gradle", "build.gradle.kts"]
-contains = ["intermediates", "outputs"]
+pattern = "_site"
+markers = ["_config.yml"]
+contains = ["index.html"]
 category = "build"
 safety = "review"
-ecosystem = "android"
+ecosystem = "jekyll"
 
 [duplicates]
 min_size = "4KiB"

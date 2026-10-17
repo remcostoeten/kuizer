@@ -9,7 +9,7 @@ A terminal tool that finds build output, development caches and duplicate files 
   <img src="https://shieldcn.dev/badge/platform-Linux-black.svg?font=jetbrains-mono&logo=linux" alt="platform: Linux" />
 </p>
 
-kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
+kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. Built-in rules cover JavaScript and its frameworks, Rust, Python, .NET, Maven, Gradle, Swift, CocoaPods, Dart and Flutter, Elixir, Zig, Haskell, CMake, Terraform and Unity; `kuizer rules` lists them. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
 
 - **Each artifact is checked against its project.** A `dist` folder counts only next to a `package.json`, and a `target` folder only next to a `Cargo.toml` with Cargo's cache tag inside. Every result is marked `safe` or `review`.
 - Deleted items go to the trash by default. Before each removal kuizer checks again that the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home directory or a system directory.

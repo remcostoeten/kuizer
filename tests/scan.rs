@@ -101,6 +101,119 @@ fn cachedir_tag_requires_a_valid_signature() {
 }
 
 #[test]
+fn python_tool_caches_need_their_cache_tag() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    file(root, "py/pyproject.toml", 2);
+    for cache in [".pytest_cache", ".mypy_cache", ".ruff_cache"] {
+        cachedir_tag(&root.join("py").join(cache));
+        file(root, &format!("py/{cache}/blob"), 10);
+        file(root, &format!("untagged/{cache}/blob"), 10);
+    }
+
+    let collected = scan(root);
+
+    assert_eq!(
+        found(&collected, root),
+        pairs(&[
+            ("py/.mypy_cache", "mypy-cache"),
+            ("py/.pytest_cache", "pytest-cache"),
+            ("py/.ruff_cache", "ruff-cache"),
+        ])
+    );
+    assert!(
+        collected
+            .candidates
+            .iter()
+            .all(|c| c.rule.safety == Safety::Safe)
+    );
+}
+
+#[test]
+fn finds_artifacts_of_other_ecosystems() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    file(root, "dotnet/App.csproj", 2);
+    file(root, "dotnet/bin/Debug/App.dll", 10);
+    file(root, "dotnet/obj/project.assets.json", 10);
+    file(root, "scripts/bin/Debug/run.sh", 10);
+    file(root, "ios/Podfile", 2);
+    file(root, "ios/Pods/Manifest.lock", 10);
+    file(root, "ios/Pods/Alamofire/Source.swift", 10);
+    file(root, "photos/Pods/Manifest.lock", 10);
+    file(root, "phx/mix.exs", 2);
+    file(root, "phx/_build/dev/lib/app.beam", 10);
+    file(root, "phx/deps/phoenix/mix.exs", 2);
+    file(root, "docs/deps/graph.svg", 10);
+    file(root, "ziggy/build.zig", 2);
+    file(root, "ziggy/.zig-cache/o/abc", 10);
+    file(root, "ziggy/zig-out/bin/app", 10);
+    file(root, "loose/zig-out/bin/app", 10);
+    file(root, "hs/stack.yaml", 2);
+    file(root, "hs/hs.cabal", 2);
+    file(root, "hs/.stack-work/dist/x", 10);
+    file(root, "hs/dist-newstyle/cache/plan.json", 10);
+    file(root, "copied/dist-newstyle/cache/plan.json", 10);
+    file(root, "spm/Package.swift", 2);
+    file(root, "spm/.build/debug/app", 10);
+    file(root, "make/.build/out.o", 10);
+    file(root, "java/pom.xml", 2);
+    file(root, "java/target/classes/App.class", 10);
+    file(root, "java/target/maven-status/x", 10);
+    file(root, "ops/pom.xml", 2);
+    file(root, "ops/target/hosts.txt", 10);
+    file(root, "infra/main.tf", 2);
+    file(root, "infra/.terraform/providers/x", 10);
+    file(root, "old/.terraform/providers/x", 10);
+    file(root, "android/app/build.gradle", 2);
+    file(root, "android/app/build/intermediates/x", 10);
+    file(root, "android/app/build/outputs/apk/app.apk", 10);
+    file(root, "site/build.gradle", 2);
+    file(root, "site/build/index.html", 10);
+    file(root, "app/pubspec.yaml", 2);
+    file(root, "app/.dart_tool/package_config.json", 10);
+    file(root, "app/build/web/main.dart.js", 10);
+    file(root, "sketch/.dart_tool/package_config.json", 10);
+    file(root, "cpp/CMakeLists.txt", 2);
+    file(root, "cpp/build/CMakeCache.txt", 10);
+    file(root, "cpp/build/app", 10);
+    file(root, "insource/CMakeLists.txt", 2);
+    file(root, "insource/CMakeCache.txt", 10);
+    file(root, "insource/main.c", 10);
+    file(root, "game/ProjectSettings/ProjectVersion.txt", 2);
+    file(root, "game/Assets/main.cs", 10);
+    file(root, "game/Library/ArtifactDB", 10);
+    file(root, "game/Temp/x", 10);
+    file(root, "notes/Temp/draft.txt", 10);
+
+    let collected = scan(root);
+
+    assert_eq!(
+        found(&collected, root),
+        pairs(&[
+            ("android/app/build", "gradle-build"),
+            ("app/.dart_tool", "dart-tool"),
+            ("app/build", "flutter-build"),
+            ("cpp/build", "cmake-build"),
+            ("dotnet/bin", "dotnet-bin"),
+            ("dotnet/obj", "dotnet-obj"),
+            ("game/Library", "unity-library"),
+            ("game/Temp", "unity-temp"),
+            ("hs/.stack-work", "haskell-stack"),
+            ("hs/dist-newstyle", "haskell-cabal"),
+            ("infra/.terraform", "terraform"),
+            ("ios/Pods", "cocoapods"),
+            ("java/target", "maven-target"),
+            ("phx/_build", "elixir-build"),
+            ("phx/deps", "elixir-deps"),
+            ("spm/.build", "swift-build"),
+            ("ziggy/.zig-cache", "zig-cache"),
+            ("ziggy/zig-out", "zig-out"),
+        ])
+    );
+}
+
+#[test]
 fn ignore_file_and_skip_dirs_hide_subtrees() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
