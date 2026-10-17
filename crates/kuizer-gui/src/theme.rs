@@ -69,6 +69,10 @@ pub fn review() -> Rgba {
     rgb(0x00c2_a36e)
 }
 
+pub fn review_soft() -> Rgba {
+    rgba(0xc2a3_6e24)
+}
+
 pub fn danger() -> Rgba {
     rgb(0x00d0_7f7f)
 }

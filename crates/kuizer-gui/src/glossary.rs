@@ -2,6 +2,9 @@ use kuizer::detect::{Category, Safety};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Term {
+    Overview,
+    History,
+    Trash,
     Safety,
     Category,
     Safe,
@@ -35,7 +38,10 @@ pub enum Term {
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 29] = [
+    pub const ALL: [Term; 32] = [
+        Self::Overview,
+        Self::History,
+        Self::Trash,
         Self::Safety,
         Self::Category,
         Self::Safe,
@@ -85,6 +91,9 @@ impl Term {
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::Overview => "Overview",
+            Self::History => "History",
+            Self::Trash => "Move to trash",
             Self::Safety => "Safety",
             Self::Category => "Category",
             Self::Safe => "safe",
@@ -119,6 +128,15 @@ impl Term {
 
     pub fn text(self) -> &'static str {
         match self {
+            Self::Overview => {
+                "Totals for this scan: what is safe to remove, what needs review, and the largest projects and caches."
+            }
+            Self::History => {
+                "Every cleanup kuizer made on this machine, from this window and from the command line, and what is still in the trash."
+            }
+            Self::Trash => {
+                "Moves the selection to the trash after you confirm. kuizer restore puts it back until the trash is emptied. Nothing is deleted for good."
+            }
             Self::Safety => {
                 "How sure kuizer is that removing an item is harmless. safe items are rebuilt by a tool, review items need a look first."
             }
