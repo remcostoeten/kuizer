@@ -1,5 +1,6 @@
 mod app;
 mod model;
+mod start;
 mod theme;
 mod ui;
 
@@ -34,7 +35,7 @@ fn main() -> ExitCode {
         }
     };
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    let roots = model::default_roots(&loaded.config, paths);
+    let roots = kuizer::scan::normalize_roots(&paths);
     let config = loaded.config;
 
     Application::new().run(move |cx: &mut App| {
@@ -51,7 +52,9 @@ fn main() -> ExitCode {
                 window_min_size: Some(size(px(860.), px(520.))),
                 ..WindowOptions::default()
             },
-            |window, cx| cx.new(|cx| Kuizer::new(config, roots, font, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Kuizer::new(config, roots, start::Recent::for_user(), font, window, cx))
+            },
         );
         if let Err(error) = opened {
             eprintln!("kuizer-gui: cannot open a window: {error}");

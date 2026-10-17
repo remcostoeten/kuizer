@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use gpui::{Rgba, rgb, rgba};
+use gpui::{Pixels, Rgba, px, rgb, rgba};
 use kuizer::units::ByteSize;
 
 pub fn background() -> Rgba {
@@ -73,6 +73,34 @@ pub fn primary() -> Rgba {
 
 pub fn on_primary() -> Rgba {
     rgb(0x0016_1616)
+}
+
+pub fn radius_button() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_control() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_panel() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_dialog() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_checkbox() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_dot() -> Pixels {
+    px(0.)
+}
+
+pub fn radius_bar() -> Pixels {
+    px(0.)
 }
 
 pub const FONT_CANDIDATES: [&str; 5] = [

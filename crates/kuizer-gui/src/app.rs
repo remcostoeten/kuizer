@@ -1,22 +1,24 @@
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FocusHandle, FontWeight, KeyDownEvent, SharedString,
-    Task, Window, div, prelude::*, px, uniform_list,
+    AnyElement, ClickEvent, Context, CursorStyle, Div, FocusHandle, FontWeight, KeyDownEvent,
+    PathPromptOptions, SharedString, Task, Window, div, prelude::*, px, uniform_list,
 };
 use kuizer::config::Config;
 use kuizer::delete::Status;
 use kuizer::detect::{Category, Safety};
 use kuizer::history::Action;
 use kuizer::output::display_path;
-use kuizer::scan::Candidate;
+use kuizer::platform;
+use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
+use crate::start::{self, Recent, ScanOptions};
 use crate::theme;
 use crate::ui::{self, ButtonKind};
 
@@ -59,6 +61,7 @@ impl Tab {
 }
 
 enum Phase {
+    Start,
     Loading(Stage),
     Ready(Box<Report>),
     Failed(String),
@@ -80,6 +83,13 @@ enum Dialog {
 pub struct Kuizer {
     config: Config,
     roots: Vec<PathBuf>,
+    options: ScanOptions,
+    folder: String,
+    whole_home: bool,
+    folder_error: Option<String>,
+    recent: Recent,
+    cancel: Option<Cancel>,
+    started: Instant,
     font: SharedString,
     focus: FocusHandle,
     phase: Phase,
@@ -96,18 +106,33 @@ impl Kuizer {
     pub fn new(
         config: Config,
         roots: Vec<PathBuf>,
+        recent: Recent,
         font: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let folder = recent
+            .paths
+            .first()
+            .or(config.scan.roots.first())
+            .or(roots.first())
+            .map(|path| display_path(path))
+            .unwrap_or_default();
         let mut app = Self {
+            options: ScanOptions::from_config(&config),
             config,
             roots,
+            folder,
+            whole_home: false,
+            folder_error: None,
+            recent,
+            cancel: None,
+            started: Instant::now(),
             font,
             focus,
-            phase: Phase::Loading(Stage::default()),
+            phase: Phase::Start,
             tab: Tab::Overview,
             safety: None,
             hidden: HashSet::new(),
@@ -116,7 +141,10 @@ impl Kuizer {
             dialog: None,
             task: None,
         };
-        app.rescan(cx);
+        if !app.roots.is_empty() {
+            app.recent.remember(&app.roots);
+            app.rescan(cx);
+        }
         app
     }
 
@@ -135,16 +163,20 @@ impl Kuizer {
         self.phase = Phase::Loading(Stage::default());
         self.selection.clear();
         self.rows.clear();
+        self.started = Instant::now();
+        let cancel = Cancel::new();
+        self.cancel = Some(cancel.clone());
         let stage = Arc::new(Mutex::new(Stage::default()));
         let (sender, receiver) = mpsc::channel();
         {
             let config = self.config.clone();
             let roots = self.roots.clone();
+            let options = self.options.clone();
             let stage = Arc::clone(&stage);
             std::thread::Builder::new()
                 .name("kuizer-gui-scan".to_owned())
                 .spawn(move || {
-                    let _ = sender.send(model::load(&config, &roots, &stage));
+                    let _ = sender.send(model::load(&config, &roots, &options, &cancel, &stage));
                 })
                 .expect("spawn scan thread");
         }
@@ -163,9 +195,13 @@ impl Kuizer {
                 let updated = this.update(cx, |app, cx| {
                     app.phase = match result {
                         Some(Ok(report)) => Phase::Ready(Box::new(report)),
+                        Some(Err(error)) if error == model::CANCELLED => Phase::Start,
                         Some(Err(error)) => Phase::Failed(error),
                         None => Phase::Loading(current),
                     };
+                    if done {
+                        app.cancel = None;
+                    }
                     app.refresh_rows();
                     cx.notify();
                 });
@@ -174,6 +210,128 @@ impl Kuizer {
                 }
             }
         }));
+    }
+
+    fn start_scan(&mut self, cx: &mut Context<Self>) {
+        if self.busy() {
+            return;
+        }
+        let path = if self.whole_home {
+            platform::home_dir()
+        } else {
+            start::expand(&self.folder)
+        };
+        let Some(path) = path else {
+            self.folder_error = Some("Type a folder or choose one".to_owned());
+            cx.notify();
+            return;
+        };
+        match start::check_folder(&path) {
+            Ok(root) => {
+                self.folder_error = None;
+                self.roots = scan::normalize_roots(&[root]);
+                self.recent.remember(&self.roots);
+                self.rescan(cx);
+            }
+            Err(error) => {
+                self.folder_error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancel_scan(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.task = None;
+        self.phase = Phase::Start;
+        cx.notify();
+    }
+
+    fn new_scan(&mut self, cx: &mut Context<Self>) {
+        if self.busy() {
+            return;
+        }
+        self.selection.clear();
+        self.rows.clear();
+        self.phase = Phase::Start;
+        cx.notify();
+    }
+
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Scan this folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = picked.await;
+            let _ = this.update(cx, |app, cx| {
+                match picked {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.first() {
+                            app.folder = display_path(path);
+                            app.whole_home = false;
+                            app.folder_error = None;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        app.folder_error =
+                            Some(format!("The folder picker is not available: {error}"));
+                    }
+                    Ok(Ok(None)) | Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn pick_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.folder = display_path(path);
+        self.whole_home = false;
+        self.folder_error = None;
+        cx.notify();
+    }
+
+    fn type_folder(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let command = keystroke.modifiers.control || keystroke.modifiers.platform;
+        match keystroke.key.as_str() {
+            "enter" => {
+                self.start_scan(cx);
+                return;
+            }
+            "backspace" if command || keystroke.modifiers.alt => {
+                let trimmed = self.folder.trim_end_matches('/');
+                let keep = trimmed.rfind('/').map_or(0, |index| index + 1);
+                self.folder.truncate(keep);
+            }
+            "backspace" => {
+                self.folder.pop();
+            }
+            "v" if command => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.folder
+                        .push_str(text.lines().next().unwrap_or_default().trim());
+                }
+            }
+            "u" if command => self.folder.clear(),
+            _ => {
+                let Some(typed) = keystroke.key_char.as_deref() else {
+                    return;
+                };
+                if command || typed.chars().any(char::is_control) {
+                    return;
+                }
+                self.folder.push_str(typed);
+            }
+        }
+        self.whole_home = false;
+        self.folder_error = None;
+        cx.notify();
     }
 
     fn refresh_rows(&mut self) {
@@ -393,6 +551,14 @@ impl Kuizer {
 
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
+        if self.dialog.is_none() {
+            match self.phase {
+                Phase::Start => self.type_folder(event, cx),
+                Phase::Loading(_) if key == "escape" => self.cancel_scan(cx),
+                _ => {}
+            }
+            return;
+        }
         match &mut self.dialog {
             Some(Dialog::Confirm { typed, .. }) => match key {
                 "escape" => self.dialog = None,
@@ -426,13 +592,18 @@ impl Kuizer {
     }
 
     fn render_titlebar(&self, cx: &mut Context<Self>) -> Div {
-        let roots = self
-            .roots
-            .iter()
-            .map(|root| display_path(root))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let roots = if matches!(self.phase, Phase::Start) {
+            "Choose what to scan".to_owned()
+        } else {
+            self.roots
+                .iter()
+                .map(|root| display_path(root))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let busy = self.busy();
+        let scanning = matches!(self.phase, Phase::Loading(_));
+        let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_));
         div()
             .flex()
             .flex_none()
@@ -452,15 +623,33 @@ impl Kuizer {
                     .text_color(theme::muted())
                     .child(roots),
             )
-            .child(
-                ui::button("rescan", "Rescan", ButtonKind::Secondary, !busy).on_click(cx.listener(
-                    move |app, _: &ClickEvent, _, cx| {
-                        if !app.busy() {
-                            app.rescan(cx);
-                        }
-                    },
-                )),
-            )
+            .when(scanning, |this| {
+                this.child(
+                    ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true).on_click(
+                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                            app.cancel_scan(cx);
+                        }),
+                    ),
+                )
+            })
+            .when(finished, |this| {
+                this.child(
+                    ui::button("new-scan", "New scan", ButtonKind::Ghost, !busy).on_click(
+                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                            app.new_scan(cx);
+                        }),
+                    ),
+                )
+                .child(
+                    ui::button("rescan", "Rescan", ButtonKind::Secondary, !busy).on_click(
+                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                            if !app.busy() {
+                                app.rescan(cx);
+                            }
+                        }),
+                    ),
+                )
+            })
     }
 
     fn tab_count(&self, tab: Tab) -> Option<usize> {
@@ -499,7 +688,7 @@ impl Kuizer {
                     .items_center()
                     .h(px(28.))
                     .px(px(10.))
-                    .rounded(px(5.))
+                    .rounded(theme::radius_control())
                     .cursor_pointer()
                     .text_color(if active {
                         theme::text()
@@ -596,6 +785,7 @@ impl Kuizer {
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match &self.phase {
+            Phase::Start => self.render_start(cx),
             Phase::Loading(stage) => centered(
                 div()
                     .flex()
@@ -603,7 +793,16 @@ impl Kuizer {
                     .items_center()
                     .gap(px(6.))
                     .child(div().font_weight(FontWeight::MEDIUM).child("Scanning"))
-                    .child(div().text_color(theme::muted()).child(stage.describe())),
+                    .child(div().text_color(theme::muted()).child(stage.describe()))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::faint())
+                            .child(format!(
+                                "{}s elapsed, press Escape to cancel",
+                                self.started.elapsed().as_secs()
+                            )),
+                    ),
             ),
             Phase::Failed(error) => centered(
                 div()
@@ -627,6 +826,318 @@ impl Kuizer {
                 Tab::Issues => self.render_issues(),
             },
         }
+    }
+
+    fn render_start(&self, cx: &mut Context<Self>) -> AnyElement {
+        let home = platform::home_dir();
+        let field_text = if self.whole_home {
+            home.as_deref().map(display_path).unwrap_or_default()
+        } else {
+            self.folder.clone()
+        };
+        let field = div()
+            .id("folder-field")
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .h(px(32.))
+            .px(px(10.))
+            .rounded(theme::radius_control())
+            .bg(theme::background())
+            .border_1()
+            .border_color(if self.folder_error.is_some() {
+                theme::danger()
+            } else {
+                theme::border_strong()
+            })
+            .cursor(CursorStyle::IBeam)
+            .when(field_text.is_empty(), |this| {
+                this.child(div().w(px(1.)).h(px(16.)).bg(theme::text()))
+                    .child(
+                        div()
+                            .pl(px(2.))
+                            .text_color(theme::faint())
+                            .child("Type a path, for example ~/apps"),
+                    )
+            })
+            .when(!field_text.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_color(if self.whole_home {
+                            theme::muted()
+                        } else {
+                            theme::text()
+                        })
+                        .child(field_text),
+                )
+                .when(!self.whole_home, |this| {
+                    this.child(div().flex_none().w(px(1.)).h(px(16.)).bg(theme::text()))
+                })
+            })
+            .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
+                window.focus(&app.focus);
+                app.whole_home = false;
+                cx.notify();
+            }));
+        let scope = ui::segments()
+            .child(
+                ui::segment("scope-folder", "One folder", !self.whole_home).on_click(cx.listener(
+                    |app, _: &ClickEvent, _, cx| {
+                        app.whole_home = false;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                ui::segment("scope-home", "Whole home folder", self.whole_home).on_click(
+                    cx.listener(|app, _: &ClickEvent, _, cx| {
+                        app.whole_home = true;
+                        app.folder_error = None;
+                        cx.notify();
+                    }),
+                ),
+            );
+        let folder_card = ui::card("What to scan")
+            .child(div().flex().child(scope))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(field)
+                    .child(
+                        ui::button("browse", "Choose folder", ButtonKind::Secondary, true)
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.choose_folder(cx);
+                            })),
+                    )
+                    .child(
+                        ui::button("start-scan", "Start scan", ButtonKind::Primary, true)
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.start_scan(cx);
+                            })),
+                    ),
+            )
+            .children(
+                self.folder_error
+                    .clone()
+                    .map(|error| div().text_color(theme::danger()).child(error)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::faint())
+                    .child(if self.whole_home {
+                        "Walks everything under your home folder. Expect this to take a while."
+                    } else {
+                        "Enter starts the scan. Ctrl+V pastes a path, Ctrl+Backspace removes the last folder."
+                    }),
+            );
+
+        let recent_card = (!self.recent.paths.is_empty()).then(|| {
+            ui::card("Recent folders").child(div().flex().flex_col().children(
+                self.recent.paths.iter().enumerate().map(|(index, path)| {
+                    let path = path.clone();
+                    let label = display_path(&path);
+                    let missing = !path.is_dir();
+                    div()
+                        .id(("recent", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .h(px(26.))
+                        .px(px(8.))
+                        .rounded(theme::radius_control())
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme::hover()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if missing {
+                                    theme::faint()
+                                } else {
+                                    theme::text()
+                                })
+                                .child(label),
+                        )
+                        .child(div().text_size(px(12.)).text_color(theme::faint()).child(
+                            if missing {
+                                "missing"
+                            } else {
+                                "double-click to scan"
+                            },
+                        ))
+                        .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
+                            app.pick_recent(&path, cx);
+                            if event.click_count() >= 2 {
+                                app.start_scan(cx);
+                            }
+                        }))
+                }),
+            ))
+        });
+
+        let options = &self.options;
+        let size_segments = start::SIZE_STEPS.into_iter().enumerate().fold(
+            ui::segments(),
+            |row, (index, bytes)| {
+                row.child(
+                    ui::segment(
+                        ("min-size", index),
+                        start::size_label(bytes),
+                        options.min_size == bytes,
+                    )
+                    .on_click(cx.listener(
+                        move |app, _: &ClickEvent, _, cx| {
+                            app.options.min_size = bytes;
+                            cx.notify();
+                        },
+                    )),
+                )
+            },
+        );
+        let depth_segments = start::DEPTH_STEPS.into_iter().enumerate().fold(
+            ui::segments(),
+            |row, (index, depth)| {
+                row.child(
+                    ui::segment(
+                        ("depth", index),
+                        start::depth_label(depth),
+                        options.max_depth == depth,
+                    )
+                    .on_click(cx.listener(
+                        move |app, _: &ClickEvent, _, cx| {
+                            app.options.max_depth = depth;
+                            cx.notify();
+                        },
+                    )),
+                )
+            },
+        );
+        let categories =
+            Category::ALL
+                .into_iter()
+                .fold(div().flex().gap(px(2.)), |row, category| {
+                    let on = options.categories.contains(&category);
+                    row.child(
+                        div()
+                            .id(("category", category as usize))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(8.))
+                            .h(px(24.))
+                            .rounded(theme::radius_control())
+                            .cursor_pointer()
+                            .text_color(if on { theme::text() } else { theme::faint() })
+                            .hover(|style| style.bg(theme::hover()))
+                            .child(ui::checkbox(on))
+                            .child(category.as_str())
+                            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                                app.options.toggle_category(category);
+                                cx.notify();
+                            })),
+                    )
+                });
+        let toggle = |id: &'static str, on: bool, flip: fn(&mut ScanOptions)| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .child(ui::checkbox(on))
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(if on { "On" } else { "Off" }),
+                )
+                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                    flip(&mut app.options);
+                    cx.notify();
+                }))
+        };
+        let options_card = ui::card("Scan options")
+            .child(
+                ui::option_row("Kinds of artifacts", "Which detected folders to list")
+                    .child(categories),
+            )
+            .child(
+                ui::option_row("Smallest item", "Skip artifacts below this size")
+                    .child(size_segments),
+            )
+            .child(
+                ui::option_row("Folder depth", "How deep to walk below the chosen folder")
+                    .child(depth_segments),
+            )
+            .child(
+                ui::option_row(
+                    "Global caches",
+                    "Measure npm, cargo, pip and other caches in your home folder",
+                )
+                .child(toggle("opt-caches", options.caches, |options| {
+                    options.caches = !options.caches;
+                })),
+            )
+            .child(
+                ui::option_row(
+                    "Duplicate files",
+                    "Hash files to find identical copies. Reads every file, so it is slower",
+                )
+                .child(toggle("opt-duplicates", options.duplicates, |options| {
+                    options.duplicates = !options.duplicates;
+                })),
+            )
+            .child(
+                ui::option_row(
+                    "Stay on one file system",
+                    "Do not follow into other disks or mounts",
+                )
+                .child(toggle("opt-one-fs", options.one_file_system, |options| {
+                    options.one_file_system = !options.one_file_system;
+                })),
+            );
+
+        div()
+            .id("start")
+            .flex()
+            .flex_col()
+            .items_center()
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(24.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .w_full()
+                    .max_w(px(760.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(18.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Start a scan"),
+                            )
+                            .child(div().text_color(theme::muted()).child(
+                                "kuizer looks for build output, dependencies, caches and duplicate files. Nothing is removed until you select items and confirm.",
+                            )),
+                    )
+                    .child(folder_card)
+                    .children(recent_card)
+                    .child(options_card),
+            )
+            .into_any_element()
     }
 
     fn render_overview(&self) -> AnyElement {
@@ -792,28 +1303,13 @@ impl Kuizer {
                     .contains(&(Source::Artifact, report.candidates[index].id))
             });
         let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
-            let active = self.safety == value;
-            div()
-                .id(id)
-                .px(px(10.))
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .text_color(if active {
-                    theme::text()
-                } else {
-                    theme::muted()
-                })
-                .when(active, |this| this.bg(theme::selected()))
-                .hover(|style| style.text_color(theme::text()))
-                .child(label)
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+            ui::segment(id, label, self.safety == value).on_click(cx.listener(
+                move |app, _: &ClickEvent, _, cx| {
                     app.safety = value;
                     app.refresh_rows();
                     cx.notify();
-                }))
+                },
+            ))
         };
         let chip = |category: Category| {
             let shown = !self.hidden.contains(&category);
@@ -824,7 +1320,7 @@ impl Kuizer {
                 .gap(px(6.))
                 .px(px(8.))
                 .h(px(24.))
-                .rounded(px(4.))
+                .rounded(theme::radius_control())
                 .cursor_pointer()
                 .text_color(if shown { theme::text() } else { theme::faint() })
                 .hover(|style| style.bg(theme::hover()))
@@ -849,14 +1345,7 @@ impl Kuizer {
             .border_b_1()
             .border_color(theme::border())
             .child(
-                div()
-                    .flex()
-                    .gap(px(2.))
-                    .p(px(2.))
-                    .rounded(px(6.))
-                    .bg(theme::panel())
-                    .border_1()
-                    .border_color(theme::border())
+                ui::segments()
                     .child(segment("safety-all", "All", None))
                     .child(segment("safety-safe", "Safe", Some(Safety::Safe)))
                     .child(segment("safety-review", "Review", Some(Safety::Review))),
@@ -1065,7 +1554,11 @@ impl Kuizer {
                     .overflow_y_scroll()
                     .children(rows)
                     .when(report.caches.is_empty(), |this| {
-                        this.child(ui::empty("No global caches found"))
+                        this.child(ui::empty(if report.options.caches {
+                            "No global caches found"
+                        } else {
+                            "Global caches were skipped for this scan"
+                        }))
                     }),
             )
             .into_any_element()
@@ -1076,7 +1569,9 @@ impl Kuizer {
             return div().into_any_element();
         };
         let Some(found) = &report.duplicates else {
-            return centered(ui::empty("Duplicate detection did not run"));
+            return centered(ui::empty(
+                "The duplicate search was turned off for this scan",
+            ));
         };
         let wasted = found.reclaimable();
         let copies: usize = found.groups.iter().map(|group| group.members.len()).sum();
@@ -1252,7 +1747,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_col()
-                    .rounded(px(6.))
+                    .rounded(theme::radius_panel())
                     .border_1()
                     .border_color(theme::border())
                     .child(header)
@@ -1347,7 +1842,7 @@ impl Kuizer {
             .gap(px(12.))
             .w(px(520.))
             .p(px(18.))
-            .rounded(px(8.))
+            .rounded(theme::radius_dialog())
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
@@ -1384,7 +1879,7 @@ impl Kuizer {
                             .flex_col()
                             .gap(px(4.))
                             .p(px(10.))
-                            .rounded(px(6.))
+                            .rounded(theme::radius_panel())
                             .bg(theme::panel())
                             .children(selected.iter().take(LIST_LIMIT).map(|(_, candidate)| {
                                 div()
@@ -1430,7 +1925,7 @@ impl Kuizer {
                                     .items_center()
                                     .h(px(30.))
                                     .px(px(10.))
-                                    .rounded(px(5.))
+                                    .rounded(theme::radius_control())
                                     .bg(theme::background())
                                     .border_1()
                                     .border_color(if accepted {
@@ -1548,6 +2043,7 @@ impl Render for Kuizer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self.render_content(cx);
         let dialog = self.render_dialog(cx);
+        let start = matches!(self.phase, Phase::Start);
         div()
             .relative()
             .flex()
@@ -1565,10 +2061,10 @@ impl Render for Kuizer {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(cx))
+                    .when(!start, |this| this.child(self.render_sidebar(cx)))
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content)),
             )
-            .child(self.render_statusbar(cx))
+            .when(!start, |this| this.child(self.render_statusbar(cx)))
             .children(dialog)
     }
 }
@@ -1647,4 +2143,161 @@ fn cache_label(cache: &kuizer::caches::KnownCache) -> String {
 
 fn short_time(stamp: &str) -> String {
     stamp.get(..16).unwrap_or(stamp).replacen('T', " ", 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    fn open(cx: &mut TestAppContext, recent: PathBuf) -> (Entity<Kuizer>, &mut VisualTestContext) {
+        cx.add_window_view(|window, cx| {
+            let mut app = Kuizer::new(
+                Config::default(),
+                Vec::new(),
+                Recent::load(Some(recent)),
+                "Noto Sans".into(),
+                window,
+                cx,
+            );
+            app.options.caches = false;
+            app
+        })
+    }
+
+    fn type_text(cx: &mut VisualTestContext, text: &str) {
+        for ch in text.chars() {
+            let keystroke = Keystroke {
+                modifiers: Modifiers::default(),
+                key: ch.to_string(),
+                key_char: Some(ch.to_string()),
+            };
+            cx.update(|window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            });
+        }
+        cx.run_until_parked();
+    }
+
+    fn wait_for_scan(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
+        for _ in 0..1000 {
+            cx.executor().advance_clock(POLL);
+            cx.run_until_parked();
+            if view.read_with(cx, |app, _| !matches!(app.phase, Phase::Loading(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the scan did not finish");
+    }
+
+    fn project(dir: &Path) -> PathBuf {
+        let root = dir.join("apps");
+        let modules = root.join("site").join("node_modules").join("left-pad");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(root.join("site").join("package.json"), "{}").unwrap();
+        std::fs::write(modules.join("index.js"), vec![b'x'; 64 * 1024]).unwrap();
+        root
+    }
+
+    #[gpui::test]
+    fn opens_on_the_start_screen_without_a_path(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.phase, Phase::Start));
+            assert!(app.folder.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn a_missing_folder_stays_on_the_start_screen(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &dir.path().join("missing").display().to_string());
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.phase, Phase::Start));
+            assert_eq!(
+                app.folder_error.as_deref(),
+                Some("This folder does not exist")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_backspace_removes_the_last_folder(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, "/home/me/apps");
+        cx.simulate_keystrokes("ctrl-backspace");
+        view.read_with(cx, |app, _| assert_eq!(app.folder, "/home/me/"));
+        cx.simulate_keystrokes("backspace");
+        view.read_with(cx, |app, _| assert_eq!(app.folder, "/home/me"));
+    }
+
+    #[gpui::test]
+    fn enter_scans_the_typed_folder_and_remembers_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let recent = dir.path().join("recent");
+        let (view, cx) = open(cx, recent.clone());
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Loading(_))));
+        wait_for_scan(&view, cx);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        view.read_with(cx, |app, _| {
+            let Phase::Ready(report) = &app.phase else {
+                panic!("expected a report");
+            };
+            assert_eq!(report.roots, vec![canonical.clone()]);
+            assert_eq!(report.candidates.len(), 1);
+            assert!(report.caches.is_empty());
+        });
+        let saved = std::fs::read_to_string(&recent).unwrap();
+        assert_eq!(saved.trim(), canonical.display().to_string());
+
+        view.update(cx, |app, cx| app.new_scan(cx));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.phase, Phase::Start));
+            assert_eq!(app.recent.paths, vec![canonical.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    fn escape_cancels_a_running_scan(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.phase, Phase::Start));
+            assert!(app.cancel.is_none());
+            assert!(app.task.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn the_whole_home_option_ignores_the_typed_folder(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, "/does/not/matter");
+        view.update(cx, |app, cx| {
+            app.whole_home = true;
+            app.options.duplicates = false;
+            app.start_scan(cx);
+        });
+        view.update(cx, |app, cx| {
+            assert!(matches!(app.phase, Phase::Loading(_)));
+            assert_eq!(
+                app.roots,
+                scan::normalize_roots(&[platform::home_dir().unwrap()])
+            );
+            app.cancel_scan(cx);
+        });
+    }
 }

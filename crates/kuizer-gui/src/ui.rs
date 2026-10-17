@@ -29,7 +29,7 @@ pub fn button(
         .items_center()
         .h(px(26.))
         .px(px(10.))
-        .rounded(px(5.))
+        .rounded(theme::radius_button())
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .bg(background)
@@ -52,7 +52,7 @@ pub fn checkbox(checked: bool) -> Div {
         .justify_center()
         .size(px(14.))
         .flex_none()
-        .rounded(px(3.))
+        .rounded(theme::radius_checkbox())
         .border_1()
         .border_color(if checked {
             theme::primary()
@@ -60,7 +60,12 @@ pub fn checkbox(checked: bool) -> Div {
             theme::border_strong()
         })
         .when(checked, |this| {
-            this.child(div().size(px(6.)).rounded(px(1.5)).bg(theme::primary()))
+            this.child(
+                div()
+                    .size(px(6.))
+                    .rounded(theme::radius_dot())
+                    .bg(theme::primary()),
+            )
         })
 }
 
@@ -71,7 +76,7 @@ pub fn card(title: impl Into<SharedString>) -> Div {
         .min_w_0()
         .gap(px(10.))
         .p(px(14.))
-        .rounded(px(6.))
+        .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
@@ -98,7 +103,7 @@ pub fn stat(
         .flex_1()
         .min_w(px(140.))
         .p(px(14.))
-        .rounded(px(6.))
+        .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
@@ -149,13 +154,13 @@ pub fn bar_row(
             div()
                 .h(px(4.))
                 .w_full()
-                .rounded(px(2.))
+                .rounded(theme::radius_bar())
                 .bg(theme::track())
                 .child(
                     div()
                         .h_full()
                         .w(relative(fraction.max(0.005)))
-                        .rounded(px(2.))
+                        .rounded(theme::radius_bar())
                         .bg(fill),
                 ),
         )
@@ -177,4 +182,64 @@ pub fn safety_label(review: bool) -> Div {
             theme::muted()
         })
         .child(if review { "review" } else { "safe" })
+}
+
+pub fn segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(10.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(theme::radius_control())
+        .cursor_pointer()
+        .text_color(if active {
+            theme::text()
+        } else {
+            theme::muted()
+        })
+        .when(active, |this| this.bg(theme::selected()))
+        .hover(|style| style.text_color(theme::text()))
+        .child(label.into())
+}
+
+pub fn segments() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded(theme::radius_panel())
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+}
+
+pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .py(px(8.))
+        .border_t_1()
+        .border_color(theme::border())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(div().child(label.into()))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::faint())
+                        .child(hint.into()),
+                ),
+        )
 }

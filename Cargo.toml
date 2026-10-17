@@ -10,6 +10,7 @@ homepage = "https://github.com/remcostoeten/kuizer"
 readme = "README.md"
 keywords = ["cleanup", "disk", "node-modules", "cache", "cli"]
 categories = ["command-line-utilities", "filesystem"]
+include = ["/src/**", "/tests/**", "/examples/synth.rs", "/docs/config.example.toml", "/README.md", "/LICENSE"]
 
 [workspace]
 members = [".", "crates/kuizer-gui"]
