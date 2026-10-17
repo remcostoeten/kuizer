@@ -106,7 +106,12 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
 ///
 /// @example
 /// columns("ages", &stats::by_age(&candidates, now), Measure::Bytes, "Items")
-pub fn columns(id: &'static str, buckets: &[Bucket], measure: Measure, counted: &'static str) -> Div {
+pub fn columns(
+    id: &'static str,
+    buckets: &[Bucket],
+    measure: Measure,
+    counted: &'static str,
+) -> Div {
     let largest = buckets
         .iter()
         .map(|bucket| measure.of(bucket))
@@ -236,7 +241,9 @@ pub fn loader() -> AnyElement {
                 .bg(theme::bar())
                 .with_animation(
                     "loader-sweep",
-                    Animation::new(SWEEP).repeat().with_easing(motion::ease_in_out),
+                    Animation::new(SWEEP)
+                        .repeat()
+                        .with_easing(motion::ease_in_out),
                     |sweep, delta| sweep.left(relative(delta * (1. + SWEEP_WIDTH) - SWEEP_WIDTH)),
                 ),
         )
@@ -251,7 +258,6 @@ pub fn percent(share: f32) -> String {
         format!("{value:.0}%")
     }
 }
-
 
 #[cfg(test)]
 mod tests {

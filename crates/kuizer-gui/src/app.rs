@@ -24,8 +24,8 @@ use kuizer::stats;
 use crate::chart::{self, Measure, Segment};
 use crate::frame;
 use crate::glossary::Term;
-use crate::motion;
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
+use crate::motion;
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
 use crate::tooltip::{self, Tip, Tooltip};
@@ -2555,9 +2555,11 @@ fn overview_trends(report: &Report) -> Div {
     let largest = ecosystems.first().map_or(0, |bucket| bucket.bytes);
     let total = report.total(None);
     let empty = report.candidates.is_empty();
-    let removed = report.history.as_ref().ok().map(|view| {
-        stats::removed_by_month(&view.history, &kuizer::history::now(), 12)
-    });
+    let removed = report
+        .history
+        .as_ref()
+        .ok()
+        .map(|view| stats::removed_by_month(&view.history, &kuizer::history::now(), 12));
     div()
         .flex()
         .flex_col()
@@ -2574,7 +2576,9 @@ fn overview_trends(report: &Report) -> Div {
                         .when(!empty, |this| {
                             this.child(chart::columns("age", &ages, Measure::Bytes, "Items"))
                         })
-                        .when(empty, |this| this.child(ui::empty("No project artifacts found"))),
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
                 )
                 .child(
                     ui::card("Artifact sizes")
@@ -2582,34 +2586,54 @@ fn overview_trends(report: &Report) -> Div {
                         .when(!empty, |this| {
                             this.child(chart::columns("size", &sizes, Measure::Count, "Items"))
                         })
-                        .when(empty, |this| this.child(ui::empty("No project artifacts found"))),
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
                 )
                 .child(
                     ui::card("By ecosystem")
                         .flex_1()
-                        .children(ecosystems.iter().take(6).enumerate().map(|(index, bucket)| {
-                            ui::bar_row(
-                                format!("{}  {}", bucket.label, plural(bucket.count, "item")),
-                                theme::bytes(bucket.bytes),
-                                theme::share(bucket.bytes, largest),
-                                theme::bar(),
-                            )
-                            .id(("ecosystem", index))
-                            .tip(
-                                Tooltip::details(bucket.label.clone())
-                                    .row("Size", theme::bytes(bucket.bytes))
-                                    .row("Items", bucket.count.to_string())
-                                    .row("Share", chart::percent(theme::share(bucket.bytes, total)))
-                                    .build(),
-                            )
-                        }))
-                        .when(empty, |this| this.child(ui::empty("No project artifacts found"))),
+                        .children(
+                            ecosystems
+                                .iter()
+                                .take(6)
+                                .enumerate()
+                                .map(|(index, bucket)| {
+                                    ui::bar_row(
+                                        format!(
+                                            "{}  {}",
+                                            bucket.label,
+                                            plural(bucket.count, "item")
+                                        ),
+                                        theme::bytes(bucket.bytes),
+                                        theme::share(bucket.bytes, largest),
+                                        theme::bar(),
+                                    )
+                                    .id(("ecosystem", index))
+                                    .tip(
+                                        Tooltip::details(bucket.label.clone())
+                                            .row("Size", theme::bytes(bucket.bytes))
+                                            .row("Items", bucket.count.to_string())
+                                            .row(
+                                                "Share",
+                                                chart::percent(theme::share(bucket.bytes, total)),
+                                            )
+                                            .build(),
+                                    )
+                                }),
+                        )
+                        .when(empty, |this| {
+                            this.child(ui::empty("No project artifacts found"))
+                        }),
                 ),
         )
         .children(removed.map(|months| {
             let total: u64 = months.iter().map(|month| month.bytes).sum();
-            ui::card(format!("Removed in the last 12 months  {}", theme::bytes(total)))
-                .child(chart::columns("removed", &months, Measure::Bytes, "Items"))
+            ui::card(format!(
+                "Removed in the last 12 months  {}",
+                theme::bytes(total)
+            ))
+            .child(chart::columns("removed", &months, Measure::Bytes, "Items"))
         }))
 }
 
@@ -2644,21 +2668,19 @@ fn skeleton_stat(label: &'static str, index: usize, live: Option<String>) -> Div
 }
 
 fn skeleton_bars(id: &'static str, title: &'static str) -> Div {
-    ui::card(title)
-        .flex_1()
-        .children((0..5).map(move |index| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(unit(6.))
-                .child(chart::block(
-                    id,
-                    index,
-                    gpui::relative(WIDTHS[index]),
-                    unit(12.),
-                ))
-                .child(chart::block(id, index + 10, gpui::relative(1.), unit(4.)))
-        }))
+    ui::card(title).flex_1().children((0..5).map(move |index| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(unit(6.))
+            .child(chart::block(
+                id,
+                index,
+                gpui::relative(WIDTHS[index]),
+                unit(12.),
+            ))
+            .child(chart::block(id, index + 10, gpui::relative(1.), unit(4.)))
+    }))
 }
 
 fn skeleton_columns(id: &'static str, title: &'static str) -> Div {
@@ -2669,12 +2691,15 @@ fn skeleton_columns(id: &'static str, title: &'static str) -> Div {
             .gap(unit(4.))
             .h(unit(88.))
             .children(HEIGHTS.iter().enumerate().map(move |(index, height)| {
-                div().flex_1().h(gpui::relative(*height)).child(chart::block(
-                    id,
-                    index,
-                    gpui::relative(1.),
-                    gpui::relative(1.),
-                ))
+                div()
+                    .flex_1()
+                    .h(gpui::relative(*height))
+                    .child(chart::block(
+                        id,
+                        index,
+                        gpui::relative(1.),
+                        gpui::relative(1.),
+                    ))
             })),
     )
 }
@@ -2703,12 +2728,9 @@ fn skeleton_overview(stage: Stage) -> Div {
         .child(
             ui::card("Disk")
                 .child(chart::block("disk", 0, gpui::relative(1.), unit(12.)))
-                .child(
-                    div()
-                        .flex()
-                        .gap(unit(16.))
-                        .children((1..6).map(|index| chart::block("disk", index, unit(84.), unit(12.)))),
-                ),
+                .child(div().flex().gap(unit(16.)).children(
+                    (1..6).map(|index| chart::block("disk", index, unit(84.), unit(12.))),
+                )),
         )
         .child(
             div()
@@ -2748,14 +2770,12 @@ fn skeleton_table() -> Div {
                 .border_b_1()
                 .border_color(theme::border())
                 .child(chart::block("row-check", index, unit(14.), unit(14.)))
-                .child(
-                    div().flex_1().min_w_0().child(chart::block(
-                        "row-path",
-                        index,
-                        gpui::relative(WIDTHS[index % WIDTHS.len()]),
-                        unit(10.),
-                    )),
-                )
+                .child(div().flex_1().min_w_0().child(chart::block(
+                    "row-path",
+                    index,
+                    gpui::relative(WIDTHS[index % WIDTHS.len()]),
+                    unit(10.),
+                )))
                 .child(chart::block("row-size", index, unit(64.), unit(10.)))
         }))
 }
@@ -3072,6 +3092,34 @@ mod tests {
             );
             app.cancel_scan(cx);
         });
+    }
+
+    #[gpui::test]
+    fn a_scan_shows_skeletons_then_charts_with_tooltips(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("skeleton").is_some());
+        assert!(cx.debug_bounds("loader").is_some());
+        wait_for_scan(&view, cx);
+        view.read_with(cx, |app, _| assert!(!app.busy()));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chart-ages").is_some());
+        let segment = cx
+            .debug_bounds("disk-0")
+            .expect("the safe artifacts segment");
+        cx.simulate_event(MouseMoveEvent {
+            position: segment.center(),
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        });
+        cx.executor().advance_clock(Duration::from_millis(700));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("tooltip").is_some());
     }
 
     #[gpui::test]
