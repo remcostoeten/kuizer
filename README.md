@@ -6,7 +6,7 @@ A terminal tool that finds build output, development caches and duplicate files 
   <img src="https://shieldcn.dev/badge/core-Rust-black.svg?font=jetbrains-mono&logo=rust" alt="core: Rust" />
   <img src="https://shieldcn.dev/badge/UI-ratatui-black.svg?font=jetbrains-mono" alt="UI: ratatui" />
   <img src="https://shieldcn.dev/badge/deletes%20to-trash-black.svg?font=jetbrains-mono" alt="deletes to: trash" />
-  <img src="https://shieldcn.dev/badge/platform-Linux-black.svg?font=jetbrains-mono&logo=linux" alt="platform: Linux" />
+  <img src="https://shieldcn.dev/badge/platform-Linux%20%7C%20macOS-black.svg?font=jetbrains-mono" alt="platform: Linux and macOS" />
 </p>
 
 kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. Built-in rules cover JavaScript and its frameworks, Rust, Python, .NET, Maven, Gradle, Swift, CocoaPods, Dart and Flutter, Elixir, Zig, Haskell, CMake, Terraform and Unity; `kuizer rules` lists them. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
@@ -53,24 +53,19 @@ On Linux GPUI needs the X11, Wayland, Vulkan and font development packages. On A
 
 ## Install
 
-Prebuilt binaries are available for Linux and macOS on x86_64 and ARM.
+Prebuilt binaries for Linux and macOS, on x86_64 and ARM, are attached to every [GitHub release](https://github.com/remcostoeten/kuizer/releases). The installer script downloads the right one, checks it and puts it in `~/.cargo/bin`:
 
 ```sh
-npx kuizer                                          # run without installing, needs Node
-npm install -g kuizer                               # or keep it installed
 curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-installer.sh | sh
-cargo binstall kuizer                               # prebuilt binary through cargo-binstall
-cargo install kuizer                                # compile from crates.io
 ```
 
 The desktop app installs the same way under its own name:
 
 ```sh
 curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-gui-installer.sh | sh
-cargo install kuizer-gui
 ```
 
-Release archives for every platform are on the [releases page](https://github.com/remcostoeten/kuizer/releases). The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
+Each release also has plain archives with a SHA-256 checksum. The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
 
 ### From source
 
