@@ -20,9 +20,11 @@ use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::frame;
+use crate::glossary::Term;
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
+use crate::tooltip::{self, Tip};
 use crate::ui::{self, ButtonKind};
 use crate::zoom::Zoom;
 
@@ -141,6 +143,7 @@ impl Kuizer {
             .or(roots.first())
             .map(|path| display_path(path))
             .unwrap_or_default();
+        cx.set_global(tooltip::Typeface(font.clone()));
         let mut app = Self {
             options: ScanOptions::from_config(&config),
             config,
@@ -722,10 +725,14 @@ impl Kuizer {
             .child(div().font_weight(FontWeight::SEMIBOLD).child("kuizer"))
             .child(
                 div()
+                    .id("roots")
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(theme::muted())
+                    .when(!matches!(self.phase, Phase::Start), |this| {
+                        this.tip(tooltip::plain(roots.clone()))
+                    })
                     .child(roots),
             )
             .child(actions)
@@ -842,19 +849,21 @@ impl Kuizer {
             .when(review > 0, |this| {
                 this.child(
                     div()
+                        .id("marked-review")
                         .text_color(theme::review())
+                        .tip(tooltip::term(Term::Review))
                         .child(format!("{review} marked review")),
                 )
             })
             .child(div().flex_1())
             .child(
-                ui::button("select-safe", "Select safe", ButtonKind::Ghost, can_select).on_click(
-                    cx.listener(|app, _: &ClickEvent, _, cx| {
+                ui::button("select-safe", "Select safe", ButtonKind::Ghost, can_select)
+                    .tip(tooltip::term(Term::SelectSafe))
+                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                         if matches!(app.tab, Tab::Artifacts | Tab::Caches) && !app.busy() {
                             app.select_safe(cx);
                         }
-                    }),
-                ),
+                    })),
             )
             .child(
                 ui::button(
@@ -1042,6 +1051,7 @@ impl Kuizer {
                     let path = path.clone();
                     let label = display_path(&path);
                     let missing = !path.is_dir();
+                    let full = tooltip::path(&path);
                     div()
                         .id(("recent", index))
                         .flex()
@@ -1054,9 +1064,11 @@ impl Kuizer {
                         .hover(|style| style.bg(theme::hover()))
                         .child(
                             div()
+                                .id(("recent-path", index))
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
+                                .tip(full)
                                 .text_color(if missing {
                                     theme::faint()
                                 } else {
@@ -1135,6 +1147,7 @@ impl Kuizer {
                             .cursor_pointer()
                             .text_color(if on { theme::text() } else { theme::faint() })
                             .hover(|style| style.bg(theme::hover()))
+                            .tip(tooltip::term(Term::category(category)))
                             .child(ui::checkbox(on))
                             .child(category.as_str())
                             .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
@@ -1270,38 +1283,62 @@ impl Kuizer {
                     .flex()
                     .flex_wrap()
                     .gap(unit(10.))
-                    .child(ui::stat(
-                        "Project artifacts",
-                        theme::bytes(total),
-                        format!("{} items", report.candidates.len()),
-                    ))
-                    .child(ui::stat(
-                        "Safe to remove",
-                        theme::bytes(safe),
-                        "rebuilt on the next build",
-                    ))
-                    .child(ui::stat(
-                        "Needs review",
-                        theme::bytes(review),
-                        "check before removing",
-                    ))
-                    .child(ui::stat(
-                        "Global caches",
-                        theme::bytes(caches),
-                        format!("{} caches", report.caches.len()),
-                    ))
-                    .child(ui::stat(
-                        "Duplicate files",
-                        theme::bytes(duplicates),
-                        "keep one copy of each",
-                    ))
-                    .child(ui::stat(
-                        "Disk free",
-                        disk.map_or_else(String::new, |(free, _)| theme::bytes(free)),
-                        disk.map_or_else(String::new, |(_, size)| {
-                            format!("of {}", theme::bytes(size))
-                        }),
-                    )),
+                    .child(
+                        ui::stat(
+                            "Project artifacts",
+                            theme::bytes(total),
+                            format!("{} items", report.candidates.len()),
+                        )
+                        .id("stat-artifacts")
+                        .tip(tooltip::term(Term::ProjectArtifacts)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Safe to remove",
+                            theme::bytes(safe),
+                            "rebuilt on the next build",
+                        )
+                        .id("stat-safe")
+                        .tip(tooltip::term(Term::Safe)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Needs review",
+                            theme::bytes(review),
+                            "check before removing",
+                        )
+                        .id("stat-review")
+                        .tip(tooltip::term(Term::Review)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Global caches",
+                            theme::bytes(caches),
+                            format!("{} caches", report.caches.len()),
+                        )
+                        .id("stat-caches")
+                        .tip(tooltip::term(Term::GlobalCaches)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Duplicate files",
+                            theme::bytes(duplicates),
+                            "keep one copy of each",
+                        )
+                        .id("stat-duplicates")
+                        .tip(tooltip::term(Term::DuplicateFiles)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Disk free",
+                            disk.map_or_else(String::new, |(free, _)| theme::bytes(free)),
+                            disk.map_or_else(String::new, |(_, size)| {
+                                format!("of {}", theme::bytes(size))
+                            }),
+                        )
+                        .id("stat-disk")
+                        .tip(tooltip::term(Term::DiskFree)),
+                    ),
             )
             .child(
                 div()
@@ -1311,7 +1348,7 @@ impl Kuizer {
                     .child(
                         ui::card("Where the space is")
                             .flex_1()
-                            .children(categories.iter().map(|bucket| {
+                            .children(categories.iter().enumerate().map(|(index, bucket)| {
                                 ui::bar_row(
                                     format!(
                                         "{}  {}",
@@ -1322,6 +1359,8 @@ impl Kuizer {
                                     theme::share(bucket.bytes, total + caches),
                                     theme::bar(),
                                 )
+                                .id(("space", index))
+                                .tip(tooltip::term(Term::category(bucket.key)))
                             }))
                             .child(ui::bar_row(
                                 format!("global caches  {}", plural(report.caches.len(), "cache")),
@@ -1336,13 +1375,15 @@ impl Kuizer {
                     .child(
                         ui::card("Largest projects")
                             .flex_1()
-                            .children(projects.iter().take(8).map(|bucket| {
+                            .children(projects.iter().take(8).enumerate().map(|(index, bucket)| {
                                 ui::bar_row(
                                     model::short_path(&bucket.key, &report.roots),
                                     theme::bytes(bucket.bytes),
                                     theme::share(bucket.bytes, largest_project),
                                     theme::bar(),
                                 )
+                                .id(("project", index))
+                                .tip(tooltip::path(&bucket.key))
                             }))
                             .when(projects.is_empty(), |this| {
                                 this.child(ui::empty("No projects with artifacts"))
@@ -1402,13 +1443,15 @@ impl Kuizer {
                     .contains(&(Source::Artifact, report.candidates[index].id))
             });
         let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
-            ui::segment(id, label, self.safety == value).on_click(cx.listener(
-                move |app, _: &ClickEvent, _, cx| {
+            ui::segment(id, label, self.safety == value)
+                .when_some(value, |this, safety| {
+                    this.tip(tooltip::term(Term::safety(safety)))
+                })
+                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                     app.safety = value;
                     app.refresh_rows();
                     cx.notify();
-                },
-            ))
+                }))
         };
         let chip = |category: Category| {
             let shown = !self.hidden.contains(&category);
@@ -1423,6 +1466,7 @@ impl Kuizer {
                 .cursor_pointer()
                 .text_color(if shown { theme::text() } else { theme::faint() })
                 .hover(|style| style.bg(theme::hover()))
+                .tip(tooltip::term(Term::category(category)))
                 .child(ui::checkbox(shown))
                 .child(category.as_str())
                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
@@ -1473,11 +1517,11 @@ impl Kuizer {
                         }
                     })),
             )
-            .child(column(90.).text_right().child("Size"))
-            .child(column(64.).child("Safety"))
-            .child(column(110.).child("Category"))
-            .child(column(150.).child("Rule"))
-            .child(column(56.).text_right().child("Changed"))
+            .child(head(90., "Size", Term::Size).text_right())
+            .child(head(64., "Safety", Term::Safety))
+            .child(head(110., "Category", Term::Category))
+            .child(head(150., "Rule", Term::Rule))
+            .child(head(56., "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
         let list = uniform_list(
             "artifacts",
@@ -1500,13 +1544,31 @@ impl Kuizer {
                                         .text_right()
                                         .child(theme::bytes(candidate.usage.allocated)),
                                 )
-                                .child(column(64.).child(ui::safety_label(review)))
+                                .child(
+                                    column(64.)
+                                        .child(ui::safety_label(("artifact-safety", id), review)),
+                                )
                                 .child(
                                     column(110.)
+                                        .id(("artifact-category", id))
                                         .text_color(theme::muted())
+                                        .tip(tooltip::term(Term::category(candidate.rule.category)))
                                         .child(candidate.rule.category.as_str()),
                                 )
-                                .child(column(150.).truncate().child(candidate.rule.name.clone()))
+                                .child(
+                                    column(150.)
+                                        .id(("artifact-rule", id))
+                                        .truncate()
+                                        .tip(tooltip::titled(
+                                            candidate.rule.name.clone(),
+                                            format!(
+                                                "{} Ecosystem: {}.",
+                                                Term::Rule.text(),
+                                                candidate.rule.ecosystem
+                                            ),
+                                        ))
+                                        .child(candidate.rule.name.clone()),
+                                )
                                 .child(
                                     column(56.)
                                         .text_right()
@@ -1515,10 +1577,12 @@ impl Kuizer {
                                 )
                                 .child(
                                     div()
+                                        .id(("artifact-path", id))
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
                                         .text_color(theme::muted())
+                                        .tip(tooltip::path(&candidate.path))
                                         .child(model::short_path(&candidate.path, &report.roots)),
                                 )
                                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
@@ -1553,11 +1617,11 @@ impl Kuizer {
         };
         let header = table_header()
             .child(div().w(unit(14.)))
-            .child(column(90.).text_right().child("Size"))
-            .child(column(64.).child("Safety"))
-            .child(column(90.).child("Tool"))
+            .child(head(90., "Size", Term::Size).text_right())
+            .child(head(64., "Safety", Term::Safety))
+            .child(head(90., "Tool", Term::Tool))
             .child(column(170.).child("Cache"))
-            .child(column(56.).text_right().child("Changed"))
+            .child(head(56., "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
         let rows = report.caches.iter().map(|(cache, candidate)| {
             let id = candidate.id;
@@ -1570,7 +1634,7 @@ impl Kuizer {
                         .text_right()
                         .child(theme::bytes(candidate.usage.allocated)),
                 )
-                .child(column(64.).child(ui::safety_label(review)))
+                .child(column(64.).child(ui::safety_label(("cache-safety", id), review)))
                 .child(column(90.).text_color(theme::muted()).child(cache.tool))
                 .child(column(170.).truncate().child(cache.name))
                 .child(
@@ -1588,8 +1652,10 @@ impl Kuizer {
                         .min_w_0()
                         .child(
                             div()
+                                .id(("cache-path", id))
                                 .truncate()
                                 .text_color(theme::muted())
+                                .tip(tooltip::path(&candidate.path))
                                 .child(display_path(&candidate.path)),
                         )
                         .when(!cache.note.is_empty(), |this| {
@@ -1628,14 +1694,25 @@ impl Kuizer {
                         theme::bytes(report.cache_total(None)),
                         report.caches.len()
                     ))
-                    .child(format!(
-                        "safe {}",
-                        theme::bytes(report.cache_total(Some(Safety::Safe)))
-                    ))
-                    .child(div().text_color(theme::review()).child(format!(
-                        "review {}",
-                        theme::bytes(report.cache_total(Some(Safety::Review)))
-                    )))
+                    .child(
+                        div()
+                            .id("caches-safe")
+                            .tip(tooltip::term(Term::Safe))
+                            .child(format!(
+                                "safe {}",
+                                theme::bytes(report.cache_total(Some(Safety::Safe)))
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("caches-review")
+                            .text_color(theme::review())
+                            .tip(tooltip::term(Term::Review))
+                            .child(format!(
+                                "review {}",
+                                theme::bytes(report.cache_total(Some(Safety::Review)))
+                            )),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -1684,21 +1761,33 @@ impl Kuizer {
                     .flex()
                     .flex_wrap()
                     .gap(unit(10.))
-                    .child(ui::stat(
-                        "Reclaimable",
-                        theme::bytes(wasted),
-                        "by keeping one copy of each",
-                    ))
-                    .child(ui::stat(
-                        "Groups",
-                        found.groups.len().to_string(),
-                        format!("{copies} files in total"),
-                    ))
-                    .child(ui::stat(
-                        "Files compared",
-                        found.files.to_string(),
-                        format!("in {:.1}s", found.duration.as_secs_f32()),
-                    )),
+                    .child(
+                        ui::stat(
+                            "Reclaimable",
+                            theme::bytes(wasted),
+                            "by keeping one copy of each",
+                        )
+                        .id("stat-reclaimable")
+                        .tip(tooltip::term(Term::Reclaimable)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Groups",
+                            found.groups.len().to_string(),
+                            format!("{copies} files in total"),
+                        )
+                        .id("stat-groups")
+                        .tip(tooltip::term(Term::Groups)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Files compared",
+                            found.files.to_string(),
+                            format!("in {:.1}s", found.duration.as_secs_f32()),
+                        )
+                        .id("stat-compared")
+                        .tip(tooltip::term(Term::FilesCompared)),
+                    ),
             )
             .child(
                 ui::card(if found.groups.len() > DUPLICATE_GROUPS {
@@ -1709,49 +1798,60 @@ impl Kuizer {
                 } else {
                     "Groups".to_owned()
                 })
-                .children(found.groups.iter().take(DUPLICATE_GROUPS).map(|group| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(unit(4.))
-                        .pt(unit(8.))
-                        .border_t_1()
-                        .border_color(theme::border())
-                        .child(ui::bar_row(
-                            format!(
-                                "{} copies of {}{}",
-                                group.members.len(),
-                                theme::bytes(group.size),
-                                if group.verified {
-                                    ""
-                                } else {
-                                    ", not byte-verified"
-                                }
-                            ),
-                            format!("{} reclaimable", theme::bytes(group.reclaimable())),
-                            theme::share(group.reclaimable(), largest),
-                            theme::bar(),
-                        ))
-                        .children(group.members.iter().map(|member| {
-                            div()
-                                .flex()
-                                .gap(unit(8.))
-                                .text_color(theme::muted())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(model::short_path(&member.path, &report.roots)),
+                .children(found.groups.iter().take(DUPLICATE_GROUPS).enumerate().map(
+                    |(index, group)| {
+                        let members = SharedString::from(format!("dupe-{index}"));
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(unit(4.))
+                            .pt(unit(8.))
+                            .border_t_1()
+                            .border_color(theme::border())
+                            .child(
+                                ui::bar_row(
+                                    format!(
+                                        "{} copies of {}{}",
+                                        group.members.len(),
+                                        theme::bytes(group.size),
+                                        if group.verified {
+                                            ""
+                                        } else {
+                                            ", not byte-verified"
+                                        }
+                                    ),
+                                    format!("{} reclaimable", theme::bytes(group.reclaimable())),
+                                    theme::share(group.reclaimable(), largest),
+                                    theme::bar(),
                                 )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(theme::faint())
-                                        .child(theme::age(member.modified)),
-                                )
-                        }))
-                }))
+                                .id(("group", index))
+                                .when(!group.verified, |this| {
+                                    this.tip(tooltip::term(Term::Unverified))
+                                }),
+                            )
+                            .children(group.members.iter().enumerate().map(|(position, member)| {
+                                div()
+                                    .flex()
+                                    .gap(unit(8.))
+                                    .text_color(theme::muted())
+                                    .child(
+                                        div()
+                                            .id((members.clone(), position))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .tip(tooltip::path(&member.path))
+                                            .child(model::short_path(&member.path, &report.roots)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(theme::faint())
+                                            .child(theme::age(member.modified)),
+                                    )
+                            }))
+                    },
+                ))
                 .when(found.groups.is_empty(), |this| {
                     this.child(ui::empty("No duplicate files found"))
                 }),
@@ -1794,46 +1894,68 @@ impl Kuizer {
                     .bg(theme::bar())
             }));
         let header = table_header()
-            .child(column(56.).child("Run"))
+            .child(head(56., "Run", Term::Run))
             .child(column(150.).child("Started"))
             .child(column(70.).text_right().child("Items"))
-            .child(column(90.).text_right().child("Size"))
-            .child(column(80.).child("Mode"))
-            .child(div().flex_1().child("Command"));
+            .child(head(90., "Size", Term::Size).text_right())
+            .child(head(80., "Mode", Term::Mode))
+            .child(
+                div()
+                    .id("Command")
+                    .flex_1()
+                    .tip(tooltip::term(Term::Command))
+                    .child("Command"),
+            );
         scroll("history")
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap(unit(10.))
-                    .child(ui::stat(
-                        "Cleanups",
-                        cumulative.runs.to_string(),
-                        cumulative
-                            .first_run
-                            .as_deref()
-                            .map(|first| format!("since {}", short_time(first)))
-                            .unwrap_or_default(),
-                    ))
-                    .child(ui::stat(
-                        "Items removed",
-                        cumulative.items.to_string(),
-                        format!("{} restored", cumulative.restored_items),
-                    ))
-                    .child(ui::stat(
-                        "Freed",
-                        theme::bytes(view.freed()),
-                        "removed or emptied from the trash",
-                    ))
-                    .child(ui::stat(
-                        "Still in the trash",
-                        if view.trash_known {
-                            theme::bytes(view.in_trash())
-                        } else {
-                            "unknown".to_owned()
-                        },
-                        "restore with kuizer restore",
-                    )),
+                    .child(
+                        ui::stat(
+                            "Cleanups",
+                            cumulative.runs.to_string(),
+                            cumulative
+                                .first_run
+                                .as_deref()
+                                .map(|first| format!("since {}", short_time(first)))
+                                .unwrap_or_default(),
+                        )
+                        .id("stat-cleanups")
+                        .tip(tooltip::term(Term::Cleanups)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Items removed",
+                            cumulative.items.to_string(),
+                            format!("{} restored", cumulative.restored_items),
+                        )
+                        .id("stat-removed")
+                        .tip(tooltip::term(Term::ItemsRemoved)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Freed",
+                            theme::bytes(view.freed()),
+                            "removed or emptied from the trash",
+                        )
+                        .id("stat-freed")
+                        .tip(tooltip::term(Term::Freed)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Still in the trash",
+                            if view.trash_known {
+                                theme::bytes(view.in_trash())
+                            } else {
+                                "unknown".to_owned()
+                            },
+                            "restore with kuizer restore",
+                        )
+                        .id("stat-trash")
+                        .tip(tooltip::term(Term::InTrash)),
+                    ),
             )
             .child(
                 ui::card(format!("Last {} cleanups", recent.len()))
@@ -1850,7 +1972,7 @@ impl Kuizer {
                     .border_1()
                     .border_color(theme::border())
                     .child(header)
-                    .children(runs.iter().map(|run| {
+                    .children(runs.iter().enumerate().map(|(index, run)| {
                         let mode = run.deleted.first().map_or("", |entry| match entry.mode {
                             kuizer::delete::Mode::Trash => "trash",
                             kuizer::delete::Mode::Permanent => "permanent",
@@ -1879,10 +2001,12 @@ impl Kuizer {
                             .child(column(80.).text_color(theme::muted()).child(mode))
                             .child(
                                 div()
+                                    .id(("command", index))
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_color(theme::faint())
+                                    .tip(tooltip::plain(run.command.clone()))
                                     .child(run.command.clone()),
                             )
                     })),
@@ -1910,26 +2034,45 @@ impl Kuizer {
             return centered(ui::empty("The scan reported no issues"));
         }
         scroll("issues")
-            .child(div().text_color(theme::muted()).child(format!(
-                "{} folders could not be read or were skipped",
-                report.issues.len()
-            )))
-            .children(report.issues.iter().take(ISSUE_LIMIT).map(|issue| {
+            .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(unit(2.))
-                    .py(unit(6.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(div().truncate().child(display_path(&issue.path)))
-                    .child(
+                    .id("issues-count")
+                    .text_color(theme::muted())
+                    .tip(tooltip::term(Term::Issues))
+                    .child(format!(
+                        "{} folders could not be read or were skipped",
+                        report.issues.len()
+                    )),
+            )
+            .children(
+                report
+                    .issues
+                    .iter()
+                    .take(ISSUE_LIMIT)
+                    .enumerate()
+                    .map(|(index, issue)| {
                         div()
-                            .text_size(unit(12.))
-                            .text_color(theme::faint())
-                            .child(issue.message.clone()),
-                    )
-            }))
+                            .flex()
+                            .flex_col()
+                            .gap(unit(2.))
+                            .py(unit(6.))
+                            .border_b_1()
+                            .border_color(theme::border())
+                            .child(
+                                div()
+                                    .id(("issue", index))
+                                    .truncate()
+                                    .tip(tooltip::path(&issue.path))
+                                    .child(display_path(&issue.path)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(unit(12.))
+                                    .text_color(theme::faint())
+                                    .child(issue.message.clone()),
+                            )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1986,12 +2129,15 @@ impl Kuizer {
                                     .gap(unit(8.))
                                     .child(
                                         div()
+                                            .id(("dialog-path", candidate.id))
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
+                                            .tip(tooltip::path(&candidate.path))
                                             .child(self.dialog_path(candidate)),
                                     )
                                     .child(ui::safety_label(
+                                        ("dialog-safety", candidate.id),
                                         candidate.rule.safety == Safety::Review,
                                     ))
                                     .child(
@@ -2090,22 +2236,26 @@ impl Kuizer {
                         finished.failures.len()
                     )))
                     .children(
-                        finished
-                            .failures
-                            .iter()
-                            .take(LIST_LIMIT)
-                            .map(|(path, error)| {
+                        finished.failures.iter().take(LIST_LIMIT).enumerate().map(
+                            |(index, (path, error))| {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .child(div().truncate().child(path.clone()))
+                                    .child(
+                                        div()
+                                            .id(("failure", index))
+                                            .truncate()
+                                            .tip(tooltip::plain(path.clone()))
+                                            .child(path.clone()),
+                                    )
                                     .child(
                                         div()
                                             .text_size(unit(12.))
                                             .text_color(theme::faint())
                                             .child(error.clone()),
                                     )
-                            }),
+                            },
+                        ),
                     )
                 })
                 .children(finished.history_error.as_ref().map(|error| {
@@ -2213,6 +2363,13 @@ fn scroll(id: &'static str) -> gpui::Stateful<Div> {
 
 fn column(width: f32) -> Div {
     div().w(unit(width)).flex_none()
+}
+
+fn head(width: f32, label: &'static str, term: Term) -> gpui::Stateful<Div> {
+    column(width)
+        .id(label)
+        .tip(tooltip::term(term))
+        .child(label)
 }
 
 fn table_header() -> Div {

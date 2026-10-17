@@ -1,8 +1,11 @@
 mod app;
 mod frame;
+mod glossary;
 mod model;
+mod motion;
 mod start;
 mod theme;
+mod tooltip;
 mod ui;
 mod zoom;
 

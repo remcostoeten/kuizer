@@ -3,7 +3,9 @@ use gpui::{
     prelude::*, relative,
 };
 
+use crate::glossary::Term;
 use crate::theme::{self, unit};
+use crate::tooltip::{self, Tip};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonKind {
@@ -173,8 +175,14 @@ pub fn empty(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-pub fn safety_label(review: bool) -> Div {
+pub fn safety_label(id: impl Into<ElementId>, review: bool) -> Stateful<Div> {
     div()
+        .id(id)
+        .tip(tooltip::term(if review {
+            Term::Review
+        } else {
+            Term::Safe
+        }))
         .text_size(unit(12.))
         .text_color(if review {
             theme::review()
