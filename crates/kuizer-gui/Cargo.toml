@@ -21,3 +21,34 @@ kuizer = { path = "../..", version = "0.1.0" }
 [package.metadata.dist]
 installers = ["shell"]
 include = ["../../packaging/kuizer-gui.desktop", "../../packaging/kuizer-gui.svg"]
+
+[package.metadata.packager]
+product-name = "kuizer"
+identifier = "com.remcostoeten.kuizer"
+category = "Utility"
+authors = ["Remco Stoeten"]
+before-packaging-command = "cargo build --release -p kuizer-gui"
+icons = ["../../packaging/icons/*.png"]
+binaries = [{ path = "kuizer-gui", main = true }]
+
+[package.metadata.packager.deb]
+package-name = "kuizer-gui"
+desktop-template = "../../packaging/kuizer-gui.desktop"
+section = "utils"
+depends = ["libxcb1", "libxkbcommon0", "libxkbcommon-x11-0", "libvulkan1", "libfontconfig1", "libwayland-client0"]
+
+[package.metadata.packager.pacman]
+depends = ["libxcb", "libxkbcommon", "libxkbcommon-x11", "vulkan-icd-loader", "fontconfig", "wayland"]
+
+[package.metadata.generate-rpm]
+name = "kuizer-gui"
+summary = "Desktop interface for kuizer"
+assets = [
+    { source = "target/release/kuizer-gui", dest = "/usr/bin/kuizer-gui", mode = "755" },
+    { source = "packaging/kuizer-gui.desktop", dest = "/usr/share/applications/kuizer-gui.desktop", mode = "644" },
+    { source = "packaging/kuizer-gui.svg", dest = "/usr/share/icons/hicolor/scalable/apps/kuizer-gui.svg", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+vulkan-loader = "*"
+fontconfig = "*"
