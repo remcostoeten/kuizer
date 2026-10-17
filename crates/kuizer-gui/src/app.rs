@@ -14,6 +14,7 @@ use gpui::{
 use kuizer::config::Config;
 use kuizer::delete::Status;
 use kuizer::detect::{Category, Safety};
+use kuizer::dupes;
 use kuizer::history::Action;
 use kuizer::output::display_path;
 use kuizer::platform;
@@ -75,6 +76,33 @@ impl Tab {
             Self::Duplicates => "Duplicates",
             Self::History => "History",
             Self::Issues => "Issues",
+        }
+    }
+
+    fn status(self, stage: Stage, options: &ScanOptions) -> &'static str {
+        let walking = matches!(stage, Stage::Starting | Stage::Scanning(_));
+        match self {
+            Self::Overview => "Shown once every part of the scan is done",
+            Self::Artifacts if walking => "Looking for project artifacts",
+            Self::Artifacts => "Artifacts found, shown once the scan is done",
+            Self::Issues if walking => "Collecting issues while scanning folders",
+            Self::Issues => "Issues collected, shown once the scan is done",
+            Self::Duplicates if !options.duplicates => "Duplicate search is off for this scan",
+            Self::Duplicates if walking => "Collecting files while scanning folders",
+            Self::Duplicates => match stage {
+                Stage::Duplicates(dupes::Stage::Walking { .. }) => "Collecting files",
+                Stage::Duplicates(dupes::Stage::Hashing { .. }) => "Hashing files",
+                Stage::Duplicates(dupes::Stage::Verifying { .. }) => "Comparing files",
+                _ => "Duplicates found, shown once the scan is done",
+            },
+            Self::Caches if !options.caches => "Global caches are off for this scan",
+            Self::Caches => match stage {
+                Stage::Caches => "Measuring global caches",
+                Stage::History => "Caches measured, shown once the scan is done",
+                _ => "Measured after the folder scan",
+            },
+            Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",
+            Self::History => "Read at the end of the scan",
         }
     }
 }
@@ -791,6 +819,7 @@ impl Kuizer {
                 let count = self.tab_count(tab);
                 div()
                     .id(tab.label())
+                    .debug_selector(|| tab.label().to_owned())
                     .flex()
                     .items_center()
                     .h(unit(28.))
@@ -902,8 +931,24 @@ impl Kuizer {
                         .flex_col()
                         .items_center()
                         .gap(unit(6.))
-                        .child(div().font_weight(FontWeight::MEDIUM).child("Scanning"))
-                        .child(div().text_color(theme::muted()).child(stage.describe()))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(self.tab.label()),
+                        )
+                        .child({
+                            let status = self.tab.status(*stage, &self.options);
+                            div()
+                                .debug_selector(|| status.to_owned())
+                                .text_color(theme::muted())
+                                .child(status)
+                        })
+                        .child(
+                            div()
+                                .text_size(unit(12.))
+                                .text_color(theme::faint())
+                                .child(stage.describe()),
+                        )
                         .child(div().text_size(unit(12.)).text_color(theme::faint()).child(
                             format!(
                                 "{}s elapsed, press Escape to cancel",
@@ -2581,6 +2626,63 @@ mod tests {
             );
             app.cancel_scan(cx);
         });
+    }
+
+    #[gpui::test]
+    fn the_sidebar_switches_sections_during_a_scan(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        for (label, shown) in [
+            ("Global caches", "Global caches are off for this scan"),
+            ("History", "Read at the end of the scan"),
+            ("Duplicates", "Collecting files while scanning folders"),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear());
+            let bounds = cx.debug_bounds(label).expect("a sidebar item");
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            view.read_with(cx, |app, _| {
+                assert!(matches!(app.phase, Phase::Loading(_)));
+                assert_eq!(app.tab.label(), label);
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert!(cx.debug_bounds(shown).is_some());
+        }
+        wait_for_scan(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.phase, Phase::Ready(_)));
+            assert_eq!(app.tab, Tab::Duplicates);
+        });
+    }
+
+    #[test]
+    fn each_section_describes_its_own_progress() {
+        let mut options = ScanOptions::from_config(&Config::default());
+        options.caches = true;
+        options.duplicates = true;
+        let walking = Stage::Starting;
+        assert_eq!(
+            Tab::Caches.status(walking, &options),
+            "Measured after the folder scan"
+        );
+        assert_eq!(
+            Tab::Caches.status(Stage::Caches, &options),
+            "Measuring global caches"
+        );
+        assert_eq!(
+            Tab::Artifacts.status(Stage::Caches, &options),
+            "Artifacts found, shown once the scan is done"
+        );
+        options.duplicates = false;
+        assert_eq!(
+            Tab::Duplicates.status(walking, &options),
+            "Duplicate search is off for this scan"
+        );
+        options.duplicates = true;
+        let hashing = Stage::Duplicates(dupes::Stage::Hashing { files: 3 });
+        assert_eq!(Tab::Duplicates.status(hashing, &options), "Hashing files");
     }
 
     fn scroll(cx: &mut VisualTestContext, lines: f32, modifiers: Modifiers) {
