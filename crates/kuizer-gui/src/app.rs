@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, Div, FocusHandle, FontWeight, KeyDownEvent,
-    PathPromptOptions, SharedString, Task, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FocusHandle, FontWeight,
+    KeyBinding, KeyDownEvent, PathPromptOptions, Pixels, ScrollWheelEvent, SharedString, Task,
+    Window, actions, canvas, div, prelude::*, px, uniform_list,
 };
 use kuizer::config::Config;
 use kuizer::delete::Status;
@@ -19,14 +20,28 @@ use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
 use crate::start::{self, Recent, ScanOptions};
-use crate::theme;
+use crate::theme::{self, unit};
 use crate::ui::{self, ButtonKind};
+use crate::zoom::Zoom;
 
 const POLL: Duration = Duration::from_millis(100);
 const LIST_LIMIT: usize = 6;
 const DUPLICATE_GROUPS: usize = 200;
 const ISSUE_LIMIT: usize = 500;
 const HISTORY_BARS: usize = 24;
+const WHEEL_NOTCH: Pixels = px(20.);
+
+actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-=", ZoomIn, None),
+        KeyBinding::new("secondary-+", ZoomIn, None),
+        KeyBinding::new("secondary-shift-=", ZoomIn, None),
+        KeyBinding::new("secondary--", ZoomOut, None),
+        KeyBinding::new("secondary-0", ResetZoom, None),
+    ]);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -88,6 +103,8 @@ pub struct Kuizer {
     whole_home: bool,
     folder_error: Option<String>,
     recent: Recent,
+    zoom: Zoom,
+    wheel: Pixels,
     cancel: Option<Cancel>,
     started: Instant,
     font: SharedString,
@@ -107,6 +124,7 @@ impl Kuizer {
         config: Config,
         roots: Vec<PathBuf>,
         recent: Recent,
+        zoom: Zoom,
         font: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -128,6 +146,8 @@ impl Kuizer {
             whole_home: false,
             folder_error: None,
             recent,
+            zoom,
+            wheel: px(0.),
             cancel: None,
             started: Instant::now(),
             font,
@@ -549,6 +569,40 @@ impl Kuizer {
         cx.notify();
     }
 
+    fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoom.zoom_in() {
+            cx.notify();
+        }
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoom.zoom_out() {
+            cx.notify();
+        }
+    }
+
+    fn reset_zoom(&mut self, _: &ResetZoom, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoom.reset() {
+            cx.notify();
+        }
+    }
+
+    fn wheel_zoom(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        self.wheel += event.delta.pixel_delta(WHEEL_NOTCH).y;
+        if self.wheel.abs() < WHEEL_NOTCH {
+            return;
+        }
+        let changed = if self.wheel > px(0.) {
+            self.zoom.zoom_in()
+        } else {
+            self.zoom.zoom_out()
+        };
+        self.wheel = px(0.);
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         if self.dialog.is_none() {
@@ -608,9 +662,9 @@ impl Kuizer {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(12.))
-            .h(px(40.))
-            .px(px(14.))
+            .gap(unit(12.))
+            .h(unit(40.))
+            .px(unit(14.))
             .bg(theme::panel())
             .border_b_1()
             .border_color(theme::border())
@@ -673,9 +727,9 @@ impl Kuizer {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(200.))
-            .gap(px(2.))
-            .p(px(8.))
+            .w(unit(200.))
+            .gap(unit(2.))
+            .p(unit(8.))
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
@@ -686,8 +740,8 @@ impl Kuizer {
                     .id(tab.label())
                     .flex()
                     .items_center()
-                    .h(px(28.))
-                    .px(px(10.))
+                    .h(unit(28.))
+                    .px(unit(10.))
                     .rounded(theme::radius_control())
                     .cursor_pointer()
                     .text_color(if active {
@@ -700,7 +754,7 @@ impl Kuizer {
                     .child(div().flex_1().child(tab.label()))
                     .children(count.map(|count| {
                         div()
-                            .text_size(px(12.))
+                            .text_size(unit(12.))
                             .text_color(theme::faint())
                             .child(count.to_string())
                     }))
@@ -732,9 +786,9 @@ impl Kuizer {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.))
-            .h(px(40.))
-            .px(px(14.))
+            .gap(unit(8.))
+            .h(unit(40.))
+            .px(unit(14.))
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::border())
@@ -786,30 +840,29 @@ impl Kuizer {
     fn render_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match &self.phase {
             Phase::Start => self.render_start(cx),
-            Phase::Loading(stage) => centered(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Scanning"))
-                    .child(div().text_color(theme::muted()).child(stage.describe()))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme::faint())
-                            .child(format!(
+            Phase::Loading(stage) => {
+                centered(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(unit(6.))
+                        .child(div().font_weight(FontWeight::MEDIUM).child("Scanning"))
+                        .child(div().text_color(theme::muted()).child(stage.describe()))
+                        .child(div().text_size(unit(12.)).text_color(theme::faint()).child(
+                            format!(
                                 "{}s elapsed, press Escape to cancel",
                                 self.started.elapsed().as_secs()
-                            )),
-                    ),
-            ),
+                            ),
+                        )),
+                )
+            }
             Phase::Failed(error) => centered(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(unit(6.))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -842,8 +895,8 @@ impl Kuizer {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .h(px(32.))
-            .px(px(10.))
+            .h(unit(32.))
+            .px(unit(10.))
             .rounded(theme::radius_control())
             .bg(theme::background())
             .border_1()
@@ -854,10 +907,10 @@ impl Kuizer {
             })
             .cursor(CursorStyle::IBeam)
             .when(field_text.is_empty(), |this| {
-                this.child(div().w(px(1.)).h(px(16.)).bg(theme::text()))
+                this.child(div().w(unit(1.)).h(unit(16.)).bg(theme::text()))
                     .child(
                         div()
-                            .pl(px(2.))
+                            .pl(unit(2.))
                             .text_color(theme::faint())
                             .child("Type a path, for example ~/apps"),
                     )
@@ -874,7 +927,7 @@ impl Kuizer {
                         .child(field_text),
                 )
                 .when(!self.whole_home, |this| {
-                    this.child(div().flex_none().w(px(1.)).h(px(16.)).bg(theme::text()))
+                    this.child(div().flex_none().w(unit(1.)).h(unit(16.)).bg(theme::text()))
                 })
             })
             .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
@@ -906,7 +959,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(unit(8.))
                     .child(field)
                     .child(
                         ui::button("browse", "Choose folder", ButtonKind::Secondary, true)
@@ -928,7 +981,7 @@ impl Kuizer {
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(unit(12.))
                     .text_color(theme::faint())
                     .child(if self.whole_home {
                         "Walks everything under your home folder. Expect this to take a while."
@@ -947,9 +1000,9 @@ impl Kuizer {
                         .id(("recent", index))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .h(px(26.))
-                        .px(px(8.))
+                        .gap(unit(8.))
+                        .h(unit(26.))
+                        .px(unit(8.))
                         .rounded(theme::radius_control())
                         .cursor_pointer()
                         .hover(|style| style.bg(theme::hover()))
@@ -965,7 +1018,7 @@ impl Kuizer {
                                 })
                                 .child(label),
                         )
-                        .child(div().text_size(px(12.)).text_color(theme::faint()).child(
+                        .child(div().text_size(unit(12.)).text_color(theme::faint()).child(
                             if missing {
                                 "missing"
                             } else {
@@ -1022,16 +1075,16 @@ impl Kuizer {
         let categories =
             Category::ALL
                 .into_iter()
-                .fold(div().flex().gap(px(2.)), |row, category| {
+                .fold(div().flex().gap(unit(2.)), |row, category| {
                     let on = options.categories.contains(&category);
                     row.child(
                         div()
                             .id(("category", category as usize))
                             .flex()
                             .items_center()
-                            .gap(px(6.))
-                            .px(px(8.))
-                            .h(px(24.))
+                            .gap(unit(6.))
+                            .px(unit(8.))
+                            .h(unit(24.))
                             .rounded(theme::radius_control())
                             .cursor_pointer()
                             .text_color(if on { theme::text() } else { theme::faint() })
@@ -1049,7 +1102,7 @@ impl Kuizer {
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(unit(6.))
                 .cursor_pointer()
                 .child(ui::checkbox(on))
                 .child(
@@ -1110,22 +1163,22 @@ impl Kuizer {
             .items_center()
             .size_full()
             .overflow_y_scroll()
-            .p(px(24.))
+            .p(unit(24.))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(14.))
+                    .gap(unit(14.))
                     .w_full()
-                    .max_w(px(760.))
+                    .max_w(unit(760.))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
+                            .gap(unit(4.))
                             .child(
                                 div()
-                                    .text_size(px(18.))
+                                    .text_size(unit(18.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Start a scan"),
                             )
@@ -1170,7 +1223,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(10.))
+                    .gap(unit(10.))
                     .child(ui::stat(
                         "Project artifacts",
                         theme::bytes(total),
@@ -1207,7 +1260,7 @@ impl Kuizer {
             .child(
                 div()
                     .flex()
-                    .gap(px(10.))
+                    .gap(unit(10.))
                     .items_start()
                     .child(
                         ui::card("Where the space is")
@@ -1271,7 +1324,7 @@ impl Kuizer {
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(unit(12.))
                     .text_color(theme::faint())
                     .child(format!(
                         "Scanned {} folders and {} files in {:.1}s{}",
@@ -1317,9 +1370,9 @@ impl Kuizer {
                 .id(category.as_str())
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .h(px(24.))
+                .gap(unit(6.))
+                .px(unit(8.))
+                .h(unit(24.))
                 .rounded(theme::radius_control())
                 .cursor_pointer()
                 .text_color(if shown { theme::text() } else { theme::faint() })
@@ -1339,9 +1392,9 @@ impl Kuizer {
             .flex_none()
             .flex_wrap()
             .items_center()
-            .gap(px(12.))
-            .px(px(14.))
-            .py(px(8.))
+            .gap(unit(12.))
+            .px(unit(14.))
+            .py(unit(8.))
             .border_b_1()
             .border_color(theme::border())
             .child(
@@ -1353,7 +1406,7 @@ impl Kuizer {
             .child(
                 div()
                     .flex()
-                    .gap(px(2.))
+                    .gap(unit(2.))
                     .children(Category::ALL.into_iter().map(chip)),
             )
             .child(div().flex_1())
@@ -1453,7 +1506,7 @@ impl Kuizer {
             return div().into_any_element();
         };
         let header = table_header()
-            .child(div().w(px(14.)))
+            .child(div().w(unit(14.)))
             .child(column(90.).text_right().child("Size"))
             .child(column(64.).child("Safety"))
             .child(column(90.).child("Tool"))
@@ -1497,13 +1550,13 @@ impl Kuizer {
                             this.child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.))
+                                    .text_size(unit(12.))
                                     .text_color(theme::faint())
                                     .child(cache.note),
                             )
                         }),
                 )
-                .h(px(44.))
+                .h(unit(44.))
                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                     if !app.busy() {
                         app.toggle(Source::Cache, id, cx);
@@ -1518,9 +1571,9 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_none()
-                    .gap(px(16.))
-                    .px(px(14.))
-                    .py(px(10.))
+                    .gap(unit(16.))
+                    .px(unit(14.))
+                    .py(unit(10.))
                     .border_b_1()
                     .border_color(theme::border())
                     .text_color(theme::muted())
@@ -1584,7 +1637,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(10.))
+                    .gap(unit(10.))
                     .child(ui::stat(
                         "Reclaimable",
                         theme::bytes(wasted),
@@ -1614,8 +1667,8 @@ impl Kuizer {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
-                        .pt(px(8.))
+                        .gap(unit(4.))
+                        .pt(unit(8.))
                         .border_t_1()
                         .border_color(theme::border())
                         .child(ui::bar_row(
@@ -1636,7 +1689,7 @@ impl Kuizer {
                         .children(group.members.iter().map(|member| {
                             div()
                                 .flex()
-                                .gap(px(8.))
+                                .gap(unit(8.))
                                 .text_color(theme::muted())
                                 .child(
                                     div()
@@ -1682,16 +1735,16 @@ impl Kuizer {
         let chart = div()
             .flex()
             .items_end()
-            .gap(px(4.))
-            .h(px(120.))
+            .gap(unit(4.))
+            .h(unit(120.))
             .children(recent.iter().map(|run| {
                 div()
                     .flex_1()
-                    .max_w(px(40.))
+                    .max_w(unit(40.))
                     .h(gpui::relative(
                         theme::share(run.total.bytes, tallest).max(0.02),
                     ))
-                    .rounded_t(px(2.))
+                    .rounded_t(unit(2.))
                     .bg(theme::bar())
             }));
         let header = table_header()
@@ -1706,7 +1759,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(px(10.))
+                    .gap(unit(10.))
                     .child(ui::stat(
                         "Cleanups",
                         cumulative.runs.to_string(),
@@ -1760,9 +1813,9 @@ impl Kuizer {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(12.))
-                            .h(px(30.))
-                            .px(px(14.))
+                            .gap(unit(12.))
+                            .h(unit(30.))
+                            .px(unit(14.))
                             .border_t_1()
                             .border_color(theme::border())
                             .child(column(56.).child(run.session()))
@@ -1795,7 +1848,7 @@ impl Kuizer {
                     .any(|run| run.action == Action::Restore)
                     .then(|| {
                         div()
-                            .text_size(px(12.))
+                            .text_size(unit(12.))
                             .text_color(theme::faint())
                             .child("Restores are counted in Items removed as restored")
                     }),
@@ -1819,14 +1872,14 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
-                    .py(px(6.))
+                    .gap(unit(2.))
+                    .py(unit(6.))
                     .border_b_1()
                     .border_color(theme::border())
                     .child(div().truncate().child(display_path(&issue.path)))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(unit(12.))
                             .text_color(theme::faint())
                             .child(issue.message.clone()),
                     )
@@ -1839,9 +1892,9 @@ impl Kuizer {
         let panel = div()
             .flex()
             .flex_col()
-            .gap(px(12.))
-            .w(px(520.))
-            .p(px(18.))
+            .gap(unit(12.))
+            .w(unit(520.))
+            .p(unit(18.))
             .rounded(theme::radius_dialog())
             .bg(theme::elevated())
             .border_1()
@@ -1862,7 +1915,7 @@ impl Kuizer {
                 panel
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_size(unit(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!(
                                 "Move {} items to the trash?",
@@ -1877,14 +1930,14 @@ impl Kuizer {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
-                            .p(px(10.))
+                            .gap(unit(4.))
+                            .p(unit(10.))
                             .rounded(theme::radius_panel())
                             .bg(theme::panel())
                             .children(selected.iter().take(LIST_LIMIT).map(|(_, candidate)| {
                                 div()
                                     .flex()
-                                    .gap(px(8.))
+                                    .gap(unit(8.))
                                     .child(
                                         div()
                                             .flex_1()
@@ -1897,7 +1950,7 @@ impl Kuizer {
                                     ))
                                     .child(
                                         div()
-                                            .w(px(80.))
+                                            .w(unit(80.))
                                             .text_right()
                                             .text_color(theme::muted())
                                             .child(theme::bytes(candidate.usage.allocated)),
@@ -1923,8 +1976,8 @@ impl Kuizer {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .h(px(30.))
-                                    .px(px(10.))
+                                    .h(unit(30.))
+                                    .px(unit(10.))
                                     .rounded(theme::radius_control())
                                     .bg(theme::background())
                                     .border_1()
@@ -1934,7 +1987,7 @@ impl Kuizer {
                                         theme::border_strong()
                                     })
                                     .child(typed.clone())
-                                    .child(div().w(px(1.)).h(px(16.)).bg(theme::text())),
+                                    .child(div().w(unit(1.)).h(unit(16.)).bg(theme::text())),
                             )
                         },
                     )
@@ -1942,7 +1995,7 @@ impl Kuizer {
                         div()
                             .flex()
                             .justify_end()
-                            .gap(px(8.))
+                            .gap(unit(8.))
                             .child(
                                 ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
                                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
@@ -1972,7 +2025,7 @@ impl Kuizer {
             Dialog::Finished(finished) => panel
                 .child(
                     div()
-                        .text_size(px(15.))
+                        .text_size(unit(15.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!(
                             "Moved {} items, {}",
@@ -2002,7 +2055,7 @@ impl Kuizer {
                                     .child(div().truncate().child(path.clone()))
                                     .child(
                                         div()
-                                            .text_size(px(12.))
+                                            .text_size(unit(12.))
                                             .text_color(theme::faint())
                                             .child(error.clone()),
                                     )
@@ -2040,7 +2093,23 @@ impl Kuizer {
 }
 
 impl Render for Kuizer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(self.zoom.rem_size());
+        let view = cx.entity().downgrade();
+        let wheel = canvas(
+            |_, _, _| {},
+            move |_, (), window, _| {
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture || !event.modifiers.secondary() {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    view.update(cx, |app, cx| app.wheel_zoom(event, cx)).ok();
+                });
+            },
+        )
+        .absolute()
+        .size_full();
         let content = self.render_content(cx);
         let dialog = self.render_dialog(cx);
         let start = matches!(self.phase, Phase::Start);
@@ -2052,9 +2121,13 @@ impl Render for Kuizer {
             .bg(theme::background())
             .text_color(theme::text())
             .font_family(self.font.clone())
-            .text_size(px(13.))
+            .text_size(unit(13.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::reset_zoom))
+            .child(wheel)
             .child(self.render_titlebar(cx))
             .child(
                 div()
@@ -2084,14 +2157,14 @@ fn scroll(id: &'static str) -> gpui::Stateful<Div> {
         .id(id)
         .flex()
         .flex_col()
-        .gap(px(14.))
+        .gap(unit(14.))
         .size_full()
-        .p(px(16.))
+        .p(unit(16.))
         .overflow_y_scroll()
 }
 
 fn column(width: f32) -> Div {
-    div().w(px(width)).flex_none()
+    div().w(unit(width)).flex_none()
 }
 
 fn table_header() -> Div {
@@ -2099,13 +2172,13 @@ fn table_header() -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(12.))
-        .h(px(30.))
-        .px(px(14.))
+        .gap(unit(12.))
+        .h(unit(30.))
+        .px(unit(14.))
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::border())
-        .text_size(px(12.))
+        .text_size(unit(12.))
         .text_color(theme::muted())
 }
 
@@ -2114,10 +2187,10 @@ fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
         .id(gpui::ElementId::NamedInteger(id.0.into(), id.1))
         .flex()
         .items_center()
-        .gap(px(12.))
+        .gap(unit(12.))
         .w_full()
-        .h(px(30.))
-        .px(px(14.))
+        .h(unit(30.))
+        .px(unit(14.))
         .cursor_pointer()
         .border_b_1()
         .border_color(theme::border())
@@ -2147,7 +2220,10 @@ fn short_time(stamp: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{
+        Entity, Keystroke, Modifiers, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext,
+        point,
+    };
 
     use super::*;
 
@@ -2157,6 +2233,7 @@ mod tests {
                 Config::default(),
                 Vec::new(),
                 Recent::load(Some(recent)),
+                Zoom::load(None),
                 "Noto Sans".into(),
                 window,
                 cx,
@@ -2299,5 +2376,44 @@ mod tests {
             );
             app.cancel_scan(cx);
         });
+    }
+
+    fn scroll(cx: &mut VisualTestContext, lines: f32, modifiers: Modifiers) {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(400.), px(300.)),
+            delta: ScrollDelta::Lines(point(0., lines)),
+            modifiers,
+            touch_phase: TouchPhase::Moved,
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_plus_minus_and_zero_change_the_zoom(cx: &mut TestAppContext) {
+        cx.update(bind_keys);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        cx.simulate_keystrokes("ctrl-= ctrl-shift-=");
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 120));
+        cx.update(|window, _| assert_eq!(window.rem_size(), px(19.2)));
+        cx.simulate_keystrokes("ctrl-- ctrl-- ctrl-- ctrl--");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.zoom.percent, 80);
+            assert!(app.folder.is_empty());
+        });
+        cx.simulate_keystrokes("ctrl-0");
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 100));
+    }
+
+    #[gpui::test]
+    fn ctrl_scroll_zooms_and_plain_scroll_does_not(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        scroll(cx, 1., Modifiers::control());
+        scroll(cx, 1., Modifiers::control());
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 120));
+        scroll(cx, -1., Modifiers::control());
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 110));
+        scroll(cx, 1., Modifiers::default());
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 110));
     }
 }

@@ -3,6 +3,7 @@ mod model;
 mod start;
 mod theme;
 mod ui;
+mod zoom;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,6 +15,7 @@ use gpui::{
 use kuizer::config::Config;
 
 use crate::app::Kuizer;
+use crate::zoom::Zoom;
 
 fn font(cx: &App) -> SharedString {
     let installed = cx.text_system().all_font_names();
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         let font = font(cx);
+        app::bind_keys(cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -53,7 +56,17 @@ fn main() -> ExitCode {
                 ..WindowOptions::default()
             },
             |window, cx| {
-                cx.new(|cx| Kuizer::new(config, roots, start::Recent::for_user(), font, window, cx))
+                cx.new(|cx| {
+                    Kuizer::new(
+                        config,
+                        roots,
+                        start::Recent::for_user(),
+                        Zoom::for_user(),
+                        font,
+                        window,
+                        cx,
+                    )
+                })
             },
         );
         if let Err(error) = opened {
