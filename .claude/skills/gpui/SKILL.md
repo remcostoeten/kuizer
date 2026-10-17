@@ -34,11 +34,18 @@ explain the mechanics well but can name APIs that 0.2.2 does not have.
 
 ## Tooltips
 
-Plain GPUI has tooltips on stateful elements: give the element an `.id(..)`,
-then `.tooltip(|window, cx| cx.new(|_| MyTooltip { .. }).into())` where the
-tooltip is a small view implementing `Render`. `hoverable_tooltip` keeps it open
-while hovered. Check both signatures in `gpui-0.2.2/src/elements/div.rs`. One
-reusable tooltip view, styled from `theme.rs`, beats per-call styling.
+kuizer-gui has its own tooltip layer in `crates/kuizer-gui/src/tooltip.rs`,
+modeled on gpui-component's managed tooltips: anchored below the trigger,
+500ms delay for the first one, the next one opens at once, closes on leave,
+click, scroll or a key. Use `.tip(..)` (from `tooltip::Tip`) on any element
+with an `.id(..)`, never GPUI's built-in `.tooltip(..)`:
+
+- `tooltip::plain(text)`, `tooltip::path(&path)` for full paths
+- `tooltip::term(Term::X)` for jargon; explanations live in `glossary.rs`
+- `Tooltip::new(text).keys(&["Enter"]).build()` for actions with a shortcut
+- `Tooltip::details(title).row(label, value).note(text).build()` for metrics
+
+The window root must render `tooltip::layer(cx)` once.
 
 ## Testing
 

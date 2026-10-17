@@ -25,7 +25,7 @@ use crate::glossary::Term;
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
-use crate::tooltip::{self, Tip};
+use crate::tooltip::{self, Tip, Tooltip};
 use crate::ui::{self, ButtonKind};
 use crate::zoom::Zoom;
 
@@ -67,6 +67,17 @@ impl Tab {
         Self::History,
         Self::Issues,
     ];
+
+    fn term(self) -> Term {
+        match self {
+            Self::Overview => Term::Overview,
+            Self::Artifacts => Term::ProjectArtifacts,
+            Self::Caches => Term::GlobalCaches,
+            Self::Duplicates => Term::DuplicateFiles,
+            Self::History => Term::History,
+            Self::Issues => Term::Issues,
+        }
+    }
 
     fn label(self) -> &'static str {
         match self {
@@ -703,29 +714,37 @@ impl Kuizer {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
-                    ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true).on_click(
-                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                    ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true)
+                        .tip(
+                            Tooltip::new("Stop the scan and go back to the start screen")
+                                .keys(&["Esc"])
+                                .build(),
+                        )
+                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                             app.cancel_scan(cx);
-                        }),
-                    ),
+                        })),
                 )
             })
             .when(finished, |this| {
                 this.child(
-                    ui::button("new-scan", "New scan", ButtonKind::Ghost, !busy).on_click(
-                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                    ui::button("new-scan", "New scan", ButtonKind::Ghost, !busy)
+                        .tip(tooltip::plain(
+                            "Choose another folder or change the scan options",
+                        ))
+                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                             app.new_scan(cx);
-                        }),
-                    ),
+                        })),
                 )
                 .child(
-                    ui::button("rescan", "Rescan", ButtonKind::Secondary, !busy).on_click(
-                        cx.listener(|app, _: &ClickEvent, _, cx| {
+                    ui::button("rescan", "Rescan", ButtonKind::Secondary, !busy)
+                        .tip(tooltip::plain(
+                            "Scan the same folders again with the same options",
+                        ))
+                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                             if !app.busy() {
                                 app.rescan(cx);
                             }
-                        }),
-                    ),
+                        })),
                 )
             });
         div()
@@ -833,6 +852,7 @@ impl Kuizer {
                     })
                     .when(active, |this| this.bg(theme::selected()))
                     .hover(|style| style.bg(theme::hover()))
+                    .tip(tooltip::term(tab.term()))
                     .child(div().flex_1().child(tab.label()))
                     .children(count.map(|count| {
                         div()
@@ -874,7 +894,14 @@ impl Kuizer {
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::border())
-            .child(div().child(summary))
+            .child(
+                div()
+                    .id("selection")
+                    .when(!selected.is_empty(), |this| {
+                        this.tip(selection_details(&selected))
+                    })
+                    .child(summary),
+            )
             .when(review > 0, |this| {
                 this.child(
                     div()
@@ -901,6 +928,7 @@ impl Kuizer {
                     ButtonKind::Ghost,
                     ready && !selected.is_empty(),
                 )
+                .tip(tooltip::plain("Clear the selection in every tab"))
                 .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                     if !app.busy() {
                         app.selection.clear();
@@ -915,6 +943,7 @@ impl Kuizer {
                     ButtonKind::Primary,
                     ready && !selected.is_empty(),
                 )
+                .tip(tooltip::term(Term::Trash))
                 .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
                     app.open_confirm(window, cx);
                 })),
@@ -1006,6 +1035,14 @@ impl Kuizer {
                 theme::border_strong()
             })
             .cursor(CursorStyle::IBeam)
+            .tip(
+                Tooltip::details("Keyboard")
+                    .row("Enter", "start the scan")
+                    .row("Ctrl+V", "paste a path")
+                    .row("Ctrl+Backspace", "remove the last folder")
+                    .row("Ctrl+U", "clear the field")
+                    .build(),
+            )
             .when(field_text.is_empty(), |this| {
                 this.child(div().w(unit(1.)).h(unit(16.)).bg(theme::text()))
                     .child(
@@ -1037,7 +1074,9 @@ impl Kuizer {
             }));
         let scope = ui::segments()
             .child(
-                ui::segment("scope-folder", "One folder", !self.whole_home).on_click(cx.listener(
+                ui::segment("scope-folder", "One folder", !self.whole_home)
+                    .tip(tooltip::plain("Scan one folder and everything below it"))
+                    .on_click(cx.listener(
                     |app, _: &ClickEvent, _, cx| {
                         app.whole_home = false;
                         cx.notify();
@@ -1045,7 +1084,11 @@ impl Kuizer {
                 )),
             )
             .child(
-                ui::segment("scope-home", "Whole home folder", self.whole_home).on_click(
+                ui::segment("scope-home", "Whole home folder", self.whole_home)
+                    .tip(tooltip::plain(
+                        "Scan everything under your home folder. This takes longer than one project folder",
+                    ))
+                    .on_click(
                     cx.listener(|app, _: &ClickEvent, _, cx| {
                         app.whole_home = true;
                         app.folder_error = None;
@@ -1062,13 +1105,13 @@ impl Kuizer {
                     .gap(unit(8.))
                     .child(field)
                     .child(
-                        ui::button("browse", "Choose folder", ButtonKind::Secondary, true)
+                        ui::button("browse", "Choose folder", ButtonKind::Secondary, true).tip(tooltip::plain("Pick a folder with the system dialog"))
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.choose_folder(cx);
                             })),
                     )
                     .child(
-                        ui::button("start-scan", "Start scan", ButtonKind::Primary, true)
+                        ui::button("start-scan", "Start scan", ButtonKind::Primary, true).tip(Tooltip::new("Scan the chosen folder").keys(&["Enter"]).build())
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.start_scan(cx);
                             })),
@@ -1555,6 +1598,7 @@ impl Kuizer {
                 div()
                     .id("select-visible")
                     .cursor_pointer()
+                    .tip(tooltip::plain("Select or clear every item in this list"))
                     .child(ui::checkbox(all_checked))
                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                         if !app.busy() {
@@ -1586,7 +1630,9 @@ impl Kuizer {
                                 .child(ui::checkbox(checked))
                                 .child(
                                     column(90.)
+                                        .id(("artifact-size", id))
                                         .text_right()
+                                        .tip(size_details(candidate, &report.roots))
                                         .child(theme::bytes(candidate.usage.allocated)),
                                 )
                                 .child(
@@ -1676,7 +1722,9 @@ impl Kuizer {
                 .child(ui::checkbox(checked))
                 .child(
                     column(90.)
+                        .id(("cache-size", id))
                         .text_right()
+                        .tip(size_details(candidate, &[]))
                         .child(theme::bytes(candidate.usage.allocated)),
                 )
                 .child(column(64.).child(ui::safety_label(("cache-safety", id), review)))
@@ -1870,9 +1918,7 @@ impl Kuizer {
                                     theme::bar(),
                                 )
                                 .id(("group", index))
-                                .when(!group.verified, |this| {
-                                    this.tip(tooltip::term(Term::Unverified))
-                                }),
+                                .tip(group_details(group)),
                             )
                             .children(group.members.iter().enumerate().map(|(position, member)| {
                                 div()
@@ -1930,6 +1976,7 @@ impl Kuizer {
             .h(unit(120.))
             .children(recent.iter().map(|run| {
                 div()
+                    .id(("cleanup-bar", run.id))
                     .flex_1()
                     .max_w(unit(40.))
                     .h(gpui::relative(
@@ -1937,6 +1984,14 @@ impl Kuizer {
                     ))
                     .rounded_t(unit(2.))
                     .bg(theme::bar())
+                    .hover(|style| style.bg(theme::text()))
+                    .tip(
+                        Tooltip::details(format!("Cleanup {}", run.session()))
+                            .row("Started", short_time(&run.started_at))
+                            .row("Items", run.total.items.to_string())
+                            .row("Size", theme::bytes(run.total.bytes))
+                            .build(),
+                    )
             }));
         let header = table_header()
             .child(head(56., "Run", Term::Run))
@@ -2034,7 +2089,9 @@ impl Kuizer {
                             .child(column(56.).child(run.session()))
                             .child(
                                 column(150.)
+                                    .id(("started", index))
                                     .text_color(theme::muted())
+                                    .tip(tooltip::plain(run.started_at.clone()))
                                     .child(short_time(&run.started_at)),
                             )
                             .child(column(70.).text_right().child(run.total.items.to_string()))
@@ -2234,14 +2291,14 @@ impl Kuizer {
                             .justify_end()
                             .gap(unit(8.))
                             .child(
-                                ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
+                                ui::button("cancel", "Cancel", ButtonKind::Secondary, true).tip(Tooltip::new("Keep everything where it is").keys(&["Esc"]).build())
                                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                         app.dialog = None;
                                         cx.notify();
                                     })),
                             )
                             .child(
-                                ui::button("confirm", "Move to trash", ButtonKind::Primary, accepted)
+                                ui::button("confirm", "Move to trash", ButtonKind::Primary, accepted).tip(Tooltip::new("Move the selected items to the trash").keys(&["Enter"]).build())
                                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                         app.accept(cx);
                                     })),
@@ -2308,14 +2365,16 @@ impl Kuizer {
                         .text_color(theme::danger())
                         .child(format!("The history could not be saved: {error}"))
                 }))
-                .child(div().flex().justify_end().child(
-                    ui::button("done", "Done", ButtonKind::Primary, true).on_click(cx.listener(
-                        |app, _: &ClickEvent, _, cx| {
-                            app.dialog = None;
-                            cx.notify();
-                        },
-                    )),
-                )),
+                .child(
+                    div().flex().justify_end().child(
+                        ui::button("done", "Done", ButtonKind::Primary, true)
+                            .tip(Tooltip::new("Close this summary").keys(&["Enter"]).build())
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.dialog = None;
+                                cx.notify();
+                            })),
+                    ),
+                ),
         };
         Some(
             div()
@@ -2380,7 +2439,8 @@ impl Render for Kuizer {
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content)),
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
-            .children(dialog);
+            .children(dialog)
+            .child(tooltip::layer(cx));
         frame::frame(root, window)
     }
 }
@@ -2446,6 +2506,77 @@ fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
         .border_color(theme::border())
         .when(checked, |this| this.bg(theme::selected()))
         .hover(|style| style.bg(theme::hover()))
+}
+
+fn size_details(
+    candidate: &Candidate,
+    roots: &[PathBuf],
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
+    let usage = candidate.usage;
+    let mut details = Tooltip::details(theme::bytes(usage.allocated))
+        .row("On disk", theme::bytes(usage.allocated))
+        .row("File sizes", theme::bytes(usage.apparent))
+        .row("Entries", usage.entries.to_string());
+    if candidate.newest.is_some() {
+        details = details.row(
+            "Last change",
+            format!("{} ago", theme::age(candidate.newest)),
+        );
+    }
+    if let Some(project) = &candidate.project {
+        details = details.row("Project", model::short_path(project, roots));
+    }
+    if candidate.project_last_active.is_some() {
+        details = details.row(
+            "Project active",
+            format!("{} ago", theme::age(candidate.project_last_active)),
+        );
+    }
+    if usage.partial {
+        details =
+            details.note("Some folders inside could not be read, so the real size is larger.");
+    }
+    details.build()
+}
+
+fn selection_details(
+    selected: &[(Source, &Candidate)],
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
+    let total = |keep: &dyn Fn(&(Source, &Candidate)) -> bool| {
+        selected
+            .iter()
+            .filter(|item| keep(item))
+            .fold((0, 0), |(count, bytes), (_, candidate)| {
+                (count + 1, bytes + candidate.usage.allocated)
+            })
+    };
+    let line = |(count, bytes): (usize, u64)| format!("{count}, {}", theme::bytes(bytes));
+    Tooltip::details("Selection")
+        .row("safe", line(total(&|(_, c)| c.rule.safety == Safety::Safe)))
+        .row(
+            "review",
+            line(total(&|(_, c)| c.rule.safety == Safety::Review)),
+        )
+        .row(
+            "Project artifacts",
+            line(total(&|(s, _)| *s == Source::Artifact)),
+        )
+        .row("Global caches", line(total(&|(s, _)| *s == Source::Cache)))
+        .build()
+}
+
+fn group_details(
+    group: &kuizer::dupes::Group,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
+    let details = Tooltip::details("Duplicate group")
+        .row("Copies", group.members.len().to_string())
+        .row("Size of each", theme::bytes(group.size))
+        .row("Reclaimable", theme::bytes(group.reclaimable()));
+    if group.verified {
+        details.build()
+    } else {
+        details.note(Term::Unverified.text()).build()
+    }
 }
 
 fn plural(count: usize, noun: &str) -> String {
@@ -2655,6 +2786,31 @@ mod tests {
             assert!(matches!(app.phase, Phase::Ready(_)));
             assert_eq!(app.tab, Tab::Duplicates);
         });
+    }
+
+    #[gpui::test]
+    fn hovering_a_section_explains_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_scan(&view, cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        let history = cx.debug_bounds("History").expect("a sidebar item");
+        let issues = cx.debug_bounds("Issues").expect("a sidebar item");
+        cx.simulate_mouse_move(history.center(), None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let tip = cx.debug_bounds("tooltip").expect("the History tooltip");
+        assert!(tip.origin.y >= history.bottom());
+        cx.simulate_mouse_move(issues.center(), None, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let next = cx
+            .debug_bounds("tooltip")
+            .expect("the Issues tooltip opens at once");
+        assert!(next.origin.y >= issues.bottom());
     }
 
     #[test]

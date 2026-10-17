@@ -176,20 +176,12 @@ pub fn empty(text: impl Into<SharedString>) -> Div {
 }
 
 pub fn safety_label(id: impl Into<ElementId>, review: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .tip(tooltip::term(if review {
-            Term::Review
-        } else {
-            Term::Safe
-        }))
-        .text_size(unit(12.))
-        .text_color(if review {
-            theme::review()
-        } else {
-            theme::muted()
-        })
-        .child(if review { "review" } else { "safe" })
+    let (label, tone, term) = if review {
+        ("review", Tone::Review, Term::Review)
+    } else {
+        ("safe", Tone::Neutral, Term::Safe)
+    };
+    tag(id, label, tone).tip(tooltip::term(term))
 }
 
 pub fn segment(
@@ -250,4 +242,47 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
                         .child(hint.into()),
                 ),
         )
+}
+
+pub fn kbd(key: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .min_w(unit(18.))
+        .h(unit(18.))
+        .px(unit(5.))
+        .rounded(theme::radius_control())
+        .bg(theme::background())
+        .border_1()
+        .border_color(theme::border_strong())
+        .text_size(unit(11.))
+        .text_color(theme::muted())
+        .child(key.into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Neutral,
+    Review,
+}
+
+pub fn tag(id: impl Into<ElementId>, label: impl Into<SharedString>, tone: Tone) -> Stateful<Div> {
+    let (background, foreground) = match tone {
+        Tone::Neutral => (theme::track(), theme::muted()),
+        Tone::Review => (theme::review_soft(), theme::review()),
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(unit(18.))
+        .px(unit(6.))
+        .rounded(theme::radius_control())
+        .bg(background)
+        .text_size(unit(11.5))
+        .text_color(foreground)
+        .child(label.into())
 }
