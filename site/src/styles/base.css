@@ -1,0 +1,235 @@
+html {
+  background: var(--bg);
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+h1,
+h2,
+h3 {
+  font-optical-sizing: auto;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+  font-feature-settings: 'liga' 0;
+}
+
+:where(:focus-visible) {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
+@utility wrap {
+  margin-inline: auto;
+  width: 100%;
+  max-width: var(--container-page);
+  padding-inline: 20px;
+
+  @media (min-width: 768px) {
+    padding-inline: 32px;
+  }
+}
+
+@utility btn {
+  display: inline-flex;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-inline: 24px;
+  border-radius: 0;
+  font-size: 16px;
+  font-weight: 400;
+  white-space: nowrap;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 150ms ease,
+    border-color 150ms ease,
+    opacity 150ms ease;
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+@utility btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      opacity: 0.88;
+    }
+  }
+}
+
+@utility btn-secondary {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      background: var(--tile);
+      border-color: var(--line-strong);
+    }
+  }
+}
+
+@utility btn-icon {
+  width: 48px;
+  padding-inline: 0;
+}
+
+@utility btn-sm {
+  height: 32px;
+  padding-inline: 16px;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+@utility press {
+  transition:
+    transform 160ms var(--ease-out),
+    color 150ms ease,
+    background-color 150ms ease;
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+@utility frame {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-frame);
+  box-shadow: var(--shadow-frame);
+  overflow: hidden;
+}
+
+@utility window {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-window);
+  overflow: hidden;
+  box-shadow: 0 30px 60px -20px color-mix(in srgb, black 50%, transparent);
+}
+
+@utility panel {
+  background: var(--tile);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+
+@utility pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding-inline: 12px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+  transition:
+    color 150ms ease,
+    border-color 150ms ease;
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--fg);
+      border-color: var(--line-strong);
+    }
+  }
+}
+
+@utility icon-btn {
+  display: inline-flex;
+  height: 28px;
+  width: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  color: var(--fg-faint);
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    transform 160ms var(--ease-out);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--fg);
+      background: var(--tile);
+    }
+  }
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+@utility install-tab {
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-faint);
+  box-shadow: inset 0 -1px 0 transparent;
+  transition:
+    color 150ms ease,
+    box-shadow 150ms ease;
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--fg);
+    }
+  }
+
+  &[aria-selected='true'] {
+    color: var(--fg);
+    box-shadow: inset 0 -1px 0 var(--brand);
+  }
+}
+
+@utility footer-grid {
+  grid-template-columns: 1fr auto;
+}
+
+@utility showcase-grid {
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+}
+
+@utility faq-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+}
+
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}

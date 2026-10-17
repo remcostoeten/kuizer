@@ -1,0 +1,9 @@
+@import 'tailwindcss';
+@custom-variant dark (&:where(:root:not([data-theme='light']), :root:not([data-theme='light']) *));
+@import '../styles/tokens.css' layer(theme);
+@import '../styles/base.css';
+@import '../styles/motion.css' layer(utilities);
+@import '../styles/components/decorations.css' layer(components);
+@import '../styles/components/faq.css' layer(components);
+@import '../styles/components/terminal.css' layer(components);
+@import '../styles/components/disk-bar.css' layer(components);

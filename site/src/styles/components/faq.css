@@ -1,0 +1,44 @@
+.faq-item {
+  interpolate-size: allow-keywords;
+
+  &::details-content {
+    height: 0;
+    overflow: clip;
+    transition:
+      height 180ms var(--ease-out),
+      content-visibility 180ms allow-discrete;
+  }
+
+  &[open]::details-content {
+    height: auto;
+    transition-duration: 260ms;
+  }
+}
+
+.faq-plus {
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    background: currentColor;
+    transition: transform 200ms var(--ease-in-out);
+  }
+
+  &::before {
+    inset-inline-start: 0;
+    top: 5.5px;
+    width: 12px;
+    height: 1px;
+  }
+
+  &::after {
+    inset-inline-start: 5.5px;
+    top: 0;
+    width: 1px;
+    height: 12px;
+  }
+
+  [open] &::after {
+    transform: rotate(90deg);
+  }
+}

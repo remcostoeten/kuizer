@@ -1,0 +1,11 @@
+.seg {
+  transition:
+    opacity 320ms ease,
+    background-color 320ms ease,
+    box-shadow 160ms ease,
+    scale 160ms var(--ease-out);
+}
+
+.seg-freed {
+  background: repeating-linear-gradient(135deg, var(--line-strong) 0 2px, transparent 2px 5px);
+}
