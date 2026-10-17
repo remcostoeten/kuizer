@@ -237,11 +237,16 @@ fn never_touches_browser_or_electron_profiles() {
     assert_eq!(snapshot(&app), before_app);
 }
 
+#[cfg(target_os = "macos")]
+const PIP_CACHE: &str = "Library/Caches/pip/http/b";
+#[cfg(not(target_os = "macos"))]
+const PIP_CACHE: &str = ".cache/pip/http/b";
+
 #[test]
 fn cache_lists_and_cleans_known_caches_only() {
     let (_tmp, home, _root) = setup();
     file(&home, ".npm/_cacache/index-v5/a", 100);
-    file(&home, ".cache/pip/http/b", 100);
+    file(&home, PIP_CACHE, 100);
     file(
         &home,
         ".cache/BraveSoftware/Brave-Browser/Default/Cache/c",
@@ -270,7 +275,7 @@ fn cache_lists_and_cleans_known_caches_only() {
     assert!(output.status.success(), "{output:?}");
     assert!(!home.join(".npm/_cacache").exists());
     assert!(home.join(".npm").exists());
-    assert!(home.join(".cache/pip/http/b").exists());
+    assert!(home.join(PIP_CACHE).exists());
     assert_eq!(snapshot(&home.join(".config/BraveSoftware")), brave);
     assert_eq!(snapshot(&home.join(".cache/BraveSoftware")), brave_cache);
 }
