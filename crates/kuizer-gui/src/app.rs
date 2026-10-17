@@ -14,6 +14,7 @@ use gpui::{
 use kuizer::config::Config;
 use kuizer::delete::Status;
 use kuizer::detect::{Category, Safety};
+use kuizer::dupes;
 use kuizer::history::Action;
 use kuizer::output::display_path;
 use kuizer::platform;
@@ -88,8 +89,12 @@ impl Tab {
             Self::Issues => "Issues collected, shown once the scan is done",
             Self::Duplicates if !options.duplicates => "Duplicate search is off for this scan",
             Self::Duplicates if walking => "Collecting files while scanning folders",
-            Self::Duplicates if matches!(stage, Stage::Duplicates(_)) => "Comparing files",
-            Self::Duplicates => "Duplicates found, shown once the scan is done",
+            Self::Duplicates => match stage {
+                Stage::Duplicates(dupes::Stage::Walking { .. }) => "Collecting files",
+                Stage::Duplicates(dupes::Stage::Hashing { .. }) => "Hashing files",
+                Stage::Duplicates(dupes::Stage::Verifying { .. }) => "Comparing files",
+                _ => "Duplicates found, shown once the scan is done",
+            },
             Self::Caches if !options.caches => "Global caches are off for this scan",
             Self::Caches => match stage {
                 Stage::Caches => "Measuring global caches",
@@ -922,7 +927,6 @@ impl Kuizer {
             Phase::Loading(stage) => {
                 centered(
                     div()
-                        .debug_selector(|| format!("scanning {}", self.tab.label()))
                         .flex()
                         .flex_col()
                         .items_center()
@@ -932,11 +936,13 @@ impl Kuizer {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(self.tab.label()),
                         )
-                        .child(
+                        .child({
+                            let status = self.tab.status(*stage, &self.options);
                             div()
+                                .debug_selector(|| status.to_owned())
                                 .text_color(theme::muted())
-                                .child(self.tab.status(*stage, &self.options)),
-                        )
+                                .child(status)
+                        })
                         .child(
                             div()
                                 .text_size(unit(12.))
@@ -2630,9 +2636,9 @@ mod tests {
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         for (label, shown) in [
-            ("Global caches", "scanning Global caches"),
-            ("History", "scanning History"),
-            ("Duplicates", "scanning Duplicates"),
+            ("Global caches", "Global caches are off for this scan"),
+            ("History", "Read at the end of the scan"),
+            ("Duplicates", "Collecting files while scanning folders"),
         ] {
             cx.update(|window, cx| window.draw(cx).clear());
             let bounds = cx.debug_bounds(label).expect("a sidebar item");
@@ -2674,6 +2680,9 @@ mod tests {
             Tab::Duplicates.status(walking, &options),
             "Duplicate search is off for this scan"
         );
+        options.duplicates = true;
+        let hashing = Stage::Duplicates(dupes::Stage::Hashing { files: 3 });
+        assert_eq!(Tab::Duplicates.status(hashing, &options), "Hashing files");
     }
 
     fn scroll(cx: &mut VisualTestContext, lines: f32, modifiers: Modifiers) {
