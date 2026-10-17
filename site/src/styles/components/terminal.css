@@ -1,0 +1,94 @@
+.term {
+  --t-green: light-dark(#1f7a3f, #00bb7f);
+  --t-yellow: light-dark(#946200, #f99c00);
+  --t-red: light-dark(#b3261e, #fb2c36);
+  --t-cyan: light-dark(#0b7285, #5ccfe6);
+  --t-blue: light-dark(#1c5fbf, #7aa7ff);
+  --t-magenta: light-dark(#9b2e9e, #ac4bff);
+  --t-tan: light-dark(#8a6d3b, #d7af87);
+  --t-cursor: color-mix(in srgb, var(--fg) 8%, transparent);
+  --t-selected: light-dark(
+    color-mix(in srgb, var(--t-green) 16%, transparent),
+    color-mix(in srgb, var(--t-green) 22%, transparent)
+  );
+  --t-chip: light-dark(
+    color-mix(in srgb, var(--fg) 10%, transparent),
+    color-mix(in srgb, var(--fg) 12%, transparent)
+  );
+
+  & input:focus-visible {
+    outline: none;
+  }
+}
+
+.tui-row {
+  display: grid;
+  grid-template-columns: 3ch 10ch 7ch minmax(0, 1fr);
+  column-gap: 1ch;
+  align-items: baseline;
+  padding: 1px 6px;
+  margin: 0 -6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  transition:
+    opacity 260ms var(--ease-out),
+    color 260ms ease;
+
+  & > * {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  @media (min-width: 768px) {
+    grid-template-columns: 3ch 10ch 8ch 7ch 12ch 20ch 6ch minmax(0, 1fr);
+  }
+}
+
+.row-deleted::after {
+  content: '';
+  position: absolute;
+  inset-inline: 6px;
+  top: 50%;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: strike 240ms var(--ease-out) forwards;
+}
+
+.clip-left {
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+
+  & > span {
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+}
+
+.key-chip {
+  display: inline-block;
+  padding-inline: 5px;
+  border-radius: 3px;
+  background: var(--t-chip);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  font-weight: 600;
+  line-height: 1.5;
+  transition:
+    scale 160ms var(--ease-out),
+    background-color 150ms ease;
+}
+
+.caret::after {
+  content: '';
+  display: inline-block;
+  width: 0.55em;
+  height: 1.1em;
+  margin-inline-start: 2px;
+  vertical-align: text-bottom;
+  background: var(--fg);
+  animation: blink 1s steps(2, start) infinite;
+}

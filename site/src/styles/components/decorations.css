@@ -1,0 +1,33 @@
+.hero-glow {
+  background: radial-gradient(
+    42% 38% at 50% 22%,
+    rgba(232, 128, 74, 0.06),
+    rgba(232, 128, 74, 0.02) 55%,
+    transparent 78%
+  );
+}
+
+.bracket {
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    width: 0.28em;
+    height: 0.28em;
+    border: 2px solid var(--brand);
+  }
+
+  &::before {
+    top: 0.04em;
+    left: -0.1em;
+    border-right: 0;
+    border-bottom: 0;
+  }
+
+  &::after {
+    right: -0.1em;
+    bottom: 0.04em;
+    border-left: 0;
+    border-top: 0;
+  }
+}
