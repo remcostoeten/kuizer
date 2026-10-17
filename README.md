@@ -64,6 +64,13 @@ Prebuilt binaries for Linux and macOS, on x86_64 and ARM, are attached to every 
 curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-installer.sh | sh
 ```
 
+With Node, the CLI also runs from npm:
+
+```sh
+npx kuizer                                          # run without installing
+npm install -g kuizer                               # or keep it installed
+```
+
 The desktop app installs the same way under its own name:
 
 ```sh
