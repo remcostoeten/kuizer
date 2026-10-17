@@ -1,9 +1,9 @@
 use gpui::{
     Div, ElementId, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled, div,
-    prelude::*, px, relative,
+    prelude::*, relative,
 };
 
-use crate::theme;
+use crate::theme::{self, unit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonKind {
@@ -27,10 +27,10 @@ pub fn button(
         .id(id)
         .flex()
         .items_center()
-        .h(px(26.))
-        .px(px(10.))
+        .h(unit(26.))
+        .px(unit(10.))
         .rounded(theme::radius_button())
-        .text_size(px(12.5))
+        .text_size(unit(12.5))
         .font_weight(FontWeight::MEDIUM)
         .bg(background)
         .text_color(foreground)
@@ -50,7 +50,7 @@ pub fn checkbox(checked: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .size(px(14.))
+        .size(unit(14.))
         .flex_none()
         .rounded(theme::radius_checkbox())
         .border_1()
@@ -62,7 +62,7 @@ pub fn checkbox(checked: bool) -> Div {
         .when(checked, |this| {
             this.child(
                 div()
-                    .size(px(6.))
+                    .size(unit(6.))
                     .rounded(theme::radius_dot())
                     .bg(theme::primary()),
             )
@@ -74,8 +74,8 @@ pub fn card(title: impl Into<SharedString>) -> Div {
         .flex()
         .flex_col()
         .min_w_0()
-        .gap(px(10.))
-        .p(px(14.))
+        .gap(unit(10.))
+        .p(unit(14.))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
@@ -85,7 +85,7 @@ pub fn card(title: impl Into<SharedString>) -> Div {
 
 pub fn heading(title: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(unit(12.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::muted())
         .child(title.into())
@@ -99,30 +99,30 @@ pub fn stat(
     div()
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(unit(2.))
         .flex_1()
-        .min_w(px(140.))
-        .p(px(14.))
+        .min_w(unit(140.))
+        .p(unit(14.))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(unit(12.))
                 .text_color(theme::muted())
                 .child(label.into()),
         )
         .child(
             div()
-                .text_size(px(20.))
+                .text_size(unit(20.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value.into()),
         )
         .child(
             div()
                 .truncate()
-                .text_size(px(12.))
+                .text_size(unit(12.))
                 .text_color(theme::faint())
                 .child(sub.into()),
         )
@@ -137,11 +137,11 @@ pub fn bar_row(
     div()
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(unit(4.))
         .child(
             div()
                 .flex()
-                .gap(px(8.))
+                .gap(unit(8.))
                 .child(div().flex_1().min_w_0().truncate().child(label.into()))
                 .child(
                     div()
@@ -152,7 +152,7 @@ pub fn bar_row(
         )
         .child(
             div()
-                .h(px(4.))
+                .h(unit(4.))
                 .w_full()
                 .rounded(theme::radius_bar())
                 .bg(theme::track())
@@ -168,14 +168,14 @@ pub fn bar_row(
 
 pub fn empty(text: impl Into<SharedString>) -> Div {
     div()
-        .p(px(14.))
+        .p(unit(14.))
         .text_color(theme::faint())
         .child(text.into())
 }
 
 pub fn safety_label(review: bool) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(unit(12.))
         .text_color(if review {
             theme::review()
         } else {
@@ -191,8 +191,8 @@ pub fn segment(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .px(px(10.))
-        .h(px(24.))
+        .px(unit(10.))
+        .h(unit(24.))
         .flex()
         .items_center()
         .rounded(theme::radius_control())
@@ -211,8 +211,8 @@ pub fn segments() -> Div {
     div()
         .flex()
         .flex_none()
-        .gap(px(2.))
-        .p(px(2.))
+        .gap(unit(2.))
+        .p(unit(2.))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
@@ -223,8 +223,8 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
     div()
         .flex()
         .items_center()
-        .gap(px(16.))
-        .py(px(8.))
+        .gap(unit(16.))
+        .py(unit(8.))
         .border_t_1()
         .border_color(theme::border())
         .child(
@@ -233,11 +233,11 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap(px(2.))
+                .gap(unit(2.))
                 .child(div().child(label.into()))
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(unit(12.))
                         .text_color(theme::faint())
                         .child(hint.into()),
                 ),

@@ -1,7 +1,13 @@
 use std::time::SystemTime;
 
-use gpui::{Pixels, Rgba, px, rgb, rgba};
+use gpui::{Pixels, Rems, Rgba, px, rems, rgb, rgba};
 use kuizer::units::ByteSize;
+
+pub const REM: f32 = 16.;
+
+pub fn unit(value: f32) -> Rems {
+    rems(value / REM)
+}
 
 pub fn background() -> Rgba {
     rgb(0x0018_1818)
