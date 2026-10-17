@@ -15,6 +15,10 @@ use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
 
+use crate::start::ScanOptions;
+
+pub const CANCELLED: &str = "cancelled";
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Stage {
     #[default]
@@ -97,6 +101,7 @@ impl HistoryView {
 
 pub struct Report {
     pub roots: Vec<PathBuf>,
+    pub options: ScanOptions,
     pub candidates: Vec<Candidate>,
     pub issues: Vec<Issue>,
     pub summary: Summary,
@@ -174,13 +179,6 @@ impl Report {
     }
 }
 
-/// @name default_roots
-/// @description Picks the folders to scan: paths given on the command line, then the roots from
-/// the config file, then the home directory. A desktop app has no meaningful working directory,
-/// so unlike the CLI it never falls back to it unless no home directory is known.
-///
-/// @example
-/// let roots = default_roots(&config, std::env::args_os().skip(1).map(PathBuf::from).collect());
 /// @name short_path
 /// @description Shows a path relative to the scan root that holds it, so long roots are not
 /// repeated on every row. Paths under the home directory root keep their `~` form.
@@ -200,19 +198,6 @@ pub fn short_path(path: &Path, roots: &[PathBuf]) -> String {
         .map_or_else(|| display_path(path), display_path)
 }
 
-pub fn default_roots(config: &Config, paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let roots = if !paths.is_empty() {
-        paths
-    } else if !config.scan.roots.is_empty() {
-        config.scan.roots.clone()
-    } else if let Some(home) = platform::home_dir() {
-        vec![home]
-    } else {
-        std::env::current_dir().into_iter().collect()
-    };
-    scan::normalize_roots(&roots)
-}
-
 fn set(stage: &Mutex<Stage>, next: Stage) {
     if let Ok(mut current) = stage.lock() {
         *current = next;
@@ -222,30 +207,50 @@ fn set(stage: &Mutex<Stage>, next: Stage) {
 /// @name load
 /// @description Gathers everything the dashboard shows in one pass: project artifacts and
 /// duplicate files from a single walk, global caches, the cleanup history and free disk space.
-/// Reports progress through `stage` so the window can show it while this runs on a worker thread.
+/// The start screen's options decide which of these run. Reports progress through `stage` so the
+/// window can show it while this runs on a worker thread, and stops early once `cancel` is set.
 ///
 /// @example
 /// let stage = Mutex::new(Stage::default());
-/// let report = load(&config, &roots, &stage)?;
-pub fn load(config: &Config, roots: &[PathBuf], stage: &Mutex<Stage>) -> Result<Report, String> {
-    let options = Options::from_config(config);
-    let (handle, files) = dupes::start_scan(config, roots, Cancel::new(), Some(options))
+/// let report = load(&config, &roots, &options, &Cancel::new(), &stage)?;
+pub fn load(
+    config: &Config,
+    roots: &[PathBuf],
+    options: &ScanOptions,
+    cancel: &Cancel,
+    stage: &Mutex<Stage>,
+) -> Result<Report, String> {
+    let config = options.apply(config);
+    let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
+    let (handle, files) = dupes::start_scan(&config, roots, cancel.clone(), duplicate_options)
         .map_err(|error| error.to_string())?;
     let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
     let files = files.recv().ok().flatten();
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
     let mut candidates = collected.candidates;
     sort_candidates(&mut candidates, SortKey::Size);
 
-    let duplicates = files.map(|files| {
-        dupes::group(files, options, |progress| {
-            set(stage, Stage::Duplicates(progress));
-        })
-    });
+    let duplicates = duplicate_options
+        .zip(files)
+        .map(|(duplicate_options, files)| {
+            dupes::group(files, duplicate_options, |progress| {
+                set(stage, Stage::Duplicates(progress));
+            })
+        });
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
 
-    set(stage, Stage::Caches);
-    let caches = Locations::for_user()
-        .map(|locations| measure_caches(caches::find(&locations, &Protected::for_user())))
-        .unwrap_or_default();
+    let caches = if options.caches {
+        set(stage, Stage::Caches);
+        Locations::for_user()
+            .map(|locations| measure_caches(caches::find(&locations, &Protected::for_user())))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     set(stage, Stage::History);
     let history = HistoryView::load();
@@ -259,6 +264,7 @@ pub fn load(config: &Config, roots: &[PathBuf], stage: &Mutex<Stage>) -> Result<
 
     Ok(Report {
         roots: roots.to_vec(),
+        options: options.clone(),
         candidates,
         issues: collected.issues,
         summary: collected.summary,
@@ -488,6 +494,7 @@ mod tests {
         second.project = Some(PathBuf::from("/p/a"));
         let report = Report {
             roots: vec![PathBuf::from("/p")],
+            options: ScanOptions::from_config(&Config::default()),
             candidates: vec![first, second],
             issues: Vec::new(),
             summary: Summary {

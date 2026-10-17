@@ -43,9 +43,14 @@ Configuration lives in `~/.config/kuizer/config.toml`; every key is optional. A 
 
 `kuizer-gui` is a desktop window for the same scan, built on [GPUI](https://gpui.rs), the framework Zed is built on. It shows the dashboard's overview, project artifacts, global caches, duplicates, history and scan issues, and moves the items you select to the trash with the same checks as `kuizer clean`: a plain confirmation when everything is `safe`, and typing the item count when any item is `review`. Each cleanup lands in the history, so `kuizer history` and `kuizer restore` work on it. It never deletes permanently.
 
+It opens on a start screen. Type a folder, pick one with the system folder dialog, reopen one of the last eight folders or choose a full scan of your home folder. The same screen sets the scan options: which kinds of artifacts to list, the smallest item size, how deep to walk, and whether to measure global caches, search for duplicate files and stay on one file system. The scan shows its progress and Escape cancels it. New scan in the title bar goes back to the start screen.
+
 ```sh
-cargo run --release -p kuizer-gui -- ~/projects    # scan a folder; without a path it uses the config roots or your home directory
+kuizer-gui                                         # open the start screen
+cargo run --release -p kuizer-gui -- ~/projects    # skip the start screen and scan this folder right away
 ```
+
+![Start screen](docs/gui/start.png)
 
 ![Overview](docs/gui/overview.png)
 
