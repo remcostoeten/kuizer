@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FocusHandle, FontWeight,
-    KeyBinding, KeyDownEvent, PathPromptOptions, Pixels, ScrollWheelEvent, SharedString, Task,
-    Window, actions, canvas, div, prelude::*, px, uniform_list,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, ScrollWheelEvent, SharedString, Task, Window, actions, canvas, div,
+    prelude::*, px, uniform_list,
 };
 use kuizer::config::Config;
 use kuizer::delete::Status;
@@ -18,6 +19,7 @@ use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
 
+use crate::frame;
 use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
@@ -105,6 +107,7 @@ pub struct Kuizer {
     recent: Recent,
     zoom: Zoom,
     wheel: Pixels,
+    moving: bool,
     cancel: Option<Cancel>,
     started: Instant,
     font: SharedString,
@@ -148,6 +151,7 @@ impl Kuizer {
             recent,
             zoom,
             wheel: px(0.),
+            moving: false,
             cancel: None,
             started: Instant::now(),
             font,
@@ -645,7 +649,7 @@ impl Kuizer {
         }
     }
 
-    fn render_titlebar(&self, cx: &mut Context<Self>) -> Div {
+    fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let roots = if matches!(self.phase, Phase::Start) {
             "Choose what to scan".to_owned()
         } else {
@@ -658,25 +662,14 @@ impl Kuizer {
         let busy = self.busy();
         let scanning = matches!(self.phase, Phase::Loading(_));
         let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_));
-        div()
+        let controls = frame::controls(window);
+        let custom = controls.is_some();
+        let actions = div()
             .flex()
             .flex_none()
             .items_center()
             .gap(unit(12.))
-            .h(unit(40.))
-            .px(unit(14.))
-            .bg(theme::panel())
-            .border_b_1()
-            .border_color(theme::border())
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("kuizer"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme::muted())
-                    .child(roots),
-            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
                     ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true).on_click(
@@ -703,7 +696,60 @@ impl Kuizer {
                         }),
                     ),
                 )
+            });
+        div()
+            .id("titlebar")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(12.))
+            .h(unit(40.))
+            .min_h(frame::TITLEBAR)
+            .px(unit(14.))
+            .when_some(frame::inset(window), |this, inset| this.pl(inset))
+            .when(custom, |this| this.pr(unit(6.)))
+            .bg(theme::panel())
+            .border_b_1()
+            .border_color(theme::border())
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
+            .on_mouse_move(cx.listener(Self::titlebar_move))
+            .when(custom, |this| {
+                this.on_mouse_down(MouseButton::Right, |event, window, _| {
+                    window.show_window_menu(event.position);
+                })
             })
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("kuizer"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme::muted())
+                    .child(roots),
+            )
+            .child(actions)
+            .children(controls)
+    }
+
+    fn titlebar_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.moving = frame::titlebar_down(event.click_count, window);
+    }
+
+    fn titlebar_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.moving = false;
+    }
+
+    fn titlebar_move(&mut self, _: &MouseMoveEvent, window: &mut Window, _: &mut Context<Self>) {
+        if self.moving {
+            self.moving = false;
+            window.start_window_move();
+        }
     }
 
     fn tab_count(&self, tab: Tab) -> Option<usize> {
@@ -2113,7 +2159,8 @@ impl Render for Kuizer {
         let content = self.render_content(cx);
         let dialog = self.render_dialog(cx);
         let start = matches!(self.phase, Phase::Start);
-        div()
+        let titlebar = self.render_titlebar(window, cx);
+        let root = div()
             .relative()
             .flex()
             .flex_col()
@@ -2128,7 +2175,7 @@ impl Render for Kuizer {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
             .child(wheel)
-            .child(self.render_titlebar(cx))
+            .child(titlebar)
             .child(
                 div()
                     .flex()
@@ -2138,7 +2185,8 @@ impl Render for Kuizer {
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content)),
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
-            .children(dialog)
+            .children(dialog);
+        frame::frame(root, window)
     }
 }
 
