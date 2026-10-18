@@ -3,183 +3,194 @@
 import { useEffect, useRef } from 'react'
 import { readTheme } from '@/shared/helpers/theme'
 
-const source =
-  'kuizer~/projectsscan.run({depth:8,follow:false})select.all({safe:true})trash.move({items:14,bytes:"27.5GiB"})kuizerhistory--last5kuizerrestore20261017-2031cache.rebuild({tool:"cargo"})if(!entry.safe)review(entry)kuizer--gui~/work'
-const boidCount = 90
-const trailDecay = 0.996
-const minTrailAlpha = 0.03
 const brand = [210, 86, 17] as const
+const columnChars = 32
+const gapChars = 6
+const scanLine = 0.34
+const rowsPerSecond = 1.1
+const foundFor = 900
+const leaveFor = 420
 
-type Boid = {
-  x: number
-  y: number
-  vx: number
-  vy: number
-  ax: number
-  ay: number
-  pointer: number
-  stampX: number
-  stampY: number
+const projectNames = [
+  'kuizer',
+  'dashboard',
+  'api-gateway',
+  'blog',
+  'infra',
+  'mobile-app',
+  'design-system',
+  'scraper',
+  'notes',
+  'ml-sandbox',
+  'cli-tools',
+  'website',
+  'editor',
+  'game',
+  'docs',
+]
+
+type Spec = {
+  name: string
+  reclaim?: boolean
+  children?: Spec[]
 }
 
-type Trail = {
-  char: string
-  gray: number
+const stacks: Spec[][] = [
+  [
+    { name: 'src/', children: [{ name: 'index.ts' }, { name: 'utils/' }] },
+    { name: 'package.json' },
+    {
+      name: 'node_modules/',
+      reclaim: true,
+      children: [{ name: '.pnpm/' }, { name: 'react/' }, { name: 'typescript/' }],
+    },
+    { name: 'dist/', reclaim: true, children: [{ name: 'index.js' }] },
+  ],
+  [
+    { name: 'src/', children: [{ name: 'main.rs' }, { name: 'lib.rs' }] },
+    { name: 'Cargo.toml' },
+    { name: 'target/', reclaim: true, children: [{ name: 'debug/' }, { name: 'release/' }] },
+  ],
+  [
+    { name: 'app/', children: [{ name: '__init__.py' }, { name: 'main.py' }] },
+    { name: 'pyproject.toml' },
+    { name: '.venv/', reclaim: true, children: [{ name: 'lib/' }, { name: 'bin/' }] },
+    { name: '__pycache__/', reclaim: true },
+  ],
+  [
+    { name: 'app/', children: [{ name: 'page.tsx' }, { name: 'layout.tsx' }] },
+    { name: 'next.config.ts' },
+    { name: '.next/', reclaim: true, children: [{ name: 'cache/' }, { name: 'server/' }] },
+    { name: 'node_modules/', reclaim: true, children: [{ name: 'next/' }, { name: '.bin/' }] },
+  ],
+  [
+    { name: 'lib/', children: [{ name: 'main.dart' }] },
+    { name: 'pubspec.yaml' },
+    { name: 'build/', reclaim: true, children: [{ name: 'app/' }, { name: 'ios/' }] },
+    { name: '.dart_tool/', reclaim: true },
+  ],
+  [
+    { name: 'cmd/', children: [{ name: 'main.go' }] },
+    { name: 'go.mod' },
+    { name: 'bin/', reclaim: true },
+    { name: 'vendor/', children: [{ name: 'modules.txt' }] },
+  ],
+]
+
+type Node = {
+  id: number
+  name: string
+  size: string
+  reclaim: boolean
+  children: Node[]
+  foundAt: number
+}
+
+type Row = {
+  node: Node
+  prefix: string
+  depth: number
+}
+
+type Placed = {
+  y: number
   alpha: number
 }
 
-type Ripple = {
+type Column = {
   x: number
-  y: number
-  radius: number
+  top: number
+  speed: number
+  projects: Node[]
+  placed: Map<number, Placed>
 }
 
 type Field = {
   width: number
   height: number
   scale: number
-  cell: number
+  charWidth: number
+  line: number
   mouse: { x: number; y: number; active: boolean }
-  ripples: Ripple[]
-  trails: Map<string, Trail>
-  boids: Boid[]
+  columns: Column[]
+  nextId: number
+  nextProject: number
 }
 
-function makeBoid(field: Field): Boid {
-  const heading = Math.random() * Math.PI * 2
-  const speed = 1.2 * field.scale * (0.5 + 0.5 * Math.random())
-  const x = Math.random() * field.width
-  const y = Math.random() * field.height
+function pick<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)] as T
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}G`
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)}M`
+  return `${Math.max(1, Math.round(bytes / 1024))}K`
+}
+
+function randomSize(reclaim: boolean, folder: boolean): string {
+  if (reclaim) return formatSize(1024 ** 2 * (40 + Math.random() * 2400))
+  if (folder) return formatSize(1024 * (20 + Math.random() * 900))
+  return formatSize(1024 * (1 + Math.random() * 24))
+}
+
+function build(field: Field, spec: Spec): Node {
+  const children = (spec.children ?? []).filter(() => Math.random() > 0.2).map((child) => build(field, child))
+  field.nextId += 1
   return {
-    x,
-    y,
-    vx: Math.cos(heading) * speed,
-    vy: Math.sin(heading) * speed,
-    ax: 0,
-    ay: 0,
-    pointer: Math.floor(Math.random() * source.length),
-    stampX: x,
-    stampY: y,
+    id: field.nextId,
+    name: spec.name,
+    size: randomSize(Boolean(spec.reclaim), spec.name.endsWith('/')),
+    reclaim: Boolean(spec.reclaim),
+    children,
+    foundAt: 0,
   }
 }
 
-function steer(boid: Boid, dx: number, dy: number, weight: number, scale: number) {
-  const distance = Math.hypot(dx, dy)
-  if (distance === 0) return
-  const speed = 1.2 * scale
-  let fx = (dx / distance) * speed - boid.vx
-  let fy = (dy / distance) * speed - boid.vy
-  const force = Math.hypot(fx, fy)
-  const maxForce = 0.035 * scale
-  if (force > maxForce) {
-    fx = (fx / force) * maxForce
-    fy = (fy / force) * maxForce
-  }
-  boid.ax += fx * weight
-  boid.ay += fy * weight
+function makeProject(field: Field): Node {
+  const name = projectNames[field.nextProject % projectNames.length] ?? 'project'
+  field.nextProject += 1
+  const specs = pick(stacks).filter((spec) => spec.reclaim || Math.random() > 0.15)
+  return build(field, { name: `~/work/${name}`, children: specs })
 }
 
-function flock(boid: Boid, field: Field) {
-  const { scale, boids, mouse } = field
-  let sepX = 0
-  let sepY = 0
-  let sepCount = 0
-  let velX = 0
-  let velY = 0
-  let velCount = 0
-  let posX = 0
-  let posY = 0
-  let posCount = 0
-  for (const other of boids) {
-    if (other === boid) continue
-    const dx = other.x - boid.x
-    const dy = other.y - boid.y
-    const distance = Math.hypot(dx, dy)
-    if (distance > 90 * scale || distance === 0) continue
-    if (distance < 44 * scale) {
-      sepX -= dx / distance / distance
-      sepY -= dy / distance / distance
-      sepCount += 1
-    }
-    velX += other.vx
-    velY += other.vy
-    velCount += 1
-    posX += other.x
-    posY += other.y
-    posCount += 1
+function flatten(project: Node): Row[] {
+  const rows: Row[] = [{ node: project, prefix: '', depth: 0 }]
+  function walk(nodes: Node[], lead: string, depth: number) {
+    nodes.forEach((node, index) => {
+      const last = index === nodes.length - 1
+      rows.push({ node, prefix: `${lead}${last ? '└─ ' : '├─ '}`, depth })
+      walk(node.children, `${lead}${last ? '   ' : '│  '}`, depth + 1)
+    })
   }
-  if (sepCount > 0) steer(boid, sepX, sepY, 1.7, scale)
-  if (velCount > 0) steer(boid, velX / velCount, velY / velCount, 1, scale)
-  if (posCount > 0) steer(boid, posX / posCount - boid.x, posY / posCount - boid.y, 0.45, scale)
-  if (mouse.active) {
-    const dx = mouse.x - boid.x
-    const dy = mouse.y - boid.y
-    const distance = Math.hypot(dx, dy)
-    const reach = 280 * scale
-    steer(boid, dx, dy, distance < reach ? (distance / reach) * 0.5 : 0.5, scale)
-  }
+  walk(project.children, '', 1)
+  return rows
 }
 
-function pickGray(): number {
-  const roll = Math.random()
-  if (roll < 0.7) return 45
-  if (roll < 0.92) return 56
-  return 68
+function prune(nodes: Node[], now: number): Node[] {
+  return nodes
+    .filter((node) => !(node.foundAt > 0 && now - node.foundAt > foundFor + leaveFor))
+    .map((node) => {
+      node.children = prune(node.children, now)
+      return node
+    })
 }
 
-function move(boid: Boid, field: Field) {
-  const { scale, cell, width, height, trails } = field
-  boid.vx += boid.ax
-  boid.vy += boid.ay
-  const speed = Math.hypot(boid.vx, boid.vy)
-  const maxSpeed = 1.2 * scale
-  if (speed > maxSpeed) {
-    boid.vx = (boid.vx / speed) * maxSpeed
-    boid.vy = (boid.vy / speed) * maxSpeed
-  }
-  boid.x += boid.vx
-  boid.y += boid.vy
-  boid.ax = 0
-  boid.ay = 0
-
-  let wrapped = false
-  if (boid.x < -cell) {
-    boid.x = width + cell
-    wrapped = true
-  } else if (boid.x > width + cell) {
-    boid.x = -cell
-    wrapped = true
-  }
-  if (boid.y < -cell) {
-    boid.y = height + cell
-    wrapped = true
-  } else if (boid.y > height + cell) {
-    boid.y = -cell
-    wrapped = true
-  }
-
-  if (wrapped) {
-    boid.stampX = boid.x
-    boid.stampY = boid.y
-    return
-  }
-  if (Math.hypot(boid.x - boid.stampX, boid.y - boid.stampY) < 1.5 * cell) return
-  boid.stampX = boid.x
-  boid.stampY = boid.y
-  const char = source.charAt(boid.pointer % source.length)
-  boid.pointer += 1
-  const column = Math.round(boid.x / cell)
-  const row = Math.round(boid.y / cell)
-  trails.set(`${column},${row}`, { char, gray: pickGray(), alpha: 0.22 + 0.1 * Math.random() })
+function leaving(node: Node, now: number): number {
+  if (node.foundAt === 0) return 0
+  return Math.min(1, Math.max(0, (now - node.foundAt - foundFor) / leaveFor))
 }
 
-function rippleStrength(field: Field, x: number, y: number): number {
-  let strength = 0
-  for (const ripple of field.ripples) {
-    const onRing = 1 - Math.abs(Math.hypot(x - ripple.x, y - ripple.y) - ripple.radius) / (110 * field.scale)
-    if (onRing > strength) strength = onRing
-  }
-  return strength
+function layout(field: Field) {
+  const span = (columnChars + gapChars) * field.charWidth
+  const count = Math.max(1, Math.ceil(field.width / span) + 1)
+  const offset = (field.width - count * span + gapChars * field.charWidth) / 2
+  field.columns = Array.from({ length: count }, (_, index) => ({
+    x: offset + index * span,
+    top: field.height * scanLine - Math.random() * field.height,
+    speed: 0.8 + Math.random() * 0.4,
+    projects: [],
+    placed: new Map(),
+  }))
 }
 
 function paint(gray: number, alpha: number, tint: number, light: boolean): string {
@@ -189,42 +200,114 @@ function paint(gray: number, alpha: number, tint: number, light: boolean): strin
   const red = Math.round(base + (r - base) * tint)
   const green = Math.round(base + (g - base) * tint)
   const blue = Math.round(base + (b - base) * tint)
-  return `rgba(${red}, ${green}, ${blue}, ${Math.min(1, alpha + 0.3 * tint)})`
+  return `rgba(${red}, ${green}, ${blue}, ${Math.min(1, alpha + 0.45 * tint)})`
 }
 
-function draw(context: CanvasRenderingContext2D, field: Field) {
-  const { width, height, scale, cell, ripples, trails, boids } = field
+function step(column: Column, field: Field, now: number, delta: number, moving: boolean) {
+  const { line, height } = field
+  if (moving) column.top -= (rowsPerSecond * column.speed * line * delta) / 1000
+  column.projects = prune(column.projects, now)
+
+  let rows = column.projects.flatMap(flatten)
+  while (column.top + rows.length * line < height + line * 4) {
+    column.projects.push(makeProject(field))
+    rows = column.projects.flatMap(flatten)
+  }
+
+  const first = column.projects[0]
+  if (first) {
+    const firstRows = flatten(first).length + 1
+    if (column.top + firstRows * line < -line * 2) {
+      column.projects.shift()
+      column.top += firstRows * line
+      rows = column.projects.flatMap(flatten)
+    }
+  }
+
+  const scan = height * scanLine
+  const seen = new Set<number>()
+  let index = 0
+  for (const project of column.projects) {
+    for (const row of flatten(project)) {
+      const target = column.top + index * line
+      const placed = column.placed.get(row.node.id)
+      if (placed) {
+        placed.y += (target - placed.y) * Math.min(1, delta / 90)
+      } else {
+        column.placed.set(row.node.id, { y: target, alpha: 1 })
+      }
+      const y = column.placed.get(row.node.id)?.y ?? target
+      if (row.node.reclaim && row.node.foundAt === 0 && y <= scan && moving) row.node.foundAt = now
+      seen.add(row.node.id)
+      index += 1
+    }
+    index += 1
+  }
+  for (const id of column.placed.keys()) {
+    if (!seen.has(id)) column.placed.delete(id)
+  }
+}
+
+function inherited(node: Node, ancestors: Node[]): Node | undefined {
+  if (node.foundAt > 0) return node
+  return ancestors.find((ancestor) => ancestor.foundAt > 0)
+}
+
+function draw(context: CanvasRenderingContext2D, field: Field, now: number, delta: number, moving: boolean) {
+  const { width, height, line, charWidth, mouse } = field
   const light = readTheme() === 'light'
+  const scan = height * scanLine
+  const center = width / 2
   context.clearRect(0, 0, width, height)
 
-  for (let index = ripples.length - 1; index >= 0; index -= 1) {
-    const ripple = ripples[index]
-    if (!ripple) continue
-    ripple.radius += 7 * scale
-    if (ripple.radius - 110 * scale > Math.hypot(width, height)) ripples.splice(index, 1)
-  }
+  for (const column of field.columns) {
+    step(column, field, now, delta, moving)
+    const middle = column.x + (columnChars * charWidth) / 2
+    const quiet = 0.3 + 0.7 * Math.min(1, Math.abs(middle - center) / (width * 0.32))
 
-  for (const [key, trail] of trails) {
-    trail.alpha *= trailDecay
-    if (trail.alpha < minTrailAlpha) {
-      trails.delete(key)
-      continue
+    for (const project of column.projects) {
+      const stack: Node[] = []
+      for (const row of flatten(project)) {
+        while (stack.length >= row.depth + 1) stack.pop()
+        const ancestors = [...stack]
+        stack.push(row.node)
+        const y = column.placed.get(row.node.id)?.y
+        if (y === undefined || y < -line || y > height + line) continue
+
+        const owner = inherited(row.node, ancestors)
+        const fade = owner ? 1 - leaving(owner, now) : 1
+        const tint = owner ? Math.max(0, 1 - (now - owner.foundAt) / (foundFor + leaveFor)) : 0
+        const scanned = y < scan
+        const cursor = Math.abs(y - scan) < line / 2
+        const hovered =
+          mouse.active &&
+          Math.abs(mouse.y - y) < line / 2 &&
+          mouse.x >= column.x &&
+          mouse.x <= column.x + columnChars * charWidth
+        const folder = row.node.name.endsWith('/') || row.depth === 0
+        let gray = folder ? 64 : 52
+        if (cursor || hovered) gray = 92
+        const alpha = (scanned ? 0.2 : 0.3) * quiet * fade * (cursor || hovered ? 1.6 : 1)
+
+        context.fillStyle = paint(40, alpha, 0, light)
+        context.fillText(row.prefix, column.x, y)
+        const nameX = column.x + row.prefix.length * charWidth
+        context.fillStyle = paint(gray, alpha, tint, light)
+        context.fillText(row.node.name, nameX, y)
+
+        const label = owner === row.node && tint > 0 ? `-${row.node.size}` : row.node.size
+        const labelX = column.x + (columnChars - label.length) * charWidth
+        if (labelX > nameX + (row.node.name.length + 1) * charWidth) {
+          context.fillStyle = paint(
+            owner === row.node ? gray : 44,
+            alpha,
+            owner === row.node ? tint : 0,
+            light,
+          )
+          context.fillText(label, labelX, y)
+        }
+      }
     }
-    const [column, row] = key.split(',')
-    const x = Number(column) * cell
-    const y = Number(row) * cell
-    context.fillStyle = paint(trail.gray, trail.alpha, rippleStrength(field, x, y), light)
-    context.fillText(trail.char, x, y)
-  }
-
-  for (const boid of boids) flock(boid, field)
-  for (const boid of boids) {
-    move(boid, field)
-    const x = Math.round(boid.x / cell) * cell
-    const y = Math.round(boid.y / cell) * cell
-    const head = source.charAt(boid.pointer % source.length)
-    context.fillStyle = paint(52, 0.35, rippleStrength(field, x, y), light)
-    context.fillText(head, x, y)
   }
 }
 
@@ -239,18 +322,21 @@ export function HeroField() {
     const context: CanvasRenderingContext2D = rendering
 
     const scale = Math.min(window.devicePixelRatio || 1, 2)
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)')
     const field: Field = {
       width: 0,
       height: 0,
       scale,
-      cell: 13 * scale,
+      charWidth: 7 * scale,
+      line: 17 * scale,
       mouse: { x: 0, y: 0, active: false },
-      ripples: [],
-      trails: new Map(),
-      boids: [],
+      columns: [],
+      nextId: 0,
+      nextProject: Math.floor(Math.random() * projectNames.length),
     }
     let visible = true
     let frame = 0
+    let last = 0
 
     function resize() {
       if (!canvas) return
@@ -261,34 +347,25 @@ export function HeroField() {
       canvas.height = field.height
       const mono = getComputedStyle(canvas).getPropertyValue('--font-plex-mono').trim()
       context.font = `${11 * scale}px ${mono ? `${mono}, ` : ''}ui-monospace, SFMono-Regular, Menlo, monospace`
-      context.textAlign = 'center'
+      context.textAlign = 'left'
       context.textBaseline = 'middle'
-      if (field.boids.length === 0 && field.width > 0 && field.height > 0) {
-        field.boids = Array.from({ length: boidCount }, () => makeBoid(field))
+      field.charWidth = context.measureText('M').width
+      if (field.width > 0 && field.height > 0) {
+        layout(field)
+        draw(context, field, performance.now(), 0, false)
       }
     }
 
-    function toField(event: MouseEvent) {
-      if (!canvas) return null
-      const rect = canvas.getBoundingClientRect()
-      return { x: (event.clientX - rect.left) * scale, y: (event.clientY - rect.top) * scale }
-    }
-
-    function inside(point: { x: number; y: number }) {
-      return point.x >= 0 && point.x <= field.width && point.y >= 0 && point.y <= field.height
-    }
-
     function onMove(event: MouseEvent) {
-      const point = toField(event)
-      if (!point) return
-      field.mouse.x = point.x
-      field.mouse.y = point.y
-      field.mouse.active = inside(point)
-    }
-
-    function onDown(event: MouseEvent) {
-      const point = toField(event)
-      if (point && inside(point)) field.ripples.push({ x: point.x, y: point.y, radius: 0 })
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      field.mouse.x = (event.clientX - rect.left) * scale
+      field.mouse.y = (event.clientY - rect.top) * scale
+      field.mouse.active =
+        field.mouse.x >= 0 &&
+        field.mouse.x <= field.width &&
+        field.mouse.y >= 0 &&
+        field.mouse.y <= field.height
     }
 
     function onLeave() {
@@ -303,13 +380,14 @@ export function HeroField() {
     })
     intersection.observe(canvas)
     window.addEventListener('mousemove', onMove)
-    window.addEventListener('mousedown', onDown)
     document.addEventListener('mouseleave', onLeave)
 
-    function tick() {
+    function tick(now: number) {
       frame = window.requestAnimationFrame(tick)
+      const delta = last === 0 ? 16 : Math.min(64, now - last)
+      last = now
       if (!visible || field.width === 0) return
-      draw(context, field)
+      draw(context, field, now, delta, !motion.matches)
     }
     frame = window.requestAnimationFrame(tick)
 
@@ -318,7 +396,6 @@ export function HeroField() {
       resizeObserver.disconnect()
       intersection.disconnect()
       window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mousedown', onDown)
       document.removeEventListener('mouseleave', onLeave)
     }
   }, [])
