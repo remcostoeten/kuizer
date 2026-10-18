@@ -10,7 +10,8 @@ use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, Safety};
 use kuizer::dupes::{self, Duplicates, Options};
-use kuizer::history::{self, Action, Entry, History, Recorder};
+use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
+use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
@@ -98,6 +99,55 @@ impl HistoryView {
             .iter()
             .filter(|run| run.action == Action::Delete)
     }
+
+    /// @name HistoryView::trash_state
+    /// @description Says whether a delete run can still be restored from the trash, using the
+    /// library's per item state: what is left in the trash, all of it restored, gone from the
+    /// trash, unknown because the trash cannot be read, or never trashed at all.
+    ///
+    /// @example
+    /// if let TrashState::Restorable { items, bytes } = view.trash_state(run) { .. }
+    pub fn trash_state(&self, run: usize) -> TrashState {
+        let Some(entries) = self.history.runs.get(run).map(|run| run.deleted.len()) else {
+            return TrashState::NotTrashed;
+        };
+        let restored = self.history.restored_ids();
+        let kept = self.trash_known.then_some(&self.kept);
+        let states: Vec<ItemState> = (0..entries)
+            .map(|entry| history::item_state(&self.history, &restored, kept, run, entry))
+            .filter(|state| !matches!(state, ItemState::Deleted | ItemState::DryRun))
+            .collect();
+        if states.is_empty() {
+            return TrashState::NotTrashed;
+        }
+        if !self.trash_known {
+            return TrashState::Unknown;
+        }
+        let left = history::restorable(&self.history, &self.kept, run);
+        if !left.is_empty() {
+            return TrashState::Restorable {
+                items: left.len(),
+                bytes: left
+                    .iter()
+                    .map(|&(run, entry)| self.history.runs[run].deleted[entry].bytes)
+                    .sum(),
+            };
+        }
+        if states.iter().all(|state| *state == ItemState::Restored) {
+            TrashState::Restored
+        } else {
+            TrashState::Emptied
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashState {
+    Restorable { items: usize, bytes: u64 },
+    Restored,
+    Emptied,
+    Unknown,
+    NotTrashed,
 }
 
 pub struct Report {
@@ -343,6 +393,7 @@ pub fn cache_roots(candidates: &[Candidate]) -> Vec<PathBuf> {
 
 pub struct Outcome {
     pub removals: Vec<(Source, Removal)>,
+    pub session: Option<u64>,
     pub history_error: Option<String>,
 }
 
@@ -403,8 +454,74 @@ pub fn trash(batches: Vec<Batch>) -> Outcome {
     }
     Outcome {
         removals,
+        session: recorder.session(),
         history_error: recorder.finish().err().map(|error| error.to_string()),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Undo,
+    StillInTrash,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restored {
+    pub items: usize,
+    pub bytes: u64,
+    pub problems: Vec<(PathBuf, String)>,
+    pub history_error: Option<String>,
+}
+
+/// @name restore
+/// @description Puts one cleanup run back from the trash with the library's restore, exactly like
+/// `kuizer restore s4`, and records the restore in the history. `Scope::Undo` asks for every item
+/// of the run, so anything that cannot come back is reported; `Scope::StillInTrash` only asks for
+/// the items that are still in the trash and not restored yet.
+///
+/// @example
+/// let restored = restore(4, Scope::Undo)?;
+pub fn restore(session: u64, scope: Scope) -> Result<Restored, String> {
+    let path = history::default_path().map_err(|error| error.to_string())?;
+    let history = history::load(&path).map_err(|error| error.to_string())?;
+    let id = format!("s{session}");
+    let targets = match scope {
+        Scope::Undo => history
+            .find(&id)
+            .ok_or_else(|| format!("the history has no cleanup {id}"))?,
+        Scope::StillInTrash => {
+            let run = history
+                .runs
+                .iter()
+                .position(|run| run.id == session)
+                .ok_or_else(|| format!("the history has no cleanup {id}"))?;
+            let trashed =
+                history::trashed_paths().ok_or_else(|| RestoreError::Unsupported.to_string())?;
+            let kept = history::still_in_trash(&history, &trashed);
+            history::restorable(&history, &kept, run)
+        }
+    };
+    if targets.is_empty() {
+        return Err(format!("nothing from {id} is still in the trash"));
+    }
+    let restore =
+        history::restore::restore(&history, &targets, false).map_err(|error| error.to_string())?;
+    Ok(Restored {
+        items: restore.count(RestoreStatus::Restored),
+        bytes: restore.bytes(RestoreStatus::Restored),
+        problems: restore
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.status != RestoreStatus::Restored)
+            .map(|outcome| {
+                (
+                    outcome.path.clone(),
+                    outcome.reason.clone().unwrap_or_default(),
+                )
+            })
+            .collect(),
+        history_error: restore.record().err().map(|error| error.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -436,6 +553,65 @@ mod tests {
             identity: None,
             project_last_active: None,
         }
+    }
+
+    fn trashed(path: &str, mode: Mode) -> Entry {
+        Entry {
+            deleted_at: history::now(),
+            path: PathBuf::from(path),
+            rule: "node_modules".to_owned(),
+            category: "dependencies".to_owned(),
+            mode,
+            bytes: 10,
+            size: "10 B".to_owned(),
+            restores: None,
+        }
+    }
+
+    #[test]
+    fn each_run_says_what_can_still_be_restored() {
+        let run = |entries| history::Run::new(history::now(), &[], entries);
+        let mut runs = vec![
+            run(vec![
+                trashed("/p/a", Mode::Trash),
+                trashed("/p/b", Mode::Trash),
+            ]),
+            run(vec![trashed("/p/c", Mode::Trash)]),
+            run(vec![trashed("/p/d", Mode::Trash)]),
+            run(vec![trashed("/p/e", Mode::Permanent)]),
+        ];
+        runs.push(history::Run::restore(
+            history::now(),
+            vec![Entry::restored(&runs[1].deleted[0], "s2.1".to_owned())],
+        ));
+        for (index, run) in runs.iter_mut().enumerate() {
+            run.id = index as u64 + 1;
+        }
+        let view = HistoryView {
+            history: History {
+                next_session: 6,
+                runs,
+                ..History::default()
+            },
+            kept: HashSet::from([(0, 1)]),
+            trash_known: true,
+        };
+        assert_eq!(
+            view.trash_state(0),
+            TrashState::Restorable {
+                items: 1,
+                bytes: 10
+            }
+        );
+        assert_eq!(view.trash_state(1), TrashState::Restored);
+        assert_eq!(view.trash_state(2), TrashState::Emptied);
+        assert_eq!(view.trash_state(3), TrashState::NotTrashed);
+        assert_eq!(view.trash_state(9), TrashState::NotTrashed);
+        let unknown = HistoryView {
+            trash_known: false,
+            ..view
+        };
+        assert_eq!(unknown.trash_state(0), TrashState::Unknown);
     }
 
     #[test]

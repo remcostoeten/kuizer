@@ -9,6 +9,8 @@ use crate::delete::Mode;
 use crate::scan::Candidate;
 use crate::units::ByteSize;
 
+pub mod restore;
+
 const FILE_NAME: &str = ".kuizer-history.json";
 const LEGACY_FILE_NAME: &str = ".sweep-history.json";
 
@@ -384,6 +386,82 @@ pub fn still_in_trash(history: &History, trashed: &[PathBuf]) -> HashSet<(usize,
     found
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemState {
+    RestoredHere,
+    Restored,
+    Deleted,
+    DryRun,
+    Trashed,
+    InTrash,
+    LeftTrash,
+}
+
+impl ItemState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RestoredHere => "restored here",
+            Self::Restored => "restored",
+            Self::Deleted => "deleted",
+            Self::DryRun => "dry run",
+            Self::Trashed => "trashed",
+            Self::InTrash => "in trash",
+            Self::LeftTrash => "left trash",
+        }
+    }
+}
+
+/// @name item_state
+/// @description Says what became of one history entry: restored, deleted permanently, a dry run,
+/// still in the trash or gone from it. With `kept` unknown, because the trash cannot be read,
+/// trashed entries are just `Trashed`.
+///
+/// @example
+/// let state = history::item_state(&history, &history.restored_ids(), Some(&kept), 0, 2);
+pub fn item_state(
+    history: &History,
+    restored: &HashSet<&str>,
+    kept: Option<&HashSet<(usize, usize)>>,
+    run: usize,
+    entry: usize,
+) -> ItemState {
+    let item = &history.runs[run].deleted[entry];
+    if history.runs[run].action == Action::Restore {
+        return ItemState::RestoredHere;
+    }
+    if restored.contains(history.item_id(run, entry).as_str()) {
+        return ItemState::Restored;
+    }
+    match (item.mode, kept) {
+        (Mode::Permanent, _) => ItemState::Deleted,
+        (Mode::DryRun, _) => ItemState::DryRun,
+        (Mode::Trash, None) => ItemState::Trashed,
+        (Mode::Trash, Some(kept)) if kept.contains(&(run, entry)) => ItemState::InTrash,
+        (Mode::Trash, Some(_)) => ItemState::LeftTrash,
+    }
+}
+
+/// @name restorable
+/// @description Lists the entries of one run that can still be restored: trashed, not restored
+/// yet and still in the trash according to `kept` from `still_in_trash`.
+///
+/// @example
+/// let targets = history::restorable(&history, &kept, run_index);
+/// let restore = history::restore::restore(&history, &targets, false)?;
+pub fn restorable(
+    history: &History,
+    kept: &HashSet<(usize, usize)>,
+    run: usize,
+) -> Vec<(usize, usize)> {
+    let restored = history.restored_ids();
+    (0..history.runs.get(run).map_or(0, |run| run.deleted.len()))
+        .filter(|&entry| {
+            item_state(history, &restored, Some(kept), run, entry) == ItemState::InTrash
+        })
+        .map(|entry| (run, entry))
+        .collect()
+}
+
 const RESTORE_WINDOW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -655,6 +733,16 @@ impl Recorder {
         }
     }
 
+    /// @name session
+    /// @description Returns the session id of the run this recorder opened, or `None` while no
+    /// entry was written yet.
+    ///
+    /// @example
+    /// let undo = recorder.session().map(|id| format!("s{id}"));
+    pub fn session(&self) -> Option<u64> {
+        self.session
+    }
+
     pub fn finish(self) -> Result<(), HistoryError> {
         self.error.map_or(Ok(()), Err)
     }
@@ -742,6 +830,7 @@ mod tests {
         assert_eq!(partial.runs[1].total.items, 1);
 
         recorder.add(entry(2));
+        assert_eq!(recorder.session(), Some(2));
         recorder.finish().expect("no errors");
         let history = load(&path).expect("after two");
         assert_eq!(history.runs.len(), 2);
@@ -754,10 +843,55 @@ mod tests {
     fn recorder_without_entries_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
-        Recorder::at(path.clone(), path.clone(), now(), &[])
-            .finish()
-            .expect("no errors");
+        let recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        assert_eq!(recorder.session(), None);
+        recorder.finish().expect("no errors");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_trashed_entries_still_in_the_trash_are_restorable() {
+        let mut permanent = entry(5);
+        permanent.mode = Mode::Permanent;
+        let mut history = History {
+            next_session: 0,
+            runs: vec![Run::new(
+                now(),
+                &[],
+                vec![entry(1), entry(2), entry(3), permanent],
+            )],
+            cumulative: Cumulative::default(),
+        };
+        history.assign_ids();
+        let back = Entry::restored(&history.runs[0].deleted[1], "s1.2".to_owned());
+        history.runs.push(Run::restore(now(), vec![back]));
+        history.assign_ids();
+        let kept = HashSet::from([(0, 0), (0, 1)]);
+        let restored = history.restored_ids();
+
+        assert_eq!(restorable(&history, &kept, 0), vec![(0, 0)]);
+        assert!(restorable(&history, &kept, 1).is_empty());
+        assert!(restorable(&history, &kept, 9).is_empty());
+        let states: Vec<ItemState> = (0..4)
+            .map(|entry| item_state(&history, &restored, Some(&kept), 0, entry))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ItemState::InTrash,
+                ItemState::Restored,
+                ItemState::LeftTrash,
+                ItemState::Deleted
+            ]
+        );
+        assert_eq!(
+            item_state(&history, &restored, None, 0, 2),
+            ItemState::Trashed
+        );
+        assert_eq!(
+            item_state(&history, &restored, Some(&kept), 1, 0).as_str(),
+            "restored here"
+        );
     }
 
     #[test]

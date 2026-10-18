@@ -30,6 +30,7 @@ pub enum Term {
     ItemsRemoved,
     Freed,
     InTrash,
+    Restore,
     Run,
     Mode,
     Command,
@@ -38,7 +39,7 @@ pub enum Term {
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 32] = [
+    pub const ALL: [Term; 33] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -67,6 +68,7 @@ impl Term {
         Self::ItemsRemoved,
         Self::Freed,
         Self::InTrash,
+        Self::Restore,
         Self::Run,
         Self::Mode,
         Self::Command,
@@ -119,6 +121,7 @@ impl Term {
             Self::ItemsRemoved => "Items removed",
             Self::Freed => "Freed",
             Self::InTrash => "Still in the trash",
+            Self::Restore => "Trash",
             Self::Run => "Run",
             Self::Mode => "Mode",
             Self::Command => "Command",
@@ -135,7 +138,7 @@ impl Term {
                 "Every cleanup kuizer made on this machine, from this window and from the command line, and what is still in the trash."
             }
             Self::Trash => {
-                "Moves the selection to the trash after you confirm. kuizer restore puts it back until the trash is emptied. Nothing is deleted for good."
+                "Moves the selection to the trash after you confirm. Undo right after, Restore in History or kuizer restore puts it back until the trash is emptied. Nothing is deleted for good."
             }
             Self::Safety => {
                 "How sure kuizer is that removing an item is harmless. safe items are rebuilt by a tool, review items need a look first."
@@ -202,7 +205,10 @@ impl Term {
                 "Space actually given back: items deleted permanently, or moved to the trash that has since been emptied."
             }
             Self::InTrash => {
-                "Removed items that are still in the trash. kuizer restore puts them back until the trash is emptied."
+                "Removed items that are still in the trash. Restore in the table below or kuizer restore puts them back until the trash is emptied."
+            }
+            Self::Restore => {
+                "Whether this cleanup is still in the trash. Restore puts what is left back where it was. Items restored before or emptied from the trash cannot come back."
             }
             Self::Run => {
                 "The id of the cleanup. Run kuizer restore with this id, for example kuizer restore s4, to put it back from the trash."
