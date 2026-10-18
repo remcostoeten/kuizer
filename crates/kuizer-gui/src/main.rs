@@ -14,6 +14,7 @@ mod start;
 mod tab;
 mod theme;
 mod tooltip;
+mod treemap;
 mod ui;
 mod zoom;
 
