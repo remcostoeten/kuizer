@@ -46,6 +46,9 @@ threads = 0
 
 [appearance]
 motion = true
+# "expanded" shows the GUI sidebar with labels, "collapsed" opens it as a strip of icons.
+# Ctrl+B (Cmd+B on macOS) switches between the two while the app runs.
+sidebar = "expanded"
 
 [toolchains]
 tools = ["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]
