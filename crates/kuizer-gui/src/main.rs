@@ -1,12 +1,16 @@
 mod app;
 mod chart;
+mod commands;
+mod field;
 mod frame;
 mod glossary;
 mod model;
 mod motion;
+mod palette;
 mod reveal;
 mod snapshot;
 mod start;
+mod tab;
 mod theme;
 mod tooltip;
 mod ui;
