@@ -719,7 +719,10 @@ impl Kuizer {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext, size};
+
     use super::*;
+    use crate::app::tests::{menu_target, open, project, scanned, type_text, wait_for_refresh};
 
     #[test]
     fn motions_stop_at_the_ends() {
@@ -739,5 +742,485 @@ mod tests {
         assert!(found(Some("node"), &["/x/Node_Modules"]));
         assert!(found(Some("cargo"), &["/x/target", "Cargo build output"]));
         assert!(!found(Some("pip"), &["/x/target", "cargo"]));
+    }
+
+    /// A folder with `count` projects, each with its own node_modules folder.
+    fn projects(dir: &Path, count: usize) -> PathBuf {
+        let root = dir.join("work");
+        for index in 0..count {
+            let project = root.join(format!("project-{index:02}"));
+            let modules = project.join("node_modules").join("dep");
+            std::fs::create_dir_all(&modules).unwrap();
+            std::fs::write(project.join("package.json"), "{}").unwrap();
+            std::fs::write(modules.join("index.js"), vec![b'x'; 4096 + index]).unwrap();
+        }
+        root
+    }
+
+    fn scan_root<'a>(
+        cx: &'a mut TestAppContext,
+        dir: &Path,
+        root: &Path,
+        tab: Tab,
+    ) -> (Entity<Kuizer>, &'a mut VisualTestContext) {
+        cx.update(bind_keys);
+        let (view, cx) = open(cx, dir.join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.update(cx, |app, cx| app.go_to(tab, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        (view, cx)
+    }
+
+    fn cursor_row(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |app, _| {
+            let cursor = app.cursor_target().expect("a cursor row");
+            app.targets(app.tab)
+                .iter()
+                .position(|target| *target == cursor)
+                .unwrap()
+        })
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    /// `debug_bounds` takes a `&'static str`; a test can afford to leak a few selectors.
+    fn painted(cx: &mut VisualTestContext, selector: String) -> bool {
+        cx.debug_bounds(Box::leak(selector.into_boxed_str()))
+            .is_some()
+    }
+
+    fn inside(cx: &mut VisualTestContext, row: &'static str, list: &'static str) {
+        let row = cx.debug_bounds(row).expect("the row is painted");
+        let list = cx.debug_bounds(list).expect("the list is painted");
+        assert!(
+            row.top() >= list.top() - px(1.) && row.bottom() <= list.bottom() + px(1.),
+            "{row:?} is outside {list:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_k_opens_the_palette_and_enter_runs_a_command(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Overview);
+        cx.simulate_keystrokes("ctrl-k");
+        view.read_with(cx, |app, _| assert!(app.palette.is_some()));
+        draw(cx);
+        let panel = cx.debug_bounds("palette").expect("the palette is painted");
+        let window = cx.update(|window, _| window.viewport_size());
+        assert!(
+            (panel.center().x - window.width / 2.).abs() < px(1.),
+            "centered"
+        );
+        assert!(panel.top() > px(0.) && panel.bottom() < window.height);
+        let rescan = cx.debug_bounds("palette-Rescan").expect("a command row");
+        assert!(panel.contains(&rescan.center()));
+        let everything = view.read_with(cx, |app, _| app.palette_entries().len());
+
+        type_text(cx, "go hist");
+        view.read_with(cx, |app, _| {
+            let entries = app.palette_entries();
+            assert!(entries.len() < everything, "typing narrows the list");
+            assert_eq!(entries[0].spec.command, Command::GoTo(Tab::History));
+            assert_eq!(app.palette.as_ref().unwrap().query, "go hist");
+        });
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.palette.is_none(),
+                "running a command closes the palette"
+            );
+            assert_eq!(app.tab, Tab::History);
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, "zoom");
+        cx.simulate_keystrokes("down ctrl-n ctrl-p");
+        view.read_with(cx, |app, _| {
+            let palette = app.palette.as_ref().unwrap();
+            assert_eq!(palette.active, 1);
+            assert_eq!(
+                app.palette_entries()[palette.active].spec.command,
+                Command::ZoomOut
+            );
+        });
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 90));
+    }
+
+    #[gpui::test]
+    fn a_blocked_command_is_grey_and_does_nothing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        view.update(cx, |app, cx| {
+            let id = app.report().unwrap().candidates[0].id;
+            app.toggle(Source::Artifact, id, cx);
+            app.stale = Some(SystemTime::now());
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, "move selected");
+        view.read_with(cx, |app, _| {
+            let entry = &app.palette_entries()[0];
+            assert_eq!(entry.spec.command, Command::Trash);
+            assert_eq!(entry.blocked, app.trash_lock());
+            assert!(entry.blocked.is_some());
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("palette-Move selected to trash").is_some());
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(app.dialog.is_none(), "a blocked command does not run");
+            assert!(app.palette.is_some(), "the palette stays open");
+        });
+
+        view.update(cx, |app, _| app.stale = None);
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(app.palette.is_none());
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm { only: None, .. })
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn escape_closes_only_the_palette(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        view.update(cx, |app, cx| {
+            app.show_toast(Notice::Info("hello".to_owned()), cx)
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, "re");
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| {
+            assert!(app.palette.is_none());
+            assert!(app.toast.is_some(), "Escape went to the palette only");
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.palette.as_ref().unwrap().query, "", "it opens empty");
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        view.read_with(cx, |app, _| {
+            assert!(app.palette.is_none(), "Ctrl+K toggles")
+        });
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(app.toast.is_none()));
+    }
+
+    #[gpui::test]
+    fn recent_folders_are_in_the_palette(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let first = projects(&dir.path().join("a"), 1);
+        let second = projects(&dir.path().join("b"), 2);
+        let (view, cx) = scan_root(cx, dir.path(), &first, Tab::Artifacts);
+        view.update(cx, |app, _| {
+            app.recent
+                .remember(&[std::fs::canonicalize(&second).unwrap()]);
+        });
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, &format!("scan {}", second.display()));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                &app.palette_entries()[0].spec.command,
+                Command::Scan(path) if path.ends_with("b/work")
+            ));
+        });
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(app.roots[0].ends_with("b/work"));
+            assert_eq!(app.report().unwrap().candidates.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn keys_do_not_fire_while_typing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 3);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, "2j ");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.tab, Tab::Artifacts);
+            assert_eq!(app.palette.as_ref().unwrap().query, "2j ");
+            assert!(app.selection.is_empty());
+        });
+        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("/");
+        view.read_with(cx, |app, _| assert!(app.filtering));
+        type_text(cx, "1");
+        cx.simulate_keystrokes("j k space ? ctrl-a");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.tab, Tab::Artifacts);
+            assert_eq!(app.filters.get(&Tab::Artifacts).unwrap(), "1jk ?");
+            assert!(app.selection.is_empty());
+            assert!(!app.shortcuts);
+            assert!(app.cursors.is_empty(), "the cursor never moved");
+        });
+    }
+
+    /// The rows of the artifact list that are fully scrolled into view.
+    fn visible_rows(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> (usize, usize) {
+        view.read_with(cx, |app, _| {
+            let state = app.artifact_scroll.0.borrow();
+            let top = -state.base_handle.offset().y;
+            let height = state.base_handle.bounds().size.height;
+            let content = state.base_handle.max_offset().height + height;
+            #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
+            let row = content / app.rows.len() as f32;
+            let first = (top / row).ceil();
+            let last = ((top + height) / row).floor() - 1.;
+            (first as usize, last as usize)
+        })
+    }
+
+    #[gpui::test]
+    fn j_and_k_move_the_cursor_and_the_list_follows(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 40);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_resize(size(px(900.), px(520.)));
+        draw(cx);
+        assert_eq!(cursor_row(&view, cx), 0);
+        cx.simulate_keystrokes("j j down");
+        assert_eq!(cursor_row(&view, cx), 3);
+        cx.simulate_keystrokes("k");
+        assert_eq!(cursor_row(&view, cx), 2);
+        draw(cx);
+        assert!(
+            cx.debug_bounds("cursor").is_some(),
+            "the cursor row is marked"
+        );
+
+        let (first, last) = visible_rows(&view, cx);
+        assert_eq!(first, 0);
+        assert!(last < 39, "the list is longer than the window");
+        cx.simulate_keystrokes("shift-g");
+        assert_eq!(cursor_row(&view, cx), 39);
+        draw(cx);
+        inside(cx, "artifact-row-39", "artifact-list");
+        assert_eq!(visible_rows(&view, cx).1, 39);
+        for _ in 0..30 {
+            cx.simulate_keystrokes("k");
+        }
+        assert_eq!(cursor_row(&view, cx), 9);
+        draw(cx);
+        let (first, last) = visible_rows(&view, cx);
+        assert!(
+            first <= 9 && 9 <= last,
+            "row 9 is in view: {first}..={last}"
+        );
+        assert!(first > 0, "the list only scrolled as far as needed");
+        cx.simulate_keystrokes("g");
+        assert_eq!(cursor_row(&view, cx), 0);
+        cx.simulate_keystrokes("pagedown");
+        let page = cursor_row(&view, cx);
+        assert!(page > 3 && page < 20, "a page is what fits, here {page}");
+        cx.simulate_keystrokes("pageup end home");
+        assert_eq!(cursor_row(&view, cx), 0);
+    }
+
+    #[gpui::test]
+    fn a_long_duplicate_list_scrolls_to_the_cursor(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("photos");
+        for group in 0..30 {
+            for copy in ["a", "b"] {
+                let folder = root.join(copy);
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(
+                    folder.join(format!("{group}.bin")),
+                    vec![u8::try_from(group).unwrap(); 8192 + group],
+                )
+                .unwrap();
+            }
+        }
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Duplicates);
+        cx.simulate_resize(size(px(900.), px(520.)));
+        draw(cx);
+        let last = view.read_with(cx, |app, _| app.targets(Tab::Duplicates).len() - 1);
+        assert_eq!(last, 59);
+        cx.simulate_keystrokes("end");
+        assert_eq!(cursor_row(&view, cx), last);
+        draw(cx);
+        draw(cx);
+        inside(cx, "duplicate-29-1", "duplicate-list");
+        cx.simulate_keystrokes("home");
+        draw(cx);
+        draw(cx);
+        inside(cx, "duplicate-0-0", "duplicate-list");
+    }
+
+    #[gpui::test]
+    fn space_toggles_and_enter_trashes_the_cursor_item(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 2);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_keystrokes("j space");
+        let second = view.read_with(cx, |app, _| {
+            let Some(Target::Item(source, id, _)) = app.cursor_target() else {
+                panic!("an item");
+            };
+            assert_eq!(app.selection, HashSet::from([(source, id)]));
+            (source, id)
+        });
+        cx.simulate_keystrokes("space");
+        view.read_with(cx, |app, _| assert!(app.selection.is_empty()));
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm { only: Some(key), .. }) if key == second
+            ));
+        });
+        cx.simulate_keystrokes("escape k space delete");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm { only: None, .. })
+            ));
+            assert_eq!(app.confirming().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn the_filter_narrows_rows_and_select_all_follows_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 12);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        assert_eq!(
+            view.read_with(cx, |app, _| app.counts(Tab::Artifacts)),
+            (12, 12)
+        );
+        cx.simulate_keystrokes("/");
+        type_text(cx, "PROJECT-1");
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.counts(Tab::Artifacts),
+                (2, 12),
+                "project-10 and project-11"
+            );
+            assert!(app.filtering);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("filter-count").is_some());
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(!app.filtering, "Enter keeps the filter")
+        });
+        cx.simulate_keystrokes("ctrl-a");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.selection.len(), 2, "only the visible rows");
+            assert!(
+                app.selected().iter().all(|(_, candidate)| {
+                    candidate.path.to_string_lossy().contains("project-1")
+                })
+            );
+        });
+        cx.simulate_keystrokes("ctrl-shift-a");
+        view.read_with(cx, |app, _| assert!(app.selection.is_empty()));
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| {
+            assert!(!app.filtering, "Escape leaves the field");
+            assert!(!app.filters.contains_key(&Tab::Artifacts), "and clears it");
+            assert_eq!(app.counts(Tab::Artifacts), (12, 12));
+        });
+
+        cx.simulate_keystrokes("/");
+        type_text(cx, "nothing-like-this");
+        cx.simulate_keystrokes("enter escape");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.rows.len(), 12, "Escape outside the field clears it too");
+        });
+    }
+
+    #[gpui::test]
+    fn the_menu_key_opens_on_the_cursor_row(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 3);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_keystrokes("j j");
+        let cursor = view.read_with(cx, |app, _| app.cursor_target());
+        draw(cx);
+        cx.simulate_keystrokes("menu");
+        assert_eq!(menu_target(&view, cx), cursor);
+        draw(cx);
+        let row = cx.debug_bounds("artifact-row-2").unwrap();
+        let menu = cx.debug_bounds("menu").unwrap();
+        assert!(
+            menu.top() >= row.bottom() - px(1.),
+            "it opens below the row"
+        );
+        cx.simulate_keystrokes("escape shift-f10");
+        assert_eq!(menu_target(&view, cx), cursor);
+    }
+
+    #[gpui::test]
+    fn number_keys_and_ctrl_tab_switch_sections(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Overview);
+        let tab = |cx: &mut VisualTestContext| view.read_with(cx, |app, _| app.tab);
+        cx.simulate_keystrokes("3");
+        assert_eq!(tab(cx), Tab::Caches);
+        cx.simulate_keystrokes("ctrl-tab");
+        assert_eq!(tab(cx), Tab::Duplicates);
+        cx.simulate_keystrokes("ctrl-shift-tab ctrl-shift-tab ctrl-shift-tab");
+        assert_eq!(tab(cx), Tab::Overview);
+        cx.simulate_keystrokes("ctrl-shift-tab");
+        assert_eq!(tab(cx), Tab::Issues, "it wraps around");
+        cx.simulate_keystrokes("1");
+        assert_eq!(tab(cx), Tab::Overview);
+    }
+
+    #[gpui::test]
+    fn the_shortcuts_overlay_lists_the_command_table(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_keystrokes("?");
+        view.read_with(cx, |app, _| assert!(app.shortcuts));
+        draw(cx);
+        assert!(cx.debug_bounds("shortcuts").is_some());
+        for spec in commands::table() {
+            assert!(
+                painted(cx, format!("shortcut-{}", spec.label)),
+                "{} is listed",
+                spec.label
+            );
+        }
+        for (label, _) in commands::HINTS {
+            assert!(
+                painted(cx, format!("shortcut-{label}")),
+                "{label} is listed"
+            );
+        }
+        cx.simulate_keystrokes("j");
+        view.read_with(cx, |app, _| {
+            assert!(app.shortcuts, "other keys are ignored")
+        });
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(!app.shortcuts));
+
+        cx.simulate_keystrokes("ctrl-k");
+        type_text(cx, "keyboard");
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(app.shortcuts, "the palette opens it too");
+            assert!(app.palette.is_none());
+        });
     }
 }
