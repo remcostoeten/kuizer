@@ -21,6 +21,7 @@ use crate::history::HistoryError;
 use clap::CommandFactory;
 
 pub use cache::measure as measure_caches;
+pub use cache::measure_with as measure_caches_with;
 pub use scan::sort_candidates;
 
 #[derive(Debug, thiserror::Error)]

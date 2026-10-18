@@ -420,13 +420,26 @@ pub fn apply_pins(toolchains: &mut [Toolchain], pins: &[Pin]) {
 /// @example
 /// let entries = toolchains::measure(toolchains::find(&locations, &Tool::ALL));
 pub fn measure(found: Vec<Toolchain>) -> Vec<(Toolchain, Candidate)> {
-    let cancel = Cancel::new();
+    measure_with(found, &Cancel::new(), |_| {})
+}
+
+/// @name measure_with
+/// @description Like `measure`, but stops sizing once `cancel` is set and calls `on_measured`
+/// from the measuring thread as each toolchain is done.
+///
+/// @example
+/// let entries = toolchains::measure_with(found, &cancel, |candidate| done.push(candidate.id));
+pub fn measure_with(
+    found: Vec<Toolchain>,
+    cancel: &Cancel,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(Toolchain, Candidate)> {
+    let on_measured = &on_measured;
     let mut entries: Vec<(Toolchain, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found
             .into_iter()
             .enumerate()
             .map(|(index, toolchain)| {
-                let cancel = &cancel;
                 scope.spawn(move || {
                     let measured = scan::measure(&toolchain.path, cancel);
                     let candidate = Candidate {
@@ -440,6 +453,7 @@ pub fn measure(found: Vec<Toolchain>) -> Vec<(Toolchain, Candidate)> {
                         identity: measured.identity,
                         project_last_active: None,
                     };
+                    on_measured(&candidate);
                     (toolchain, candidate)
                 })
             })
@@ -727,5 +741,22 @@ mod tests {
         assert!(error.to_string().contains("not on PATH"), "{error}");
         remove(&guard, candidate, Mode::DryRun).expect("dry run only checks");
         assert!(candidate.path.exists());
+    }
+
+    #[test]
+    fn measure_with_reports_every_toolchain_it_sized() {
+        let tmp = home();
+        let found = find(&Locations::under(tmp.path()), &[Tool::Rustup]);
+        let total = found.len();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let entries = measure_with(found, &Cancel::new(), |candidate| {
+            seen.lock().expect("seen").push(candidate.path.clone());
+        });
+        let mut seen = seen.into_inner().expect("seen");
+        seen.sort();
+        let mut measured: Vec<PathBuf> = entries.iter().map(|(t, _)| t.path.clone()).collect();
+        measured.sort();
+        assert_eq!(total, 3);
+        assert_eq!(seen, measured);
     }
 }

@@ -18,13 +18,27 @@ use crate::scan::{self, Cancel, Candidate};
 /// @example
 /// let entries = measure(caches::find(&locations, &Protected::for_user()));
 pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
-    let cancel = Cancel::new();
+    measure_with(found, &Cancel::new(), |_| {})
+}
+
+/// @name measure_with
+/// @description Like `measure`, but stops sizing once `cancel` is set and calls `on_measured`
+/// from the measuring thread as each cache is done, so a frontend can show which cache was
+/// measured and how many are left.
+///
+/// @example
+/// let entries = measure_with(found, &cancel, |candidate| println!("{}", candidate.path.display()));
+pub fn measure_with(
+    found: Vec<KnownCache>,
+    cancel: &Cancel,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(KnownCache, Candidate)> {
+    let on_measured = &on_measured;
     let mut entries: Vec<(KnownCache, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found
             .into_iter()
             .enumerate()
             .map(|(index, cache)| {
-                let cancel = &cancel;
                 scope.spawn(move || {
                     let measured = scan::measure(&cache.path, cancel);
                     let candidate = Candidate {
@@ -43,6 +57,7 @@ pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
                         identity: measured.identity,
                         project_last_active: None,
                     };
+                    on_measured(&candidate);
                     (cache, candidate)
                 })
             })
@@ -95,4 +110,36 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         remove: removal::files,
     };
     removal::run(&request, selected, &[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detect::Safety;
+
+    #[test]
+    fn measure_with_reports_each_cache_and_drops_empty_ones() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let full = tmp.path().join("full");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&full).expect("full");
+        std::fs::create_dir_all(&empty).expect("empty");
+        std::fs::write(full.join("blob"), vec![0u8; 8192]).expect("blob");
+        let cache = |path: &std::path::Path| KnownCache {
+            name: "test-cache",
+            tool: "test",
+            path: path.to_path_buf(),
+            safety: Safety::Safe,
+            note: "",
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let entries = measure_with(vec![cache(&full), cache(&empty)], &Cancel::new(), |c| {
+            seen.lock().expect("seen").push(c.path.clone());
+        });
+        let mut seen = seen.into_inner().expect("seen");
+        seen.sort();
+        assert_eq!(seen, [empty, full.clone()]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.path, full);
+    }
 }

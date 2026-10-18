@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Row, Table};
 
-use super::view::{MUTED, cells, shorten};
+use super::view::{CURRENT_WIDTH, MUTED, cells, shorten};
 use crate::detect::Safety;
 use crate::output::display_path;
 use crate::scan::{Candidate, Collected, Event, Issue, Scan, Summary};
@@ -115,7 +115,7 @@ fn header(watch: &Watch, scan: &Scan) -> Line<'static> {
         Some(summary) => format!("done in {:.1}s", summary.duration.as_secs_f64()),
         None => "scanning".to_owned(),
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(" kuizer scan ", Style::new().add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
@@ -126,7 +126,16 @@ fn header(watch: &Watch, scan: &Scan) -> Line<'static> {
             ),
             Style::new().fg(MUTED),
         ),
-    ])
+    ];
+    if watch.summary.is_none()
+        && let Some(folder) = scan.current()
+    {
+        spans.push(Span::styled(
+            format!(" in {} ", shorten(&display_path(&folder), CURRENT_WIDTH)),
+            Style::new().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn footer(watch: &Watch) -> Line<'static> {

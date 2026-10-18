@@ -205,6 +205,7 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
             }
             if scanning {
                 app.progress = handle.progress();
+                app.current = handle.current();
             }
             app.refresh();
             terminal.draw(|frame| view::draw(frame, &app))?;

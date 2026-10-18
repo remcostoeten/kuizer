@@ -29,7 +29,7 @@ pub trait Visitor {
 
     fn issue(&mut self, issue: Issue) -> Flow;
 
-    fn entered(&mut self) {}
+    fn entered(&mut self, _path: &Path) {}
 
     fn counted(&mut self, _file_type: fs::FileType) {}
 
@@ -194,7 +194,7 @@ impl<V: Visitor> Walker<'_, V> {
     }
 
     fn visit(&mut self, pending: Pending, stack: &mut Vec<Pending>) -> Flow {
-        self.visitor.entered();
+        self.visitor.entered(&pending.path);
         let entries = match fs::read_dir(&pending.path) {
             Ok(entries) => entries,
             Err(error) => return self.visitor.issue(Issue::from_io(pending.path, &error)),
