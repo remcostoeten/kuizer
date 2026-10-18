@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use gpui::{App, KeyBinding, Keystroke, SharedString, actions};
 use kuizer::output::display_path;
 
+use crate::squarify::Direction;
 use crate::tab::Tab;
 
 actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom, Undo, TogglePalette]);
@@ -35,6 +36,12 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ResetZoom,
+    SpaceMap,
+    MapIn,
+    MapOut,
+    MapTop,
+    MapMove(Direction),
+    MapToggle,
     Scan(PathBuf),
 }
 
@@ -43,17 +50,25 @@ pub enum Group {
     General,
     Sections,
     Lists,
+    Map,
     View,
 }
 
 impl Group {
-    pub const ALL: [Group; 4] = [Self::General, Self::Sections, Self::Lists, Self::View];
+    pub const ALL: [Group; 5] = [
+        Self::General,
+        Self::Sections,
+        Self::Lists,
+        Self::Map,
+        Self::View,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Sections => "Sections",
             Self::Lists => "Lists",
+            Self::Map => "Space map",
             Self::View => "View",
         }
     }
@@ -126,7 +141,7 @@ const TAB_KEYS: [&[&str]; 6] = [&["1"], &["2"], &["3"], &["4"], &["5"], &["6"]];
 /// @example
 /// let spec = table().into_iter().find(|spec| spec.answers(&keystroke));
 pub fn table() -> Vec<Spec> {
-    use Group::{General, Lists, Sections, View};
+    use Group::{General, Lists, Map, Sections, View};
     let mut specs = vec![
         Spec::new(Command::Palette, "Command palette", General)
             .keys(&["secondary-k"])
@@ -149,6 +164,7 @@ pub fn table() -> Vec<Spec> {
         .keys(keys)
     }));
     specs.extend([
+        Spec::new(Command::SpaceMap, "Show or hide the space map", Sections).keys(&["m"]),
         Spec::new(Command::NextTab, "Next section", Sections)
             .keys(&["ctrl-tab"])
             .hidden(),
@@ -184,6 +200,36 @@ pub fn table() -> Vec<Spec> {
         Spec::new(Command::CopyPath, "Copy path", Lists).keys(&["y"]),
         Spec::new(Command::OpenMenu, "Open item menu", Lists).keys(&["menu", "shift-f10"]),
         Spec::new(Command::FocusFilter, "Filter this list", Lists).keys(&["/"]),
+        Spec::new(Command::MapIn, "Open the folder tile", Map).keys(&["enter"]),
+        Spec::new(Command::MapOut, "Zoom out one level", Map).keys(&["backspace", "escape"]),
+        Spec::new(Command::MapTop, "Zoom out to the top", Map).keys(&["home"]),
+        Spec::new(Command::MapToggle, "Select or deselect the tile", Map)
+            .keys(&["space"])
+            .hidden(),
+        Spec::new(
+            Command::MapMove(Direction::Left),
+            "Focus the tile to the left",
+            Map,
+        )
+        .keys(&["left"])
+        .hidden(),
+        Spec::new(
+            Command::MapMove(Direction::Right),
+            "Focus the tile to the right",
+            Map,
+        )
+        .keys(&["right"])
+        .hidden(),
+        Spec::new(Command::MapMove(Direction::Up), "Focus the tile above", Map)
+            .keys(&["up"])
+            .hidden(),
+        Spec::new(
+            Command::MapMove(Direction::Down),
+            "Focus the tile below",
+            Map,
+        )
+        .keys(&["down"])
+        .hidden(),
         Spec::new(Command::ZoomIn, "Zoom in", View)
             .keys(&["secondary-="])
             .extra(&["secondary-+", "secondary-shift-="])
@@ -196,6 +242,23 @@ pub fn table() -> Vec<Spec> {
             .global(),
     ]);
     specs
+}
+
+/// @name lookup
+/// @description The command a keystroke runs. While the space map has the keyboard its own keys
+/// come first, so Enter opens a tile there instead of moving the selection to the trash; outside
+/// the map its keys do nothing.
+///
+/// @example
+/// let command = lookup(&keystroke, app.map_active());
+pub fn lookup(keystroke: &Keystroke, map: bool) -> Option<Command> {
+    let specs = table();
+    let scoped = specs.iter().filter(|spec| map && spec.group == Group::Map);
+    let general = specs.iter().filter(|spec| spec.group != Group::Map);
+    scoped
+        .chain(general)
+        .find(|spec| spec.answers(keystroke))
+        .map(|spec| spec.command.clone())
 }
 
 /// Keys that only work inside the palette, a filter field or a dialog, listed in the shortcuts
@@ -315,6 +378,9 @@ pub fn label(pattern: &str) -> String {
     let key = match keystroke.key.as_str() {
         "down" => "Down".to_owned(),
         "up" => "Up".to_owned(),
+        "left" => "Left".to_owned(),
+        "right" => "Right".to_owned(),
+        "backspace" => "Backspace".to_owned(),
         "pagedown" => "PgDn".to_owned(),
         "pageup" => "PgUp".to_owned(),
         "home" => "Home".to_owned(),
@@ -386,7 +452,13 @@ mod tests {
     fn every_key_is_used_once() {
         let specs = table();
         let mut seen: Vec<&str> = Vec::new();
+        let mut map: Vec<&str> = Vec::new();
         for spec in &specs {
+            let seen = if spec.group == Group::Map {
+                &mut map
+            } else {
+                &mut seen
+            };
             assert!(
                 !spec.keys.is_empty(),
                 "{} needs a key to be listed",
@@ -398,5 +470,21 @@ mod tests {
                 seen.push(key);
             }
         }
+    }
+
+    #[test]
+    fn map_keys_win_only_inside_the_map() {
+        let enter = key("enter");
+        assert_eq!(lookup(&enter, true), Some(Command::MapIn));
+        assert_eq!(lookup(&enter, false), Some(Command::Trash));
+        assert_eq!(
+            lookup(&key("left"), true),
+            Some(Command::MapMove(Direction::Left))
+        );
+        assert_eq!(lookup(&key("left"), false), None);
+        assert_eq!(lookup(&key("backspace"), false), None);
+        assert_eq!(lookup(&key("j"), true), Some(Command::Down));
+        assert_eq!(lookup(&key("m"), false), Some(Command::SpaceMap));
+        assert_eq!(label("backspace"), "Backspace");
     }
 }

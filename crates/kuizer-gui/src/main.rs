@@ -9,10 +9,12 @@ mod motion;
 mod palette;
 mod reveal;
 mod snapshot;
+mod squarify;
 mod start;
 mod tab;
 mod theme;
 mod tooltip;
+mod treemap;
 mod ui;
 mod zoom;
 

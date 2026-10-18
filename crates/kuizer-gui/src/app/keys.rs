@@ -6,6 +6,7 @@ use gpui::{Keystroke, ScrollStrategy};
 use super::*;
 use crate::commands::Spec;
 use crate::palette;
+use crate::treemap;
 
 const START_FIRST: &str = "Start a scan first";
 const NEEDS_SCAN: &str = "Available once a scan is shown";
@@ -164,17 +165,16 @@ impl Kuizer {
             }
             _ => {}
         }
-        let command = commands::table()
-            .into_iter()
-            .find(|spec| spec.answers(keystroke))
-            .map(|spec| spec.command);
-        if let Some(command) = command {
+        if let Some(command) = commands::lookup(keystroke, self.map_active()) {
             self.run(command, window, cx);
         }
     }
 
     fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.refreshing() {
+        if self.map_active() && !self.map.path.is_empty() {
+            self.map_back(self.map.path.len() - 1);
+            cx.notify();
+        } else if self.refreshing() {
             self.cancel_scan(cx);
         } else if self.toast.is_some() && !self.restoring() {
             self.dismiss_toast(cx);
@@ -398,6 +398,34 @@ impl Kuizer {
                 .wait()
                 .or_else(|| (!path.is_dir()).then_some("This folder is missing")),
             _ if !shown => Some(NEEDS_SCAN),
+            Command::SpaceMap => None,
+            Command::MapIn
+            | Command::MapOut
+            | Command::MapTop
+            | Command::MapMove(_)
+            | Command::MapToggle
+                if !self.map_active() =>
+            {
+                Some(map::MAP_ONLY)
+            }
+            Command::MapIn => (!self.map_focused().is_some_and(treemap::Node::opens))
+                .then_some("Only a folder tile opens"),
+            Command::MapOut | Command::MapTop => self
+                .map
+                .path
+                .is_empty()
+                .then_some("The map is already at the top"),
+            Command::MapMove(_) => self
+                .map_focused()
+                .is_none()
+                .then_some("This level has no tiles"),
+            Command::MapToggle => {
+                if self.map_focused().and_then(treemap::Node::item).is_some() {
+                    self.wait()
+                } else {
+                    Some("Only an item tile can be selected")
+                }
+            }
             Command::Trash => {
                 let item = matches!(self.cursor_target(), Some(Target::Item(..)));
                 self.trash_lock().or_else(|| self.wait()).or_else(|| {
@@ -412,6 +440,10 @@ impl Kuizer {
                 }
             }
             Command::FocusFilter => (self.tab == Tab::Overview).then_some(LISTS_ONLY),
+            Command::Reveal | Command::CopyPath | Command::OpenMenu if self.map_active() => self
+                .cursor_target()
+                .is_none()
+                .then_some("Focus an item tile first"),
             Command::Down
             | Command::Up
             | Command::First
@@ -517,6 +549,23 @@ impl Kuizer {
             Command::ResetZoom => {
                 self.zoom.reset();
             }
+            Command::SpaceMap => {
+                if self.tab == Tab::Overview {
+                    self.map.shown = !self.map.shown;
+                } else {
+                    self.go_to(Tab::Overview, cx);
+                    self.map.shown = true;
+                }
+            }
+            Command::MapIn => {
+                if let Some(key) = self.map_focused().map(|node| node.key.clone()) {
+                    self.map_open(&key);
+                }
+            }
+            Command::MapOut => self.map_back(self.map.path.len().saturating_sub(1)),
+            Command::MapTop => self.map_back(0),
+            Command::MapMove(direction) => self.map_move(direction),
+            Command::MapToggle => self.map_toggle(cx),
             Command::Scan(path) => self.scan_folder(&path, cx),
         }
         cx.notify();
@@ -624,6 +673,9 @@ impl Kuizer {
     /// The keyboard cursor of the current list: the last row moved to or used, else its first
     /// row. The item menu's Menu key and Shift+F10 open on it.
     pub(super) fn cursor_target(&self) -> Option<Target> {
+        if self.tab == Tab::Overview {
+            return self.map_target().filter(|_| self.map_active());
+        }
         self.cursors
             .get(&self.tab)
             .filter(|target| self.target_exists(target))
