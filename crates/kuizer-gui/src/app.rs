@@ -1,15 +1,17 @@
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, CursorStyle, DispatchPhase, Div, FocusHandle, FontWeight,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathPromptOptions, Pixels, ScrollWheelEvent, SharedString, Task, Window, actions, canvas, div,
-    prelude::*, px, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
+    FocusHandle, FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollWheelEvent, SharedString, Task, Window,
+    actions, anchored, canvas, deferred, div, point, prelude::*, px, uniform_list,
 };
 use kuizer::config::Config;
 use kuizer::delete::Status;
@@ -29,6 +31,7 @@ use crate::model::{
     TrashState,
 };
 use crate::motion;
+use crate::reveal;
 use crate::snapshot::{self, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
 use crate::theme::{self, unit};
@@ -164,12 +167,13 @@ enum Notice {
     },
     Restored(Restored),
     Failed(String),
+    Info(String),
 }
 
 impl Notice {
     fn lingers(&self) -> bool {
         match self {
-            Self::Trashed { .. } => true,
+            Self::Trashed { .. } | Self::Info(_) => true,
             Self::Restored(restored) => {
                 restored.problems.is_empty() && restored.history_error.is_none()
             }
@@ -184,10 +188,113 @@ struct Toast {
 }
 
 enum Dialog {
-    Confirm { rule: Confirmation, typed: String },
+    Confirm {
+        rule: Confirmation,
+        typed: String,
+        only: Option<(Source, u64)>,
+    },
     Running,
     Finished(Finished),
 }
+
+/// One row a context menu can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Item(Source, u64, PathBuf),
+    Duplicate(PathBuf),
+    Issue(PathBuf),
+    Run(u64, String),
+}
+
+impl Target {
+    fn tab(&self) -> Tab {
+        match self {
+            Self::Item(Source::Artifact, ..) => Tab::Artifacts,
+            Self::Item(Source::Cache, ..) => Tab::Caches,
+            Self::Duplicate(_) => Tab::Duplicates,
+            Self::Issue(_) => Tab::Issues,
+            Self::Run(..) => Tab::History,
+        }
+    }
+
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Item(_, _, path) | Self::Duplicate(path) | Self::Issue(path) => Some(path),
+            Self::Run(..) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    Reveal,
+    CopyPath,
+    Toggle,
+    Trash,
+    Exclude,
+    Restore,
+    CopyCommand,
+}
+
+struct MenuItem {
+    choice: Choice,
+    label: &'static str,
+    key: &'static str,
+    enabled: bool,
+    tip: Option<&'static str>,
+    divided: bool,
+}
+
+impl MenuItem {
+    fn new(choice: Choice, label: &'static str, key: &'static str) -> Self {
+        Self {
+            choice,
+            label,
+            key,
+            enabled: true,
+            tip: None,
+            divided: false,
+        }
+    }
+
+    fn tip(mut self, tip: &'static str) -> Self {
+        self.tip = Some(tip);
+        self
+    }
+
+    fn unless(mut self, reason: Option<&'static str>) -> Self {
+        if let Some(reason) = reason {
+            self.enabled = false;
+            self.tip = Some(reason);
+        }
+        self
+    }
+
+    fn divided(mut self) -> Self {
+        self.divided = true;
+        self
+    }
+
+    fn answers(&self, key: &str) -> bool {
+        match self.key {
+            "Del" => key == "delete",
+            letter => letter.eq_ignore_ascii_case(key),
+        }
+    }
+}
+
+struct Menu {
+    target: Target,
+    position: Point<Pixels>,
+    active: Option<usize>,
+}
+
+const WAIT_FOR_REFRESH: &str = "Available once the fresh scan finishes";
+const WAIT_FOR_RESTORE: &str = "Available once the restore finishes";
+const EXCLUDE_TIP: &str =
+    "Skip this path in every future scan. It is added to scan.exclude in the config file";
+
+type Reveal = fn(&Path) -> Result<(), String>;
 
 pub struct Kuizer {
     config: Config,
@@ -217,6 +324,12 @@ pub struct Kuizer {
     toast: Option<Toast>,
     toast_task: Option<Task<()>>,
     restore_task: Option<Task<()>>,
+    menu: Option<Menu>,
+    cursor: Option<Target>,
+    cursor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    config_path: Option<PathBuf>,
+    excluded: Vec<PathBuf>,
+    reveal: Reveal,
 }
 
 impl Kuizer {
@@ -273,6 +386,12 @@ impl Kuizer {
             toast: None,
             toast_task: None,
             restore_task: None,
+            menu: None,
+            cursor: None,
+            cursor_bounds: Rc::new(Cell::new(None)),
+            config_path: kuizer::config::default_path(),
+            excluded: Vec::new(),
+            reveal: reveal::reveal,
         };
         if !app.roots.is_empty() {
             app.recent.remember(&app.roots);
@@ -392,7 +511,7 @@ impl Kuizer {
     ) {
         let Some((restored, history)) = message else {
             self.show_toast(
-                Notice::Failed("the restore stopped unexpectedly".to_owned()),
+                Notice::Failed("Could not restore: the restore stopped unexpectedly".to_owned()),
                 cx,
             );
             return;
@@ -407,7 +526,7 @@ impl Kuizer {
                 }
                 Notice::Restored(restored)
             }
-            Err(error) => Notice::Failed(error),
+            Err(error) => Notice::Failed(format!("Could not restore: {error}")),
         };
         self.show_toast(notice, cx);
     }
@@ -520,7 +639,8 @@ impl Kuizer {
         };
         self.selection = selection;
         self.phase = Phase::Ready(Box::new(report));
-        self.refresh_rows();
+        self.menu = None;
+        self.prune();
     }
 
     fn start_scan(&mut self, cx: &mut Context<Self>) {
@@ -733,21 +853,58 @@ impl Kuizer {
     }
 
     fn open_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.selected();
-        if selected.is_empty() || self.busy() || self.refreshing() {
+        self.confirm(None, window, cx);
+    }
+
+    /// Opens the trash confirmation for the selection, or for one item when `only` is set.
+    fn confirm(
+        &mut self,
+        only: Option<(Source, u64)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items = match only {
+            Some(key) => self.item(key).into_iter().collect(),
+            None => self.selected(),
+        };
+        if items.is_empty() || self.busy() || self.refreshing() {
             return;
         }
-        let rule = Confirmation::for_items(selected.iter().map(|(_, candidate)| *candidate));
+        let rule = Confirmation::for_items(items.iter().map(|(_, candidate)| *candidate));
         self.dialog = Some(Dialog::Confirm {
             rule,
             typed: String::new(),
+            only,
         });
         window.focus(&self.focus);
         cx.notify();
     }
 
+    fn item(&self, (source, id): (Source, u64)) -> Option<(Source, &Candidate)> {
+        let report = self.report()?;
+        let candidate = match source {
+            Source::Artifact => report.candidates.iter().find(|c| c.id == id),
+            Source::Cache => report
+                .caches
+                .iter()
+                .map(|(_, candidate)| candidate)
+                .find(|c| c.id == id),
+        }?;
+        Some((source, candidate))
+    }
+
+    /// What the open confirmation acts on: one item from a context menu, or the selection.
+    fn confirming(&self) -> Vec<(Source, &Candidate)> {
+        match &self.dialog {
+            Some(Dialog::Confirm {
+                only: Some(key), ..
+            }) => self.item(*key).into_iter().collect(),
+            _ => self.selected(),
+        }
+    }
+
     fn accept(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Confirm { rule, typed }) = &self.dialog else {
+        let Some(Dialog::Confirm { rule, typed, .. }) = &self.dialog else {
             return;
         };
         if !rule.accepts(typed) || self.refreshing() {
@@ -758,7 +915,7 @@ impl Kuizer {
         };
         let mut artifacts = Vec::new();
         let mut caches = Vec::new();
-        for (source, candidate) in self.selected() {
+        for (source, candidate) in self.confirming() {
             match source {
                 Source::Artifact => artifacts.push(candidate.clone()),
                 Source::Cache => caches.push(candidate.clone()),
@@ -907,10 +1064,16 @@ impl Kuizer {
         }
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
+        if self.menu.is_some() {
+            self.menu_key(event, window, cx);
+            return;
+        }
+        let menu_key = key == "menu" || (key == "f10" && event.keystroke.modifiers.shift);
         if self.dialog.is_none() {
             match self.phase {
+                Phase::Ready(_) if menu_key => self.open_menu_at_cursor(window, cx),
                 Phase::Start => self.type_folder(event, cx),
                 Phase::Loading(_) if key == "escape" => self.cancel_scan(cx),
                 Phase::Ready(_) if key == "escape" && self.refreshing() => self.cancel_scan(cx),
@@ -942,6 +1105,507 @@ impl Kuizer {
             _ => return,
         }
         cx.notify();
+    }
+
+    /// Shows a message unless the restore message is up, which tracks a running restore.
+    fn tell(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        if !self.restoring() {
+            self.show_toast(notice, cx);
+        }
+    }
+
+    fn target_exists(&self, target: &Target) -> bool {
+        let Some(report) = self.report() else {
+            return false;
+        };
+        match target {
+            Target::Item(Source::Artifact, id, _) => self
+                .rows
+                .iter()
+                .any(|&index| report.candidates[index].id == *id),
+            Target::Item(Source::Cache, id, _) => report
+                .caches
+                .iter()
+                .any(|(_, candidate)| candidate.id == *id),
+            Target::Duplicate(path) => report.duplicates.as_ref().is_some_and(|found| {
+                found
+                    .groups
+                    .iter()
+                    .take(DUPLICATE_GROUPS)
+                    .flat_map(|group| &group.members)
+                    .any(|member| member.path == *path)
+            }),
+            Target::Issue(path) => report
+                .issues
+                .iter()
+                .take(ISSUE_LIMIT)
+                .any(|issue| issue.path == *path),
+            Target::Run(session, _) => report
+                .history
+                .as_ref()
+                .is_ok_and(|view| view.delete_runs().any(|run| run.id == *session)),
+        }
+    }
+
+    fn first_target(&self) -> Option<Target> {
+        let report = self.report()?;
+        match self.tab {
+            Tab::Overview => None,
+            Tab::Artifacts => self.rows.first().map(|&index| {
+                let candidate = &report.candidates[index];
+                Target::Item(Source::Artifact, candidate.id, candidate.path.clone())
+            }),
+            Tab::Caches => report.caches.first().map(|(_, candidate)| {
+                Target::Item(Source::Cache, candidate.id, candidate.path.clone())
+            }),
+            Tab::Duplicates => report
+                .duplicates
+                .as_ref()?
+                .groups
+                .first()?
+                .members
+                .first()
+                .map(|member| Target::Duplicate(member.path.clone())),
+            Tab::Issues => report
+                .issues
+                .first()
+                .map(|issue| Target::Issue(issue.path.clone())),
+            Tab::History => report
+                .history
+                .as_ref()
+                .ok()?
+                .delete_runs()
+                .next_back()
+                .map(|run| Target::Run(run.id, run.command.clone())),
+        }
+    }
+
+    /// The row the keyboard menu opens for: the last row used in this section, else its first row.
+    fn cursor_target(&self) -> Option<Target> {
+        self.cursor
+            .clone()
+            .filter(|target| target.tab() == self.tab && self.target_exists(target))
+            .or_else(|| self.first_target())
+    }
+
+    fn trash_lock(&self) -> Option<&'static str> {
+        if self.restoring() {
+            Some(WAIT_FOR_RESTORE)
+        } else if self.refreshing() {
+            Some(
+                "Available once the fresh scan finishes. These results come from an earlier scan, so every item is checked again first",
+            )
+        } else {
+            None
+        }
+    }
+
+    fn menu_items(&self, target: &Target) -> Vec<MenuItem> {
+        let reveal = MenuItem::new(Choice::Reveal, "Reveal in file manager", "R")
+            .tip("Open the folder that holds this item");
+        let copy = MenuItem::new(Choice::CopyPath, "Copy path", "C");
+        let exclude = MenuItem::new(Choice::Exclude, "Always exclude", "X")
+            .tip(EXCLUDE_TIP)
+            .divided();
+        match target {
+            Target::Item(source, id, _) => {
+                let selected = self.selection.contains(&(*source, *id));
+                vec![
+                    reveal,
+                    copy,
+                    MenuItem::new(
+                        Choice::Toggle,
+                        if selected { "Deselect" } else { "Select" },
+                        "S",
+                    )
+                    .divided()
+                    .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
+                    MenuItem::new(Choice::Trash, "Move to trash", "Del")
+                        .tip("Move only this item to the trash, after a confirmation")
+                        .unless(self.trash_lock()),
+                    exclude,
+                ]
+            }
+            Target::Duplicate(_) | Target::Issue(_) => vec![reveal, copy, exclude],
+            Target::Run(session, _) => {
+                let restorable = self.report().is_some_and(|report| {
+                    report.history.as_ref().is_ok_and(|view| {
+                        view.history
+                            .runs
+                            .iter()
+                            .position(|run| run.id == *session)
+                            .is_some_and(|index| {
+                                matches!(view.trash_state(index), TrashState::Restorable { .. })
+                            })
+                    })
+                });
+                let lock = if !restorable {
+                    Some("Nothing from this cleanup is left in the trash")
+                } else if self.restoring() {
+                    Some(WAIT_FOR_RESTORE)
+                } else if !self.can_restore() {
+                    Some(WAIT_FOR_REFRESH)
+                } else {
+                    None
+                };
+                vec![
+                    MenuItem::new(Choice::Restore, "Restore", "R")
+                        .tip("Put what is still in the trash back where it was")
+                        .unless(lock),
+                    MenuItem::new(Choice::CopyCommand, "Copy command", "C"),
+                ]
+            }
+        }
+    }
+
+    fn open_menu(
+        &mut self,
+        target: Target,
+        position: Point<Pixels>,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dialog.is_some() || !self.target_exists(&target) {
+            return;
+        }
+        let active = if keyboard {
+            self.menu_items(&target)
+                .iter()
+                .position(|item| item.enabled)
+        } else {
+            None
+        };
+        self.cursor = Some(target.clone());
+        self.menu = Some(Menu {
+            target,
+            position,
+            active,
+        });
+        cx.notify();
+    }
+
+    fn open_menu_at_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.cursor_target() else {
+            return;
+        };
+        let indent = unit(24.).to_pixels(window.rem_size());
+        let position = self.cursor_bounds.get().map_or_else(
+            || {
+                let size = window.viewport_size();
+                point(size.width / 2., size.height / 3.)
+            },
+            |bounds| point(bounds.left() + indent, bounds.bottom()),
+        );
+        self.open_menu(target, position, true, cx);
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = &self.menu else {
+            return;
+        };
+        let items = self.menu_items(&menu.target);
+        let enabled: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.enabled)
+            .map(|(index, _)| index)
+            .collect();
+        let at = menu
+            .active
+            .and_then(|active| enabled.iter().position(|&index| index == active));
+        let count = enabled.len();
+        let keystroke = &event.keystroke;
+        let plain = !keystroke.modifiers.control
+            && !keystroke.modifiers.alt
+            && !keystroke.modifiers.platform;
+        let key = keystroke.key.as_str();
+        let next = match key {
+            "escape" | "menu" => {
+                self.close_menu(cx);
+                return;
+            }
+            "f10" if keystroke.modifiers.shift => {
+                self.close_menu(cx);
+                return;
+            }
+            "down" | "j" if count > 0 => Some(enabled[at.map_or(0, |at| (at + 1) % count)]),
+            "up" | "k" if count > 0 => {
+                Some(enabled[at.map_or(count - 1, |at| (at + count - 1) % count)])
+            }
+            "home" => enabled.first().copied(),
+            "end" => enabled.last().copied(),
+            "enter" | "space" => {
+                if let Some(active) = menu.active {
+                    self.choose(active, window, cx);
+                }
+                return;
+            }
+            _ => {
+                if plain
+                    && let Some(index) = items
+                        .iter()
+                        .position(|item| item.enabled && item.answers(key))
+                {
+                    self.choose(index, window, cx);
+                }
+                return;
+            }
+        };
+        if let Some(menu) = &mut self.menu {
+            menu.active = next;
+        }
+        cx.notify();
+    }
+
+    fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        let choice = self
+            .menu_items(&menu.target)
+            .get(index)
+            .filter(|item| item.enabled)
+            .map(|item| item.choice);
+        let Some(choice) = choice else {
+            self.menu = Some(menu);
+            return;
+        };
+        cx.notify();
+        let target = menu.target;
+        let path = target.path().map(Path::to_path_buf);
+        match (choice, target) {
+            (Choice::Reveal, _) => {
+                if let Some(path) = path {
+                    self.reveal_path(path, cx);
+                }
+            }
+            (Choice::CopyPath, _) => {
+                if let Some(path) = path {
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        path.to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+            (Choice::Exclude, _) => {
+                if let Some(path) = path {
+                    self.exclude(path, cx);
+                }
+            }
+            (Choice::Toggle, Target::Item(source, id, _)) => self.toggle(source, id, cx),
+            (Choice::Trash, Target::Item(source, id, _)) => {
+                self.confirm(Some((source, id)), window, cx);
+            }
+            (Choice::Restore, Target::Run(session, _)) => {
+                self.restore(session, Scope::StillInTrash, cx);
+            }
+            (Choice::CopyCommand, Target::Run(_, command)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(command));
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the file manager on a worker so a slow or missing file manager never blocks the
+    /// window, and explains a failure in the message bar.
+    fn reveal_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let open = self.reveal;
+        let opened = cx.background_executor().spawn(async move { open(&path) });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = opened.await {
+                let _ = this.update(cx, |app, cx| {
+                    app.tell(
+                        Notice::Failed(format!("Could not open the file manager: {error}")),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Adds the path to `scan.exclude` in the config file, so no later scan shows it, and
+    /// removes it from the lists on screen.
+    fn exclude(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let shown = self.shown_path(&path);
+        let pattern = kuizer::config::exclude_pattern(&path);
+        let written = match &self.config_path {
+            Some(file) => {
+                kuizer::config::add_exclude(file, &pattern).map_err(|error| error.to_string())
+            }
+            None => Err("this system has no config folder".to_owned()),
+        };
+        if let Err(error) = written {
+            self.tell(
+                Notice::Failed(format!("Could not exclude {shown}: {error}")),
+                cx,
+            );
+            return;
+        }
+        if !self.config.scan.exclude.contains(&pattern) {
+            self.config.scan.exclude.push(pattern);
+        }
+        self.excluded.push(path);
+        self.prune();
+        self.tell(
+            Notice::Info(format!("{shown} is excluded from every scan")),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Removes excluded paths from the report on screen and forgets selections of items that
+    /// are gone.
+    fn prune(&mut self) {
+        if let Phase::Ready(report) = &mut self.phase {
+            report.drop_paths(&self.excluded);
+        }
+        if let Some(report) = self.report() {
+            let known: HashSet<(Source, u64)> = report
+                .candidates
+                .iter()
+                .map(|candidate| (Source::Artifact, candidate.id))
+                .chain(
+                    report
+                        .caches
+                        .iter()
+                        .map(|(_, candidate)| (Source::Cache, candidate.id)),
+                )
+                .collect();
+            self.selection.retain(|key| known.contains(key));
+        }
+        self.refresh_rows();
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| !self.target_exists(&menu.target))
+        {
+            self.menu = None;
+        }
+    }
+
+    /// Adds the right-click menu to a row, and marks the row the keyboard menu would open for.
+    fn menu_row<E: InteractiveElement + ParentElement + Styled + FluentBuilder>(
+        &self,
+        row: E,
+        target: Target,
+        cursor: Option<&Target>,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let open = self.menu.as_ref().is_some_and(|menu| menu.target == target);
+        let bounds = (cursor == Some(&target)).then(|| Rc::clone(&self.cursor_bounds));
+        row.when_some(bounds, |this, bounds| {
+            this.child(
+                canvas(move |area, _, _| bounds.set(Some(area)), |_, (), _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        })
+        .when(open, |this| this.bg(theme::hover()))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                app.open_menu(target.clone(), event.position, false, cx);
+            }),
+        )
+    }
+
+    fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu.as_ref()?;
+        let items = self.menu_items(&menu.target);
+        let active = menu.active;
+        let panel = div()
+            .id("menu")
+            .debug_selector(|| "menu".to_owned())
+            .flex()
+            .flex_col()
+            .min_w(unit(220.))
+            .py(unit(4.))
+            .rounded(theme::radius_panel())
+            .bg(theme::elevated())
+            .border_1()
+            .border_color(theme::border_strong())
+            .shadow_lg()
+            .text_size(unit(12.5))
+            .font_family(self.font.clone())
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .children(items.into_iter().enumerate().map(|(index, item)| {
+                let label = item.label;
+                let enabled = item.enabled;
+                let divider = item
+                    .divided
+                    .then(|| div().h(unit(1.)).my(unit(4.)).bg(theme::border()));
+                let row = div()
+                    .id(("menu-item", index))
+                    .debug_selector(move || format!("menu-{label}"))
+                    .flex()
+                    .items_center()
+                    .gap(unit(16.))
+                    .h(unit(26.))
+                    .mx(unit(4.))
+                    .px(unit(8.))
+                    .rounded(theme::radius_control())
+                    .text_color(if enabled {
+                        theme::text()
+                    } else {
+                        theme::faint()
+                    })
+                    .when(enabled && active == Some(index), |this| {
+                        this.bg(theme::selected())
+                    })
+                    .when(enabled, |this| this.cursor_pointer())
+                    .when_some(item.tip, |this, tip| this.tip(tooltip::plain(tip)))
+                    .child(div().flex_1().child(label))
+                    .child(ui::kbd(item.key))
+                    .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
+                        if let Some(menu) = &mut app.menu
+                            && enabled
+                            && menu.active != Some(index)
+                        {
+                            menu.active = Some(index);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
+                        app.choose(index, window, cx);
+                    }));
+                div().flex().flex_col().children(divider).child(row)
+            }));
+        Some(
+            div()
+                .id("menu-backdrop")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|app, _: &MouseDownEvent, _, cx| app.close_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|app, _: &MouseDownEvent, _, cx| app.close_menu(cx)),
+                )
+                .child(
+                    deferred(
+                        anchored()
+                            .position(menu.position)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(panel),
+                    )
+                    .with_priority(1),
+                )
+                .into_any_element(),
+        )
     }
 
     fn dialog_path(&self, candidate: &Candidate) -> String {
@@ -1029,6 +1693,7 @@ impl Kuizer {
             });
         div()
             .id("titlebar")
+            .debug_selector(|| "titlebar".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -1258,9 +1923,9 @@ impl Kuizer {
                 Tab::Overview => self.render_overview(),
                 Tab::Artifacts => self.render_artifacts(cx),
                 Tab::Caches => self.render_caches(cx),
-                Tab::Duplicates => self.render_duplicates(),
+                Tab::Duplicates => self.render_duplicates(cx),
                 Tab::History => self.render_history(cx),
-                Tab::Issues => self.render_issues(),
+                Tab::Issues => self.render_issues(cx),
             },
         }
     }
@@ -1927,14 +2592,18 @@ impl Kuizer {
                 let Some(report) = app.report() else {
                     return Vec::new();
                 };
+                let cursor = app.cursor_target();
                 range
                     .filter_map(|row| {
                         let candidate = &report.candidates[*app.rows.get(row)?];
                         let id = candidate.id;
                         let checked = app.selection.contains(&(Source::Artifact, id));
                         let review = candidate.rule.safety == Safety::Review;
+                        let target = Target::Item(Source::Artifact, id, candidate.path.clone());
+                        let row = table_row(("artifact", id), checked)
+                            .debug_selector(move || format!("artifact-row-{row}"));
                         Some(
-                            table_row(("artifact", id), checked)
+                            app.menu_row(row, target, cursor.as_ref(), cx)
                                 .child(ui::checkbox(checked))
                                 .child(
                                     column(90.)
@@ -2022,60 +2691,68 @@ impl Kuizer {
             .child(column(170.).child("Cache"))
             .child(head(56., "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
-        let rows = report.caches.iter().map(|(cache, candidate)| {
-            let id = candidate.id;
-            let checked = self.selection.contains(&(Source::Cache, id));
-            let review = candidate.rule.safety == Safety::Review;
-            table_row(("cache", id), checked)
-                .child(ui::checkbox(checked))
-                .child(
-                    column(90.)
-                        .id(("cache-size", id))
-                        .text_right()
-                        .tip(size_details(candidate, &[]))
-                        .child(theme::bytes(candidate.usage.allocated)),
-                )
-                .child(column(64.).child(ui::safety_label(("cache-safety", id), review)))
-                .child(column(90.).text_color(theme::muted()).child(cache.tool))
-                .child(column(170.).truncate().child(cache.name))
-                .child(
-                    column(56.)
-                        .text_right()
-                        .text_color(theme::muted())
-                        .child(theme::age(candidate.newest)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .id(("cache-path", id))
-                                .truncate()
-                                .text_color(theme::muted())
-                                .tip(tooltip::path(&candidate.path))
-                                .child(display_path(&candidate.path)),
-                        )
-                        .when(!cache.note.is_empty(), |this| {
-                            this.child(
+        let cursor = self.cursor_target();
+        let rows = report
+            .caches
+            .iter()
+            .enumerate()
+            .map(|(index, (cache, candidate))| {
+                let id = candidate.id;
+                let checked = self.selection.contains(&(Source::Cache, id));
+                let review = candidate.rule.safety == Safety::Review;
+                let row = table_row(("cache", id), checked)
+                    .debug_selector(move || format!("cache-row-{index}"));
+                let target = Target::Item(Source::Cache, id, candidate.path.clone());
+                self.menu_row(row, target, cursor.as_ref(), cx)
+                    .child(ui::checkbox(checked))
+                    .child(
+                        column(90.)
+                            .id(("cache-size", id))
+                            .text_right()
+                            .tip(size_details(candidate, &[]))
+                            .child(theme::bytes(candidate.usage.allocated)),
+                    )
+                    .child(column(64.).child(ui::safety_label(("cache-safety", id), review)))
+                    .child(column(90.).text_color(theme::muted()).child(cache.tool))
+                    .child(column(170.).truncate().child(cache.name))
+                    .child(
+                        column(56.)
+                            .text_right()
+                            .text_color(theme::muted())
+                            .child(theme::age(candidate.newest)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
                                 div()
+                                    .id(("cache-path", id))
                                     .truncate()
-                                    .text_size(unit(12.))
-                                    .text_color(theme::faint())
-                                    .child(cache.note),
+                                    .text_color(theme::muted())
+                                    .tip(tooltip::path(&candidate.path))
+                                    .child(display_path(&candidate.path)),
                             )
-                        }),
-                )
-                .h(unit(44.))
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    if !app.busy() {
-                        app.toggle(Source::Cache, id, cx);
-                    }
-                }))
-        });
+                            .when(!cache.note.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(unit(12.))
+                                        .text_color(theme::faint())
+                                        .child(cache.note),
+                                )
+                            }),
+                    )
+                    .h(unit(44.))
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        if !app.busy() {
+                            app.toggle(Source::Cache, id, cx);
+                        }
+                    }))
+            });
         div()
             .flex()
             .flex_col()
@@ -2141,7 +2818,7 @@ impl Kuizer {
             .into_any_element()
     }
 
-    fn render_duplicates(&self) -> AnyElement {
+    fn render_duplicates(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
@@ -2156,6 +2833,7 @@ impl Kuizer {
             .groups
             .first()
             .map_or(0, kuizer::dupes::Group::reclaimable);
+        let cursor = self.cursor_target();
         scroll("duplicates")
             .child(
                 div()
@@ -2229,10 +2907,15 @@ impl Kuizer {
                                 .tip(group_details(group)),
                             )
                             .children(group.members.iter().enumerate().map(|(position, member)| {
-                                div()
+                                let row = div()
                                     .flex()
                                     .gap(unit(8.))
                                     .text_color(theme::muted())
+                                    .debug_selector(move || {
+                                        format!("duplicate-{index}-{position}")
+                                    });
+                                let target = Target::Duplicate(member.path.clone());
+                                self.menu_row(row, target, cursor.as_ref(), cx)
                                     .child(
                                         div()
                                             .id((members.clone(), position))
@@ -2289,6 +2972,7 @@ impl Kuizer {
             .collect();
         let can_restore = self.can_restore();
         let refreshing = self.refreshing();
+        let cursor = self.cursor_target();
         let tallest = recent.iter().map(|run| run.total.bytes).max().unwrap_or(0);
         let chart = div()
             .flex()
@@ -2400,7 +3084,8 @@ impl Kuizer {
                             kuizer::delete::Mode::Permanent => "permanent",
                             kuizer::delete::Mode::DryRun => "dry run",
                         });
-                        div()
+                        let session = run.id;
+                        let row = div()
                             .flex()
                             .items_center()
                             .gap(unit(12.))
@@ -2408,6 +3093,9 @@ impl Kuizer {
                             .px(unit(14.))
                             .border_t_1()
                             .border_color(theme::border())
+                            .debug_selector(move || format!("run-{session}"));
+                        let target = Target::Run(run.id, run.command.clone());
+                        self.menu_row(row, target, cursor.as_ref(), cx)
                             .child(column(56.).child(run.session()))
                             .child(
                                 column(150.)
@@ -2506,13 +3194,14 @@ impl Kuizer {
         }
     }
 
-    fn render_issues(&self) -> AnyElement {
+    fn render_issues(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
         if report.issues.is_empty() {
             return centered(ui::empty("The scan reported no issues"));
         }
+        let cursor = self.cursor_target();
         scroll("issues")
             .child(
                 div()
@@ -2531,13 +3220,15 @@ impl Kuizer {
                     .take(ISSUE_LIMIT)
                     .enumerate()
                     .map(|(index, issue)| {
-                        div()
+                        let row = div()
                             .flex()
                             .flex_col()
                             .gap(unit(2.))
                             .py(unit(6.))
                             .border_b_1()
                             .border_color(theme::border())
+                            .debug_selector(move || format!("issue-row-{index}"));
+                        self.menu_row(row, Target::Issue(issue.path.clone()), cursor.as_ref(), cx)
                             .child(
                                 div()
                                     .id(("issue", index))
@@ -2684,9 +3375,13 @@ impl Kuizer {
                         .flex_1()
                         .debug_selector(|| "toast-error".to_owned())
                         .text_color(theme::danger())
-                        .child(format!("Could not restore: {error}")),
+                        .child(error.clone()),
                 )
                 .child(dismiss()),
+            ),
+            Notice::Info(text) => panel.child(
+                line.child(div().flex_1().child(text.clone()))
+                    .child(dismiss()),
             ),
         };
         Some(
@@ -2724,8 +3419,8 @@ impl Kuizer {
             .border_color(theme::border_strong())
             .shadow_lg();
         let body = match dialog {
-            Dialog::Confirm { rule, typed } => {
-                let selected = self.selected();
+            Dialog::Confirm { rule, typed, .. } => {
+                let selected = self.confirming();
                 let bytes: u64 = selected
                     .iter()
                     .map(|(_, candidate)| candidate.usage.allocated)
@@ -2830,7 +3525,7 @@ impl Kuizer {
                                     })),
                             )
                             .child(
-                                ui::button("confirm", "Move to trash", ButtonKind::Primary, accepted).tip(Tooltip::new("Move the selected items to the trash").keys(&["Enter"]).build())
+                                ui::button("confirm", "Move to trash", ButtonKind::Primary, accepted).tip(Tooltip::new("Move these items to the trash").keys(&["Enter"]).build())
                                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                         app.accept(cx);
                                     })),
@@ -2945,6 +3640,8 @@ impl Render for Kuizer {
         let content = self.render_content(cx);
         let dialog = self.render_dialog(cx);
         let toast = self.render_toast(cx);
+        let menu = self.render_menu(cx);
+        self.cursor_bounds.set(None);
         let start = matches!(self.phase, Phase::Start);
         let titlebar = self.render_titlebar(window, cx);
         let root = div()
@@ -2986,6 +3683,7 @@ impl Render for Kuizer {
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
             .children(dialog)
+            .children(menu)
             .child(tooltip::layer(cx));
         frame::frame(root, window)
     }
@@ -3466,6 +4164,8 @@ mod tests {
                 cx,
             );
             app.options.caches = false;
+            app.config_path = recent.parent().map(|dir| dir.join("config.toml"));
+            app.reveal = |_| Err("no file manager in tests".to_owned());
             app
         })
     }
@@ -4128,6 +4828,325 @@ mod tests {
         cx.simulate_keystrokes("ctrl-z");
         toast_is(&view, cx, |notice| matches!(notice, Notice::Trashed { .. }));
         view.update(cx, |app, cx| app.cancel_scan(cx));
+    }
+
+    fn scanned<'a>(
+        cx: &'a mut TestAppContext,
+        dir: &Path,
+        tab: Tab,
+    ) -> (Entity<Kuizer>, &'a mut VisualTestContext) {
+        let root = project(dir);
+        let (view, cx) = open(cx, dir.join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.update(cx, |app, cx| {
+            app.tab = tab;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        (view, cx)
+    }
+
+    fn right_click(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        let bounds = cx.debug_bounds(selector).expect("the row is painted");
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        bounds
+    }
+
+    fn click_item(cx: &mut VisualTestContext, selector: &'static str) {
+        let item = cx.debug_bounds(selector).expect("the menu item is painted");
+        cx.simulate_click(item.center(), Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn menu_target(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Option<Target> {
+        view.read_with(cx, |app, _| {
+            app.menu.as_ref().map(|menu| menu.target.clone())
+        })
+    }
+
+    fn only_artifact(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> (u64, PathBuf) {
+        view.read_with(cx, |app, _| {
+            let candidates = &app.report().unwrap().candidates;
+            assert_eq!(candidates.len(), 1);
+            (candidates[0].id, candidates[0].path.clone())
+        })
+    }
+
+    #[gpui::test]
+    fn right_clicking_a_row_opens_its_menu_there(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let (id, path) = only_artifact(&view, cx);
+        let row = right_click(cx, "artifact-row-0");
+        assert_eq!(
+            menu_target(&view, cx),
+            Some(Target::Item(Source::Artifact, id, path))
+        );
+        let menu = cx.debug_bounds("menu").expect("the menu is painted");
+        assert!(menu.top() >= row.top() && menu.top() <= row.bottom());
+        assert!((menu.left() - row.center().x).abs() < px(1.));
+        view.read_with(cx, |app, _| {
+            assert!(app.selection.is_empty(), "a right click does not select");
+            let labels: Vec<&str> = app
+                .menu_items(&app.menu.as_ref().unwrap().target)
+                .iter()
+                .map(|item| item.label)
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    "Reveal in file manager",
+                    "Copy path",
+                    "Select",
+                    "Move to trash",
+                    "Always exclude"
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn copy_path_puts_the_full_path_on_the_clipboard(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let (_, path) = only_artifact(&view, cx);
+        right_click(cx, "artifact-row-0");
+        click_item(cx, "menu-Copy path");
+        assert!(menu_target(&view, cx).is_none(), "choosing closes the menu");
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some(path.to_str().unwrap()));
+    }
+
+    #[gpui::test]
+    fn always_exclude_writes_the_config_and_hides_the_item(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let (id, path) = only_artifact(&view, cx);
+        view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        right_click(cx, "artifact-row-0");
+        click_item(cx, "menu-Always exclude");
+
+        let file = dir.path().join("config.toml");
+        let config = Config::load(Some(&file)).unwrap().config;
+        let pattern = kuizer::config::exclude_pattern(&path);
+        assert_eq!(config.scan.exclude, std::slice::from_ref(&pattern));
+        view.read_with(cx, |app, _| {
+            assert!(app.menu.is_none());
+            assert!(app.report().unwrap().candidates.is_empty());
+            assert!(app.rows.is_empty());
+            assert!(app.selection.is_empty(), "the selection forgets it too");
+            assert_eq!(app.config.scan.exclude, std::slice::from_ref(&pattern));
+        });
+        toast_is(&view, cx, |notice| matches!(notice, Notice::Info(_)));
+
+        view.update(cx, |app, cx| app.rescan(cx));
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.report().unwrap().candidates.is_empty(),
+                "a fresh scan skips it"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn escape_or_a_click_outside_closes_the_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        right_click(cx, "artifact-row-0");
+        assert!(menu_target(&view, cx).is_some());
+        cx.simulate_keystrokes("escape");
+        assert!(menu_target(&view, cx).is_none());
+
+        let row = right_click(cx, "artifact-row-0");
+        assert!(menu_target(&view, cx).is_some());
+        cx.simulate_click(
+            point(row.center().x, row.bottom() + px(200.)),
+            Modifiers::default(),
+        );
+        view.read_with(cx, |app, _| {
+            assert!(app.menu.is_none());
+            assert!(app.selection.is_empty(), "the click only closed the menu");
+        });
+    }
+
+    #[gpui::test]
+    fn the_keyboard_opens_the_menu_and_chooses_an_item(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let (id, path) = only_artifact(&view, cx);
+        cx.simulate_keystrokes("shift-f10");
+        view.read_with(cx, |app, _| {
+            let menu = app.menu.as_ref().expect("Shift+F10 opens the menu");
+            assert_eq!(
+                menu.target,
+                Target::Item(Source::Artifact, id, path.clone())
+            );
+            assert_eq!(menu.active, Some(0));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("artifact-row-0").unwrap();
+        let menu = cx.debug_bounds("menu").unwrap();
+        assert!(
+            menu.top() >= row.bottom() - px(1.),
+            "it opens below the row"
+        );
+
+        let active = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| app.menu.as_ref().and_then(|menu| menu.active))
+        };
+        cx.simulate_keystrokes("down");
+        assert_eq!(active(cx), Some(1));
+        cx.simulate_keystrokes("j j");
+        assert_eq!(active(cx), Some(3));
+        cx.simulate_keystrokes("k");
+        assert_eq!(active(cx), Some(2));
+        cx.simulate_keystrokes("up up up");
+        assert_eq!(active(cx), Some(4), "it wraps around");
+        cx.simulate_keystrokes("down down down enter");
+        view.read_with(cx, |app, _| {
+            assert!(app.menu.is_none());
+            assert!(app.selection.contains(&(Source::Artifact, id)));
+        });
+
+        cx.simulate_keystrokes("menu");
+        assert!(
+            menu_target(&view, cx).is_some(),
+            "the Menu key opens it too"
+        );
+        cx.simulate_keystrokes("s");
+        view.read_with(cx, |app, _| {
+            assert!(app.menu.is_none());
+            assert!(app.selection.is_empty(), "S deselects");
+        });
+    }
+
+    #[gpui::test]
+    fn a_right_click_on_the_titlebar_opens_no_item_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        right_click(cx, "titlebar");
+        assert!(menu_target(&view, cx).is_none());
+    }
+
+    #[gpui::test]
+    fn trash_from_the_menu_asks_for_that_item_only(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let other = root.join("web").join("node_modules").join("x");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join("web").join("package.json"), "{}").unwrap();
+        std::fs::write(other.join("index.js"), vec![b'y'; 8 * 1024]).unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.update(cx, |app, cx| {
+            app.tab = Tab::Artifacts;
+            let first = app.report().unwrap().candidates[0].id;
+            app.toggle(Source::Artifact, first, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        view.update(cx, |app, _| app.stale = Some(SystemTime::now()));
+        right_click(cx, "artifact-row-1");
+        view.read_with(cx, |app, _| {
+            let items = app.menu_items(&app.menu.as_ref().unwrap().target);
+            let trash = items
+                .iter()
+                .find(|item| item.choice == Choice::Trash)
+                .unwrap();
+            assert!(!trash.enabled, "not while the results are refreshing");
+            assert_eq!(trash.tip, app.trash_lock());
+        });
+        cx.simulate_keystrokes("delete");
+        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
+        cx.simulate_keystrokes("escape");
+        view.update(cx, |app, _| app.stale = None);
+
+        let second = right_click(cx, "artifact-row-1");
+        let Some(Target::Item(_, id, _)) = menu_target(&view, cx) else {
+            panic!("the menu is open on the second row");
+        };
+        assert!(second.size.height > px(0.));
+        cx.simulate_keystrokes("delete");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm {
+                    only: Some((Source::Artifact, only)),
+                    ..
+                }) if only == id
+            ));
+            let items = app.confirming();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].1.id, id);
+            assert_eq!(app.selected().len(), 1, "the selection is untouched");
+        });
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_failed_reveal_explains_why(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        right_click(cx, "artifact-row-0");
+        click_item(cx, "menu-Reveal in file manager");
+        toast_is(&view, cx, |notice| {
+            matches!(notice, Notice::Failed(text)
+                if text == "Could not open the file manager: no file manager in tests")
+        });
+    }
+
+    #[gpui::test]
+    fn duplicates_can_be_excluded_from_their_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        for name in ["a", "b"] {
+            let folder = root.join("photos").join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("same.bin"), vec![b'z'; 16 * 1024]).unwrap();
+        }
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.update(cx, |app, cx| {
+            app.tab = Tab::Duplicates;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let groups = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| {
+                app.report()
+                    .unwrap()
+                    .duplicates
+                    .as_ref()
+                    .unwrap()
+                    .groups
+                    .len()
+            })
+        };
+        assert_eq!(groups(cx), 1);
+        right_click(cx, "duplicate-0-0");
+        let Some(Target::Duplicate(path)) = menu_target(&view, cx) else {
+            panic!("a duplicate menu");
+        };
+        view.read_with(cx, |app, _| {
+            let items = app.menu_items(&app.menu.as_ref().unwrap().target);
+            let choices: Vec<Choice> = items.iter().map(|item| item.choice).collect();
+            assert_eq!(choices, [Choice::Reveal, Choice::CopyPath, Choice::Exclude]);
+        });
+        cx.simulate_keystrokes("x");
+        assert_eq!(groups(cx), 0, "one copy left is no longer a duplicate");
+        let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(written.contains(&kuizer::config::exclude_pattern(&path)));
     }
 
     #[gpui::test]
