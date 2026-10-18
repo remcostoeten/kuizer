@@ -1,3 +1,4 @@
+mod edit;
 mod exclude;
 
 use std::fs;
@@ -9,6 +10,7 @@ use crate::detect::{Category, Detector, Listing, RuleError, RuleSpec, builtin_ru
 use crate::platform;
 use crate::units::ByteSize;
 
+pub use edit::{EditError, add_exclude, exclude_pattern};
 pub use exclude::{ExcludeError, Excludes};
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
