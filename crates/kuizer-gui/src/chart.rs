@@ -191,26 +191,6 @@ pub fn swatch(fill: Rgba) -> Div {
     div().size(unit(size::SWATCH)).flex_none().bg(fill)
 }
 
-/// @name block
-/// @description A skeleton placeholder of the given size that breathes while content loads,
-/// or stays still when motion is off.
-///
-/// @example
-/// block("stat-value", 0, unit(col::M), unit(font::FIGURE))
-pub fn block(
-    id: &'static str,
-    index: usize,
-    width: impl Into<gpui::Length>,
-    height: impl Into<gpui::Length>,
-) -> AnyElement {
-    let shape = div()
-        .w(width.into())
-        .h(height.into())
-        .flex_none()
-        .bg(theme::skeleton());
-    breathe(ElementId::from((id, index)), shape)
-}
-
 pub fn breathe(id: impl Into<ElementId>, element: Div) -> AnyElement {
     if motion::reduced() {
         return element.opacity(0.8).into_any_element();

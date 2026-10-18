@@ -247,6 +247,21 @@ fn threads(config: &GitConfig) -> usize {
 /// @example
 /// let found = repos::inspect_all(repos::find(&config, &roots)?, &config.git, &Cancel::new());
 pub fn inspect_all(roots: Vec<PathBuf>, config: &GitConfig, cancel: &Cancel) -> Vec<Repository> {
+    inspect_all_with(roots, config, cancel, |_| {})
+}
+
+/// @name inspect_all_with
+/// @description Like `inspect_all`, but calls `on_inspected` from the inspecting thread with
+/// each repository root once it was read, kept or not, so a frontend can count what is left.
+///
+/// @example
+/// let found = repos::inspect_all_with(roots, &config.git, &cancel, |root| seen.push(root.to_owned()));
+pub fn inspect_all_with(
+    roots: Vec<PathBuf>,
+    config: &GitConfig,
+    cancel: &Cancel,
+    on_inspected: impl Fn(&Path) + Sync,
+) -> Vec<Repository> {
     let queue = Mutex::new(roots);
     let found = Mutex::new(Vec::new());
     thread::scope(|scope| {
@@ -265,6 +280,7 @@ pub fn inspect_all(roots: Vec<PathBuf>, config: &GitConfig, cancel: &Cancel) -> 
                     {
                         found.push(repository);
                     }
+                    on_inspected(&root);
                 }
             });
         }
@@ -812,5 +828,25 @@ mod tests {
         let found = find(&Config::default(), &[root.to_path_buf()]).expect("walks");
         let root = fs::canonicalize(root).expect("canonicalize");
         assert_eq!(found, [root.clone(), root.join("apps/kearn")]);
+    }
+
+    #[test]
+    fn inspect_all_with_reports_each_root_kept_or_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = dir.path().join("plain");
+        let other = dir.path().join("other");
+        fs::create_dir_all(&plain).expect("plain");
+        fs::create_dir_all(&other).expect("other");
+        let seen = Mutex::new(Vec::new());
+        let found = inspect_all_with(
+            vec![plain.clone(), other.clone()],
+            &GitConfig::default(),
+            &Cancel::new(),
+            |root| seen.lock().expect("seen").push(root.to_path_buf()),
+        );
+        let mut seen = seen.into_inner().expect("seen");
+        seen.sort();
+        assert!(found.is_empty());
+        assert_eq!(seen, [other, plain]);
     }
 }

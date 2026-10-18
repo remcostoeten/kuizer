@@ -53,7 +53,7 @@ impl Duplicates {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Walking { files: u64 },
     Hashing { files: usize },

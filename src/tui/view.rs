@@ -22,6 +22,7 @@ const WARNING: Color = Color::Yellow;
 const SAFE: Color = Color::Green;
 const SELECTED: Color = Color::Indexed(22);
 const BAR: u16 = 8;
+pub(super) const CURRENT_WIDTH: usize = 48;
 type HelpRow = (&'static [&'static str], &'static str);
 type HelpSection = (&'static str, &'static [HelpRow]);
 
@@ -151,6 +152,14 @@ fn header(app: &App) -> Line<'static> {
     }
     spans.extend(filters(app));
     spans.extend(disk(app));
+    if app.finished.is_none()
+        && let Some(folder) = &app.current
+    {
+        spans.push(Span::styled(
+            format!(" in {} ", shorten(&display_path(folder), CURRENT_WIDTH)),
+            Style::new().fg(MUTED),
+        ));
+    }
     Line::from(spans)
 }
 

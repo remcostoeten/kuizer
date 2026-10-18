@@ -374,3 +374,21 @@ fn max_depth_limits_discovery() {
         pairs(&[("a/node_modules", "node-modules")])
     );
 }
+
+#[test]
+fn collect_reports_final_counters_and_where_the_walk_was() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    for index in 0..80 {
+        dir(root, &format!("folders/{index}/inner"));
+    }
+    file(root, "web/package.json", 2);
+    file(root, "web/node_modules/react/index.js", 100);
+    let handle = scan::start(&Config::default(), &[root.to_path_buf()], Cancel::new()).unwrap();
+    let mut ticks = Vec::new();
+    let collected = scan::collect(&handle, |progress| ticks.push(progress));
+    assert_eq!(ticks.last(), Some(&collected.summary.progress));
+    let root = fs::canonicalize(root).unwrap();
+    let current = handle.current().expect("the walker noted a folder");
+    assert!(current.starts_with(&root), "{}", current.display());
+}
