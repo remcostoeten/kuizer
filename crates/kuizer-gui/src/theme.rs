@@ -52,7 +52,6 @@ pub mod size {
     pub const TOOLBAR: f32 = 44.;
     pub const SIDEBAR: f32 = 220.;
     pub const SIDEBAR_COLLAPSED: f32 = 48.;
-    pub const LINE: f32 = 10.;
     pub const METER: f32 = 12.;
     pub const TRACK: f32 = 4.;
     pub const SWATCH: f32 = 8.;
@@ -159,10 +158,6 @@ pub fn bar_soft() -> Rgba {
 
 pub fn bar_rest() -> Rgba {
     rgb(0x0038_3838)
-}
-
-pub fn skeleton() -> Rgba {
-    rgb(0x0027_2727)
 }
 
 pub fn track() -> Rgba {

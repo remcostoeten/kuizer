@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
-    FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
     Stateful, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, point,
     prelude::*, px, uniform_list,
@@ -23,6 +23,7 @@ use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
 use kuizer::stats;
 
+use crate::activity::{self, Activity, State, Step, plural};
 use crate::chart::{self, Measure, Segment};
 use crate::commands::{self, Command, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
 use crate::field;
@@ -30,8 +31,7 @@ use crate::frame;
 use crate::glossary::Term;
 use crate::icon::{self, Icon};
 use crate::model::{
-    self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, Stage,
-    TrashState,
+    self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, TrashState,
 };
 use crate::motion;
 use crate::palette::Palette;
@@ -77,7 +77,7 @@ pub use crate::commands::bind_keys;
 
 enum Phase {
     Start,
-    Loading(Stage),
+    Loading(Box<Activity>),
     Ready(Box<Report>),
     Failed(String),
 }
@@ -315,7 +315,8 @@ impl Kuizer {
         window.focus(&focus);
         let folder = recent
             .paths
-            .first()
+            .iter()
+            .find(|path| path.is_dir())
             .or(config.scan.roots.first())
             .or(roots.first())
             .map(|path| display_path(path))
@@ -534,7 +535,7 @@ impl Kuizer {
             self.stale = Some(report.scanned);
             true
         } else {
-            self.phase = Phase::Loading(Stage::default());
+            self.phase = Phase::Loading(Box::default());
             self.stale = None;
             self.selection.clear();
             self.rows.clear();
@@ -543,7 +544,7 @@ impl Kuizer {
         self.started = Instant::now();
         let cancel = Cancel::new();
         self.cancel = Some(cancel.clone());
-        let stage = Arc::new(Mutex::new(Stage::default()));
+        let stage = Arc::new(Mutex::new(Activity::default()));
         let (sender, receiver) = mpsc::channel();
         {
             let config = self.config.clone();
@@ -575,7 +576,7 @@ impl Kuizer {
                         "the scan stopped unexpectedly".to_owned(),
                     ))),
                 };
-                let current = stage.lock().map(|stage| *stage).unwrap_or_default();
+                let current = stage.lock().map(|stage| stage.clone()).unwrap_or_default();
                 let done = matches!(update, Some(Update::Done(_)));
                 let updated = this.update(cx, |app, cx| {
                     match update {
@@ -591,8 +592,10 @@ impl Kuizer {
                         }
                         Some(Update::Done(Err(error))) => app.phase = Phase::Failed(error),
                         None => {
-                            if matches!(app.phase, Phase::Loading(_)) {
-                                app.phase = Phase::Loading(current);
+                            if let Phase::Loading(shown) = &mut app.phase
+                                && **shown != current
+                            {
+                                **shown = current;
                             }
                         }
                     }
@@ -2121,7 +2124,7 @@ impl Kuizer {
     fn render_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match &self.phase {
             Phase::Start => self.render_start(cx),
-            Phase::Loading(stage) => self.render_loading(*stage),
+            Phase::Loading(activity) => self.render_loading(activity),
             Phase::Failed(error) => centered(
                 div()
                     .flex()
@@ -2531,8 +2534,8 @@ impl Kuizer {
             .into_any_element()
     }
 
-    fn render_loading(&self, stage: Stage) -> AnyElement {
-        let status = self.tab.status(stage, &self.options);
+    fn render_loading(&self, activity: &Activity) -> AnyElement {
+        let status = self.tab.status(activity.stage, &self.options);
         let header = div()
             .flex()
             .items_end()
@@ -2559,26 +2562,41 @@ impl Kuizer {
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(unit(space::XXS))
+                    .items_center()
+                    .gap(unit(space::M))
                     .flex_none()
                     .text_size(unit(font::SMALL))
                     .text_color(theme::faint())
-                    .child(stage.describe())
-                    .child(format!(
-                        "{}s elapsed, press Escape to cancel",
-                        self.started.elapsed().as_secs()
-                    )),
+                    .child(
+                        ui::tabular(div().text_color(theme::muted()))
+                            .child(activity::took(self.started.elapsed())),
+                    )
+                    .child(ui::kbd("Esc"))
+                    .child("cancels"),
             );
-        let body = match self.tab {
-            Tab::Overview => skeleton_overview(stage).into_any_element(),
-            _ => skeleton_table().into_any_element(),
-        };
+        let steps = ui::card("Progress").child(
+            div().flex().flex_col().children(
+                Step::ALL
+                    .into_iter()
+                    .map(|step| step_row(step, activity, &self.options, &self.roots)),
+            ),
+        );
         scroll("loading")
-            .debug_selector(|| "skeleton".to_owned())
+            .debug_selector(|| "activity".to_owned())
             .child(header)
-            .child(body)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap(unit(space::L))
+                    .child(steps.flex_1().min_w(unit(size::LIST)))
+                    .child(
+                        found_card(activity, &self.roots)
+                            .flex_1()
+                            .min_w(unit(size::LIST)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4438,9 +4456,6 @@ impl Render for Kuizer {
     }
 }
 
-const WIDTHS: [f32; 6] = [0.62, 0.44, 0.71, 0.38, 0.56, 0.49];
-const HEIGHTS: [f32; 6] = [0.35, 0.8, 0.55, 1.0, 0.25, 0.6];
-
 fn overview_disk(report: &Report) -> Div {
     let safe = report.total(Some(Safety::Safe));
     let review = report.total(Some(Safety::Review));
@@ -4606,178 +4621,184 @@ fn overview_trends(report: &Report) -> Div {
         }))
 }
 
-fn skeleton_stat(label: &'static str, index: usize, live: Option<String>) -> Div {
-    div()
+fn step_row(step: Step, activity: &Activity, options: &ScanOptions, roots: &[PathBuf]) -> Div {
+    let state = activity.state(step, options);
+    let active = state == State::Active;
+    let (detail, took) = match &state {
+        State::Off => ("Off".to_owned(), String::new()),
+        State::Pending => (String::new(), String::new()),
+        State::Active => (activity.detail(), String::new()),
+        State::Done(done) => (done.result.clone(), activity::took(done.took)),
+    };
+    let quiet = matches!(state, State::Off | State::Pending);
+    let line = div()
         .flex()
-        .flex_col()
-        .gap(unit(space::S))
-        .flex_1()
-        .min_w(unit(size::STAT))
-        .p(unit(space::GUTTER))
-        .rounded(theme::radius_panel())
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
+        .items_center()
+        .gap(unit(space::L))
+        .h(unit(size::ROW))
+        .child(step_dot(step, &state))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if quiet { theme::faint() } else { theme::text() })
+                .when(active, |label| label.font_weight(FontWeight::MEDIUM))
+                .child(step.label()),
+        )
+        .child(
+            ui::tabular(div())
+                .flex_none()
+                .text_size(unit(font::SMALL))
+                .text_color(if active {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .when(quiet, |detail| detail.text_color(theme::faint()))
+                .child(detail),
+        )
+        .child(
+            ui::tabular(column(col::XS))
+                .flex()
+                .justify_end()
+                .text_size(unit(font::SMALL))
+                .text_color(theme::faint())
+                .child(took),
+        );
+    let mut row = div()
+        .debug_selector(move || format!("step-{step:?}"))
+        .flex()
+        .flex_col()
+        .child(line);
+    if active {
+        let indent = unit(size::DOT + space::L);
+        if let Some((done, total)) = activity.count
+            && total > 0
+        {
+            row = row.child(
+                div().pl(indent).pb(unit(space::S)).child(
+                    div()
+                        .w_full()
+                        .h(unit(size::TRACK))
+                        .bg(theme::track())
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(done as f32 / total as f32))
+                                .bg(theme::bar()),
+                        ),
+                ),
+            );
+        }
+        if let Some(current) = &activity.current {
+            row = row.child(
+                div()
+                    .debug_selector(|| "current".to_owned())
+                    .pl(indent)
+                    .pb(unit(space::S))
+                    .truncate()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::faint())
+                    .child(model::short_path(current, roots)),
+            );
+        }
+    }
+    row
+}
+
+fn step_dot(step: Step, state: &State) -> AnyElement {
+    let dot = div()
+        .flex_none()
+        .size(unit(size::DOT))
+        .rounded(theme::radius_dot());
+    match state {
+        State::Done(_) => dot.bg(theme::faint()).into_any_element(),
+        State::Active => chart::breathe(
+            ElementId::Name(format!("step-dot-{step:?}").into()),
+            dot.bg(theme::primary()),
+        ),
+        State::Pending => dot
+            .border_1()
+            .border_color(theme::border_strong())
+            .into_any_element(),
+        State::Off => dot.bg(theme::border()).into_any_element(),
+    }
+}
+
+fn found_card(activity: &Activity, roots: &[PathBuf]) -> Div {
+    let total = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(ui::heading("Largest found so far"))
+        .child(
+            ui::tabular(div())
+                .debug_selector(|| "found-total".to_owned())
                 .text_size(unit(font::SMALL))
                 .text_color(theme::muted())
-                .child(label),
-        )
-        .child(match live {
-            Some(value) => div()
-                .h(unit(size::SEGMENT))
-                .text_size(unit(font::FIGURE))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(value)
-                .into_any_element(),
-            None => chart::block("stat-value", index, unit(col::M), unit(font::FIGURE)),
-        })
-        .child(chart::block(
-            "stat-sub",
-            index,
-            unit(col::S),
-            unit(size::METER),
-        ))
-}
-
-fn skeleton_bars(id: &'static str, title: &'static str) -> Div {
-    ui::card(title).flex_1().children((0..5).map(move |index| {
-        div()
-            .flex()
-            .flex_col()
-            .gap(unit(space::S))
-            .child(chart::block(
-                id,
-                index,
-                gpui::relative(WIDTHS[index]),
-                unit(size::METER),
-            ))
-            .child(chart::block(
-                id,
-                index + 10,
-                gpui::relative(1.),
-                unit(size::TRACK),
-            ))
-    }))
-}
-
-fn skeleton_columns(id: &'static str, title: &'static str) -> Div {
-    ui::card(title).flex_1().child(
-        div()
-            .flex()
-            .items_end()
-            .gap(unit(space::XS))
-            .h(unit(size::COLUMNS))
-            .children(HEIGHTS.iter().enumerate().map(move |(index, height)| {
-                div()
-                    .flex_1()
-                    .h(gpui::relative(*height))
-                    .child(chart::block(
-                        id,
-                        index,
-                        gpui::relative(1.),
-                        gpui::relative(1.),
-                    ))
-            })),
-    )
-}
-
-fn skeleton_overview(stage: Stage) -> Div {
-    let found = match stage {
-        Stage::Scanning(progress) => Some(plural(progress.candidates as usize, "item")),
-        _ => None,
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap(unit(space::XL))
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(unit(space::L))
-                .child(skeleton_stat("Project artifacts", 0, found))
-                .child(skeleton_stat("Safe to remove", 1, None))
-                .child(skeleton_stat("Needs review", 2, None))
-                .child(skeleton_stat("Global caches", 3, None))
-                .child(skeleton_stat("Toolchains", 4, None))
-                .child(skeleton_stat("Docker", 5, None))
-                .child(skeleton_stat("Duplicate files", 6, None))
-                .child(skeleton_stat("Disk free", 7, None)),
-        )
-        .child(
-            ui::card("Disk")
-                .child(chart::block(
-                    "disk",
-                    0,
-                    gpui::relative(1.),
-                    unit(size::METER),
-                ))
-                .child(
-                    div().flex().gap(unit(space::XL)).children(
-                        (1..8).map(|index| {
-                            chart::block("disk", index, unit(col::S), unit(size::METER))
-                        }),
-                    ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(unit(space::L))
-                .items_start()
-                .child(skeleton_bars("space", "Where the space is"))
-                .child(skeleton_bars("projects", "Largest projects"))
-                .child(skeleton_bars("caches", "Largest caches")),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(unit(space::L))
-                .items_start()
-                .child(skeleton_columns("ages", "Idle since"))
-                .child(skeleton_columns("sizes", "Artifact sizes"))
-                .child(skeleton_bars("ecosystems", "By ecosystem")),
-        )
-}
-
-fn skeleton_table() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .rounded(theme::radius_panel())
-        .border_1()
-        .border_color(theme::border())
-        .child(table_header().child(chart::block("head", 0, unit(col::L), unit(size::LINE))))
-        .children((0..12).map(|index| {
+                .child(format!(
+                    "{}, {}",
+                    plural(activity.found as usize, "item"),
+                    theme::bytes(activity.bytes)
+                )),
+        );
+    let rows: Vec<Div> = activity
+        .largest
+        .iter()
+        .map(|found| {
             div()
                 .flex()
                 .items_center()
                 .gap(unit(space::L))
                 .h(unit(size::ROW))
-                .px(unit(space::GUTTER))
-                .border_b_1()
+                .border_t_1()
                 .border_color(theme::border())
-                .child(chart::block(
-                    "row-check",
-                    index,
-                    unit(size::CHECK),
-                    unit(size::CHECK),
-                ))
-                .child(div().flex_1().min_w_0().child(chart::block(
-                    "row-path",
-                    index,
-                    gpui::relative(WIDTHS[index % WIDTHS.len()]),
-                    unit(size::LINE),
-                )))
-                .child(chart::block(
-                    "row-size",
-                    index,
-                    unit(col::S),
-                    unit(size::LINE),
-                ))
-        }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(model::short_path(&found.path, roots)),
+                )
+                .child(
+                    div()
+                        .w(unit(col::XL))
+                        .flex_none()
+                        .truncate()
+                        .text_size(unit(font::SMALL))
+                        .text_color(theme::muted())
+                        .child(found.name.clone()),
+                )
+                .child(
+                    ui::tabular(column(col::S))
+                        .flex()
+                        .justify_end()
+                        .child(theme::bytes(found.bytes)),
+                )
+        })
+        .collect();
+    let card = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(unit(space::L))
+        .p(unit(space::GUTTER))
+        .rounded(theme::radius_panel())
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(total);
+    if rows.is_empty() {
+        card.child(
+            div()
+                .text_size(unit(font::SMALL))
+                .text_color(theme::faint())
+                .child("Nothing found yet"),
+        )
+    } else {
+        card.child(div().flex().flex_col().children(rows))
+    }
 }
 
 fn centered(child: impl IntoElement) -> AnyElement {
@@ -4916,14 +4937,6 @@ fn group_details(
     }
 }
 
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
 fn permanent_kinds(selected: &[(Source, &Candidate)]) -> &'static str {
     let toolchains = selected
         .iter()
@@ -4966,6 +4979,7 @@ mod tests {
     use kuizer::dupes;
 
     use super::*;
+    use crate::model::Stage;
 
     pub(super) fn open(
         cx: &mut TestAppContext,
@@ -5160,14 +5174,72 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_scan_shows_skeletons_then_charts_with_tooltips(cx: &mut TestAppContext) {
+    fn the_scan_view_shows_each_step_and_what_it_touches(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, cx| {
+            app.options.caches = true;
+            let mut activity = Activity::default();
+            activity.record(Path::new("/p/site/node_modules"), "node_modules", 3 << 30);
+            activity.finish(
+                Step::Folders,
+                Duration::from_millis(1_500),
+                "1 item found".to_owned(),
+            );
+            activity.begin(Stage::Caches, Some(4));
+            activity.advance(Path::new("/home/me/.cargo/registry"));
+            app.phase = Phase::Loading(Box::new(activity));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        for selector in [
+            "activity",
+            "step-Folders",
+            "step-Caches",
+            "step-Docker",
+            "current",
+            "found-total",
+            "Shown once every part of the scan is done",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} is not shown"
+            );
+        }
+        let folders = cx.debug_bounds("step-Folders").unwrap();
+        let caches = cx.debug_bounds("step-Caches").unwrap();
+        assert!(
+            caches.size.height > folders.size.height,
+            "the running step shows its progress and current folder below it"
+        );
+    }
+
+    #[gpui::test]
+    fn the_folder_field_skips_recent_folders_that_are_gone(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let recent = dir.path().join("recent");
+        std::fs::write(
+            &recent,
+            format!("/tmp/.mount_kuizerGone/usr\n{}\n", kept.display()),
+        )
+        .unwrap();
+        let (view, cx) = open(cx, recent);
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.folder, display_path(&kept));
+        });
+    }
+
+    #[gpui::test]
+    fn a_scan_shows_its_progress_then_charts_with_tooltips(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let root = project(dir.path());
         let (view, cx) = open(cx, dir.path().join("recent"));
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("skeleton").is_some());
+        assert!(cx.debug_bounds("activity").is_some());
         assert!(cx.debug_bounds("loader").is_some());
         wait_for_scan(&view, cx);
         view.read_with(cx, |app, _| assert!(!app.busy()));
@@ -6226,7 +6298,7 @@ esac
         scan_again_from_the_start(&view, cx);
         view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Loading(_))));
         cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("skeleton").is_some());
+        assert!(cx.debug_bounds("activity").is_some());
         assert!(!wait_until_shown(&view, cx), "no saved scan is shown");
         let (roots, options) = view.read_with(cx, |app, _| {
             let report = app.report().expect("the fresh scan");

@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::cli::SortKey;
-use kuizer::commands::{measure_caches, sort_candidates};
+use kuizer::commands::{measure_caches_with, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, Safety};
@@ -20,11 +20,13 @@ use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
 use kuizer::toolchains::{self, Toolchain};
 
+use crate::activity::{Activity, Step, grouped, plural, update};
 use crate::start::ScanOptions;
+use crate::theme;
 
 pub const CANCELLED: &str = "cancelled";
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Stage {
     #[default]
     Starting,
@@ -35,32 +37,6 @@ pub enum Stage {
     Docker,
     Repos,
     History,
-}
-
-impl Stage {
-    pub fn describe(self) -> String {
-        match self {
-            Self::Starting => "Starting scan".to_owned(),
-            Self::Scanning(progress) => format!(
-                "Scanning  {} folders  {} files  {} found",
-                progress.dirs, progress.files, progress.candidates
-            ),
-            Self::Duplicates(dupes::Stage::Walking { files }) => {
-                format!("Duplicates  walking {files} files")
-            }
-            Self::Duplicates(dupes::Stage::Hashing { files }) => {
-                format!("Duplicates  hashing {files} files")
-            }
-            Self::Duplicates(dupes::Stage::Verifying { groups }) => {
-                format!("Duplicates  comparing {groups} groups")
-            }
-            Self::Caches => "Measuring global caches".to_owned(),
-            Self::Toolchains => "Measuring installed toolchains".to_owned(),
-            Self::Docker => "Asking Docker and Podman".to_owned(),
-            Self::Repos => "Checking git repositories".to_owned(),
-            Self::History => "Reading the cleanup history".to_owned(),
-        }
-    }
 }
 
 pub struct Disk {
@@ -307,28 +283,24 @@ pub fn short_path(path: &Path, roots: &[PathBuf]) -> String {
         .map_or_else(|| display_path(path), display_path)
 }
 
-fn set(stage: &Mutex<Stage>, next: Stage) {
-    if let Ok(mut current) = stage.lock() {
-        *current = next;
-    }
-}
-
 /// @name load
 /// @description Gathers everything the dashboard shows in one pass: project artifacts, duplicate
 /// files and toolchain pins from a single walk, global caches, installed toolchains, the cleanup
 /// history and free disk space.
-/// The start screen's options decide which of these run. Reports progress through `stage` so the
-/// window can show it while this runs on a worker thread, and stops early once `cancel` is set.
+/// The start screen's options decide which of these run. Reports what it is doing through
+/// `activity` so the window can show it while this runs on a worker thread: the step, its live
+/// counters, the folder or item it touched last, finished steps with their result, and the
+/// largest items found so far. Stops early once `cancel` is set.
 ///
 /// @example
-/// let stage = Mutex::new(Stage::default());
-/// let report = load(&config, &roots, &options, &Cancel::new(), &stage)?;
+/// let activity = Mutex::new(Activity::default());
+/// let report = load(&config, &roots, &options, &Cancel::new(), &activity)?;
 pub fn load(
     config: &Config,
     roots: &[PathBuf],
     options: &ScanOptions,
     cancel: &Cancel,
-    stage: &Mutex<Stage>,
+    activity: &Mutex<Activity>,
 ) -> Result<Report, String> {
     let config = options.apply(config);
     let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
@@ -345,6 +317,7 @@ pub fn load(
             })
     });
     let pin_search = options.toolchains && config.toolchains.pins;
+    let started = Instant::now();
     let (handle, walked) = repos::start_scan(
         &config,
         roots,
@@ -353,7 +326,24 @@ pub fn load(
         pin_search,
     )
     .map_err(|error| error.to_string())?;
-    let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
+    let collected = scan::collect_with(
+        &handle,
+        |progress| {
+            update(activity, |activity| {
+                activity.stage = Stage::Scanning(progress);
+                activity.current = handle.current();
+            });
+        },
+        |candidate| {
+            update(activity, |activity| {
+                activity.record(
+                    &candidate.path,
+                    &candidate.rule.name,
+                    candidate.usage.allocated,
+                );
+            });
+        },
+    );
     let (files, pins, found_repos) = walked
         .recv()
         .map(|walked| (walked.files, walked.pins, walked.repositories))
@@ -363,43 +353,102 @@ pub fn load(
     }
     let mut candidates = collected.candidates;
     sort_candidates(&mut candidates, SortKey::Size);
+    let artifact_bytes: u64 = candidates.iter().map(|c| c.usage.allocated).sum();
+    update(activity, |activity| {
+        activity.finish(
+            Step::Folders,
+            started.elapsed(),
+            format!(
+                "{} found, {} in {} folders",
+                plural(candidates.len(), "item"),
+                theme::bytes(artifact_bytes),
+                grouped(collected.summary.progress.dirs)
+            ),
+        );
+    });
 
+    let started = Instant::now();
     let duplicates = duplicate_options
         .zip(files)
         .map(|(duplicate_options, files)| {
             dupes::group(files, duplicate_options, |progress| {
-                set(stage, Stage::Duplicates(progress));
+                update(activity, |activity| {
+                    activity.begin(Stage::Duplicates(progress), None);
+                });
             })
         });
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
+    if let Some(duplicates) = &duplicates {
+        update(activity, |activity| {
+            activity.finish(
+                Step::Duplicates,
+                started.elapsed(),
+                if duplicates.groups.is_empty() {
+                    "No duplicates".to_owned()
+                } else {
+                    format!(
+                        "{}, {} reclaimable",
+                        plural(duplicates.groups.len(), "group"),
+                        theme::bytes(duplicates.reclaimable())
+                    )
+                },
+            );
+        });
+    }
 
     let caches = if options.caches {
-        set(stage, Stage::Caches);
+        let started = Instant::now();
         let excludes = config.excludes().ok();
-        Locations::for_user()
+        let found: Vec<KnownCache> = Locations::for_user()
             .map(|locations| {
-                let found = caches::find(&locations, &Protected::for_user())
+                caches::find(&locations, &Protected::for_user())
                     .into_iter()
                     .filter(|cache| {
                         excludes
                             .as_ref()
                             .is_none_or(|excludes| !excludes.path(&cache.path))
                     })
-                    .collect();
-                measure_caches(found)
+                    .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        update(activity, |activity| {
+            activity.begin(Stage::Caches, Some(found.len()));
+        });
+        let caches = measure_caches_with(found, cancel, |candidate| {
+            update(activity, |activity| {
+                activity.advance(&candidate.path);
+                if candidate.usage.entries > 0 {
+                    activity.record(
+                        &candidate.path,
+                        &candidate.rule.name,
+                        candidate.usage.allocated,
+                    );
+                }
+            });
+        });
+        let bytes = caches.iter().map(|(_, c)| c.usage.allocated).sum();
+        update(activity, |activity| {
+            activity.finish(
+                Step::Caches,
+                started.elapsed(),
+                format!("{}, {}", plural(caches.len(), "cache"), theme::bytes(bytes)),
+            );
+        });
+        caches
     } else {
         Vec::new()
     };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
 
     let toolchains = if options.toolchains {
-        set(stage, Stage::Toolchains);
-        toolchains::Locations::for_user()
+        let started = Instant::now();
+        let excludes = config.excludes().ok();
+        let found: Vec<Toolchain> = toolchains::Locations::for_user()
             .map(|locations| {
-                let excludes = config.excludes().ok();
                 let mut found: Vec<Toolchain> =
                     toolchains::find(&locations, &config.toolchains.tools)
                         .into_iter()
@@ -412,9 +461,35 @@ pub fn load(
                 if let Some(pins) = &pins {
                     toolchains::apply_pins(&mut found, &pins.pins);
                 }
-                toolchains::measure(found)
+                found
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        update(activity, |activity| {
+            activity.begin(Stage::Toolchains, Some(found.len()));
+        });
+        let toolchains = toolchains::measure_with(found, cancel, |candidate| {
+            update(activity, |activity| {
+                activity.advance(&candidate.path);
+                activity.record(
+                    &candidate.path,
+                    &candidate.rule.name,
+                    candidate.usage.allocated,
+                );
+            });
+        });
+        let bytes = toolchains.iter().map(|(_, c)| c.usage.allocated).sum();
+        update(activity, |activity| {
+            activity.finish(
+                Step::Toolchains,
+                started.elapsed(),
+                format!(
+                    "{}, {}",
+                    plural(toolchains.len(), "version"),
+                    theme::bytes(bytes)
+                ),
+            );
+        });
+        toolchains
     } else {
         Vec::new()
     };
@@ -423,8 +498,26 @@ pub fn load(
     }
 
     let repos = if options.repos {
-        set(stage, Stage::Repos);
-        repos::inspect_all(found_repos, &config.git, cancel)
+        let started = Instant::now();
+        let checked = found_repos.len();
+        update(activity, |activity| {
+            activity.begin(Stage::Repos, Some(checked));
+        });
+        let repos = repos::inspect_all_with(found_repos, &config.git, cancel, |root| {
+            update(activity, |activity| activity.advance(root));
+        });
+        update(activity, |activity| {
+            activity.finish(
+                Step::Repos,
+                started.elapsed(),
+                format!(
+                    "{} of {} worth cleaning",
+                    repos.len(),
+                    plural(checked, "repository")
+                ),
+            );
+        });
+        repos
     } else {
         Vec::new()
     };
@@ -432,9 +525,10 @@ pub fn load(
         return Err(CANCELLED.to_owned());
     }
 
+    let started = Instant::now();
     let listing = match containers {
         Some(Ok(handle)) => {
-            set(stage, Stage::Docker);
+            update(activity, |activity| activity.begin(Stage::Docker, None));
             handle.join().unwrap_or_default()
         }
         Some(Err(error)) => docker::Listing {
@@ -446,8 +540,17 @@ pub fn load(
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
+    if options.docker {
+        update(activity, |activity| {
+            activity.finish(
+                Step::Docker,
+                started.elapsed(),
+                plural(listing.items.len(), "object"),
+            );
+        });
+    }
 
-    set(stage, Stage::History);
+    update(activity, |activity| activity.begin(Stage::History, None));
     let history = HistoryView::load();
     let disks = roots
         .iter()
