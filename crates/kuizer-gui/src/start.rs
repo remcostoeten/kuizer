@@ -4,13 +4,14 @@ use kuizer::config::Config;
 use kuizer::detect::Category;
 use kuizer::platform;
 use kuizer::units::ByteSize;
+use serde::{Deserialize, Serialize};
 
 const RECENT_LIMIT: usize = 8;
 
 pub const SIZE_STEPS: [u64; 4] = [0, 1_000_000, 10_000_000, 100_000_000];
 pub const DEPTH_STEPS: [Option<usize>; 4] = [None, Some(3), Some(5), Some(8)];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanOptions {
     pub categories: Vec<Category>,
     pub min_size: u64,

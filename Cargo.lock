@@ -3419,6 +3419,8 @@ dependencies = [
  "dirs 7.0.0",
  "gpui",
  "kuizer",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

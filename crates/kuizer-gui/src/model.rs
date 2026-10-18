@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::cli::SortKey;
@@ -109,6 +110,7 @@ pub struct Report {
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
     pub disks: Vec<Disk>,
+    pub scanned: SystemTime,
 }
 
 pub struct Bucket<K> {
@@ -272,6 +274,7 @@ pub fn load(
         duplicates,
         history,
         disks,
+        scanned: SystemTime::now(),
     })
 }
 
@@ -506,6 +509,7 @@ mod tests {
             duplicates: None,
             history: Err(String::new()),
             disks: Vec::new(),
+            scanned: SystemTime::now(),
         };
         assert_eq!(report.total(None), 50);
         assert_eq!(report.total(Some(Safety::Review)), 40);

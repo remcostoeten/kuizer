@@ -4,6 +4,7 @@ mod frame;
 mod glossary;
 mod model;
 mod motion;
+mod snapshot;
 mod start;
 mod theme;
 mod tooltip;
