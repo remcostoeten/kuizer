@@ -209,6 +209,31 @@ impl Report {
         buckets
     }
 
+    /// @name Report::drop_paths
+    /// @description Removes everything at or below any of `paths` from every list, the way a
+    /// scan with those paths excluded would. Duplicate groups left with a single copy are dropped.
+    ///
+    /// @example
+    /// report.drop_paths(&[PathBuf::from("/p/site/node_modules")]);
+    pub fn drop_paths(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let gone = |path: &Path| paths.iter().any(|excluded| path.starts_with(excluded));
+        self.candidates.retain(|candidate| !gone(&candidate.path));
+        self.caches.retain(|(_, candidate)| !gone(&candidate.path));
+        self.issues.retain(|issue| !gone(&issue.path));
+        if let Some(duplicates) = &mut self.duplicates {
+            for group in &mut duplicates.groups {
+                group.members.retain(|member| !gone(&member.path));
+            }
+            duplicates.groups.retain(|group| group.members.len() > 1);
+            duplicates
+                .groups
+                .sort_by_key(|group| std::cmp::Reverse(group.reclaimable()));
+        }
+    }
+
     pub fn by_project(&self) -> Vec<Bucket<PathBuf>> {
         let mut projects: BTreeMap<&Path, (u64, usize)> = BTreeMap::new();
         for candidate in &self.candidates {
@@ -297,8 +322,19 @@ pub fn load(
 
     let caches = if options.caches {
         set(stage, Stage::Caches);
+        let excludes = config.excludes().ok();
         Locations::for_user()
-            .map(|locations| measure_caches(caches::find(&locations, &Protected::for_user())))
+            .map(|locations| {
+                let found = caches::find(&locations, &Protected::for_user())
+                    .into_iter()
+                    .filter(|cache| {
+                        excludes
+                            .as_ref()
+                            .is_none_or(|excludes| !excludes.path(&cache.path))
+                    })
+                    .collect();
+                measure_caches(found)
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -647,6 +683,60 @@ mod tests {
         assert_eq!(short_path(Path::new("/p/a/dist"), &roots), "a/dist");
         assert_eq!(short_path(Path::new("/q/b"), &roots), "/q/b");
         assert_eq!(short_path(Path::new("/p"), &roots), "/p");
+    }
+
+    #[test]
+    fn dropped_paths_leave_every_list() {
+        let member = |path: &str| dupes::Member {
+            path: PathBuf::from(path),
+            links: Vec::new(),
+            modified: None,
+        };
+        let group = |paths: &[&str]| dupes::Group {
+            size: 10,
+            allocated: 10,
+            hash: String::new(),
+            verified: true,
+            members: paths.iter().map(|path| member(path)).collect(),
+        };
+        let mut report = Report {
+            roots: vec![PathBuf::from("/p")],
+            options: ScanOptions::from_config(&Config::default()),
+            candidates: vec![
+                candidate(1, "/p/a/node_modules", Safety::Safe),
+                candidate(2, "/p/b/node_modules", Safety::Safe),
+            ],
+            issues: vec![Issue {
+                path: PathBuf::from("/p/a/node_modules/locked"),
+                kind: scan::IssueKind::PermissionDenied,
+                message: String::new(),
+            }],
+            summary: Summary {
+                progress: Progress::default(),
+                duration: std::time::Duration::ZERO,
+                cancelled: false,
+            },
+            caches: Vec::new(),
+            duplicates: Some(Duplicates {
+                groups: vec![
+                    group(&["/p/a/node_modules/x", "/p/b/x"]),
+                    group(&["/p/a/node_modules/y", "/p/b/y", "/p/c/y"]),
+                ],
+                issues: Vec::new(),
+                files: 5,
+                duration: std::time::Duration::ZERO,
+            }),
+            history: Err(String::new()),
+            disks: Vec::new(),
+            scanned: SystemTime::now(),
+        };
+        report.drop_paths(&[PathBuf::from("/p/a/node_modules")]);
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].id, 2);
+        assert!(report.issues.is_empty());
+        let groups = &report.duplicates.as_ref().unwrap().groups;
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].members.len(), 2);
     }
 
     #[test]
