@@ -56,20 +56,14 @@ impl Trash {
         run: usize,
         entry: usize,
     ) -> &'static str {
-        let item = &history.runs[run].deleted[entry];
-        if history.runs[run].action == Action::Restore {
-            return "restored here";
-        }
-        if restored.contains(history.item_id(run, entry).as_str()) {
-            return "restored";
-        }
-        match (item.mode, self.known) {
-            (Mode::Permanent, _) => "deleted",
-            (Mode::DryRun, _) => "dry run",
-            (Mode::Trash, false) => "trashed",
-            (Mode::Trash, true) if self.kept.contains(&(run, entry)) => "in trash",
-            (Mode::Trash, true) => "left trash",
-        }
+        history::item_state(
+            history,
+            restored,
+            self.known.then_some(&self.kept),
+            run,
+            entry,
+        )
+        .as_str()
     }
 }
 
