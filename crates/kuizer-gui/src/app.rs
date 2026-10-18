@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -9,14 +9,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
-    FocusHandle, FontWeight, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollWheelEvent, SharedString, Task, Window,
-    actions, anchored, canvas, deferred, div, point, prelude::*, px, uniform_list,
+    FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
+    Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, point, prelude::*, px,
+    uniform_list,
 };
 use kuizer::config::Config;
 use kuizer::delete::Status;
 use kuizer::detect::{Category, Safety};
-use kuizer::dupes;
 use kuizer::history::Action;
 use kuizer::output::display_path;
 use kuizer::platform;
@@ -24,6 +24,8 @@ use kuizer::scan::{self, Cancel, Candidate};
 use kuizer::stats;
 
 use crate::chart::{self, Measure, Segment};
+use crate::commands::{self, Command, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
+use crate::field;
 use crate::frame;
 use crate::glossary::Term;
 use crate::model::{
@@ -31,9 +33,11 @@ use crate::model::{
     TrashState,
 };
 use crate::motion;
+use crate::palette::Palette;
 use crate::reveal;
 use crate::snapshot::{self, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
+use crate::tab::Tab;
 use crate::theme::{self, unit};
 use crate::tooltip::{self, Tip, Tooltip};
 use crate::ui::{self, ButtonKind};
@@ -54,88 +58,12 @@ const UNDO_KEY: &str = if cfg!(target_os = "macos") {
     "Ctrl+Z"
 };
 
-actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom, Undo]);
+mod keys;
+mod overlay;
 
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("secondary-=", ZoomIn, None),
-        KeyBinding::new("secondary-+", ZoomIn, None),
-        KeyBinding::new("secondary-shift-=", ZoomIn, None),
-        KeyBinding::new("secondary--", ZoomOut, None),
-        KeyBinding::new("secondary-0", ResetZoom, None),
-        KeyBinding::new("secondary-z", Undo, None),
-    ]);
-}
+use keys::{found, found_path, keep_visible, shows_run};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Overview,
-    Artifacts,
-    Caches,
-    Duplicates,
-    History,
-    Issues,
-}
-
-impl Tab {
-    const ALL: [Tab; 6] = [
-        Self::Overview,
-        Self::Artifacts,
-        Self::Caches,
-        Self::Duplicates,
-        Self::History,
-        Self::Issues,
-    ];
-
-    fn term(self) -> Term {
-        match self {
-            Self::Overview => Term::Overview,
-            Self::Artifacts => Term::ProjectArtifacts,
-            Self::Caches => Term::GlobalCaches,
-            Self::Duplicates => Term::DuplicateFiles,
-            Self::History => Term::History,
-            Self::Issues => Term::Issues,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::Artifacts => "Project artifacts",
-            Self::Caches => "Global caches",
-            Self::Duplicates => "Duplicates",
-            Self::History => "History",
-            Self::Issues => "Issues",
-        }
-    }
-
-    fn status(self, stage: Stage, options: &ScanOptions) -> &'static str {
-        let walking = matches!(stage, Stage::Starting | Stage::Scanning(_));
-        match self {
-            Self::Overview => "Shown once every part of the scan is done",
-            Self::Artifacts if walking => "Looking for project artifacts",
-            Self::Artifacts => "Artifacts found, shown once the scan is done",
-            Self::Issues if walking => "Collecting issues while scanning folders",
-            Self::Issues => "Issues collected, shown once the scan is done",
-            Self::Duplicates if !options.duplicates => "Duplicate search is off for this scan",
-            Self::Duplicates if walking => "Collecting files while scanning folders",
-            Self::Duplicates => match stage {
-                Stage::Duplicates(dupes::Stage::Walking { .. }) => "Collecting files",
-                Stage::Duplicates(dupes::Stage::Hashing { .. }) => "Hashing files",
-                Stage::Duplicates(dupes::Stage::Verifying { .. }) => "Comparing files",
-                _ => "Duplicates found, shown once the scan is done",
-            },
-            Self::Caches if !options.caches => "Global caches are off for this scan",
-            Self::Caches => match stage {
-                Stage::Caches => "Measuring global caches",
-                Stage::History => "Caches measured, shown once the scan is done",
-                _ => "Measured after the folder scan",
-            },
-            Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",
-            Self::History => "Read at the end of the scan",
-        }
-    }
-}
+pub use crate::commands::bind_keys;
 
 enum Phase {
     Start,
@@ -325,8 +253,15 @@ pub struct Kuizer {
     toast_task: Option<Task<()>>,
     restore_task: Option<Task<()>>,
     menu: Option<Menu>,
-    cursor: Option<Target>,
+    palette: Option<Palette>,
+    shortcuts: bool,
+    filtering: bool,
+    filters: HashMap<Tab, String>,
+    cursors: HashMap<Tab, Target>,
     cursor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    artifact_scroll: UniformListScrollHandle,
+    scrolls: HashMap<Tab, ScrollHandle>,
+    reveal_cursor: Rc<Cell<bool>>,
     config_path: Option<PathBuf>,
     excluded: Vec<PathBuf>,
     reveal: Reveal,
@@ -387,8 +322,18 @@ impl Kuizer {
             toast_task: None,
             restore_task: None,
             menu: None,
-            cursor: None,
+            palette: None,
+            shortcuts: false,
+            filtering: false,
+            filters: HashMap::new(),
+            cursors: HashMap::new(),
             cursor_bounds: Rc::new(Cell::new(None)),
+            artifact_scroll: UniformListScrollHandle::new(),
+            scrolls: [Tab::Caches, Tab::Duplicates, Tab::History, Tab::Issues]
+                .into_iter()
+                .map(|tab| (tab, ScrollHandle::new()))
+                .collect(),
+            reveal_cursor: Rc::new(Cell::new(false)),
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
             reveal: reveal::reveal,
@@ -467,6 +412,12 @@ impl Kuizer {
     }
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.typing() {
+            self.undo_last(cx);
+        }
+    }
+
+    fn undo_last(&mut self, cx: &mut Context<Self>) {
         if let Some(Toast {
             notice: Notice::Trashed { session, .. },
             ..
@@ -731,36 +682,13 @@ impl Kuizer {
 
     fn type_folder(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let command = keystroke.modifiers.control || keystroke.modifiers.platform;
-        match keystroke.key.as_str() {
-            "enter" => {
-                self.start_scan(cx);
-                return;
-            }
-            "backspace" if command || keystroke.modifiers.alt => {
-                let trimmed = self.folder.trim_end_matches('/');
-                let keep = trimmed.rfind('/').map_or(0, |index| index + 1);
-                self.folder.truncate(keep);
-            }
-            "backspace" => {
-                self.folder.pop();
-            }
-            "v" if command => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.folder
-                        .push_str(text.lines().next().unwrap_or_default().trim());
-                }
-            }
-            "u" if command => self.folder.clear(),
-            _ => {
-                let Some(typed) = keystroke.key_char.as_deref() else {
-                    return;
-                };
-                if command || typed.chars().any(char::is_control) {
-                    return;
-                }
-                self.folder.push_str(typed);
-            }
+        if keystroke.key == "enter" {
+            self.start_scan(cx);
+            return;
+        }
+        let paste = || cx.read_from_clipboard().and_then(|item| item.text());
+        if !field::edit(&mut self.folder, keystroke, field::PATH, paste) {
+            return;
         }
         self.whole_home = false;
         self.folder_error = None;
@@ -772,6 +700,7 @@ impl Kuizer {
             self.rows.clear();
             return;
         };
+        let needle = self.needle(Tab::Artifacts);
         self.rows = report
             .candidates
             .iter()
@@ -780,6 +709,14 @@ impl Kuizer {
                 self.safety
                     .is_none_or(|safety| candidate.rule.safety == safety)
                     && !self.hidden.contains(&candidate.rule.category)
+                    && found(
+                        needle.as_deref(),
+                        &[
+                            candidate.path.to_string_lossy().as_ref(),
+                            candidate.rule.name.as_str(),
+                            candidate.rule.category.as_str(),
+                        ],
+                    )
             })
             .map(|(index, _)| index)
             .collect();
@@ -818,6 +755,7 @@ impl Kuizer {
             Tab::Caches => report
                 .caches
                 .iter()
+                .filter(|(cache, candidate)| self.shows_cache(cache, candidate))
                 .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
                 .map(|(_, candidate)| (Source::Cache, candidate.id))
                 .collect(),
@@ -1064,128 +1002,11 @@ impl Kuizer {
         }
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        if self.menu.is_some() {
-            self.menu_key(event, window, cx);
-            return;
-        }
-        let menu_key = key == "menu" || (key == "f10" && event.keystroke.modifiers.shift);
-        if self.dialog.is_none() {
-            match self.phase {
-                Phase::Ready(_) if menu_key => self.open_menu_at_cursor(window, cx),
-                Phase::Start => self.type_folder(event, cx),
-                Phase::Loading(_) if key == "escape" => self.cancel_scan(cx),
-                Phase::Ready(_) if key == "escape" && self.refreshing() => self.cancel_scan(cx),
-                Phase::Ready(_) if key == "escape" => self.dismiss_toast(cx),
-                _ => {}
-            }
-            return;
-        }
-        match &mut self.dialog {
-            Some(Dialog::Confirm { typed, .. }) => match key {
-                "escape" => self.dialog = None,
-                "enter" => {
-                    self.accept(cx);
-                    return;
-                }
-                "backspace" => {
-                    typed.pop();
-                }
-                _ => {
-                    if let Some(ch) = event.keystroke.key_char.as_deref()
-                        && ch.chars().all(|c| c.is_ascii_digit())
-                        && typed.len() < 9
-                    {
-                        typed.push_str(ch);
-                    }
-                }
-            },
-            Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
-            _ => return,
-        }
-        cx.notify();
-    }
-
     /// Shows a message unless the restore message is up, which tracks a running restore.
     fn tell(&mut self, notice: Notice, cx: &mut Context<Self>) {
         if !self.restoring() {
             self.show_toast(notice, cx);
         }
-    }
-
-    fn target_exists(&self, target: &Target) -> bool {
-        let Some(report) = self.report() else {
-            return false;
-        };
-        match target {
-            Target::Item(Source::Artifact, id, _) => self
-                .rows
-                .iter()
-                .any(|&index| report.candidates[index].id == *id),
-            Target::Item(Source::Cache, id, _) => report
-                .caches
-                .iter()
-                .any(|(_, candidate)| candidate.id == *id),
-            Target::Duplicate(path) => report.duplicates.as_ref().is_some_and(|found| {
-                found
-                    .groups
-                    .iter()
-                    .take(DUPLICATE_GROUPS)
-                    .flat_map(|group| &group.members)
-                    .any(|member| member.path == *path)
-            }),
-            Target::Issue(path) => report
-                .issues
-                .iter()
-                .take(ISSUE_LIMIT)
-                .any(|issue| issue.path == *path),
-            Target::Run(session, _) => report
-                .history
-                .as_ref()
-                .is_ok_and(|view| view.delete_runs().any(|run| run.id == *session)),
-        }
-    }
-
-    fn first_target(&self) -> Option<Target> {
-        let report = self.report()?;
-        match self.tab {
-            Tab::Overview => None,
-            Tab::Artifacts => self.rows.first().map(|&index| {
-                let candidate = &report.candidates[index];
-                Target::Item(Source::Artifact, candidate.id, candidate.path.clone())
-            }),
-            Tab::Caches => report.caches.first().map(|(_, candidate)| {
-                Target::Item(Source::Cache, candidate.id, candidate.path.clone())
-            }),
-            Tab::Duplicates => report
-                .duplicates
-                .as_ref()?
-                .groups
-                .first()?
-                .members
-                .first()
-                .map(|member| Target::Duplicate(member.path.clone())),
-            Tab::Issues => report
-                .issues
-                .first()
-                .map(|issue| Target::Issue(issue.path.clone())),
-            Tab::History => report
-                .history
-                .as_ref()
-                .ok()?
-                .delete_runs()
-                .next_back()
-                .map(|run| Target::Run(run.id, run.command.clone())),
-        }
-    }
-
-    /// The row the keyboard menu opens for: the last row used in this section, else its first row.
-    fn cursor_target(&self) -> Option<Target> {
-        self.cursor
-            .clone()
-            .filter(|target| target.tab() == self.tab && self.target_exists(target))
-            .or_else(|| self.first_target())
     }
 
     fn trash_lock(&self) -> Option<&'static str> {
@@ -1275,7 +1096,7 @@ impl Kuizer {
         } else {
             None
         };
-        self.cursor = Some(target.clone());
+        self.cursors.insert(target.tab(), target.clone());
         self.menu = Some(Menu {
             target,
             position,
@@ -1498,17 +1319,50 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> E {
         let open = self.menu.as_ref().is_some_and(|menu| menu.target == target);
-        let bounds = (cursor == Some(&target)).then(|| Rc::clone(&self.cursor_bounds));
+        let tab = target.tab();
+        let marked = cursor == Some(&target);
+        let bounds = marked.then(|| Rc::clone(&self.cursor_bounds));
+        let reveal = Rc::clone(&self.reveal_cursor);
+        let scroll = self.scrolls.get(&tab).cloned();
+        let clicked = target.clone();
         row.when_some(bounds, |this, bounds| {
             this.child(
-                canvas(move |area, _, _| bounds.set(Some(area)), |_, (), _, _| {})
+                canvas(
+                    move |area, window, _| {
+                        bounds.set(Some(area));
+                        if let Some(scroll) = scroll
+                            && reveal.take()
+                        {
+                            keep_visible(&scroll, area, window);
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "cursor".to_owned())
                     .absolute()
                     .top_0()
+                    .bottom_0()
                     .left_0()
-                    .size_full(),
+                    .w(unit(2.))
+                    .bg(theme::cursor()),
             )
         })
         .when(open, |this| this.bg(theme::hover()))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |app, _: &MouseDownEvent, _, cx| {
+                app.cursors.insert(tab, clicked.clone());
+                app.filtering = false;
+                cx.notify();
+            }),
+        )
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |app, event: &MouseDownEvent, _, cx| {
@@ -1807,8 +1661,7 @@ impl Kuizer {
                             .child(count.to_string())
                     }))
                     .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                        app.tab = tab;
-                        cx.notify();
+                        app.go_to(tab, cx);
                     }))
             }))
     }
@@ -1859,6 +1712,7 @@ impl Kuizer {
                 )
             })
             .child(div().flex_1())
+            .child(self.render_palette_hint(cx))
             .child(
                 ui::button("select-safe", "Select safe", ButtonKind::Ghost, can_select)
                     .tip(tooltip::term(Term::SelectSafe))
@@ -1919,14 +1773,23 @@ impl Kuizer {
                     )
                     .child(div().text_color(theme::danger()).child(error.clone())),
             ),
-            Phase::Ready(_) => match self.tab {
-                Tab::Overview => self.render_overview(),
-                Tab::Artifacts => self.render_artifacts(cx),
-                Tab::Caches => self.render_caches(cx),
-                Tab::Duplicates => self.render_duplicates(cx),
-                Tab::History => self.render_history(cx),
-                Tab::Issues => self.render_issues(cx),
-            },
+            Phase::Ready(_) => {
+                let list = match self.tab {
+                    Tab::Overview => return self.render_overview(),
+                    Tab::Artifacts => self.render_artifacts(cx),
+                    Tab::Caches => self.render_caches(cx),
+                    Tab::Duplicates => self.render_duplicates(cx),
+                    Tab::History => self.render_history(cx),
+                    Tab::Issues => self.render_issues(cx),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .child(self.render_filter(cx))
+                    .child(div().flex().flex_col().flex_1().min_h_0().child(list))
+                    .into_any_element()
+            }
         }
     }
 
@@ -2663,6 +2526,8 @@ impl Kuizer {
                     .collect()
             }),
         )
+        .track_scroll(self.artifact_scroll.clone())
+        .debug_selector(|| "artifact-list".to_owned())
         .flex_1()
         .w_full();
         div()
@@ -2695,6 +2560,7 @@ impl Kuizer {
         let rows = report
             .caches
             .iter()
+            .filter(|(cache, candidate)| self.shows_cache(cache, candidate))
             .enumerate()
             .map(|(index, (cache, candidate))| {
                 let id = candidate.id;
@@ -2802,10 +2668,12 @@ impl Kuizer {
             .child(
                 div()
                     .id("cache-rows")
+                    .debug_selector(|| "cache-list".to_owned())
                     .flex()
                     .flex_col()
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll_for(Tab::Caches))
                     .children(rows)
                     .when(report.caches.is_empty(), |this| {
                         this.child(ui::empty(if report.options.caches {
@@ -2834,7 +2702,10 @@ impl Kuizer {
             .first()
             .map_or(0, kuizer::dupes::Group::reclaimable);
         let cursor = self.cursor_target();
+        let needle = self.needle(Tab::Duplicates);
         scroll("duplicates")
+            .debug_selector(|| "duplicate-list".to_owned())
+            .track_scroll(&self.scroll_for(Tab::Duplicates))
             .child(
                 div()
                     .flex()
@@ -2877,63 +2748,89 @@ impl Kuizer {
                 } else {
                     "Groups".to_owned()
                 })
-                .children(found.groups.iter().take(DUPLICATE_GROUPS).enumerate().map(
-                    |(index, group)| {
-                        let members = SharedString::from(format!("dupe-{index}"));
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(unit(4.))
-                            .pt(unit(8.))
-                            .border_t_1()
-                            .border_color(theme::border())
-                            .child(
-                                ui::bar_row(
-                                    format!(
-                                        "{} copies of {}{}",
-                                        group.members.len(),
-                                        theme::bytes(group.size),
-                                        if group.verified {
-                                            ""
-                                        } else {
-                                            ", not byte-verified"
-                                        }
-                                    ),
-                                    format!("{} reclaimable", theme::bytes(group.reclaimable())),
-                                    theme::share(group.reclaimable(), largest),
-                                    theme::bar(),
+                .children(
+                    found
+                        .groups
+                        .iter()
+                        .take(DUPLICATE_GROUPS)
+                        .enumerate()
+                        .filter(|(_, group)| {
+                            group
+                                .members
+                                .iter()
+                                .any(|member| found_path(needle.as_deref(), &member.path))
+                        })
+                        .map(|(index, group)| {
+                            let members = SharedString::from(format!("dupe-{index}"));
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(unit(4.))
+                                .pt(unit(8.))
+                                .border_t_1()
+                                .border_color(theme::border())
+                                .child(
+                                    ui::bar_row(
+                                        format!(
+                                            "{} copies of {}{}",
+                                            group.members.len(),
+                                            theme::bytes(group.size),
+                                            if group.verified {
+                                                ""
+                                            } else {
+                                                ", not byte-verified"
+                                            }
+                                        ),
+                                        format!(
+                                            "{} reclaimable",
+                                            theme::bytes(group.reclaimable())
+                                        ),
+                                        theme::share(group.reclaimable(), largest),
+                                        theme::bar(),
+                                    )
+                                    .id(("group", index))
+                                    .tip(group_details(group)),
                                 )
-                                .id(("group", index))
-                                .tip(group_details(group)),
-                            )
-                            .children(group.members.iter().enumerate().map(|(position, member)| {
-                                let row = div()
-                                    .flex()
-                                    .gap(unit(8.))
-                                    .text_color(theme::muted())
-                                    .debug_selector(move || {
-                                        format!("duplicate-{index}-{position}")
-                                    });
-                                let target = Target::Duplicate(member.path.clone());
-                                self.menu_row(row, target, cursor.as_ref(), cx)
-                                    .child(
-                                        div()
-                                            .id((members.clone(), position))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .tip(tooltip::path(&member.path))
-                                            .child(model::short_path(&member.path, &report.roots)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme::faint())
-                                            .child(theme::age(member.modified)),
-                                    )
-                            }))
-                    },
-                ))
+                                .children(
+                                    group
+                                        .members
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, member)| {
+                                            found_path(needle.as_deref(), &member.path)
+                                        })
+                                        .map(|(position, member)| {
+                                            let row = div()
+                                                .flex()
+                                                .gap(unit(8.))
+                                                .text_color(theme::muted())
+                                                .debug_selector(move || {
+                                                    format!("duplicate-{index}-{position}")
+                                                });
+                                            let target = Target::Duplicate(member.path.clone());
+                                            self.menu_row(row, target, cursor.as_ref(), cx)
+                                                .child(
+                                                    div()
+                                                        .id((members.clone(), position))
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .tip(tooltip::path(&member.path))
+                                                        .child(model::short_path(
+                                                            &member.path,
+                                                            &report.roots,
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(theme::faint())
+                                                        .child(theme::age(member.modified)),
+                                                )
+                                        }),
+                                )
+                        }),
+                )
                 .when(found.groups.is_empty(), |this| {
                     this.child(ui::empty("No duplicate files found"))
                 }),
@@ -2963,6 +2860,12 @@ impl Kuizer {
             .enumerate()
             .filter(|(_, run)| run.action == Action::Delete)
             .rev()
+            .collect();
+        let needle = self.needle(Tab::History);
+        let listed: Vec<(usize, &kuizer::history::Run)> = runs
+            .iter()
+            .copied()
+            .filter(|(_, run)| shows_run(needle.as_deref(), run))
             .collect();
         let recent: Vec<&kuizer::history::Run> = runs
             .iter()
@@ -3013,6 +2916,8 @@ impl Kuizer {
                     .child("Command"),
             );
         scroll("history")
+            .debug_selector(|| "history-list".to_owned())
+            .track_scroll(&self.scroll_for(Tab::History))
             .child(
                 div()
                     .flex()
@@ -3078,7 +2983,7 @@ impl Kuizer {
                     .border_1()
                     .border_color(theme::border())
                     .child(header)
-                    .children(runs.iter().map(|&(index, run)| {
+                    .children(listed.iter().map(|&(index, run)| {
                         let mode = run.deleted.first().map_or("", |entry| match entry.mode {
                             kuizer::delete::Mode::Trash => "trash",
                             kuizer::delete::Mode::Permanent => "permanent",
@@ -3202,7 +3107,10 @@ impl Kuizer {
             return centered(ui::empty("The scan reported no issues"));
         }
         let cursor = self.cursor_target();
+        let needle = self.needle(Tab::Issues);
         scroll("issues")
+            .debug_selector(|| "issue-list".to_owned())
+            .track_scroll(&self.scroll_for(Tab::Issues))
             .child(
                 div()
                     .id("issues-count")
@@ -3219,6 +3127,15 @@ impl Kuizer {
                     .iter()
                     .take(ISSUE_LIMIT)
                     .enumerate()
+                    .filter(|(_, issue)| {
+                        found(
+                            needle.as_deref(),
+                            &[
+                                issue.path.to_string_lossy().as_ref(),
+                                issue.message.as_str(),
+                            ],
+                        )
+                    })
                     .map(|(index, issue)| {
                         let row = div()
                             .flex()
@@ -3641,6 +3558,8 @@ impl Render for Kuizer {
         let dialog = self.render_dialog(cx);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(cx);
+        let palette = self.render_palette(cx);
+        let shortcuts = self.render_shortcuts(cx);
         self.cursor_bounds.set(None);
         let start = matches!(self.phase, Phase::Start);
         let titlebar = self.render_titlebar(window, cx);
@@ -3659,6 +3578,7 @@ impl Render for Kuizer {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
             .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::toggle_palette))
             .child(wheel)
             .child(titlebar)
             .child(
@@ -3684,6 +3604,8 @@ impl Render for Kuizer {
             .when(!start, |this| this.child(self.render_statusbar(cx)))
             .children(dialog)
             .children(menu)
+            .children(palette)
+            .children(shortcuts)
             .child(tooltip::layer(cx));
         frame::frame(root, window)
     }
@@ -4149,9 +4071,14 @@ mod tests {
         point,
     };
 
+    use kuizer::dupes;
+
     use super::*;
 
-    fn open(cx: &mut TestAppContext, recent: PathBuf) -> (Entity<Kuizer>, &mut VisualTestContext) {
+    pub(super) fn open(
+        cx: &mut TestAppContext,
+        recent: PathBuf,
+    ) -> (Entity<Kuizer>, &mut VisualTestContext) {
         cx.add_window_view(|window, cx| {
             let mut app = Kuizer::new(
                 Config::default(),
@@ -4170,7 +4097,7 @@ mod tests {
         })
     }
 
-    fn type_text(cx: &mut VisualTestContext, text: &str) {
+    pub(super) fn type_text(cx: &mut VisualTestContext, text: &str) {
         for ch in text.chars() {
             let keystroke = Keystroke {
                 modifiers: Modifiers::default(),
@@ -4210,7 +4137,7 @@ mod tests {
         panic!("nothing was shown");
     }
 
-    fn wait_for_refresh(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
+    pub(super) fn wait_for_refresh(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
         for _ in 0..1000 {
             cx.executor().advance_clock(POLL);
             cx.run_until_parked();
@@ -4229,7 +4156,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
     }
 
-    fn project(dir: &Path) -> PathBuf {
+    pub(super) fn project(dir: &Path) -> PathBuf {
         let root = dir.join("apps");
         let modules = root.join("site").join("node_modules").join("left-pad");
         std::fs::create_dir_all(&modules).unwrap();
@@ -4830,7 +4757,7 @@ mod tests {
         view.update(cx, |app, cx| app.cancel_scan(cx));
     }
 
-    fn scanned<'a>(
+    pub(super) fn scanned<'a>(
         cx: &'a mut TestAppContext,
         dir: &Path,
         tab: Tab,
@@ -4862,7 +4789,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn menu_target(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Option<Target> {
+    pub(super) fn menu_target(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Option<Target> {
         view.read_with(cx, |app, _| {
             app.menu.as_ref().map(|menu| menu.target.clone())
         })
