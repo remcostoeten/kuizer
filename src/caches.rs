@@ -343,6 +343,25 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     SPECS.iter().map(|spec| spec.name)
 }
 
+/// @name known
+/// @description Rebuilds the description of a known global cache from its name, for a cache
+/// that was found at `path` earlier. Returns `None` for a name kuizer does not know.
+///
+/// @example
+/// assert_eq!(caches::known("npm", path).map(|cache| cache.tool), Some("npm"));
+pub fn known(name: &str, path: PathBuf) -> Option<KnownCache> {
+    SPECS
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| KnownCache {
+            name: spec.name,
+            tool: spec.tool,
+            path,
+            safety: spec.safety,
+            note: spec.note,
+        })
+}
+
 /// @name find
 /// @description Resolves the known global tool caches against `locations` and returns the ones
 /// that exist as real directories. Symlinks and anything inside protected browser or credential
@@ -390,6 +409,16 @@ mod tests {
         let found = find(&Locations::under(home), &Protected::new(Some(home)));
         let names: Vec<&str> = found.iter().map(|cache| cache.name).collect();
         assert_eq!(names, ["npm", "cargo-registry-cache"]);
+    }
+
+    #[test]
+    fn known_rebuilds_a_cache_by_name() {
+        let cache = known("pnpm-store", PathBuf::from("/x/pnpm/store")).expect("pnpm-store");
+        assert_eq!(cache.tool, "pnpm");
+        assert_eq!(cache.safety, Safety::Review);
+        assert_eq!(cache.path, PathBuf::from("/x/pnpm/store"));
+        assert!(!cache.note.is_empty());
+        assert!(known("not-a-cache", PathBuf::new()).is_none());
     }
 
     #[test]
