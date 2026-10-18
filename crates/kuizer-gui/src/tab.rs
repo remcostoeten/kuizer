@@ -10,16 +10,18 @@ pub enum Tab {
     Overview,
     Artifacts,
     Caches,
+    Toolchains,
     Duplicates,
     History,
     Issues,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
+        Self::Toolchains,
         Self::Duplicates,
         Self::History,
         Self::Issues,
@@ -37,11 +39,17 @@ impl Tab {
         Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
+    /// Whether rows in this section can be selected for removal.
+    pub fn selects(self) -> bool {
+        matches!(self, Self::Artifacts | Self::Caches | Self::Toolchains)
+    }
+
     pub fn term(self) -> Term {
         match self {
             Self::Overview => Term::Overview,
             Self::Artifacts => Term::ProjectArtifacts,
             Self::Caches => Term::GlobalCaches,
+            Self::Toolchains => Term::Toolchains,
             Self::Duplicates => Term::DuplicateFiles,
             Self::History => Term::History,
             Self::Issues => Term::Issues,
@@ -53,6 +61,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Artifacts => "Project artifacts",
             Self::Caches => "Global caches",
+            Self::Toolchains => "Toolchains",
             Self::Duplicates => "Duplicates",
             Self::History => "History",
             Self::Issues => "Issues",
@@ -79,6 +88,12 @@ impl Tab {
             Self::Caches => match stage {
                 Stage::Caches => "Measuring global caches",
                 Stage::History => "Caches measured, shown once the scan is done",
+                _ => "Measured after the folder scan",
+            },
+            Self::Toolchains if !options.toolchains => "Toolchains are off for this scan",
+            Self::Toolchains => match stage {
+                Stage::Toolchains => "Measuring installed toolchains",
+                Stage::History => "Toolchains measured, shown once the scan is done",
                 _ => "Measured after the folder scan",
             },
             Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",

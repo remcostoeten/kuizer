@@ -132,7 +132,7 @@ impl Spec {
     }
 }
 
-const TAB_KEYS: [&[&str]; 6] = [&["1"], &["2"], &["3"], &["4"], &["5"], &["6"]];
+const TAB_KEYS: [&[&str]; 7] = [&["1"], &["2"], &["3"], &["4"], &["5"], &["6"], &["7"]];
 
 /// @name table
 /// @description The command table. The palette, the key handling, the GPUI key bindings and the

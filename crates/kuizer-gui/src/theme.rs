@@ -70,6 +70,10 @@ pub fn bar_strong() -> Rgba {
     rgb(0x00c8_c8c8)
 }
 
+pub fn bar_mid() -> Rgba {
+    rgb(0x0076_7676)
+}
+
 pub fn bar_soft() -> Rgba {
     rgb(0x0062_6262)
 }
