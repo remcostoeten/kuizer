@@ -10,6 +10,83 @@ pub fn unit(value: f32) -> Rems {
     rems(value / REM)
 }
 
+/// The spacing scale. Every gap, padding and margin in a view is one of these steps.
+pub mod space {
+    pub const XXS: f32 = 2.;
+    pub const XS: f32 = 4.;
+    pub const S: f32 = 6.;
+    pub const M: f32 = 8.;
+    pub const L: f32 = 12.;
+    pub const XL: f32 = 16.;
+    pub const XXL: f32 = 24.;
+    /// The left and right edge shared by the titlebar, sidebar items, lists and status bar.
+    pub const GUTTER: f32 = XL;
+    /// The inset of a sidebar item inside the sidebar, so item text starts at the gutter.
+    pub const INSET: f32 = M;
+}
+
+/// The type scale.
+pub mod font {
+    pub const CAPTION: f32 = 11.;
+    pub const SMALL: f32 = 12.;
+    pub const BODY: f32 = 13.;
+    pub const TITLE: f32 = 15.;
+    pub const HEADING: f32 = 18.;
+    pub const FIGURE: f32 = 24.;
+}
+
+/// Fixed heights and widths of controls, bars and panels.
+pub mod size {
+    pub const HAIR: f32 = 1.;
+    pub const MARKER: f32 = 2.;
+    pub const DOT: f32 = 6.;
+    pub const ICON: f32 = 16.;
+    pub const CHECK: f32 = 14.;
+    pub const BADGE: f32 = 18.;
+    pub const SEGMENT: f32 = 24.;
+    pub const CONTROL: f32 = 28.;
+    pub const INPUT: f32 = 32.;
+    pub const ROW: f32 = 32.;
+    pub const ROW_TALL: f32 = 44.;
+    pub const BAR: f32 = 40.;
+    pub const TOOLBAR: f32 = 44.;
+    pub const SIDEBAR: f32 = 220.;
+    pub const SIDEBAR_COLLAPSED: f32 = 48.;
+    pub const LINE: f32 = 10.;
+    pub const METER: f32 = 12.;
+    pub const TRACK: f32 = 4.;
+    pub const SWATCH: f32 = 8.;
+    pub const LEGEND: f32 = 10.;
+    pub const CARET: f32 = 14.;
+    pub const COLUMNS: f32 = 88.;
+    pub const CHART: f32 = 120.;
+    pub const MAP: f32 = 200.;
+    pub const STAT: f32 = 140.;
+    pub const ACTIONS: f32 = 196.;
+    pub const LABEL: f32 = 240.;
+    pub const KEYS: f32 = 250.;
+    pub const FILTER: f32 = 300.;
+    pub const LIST: f32 = 340.;
+    pub const MENU: f32 = 220.;
+    pub const DIALOG: f32 = 520.;
+    pub const PALETTE: f32 = 560.;
+    pub const PAGE: f32 = 760.;
+    pub const SHORTCUTS: f32 = 820.;
+    /// How far below the titlebar the command palette opens.
+    pub const DROP: f32 = 72.;
+}
+
+/// Widths of fixed table columns.
+pub mod col {
+    pub const XS: f32 = 56.;
+    pub const S: f32 = 72.;
+    pub const M: f32 = 96.;
+    pub const L: f32 = 112.;
+    pub const XL: f32 = 152.;
+    pub const XXL: f32 = 176.;
+    pub const WIDE: f32 = 240.;
+}
+
 pub fn background() -> Rgba {
     rgb(0x0018_1818)
 }
@@ -38,8 +115,10 @@ pub fn selected() -> Rgba {
     rgb(0x002f_2f2f)
 }
 
-pub fn cursor() -> Rgba {
-    rgb(0x0090_9090)
+/// The marker and outline of whatever has the keyboard: the cursor row, the open section, a
+/// focused field.
+pub fn focus() -> Rgba {
+    rgb(0x00a8_a8a8)
 }
 
 pub fn border() -> Rgba {

@@ -2,18 +2,17 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, Div, ElementId, IntoElement, ParentElement, Rgba,
-    SharedString, Styled, div, prelude::*, px, relative,
+    SharedString, Styled, div, prelude::*, relative,
 };
 use kuizer::stats::Bucket;
 
 use crate::motion;
-use crate::theme::{self, unit};
+use crate::theme::{self, font, size, space, unit};
 use crate::tooltip::{Tip, Tooltip};
 
 const PULSE: Duration = Duration::from_millis(1_400);
 const SWEEP: Duration = Duration::from_millis(1_100);
 const SWEEP_WIDTH: f32 = 0.3;
-const COLUMN_HEIGHT: f32 = 88.;
 
 pub struct Segment {
     pub label: SharedString,
@@ -47,8 +46,9 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
     let bar = div()
         .flex()
         .w_full()
-        .h(unit(12.))
-        .gap(px(1.))
+        .h(unit(size::METER))
+        .gap(unit(size::HAIR))
+        .overflow_hidden()
         .bg(theme::track())
         .children(
             segments
@@ -62,7 +62,7 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
                         .debug_selector(move || format!("{id}-{index}"))
                         .h_full()
                         .w(relative(share.max(0.004)))
-                        .flex_none()
+                        .flex_shrink()
                         .bg(segment.fill)
                         .hover(|style| style.opacity(0.8))
                         .tip(
@@ -76,14 +76,14 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
     let legend = div()
         .flex()
         .flex_wrap()
-        .gap_x(unit(16.))
-        .gap_y(unit(6.))
-        .text_size(unit(12.))
+        .gap_x(unit(space::XL))
+        .gap_y(unit(space::S))
+        .text_size(unit(font::SMALL))
         .children(segments.iter().map(|segment| {
             div()
                 .flex()
                 .items_center()
-                .gap(unit(6.))
+                .gap(unit(space::S))
                 .child(swatch(segment.fill))
                 .child(
                     div()
@@ -95,7 +95,7 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(unit(10.))
+        .gap(unit(space::L))
         .child(bar)
         .child(legend)
 }
@@ -119,7 +119,7 @@ pub fn columns(
         .unwrap_or(0);
     div()
         .flex()
-        .gap(unit(4.))
+        .gap(unit(space::XS))
         .w_full()
         .children(buckets.iter().enumerate().map(|(index, bucket)| {
             let value = measure.of(bucket);
@@ -138,7 +138,7 @@ pub fn columns(
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap(unit(6.))
+                .gap(unit(space::S))
                 .group(SharedString::from(format!("{id}-{index}")))
                 .tip(
                     Tooltip::details(bucket.label.clone())
@@ -151,12 +151,12 @@ pub fn columns(
                         .flex()
                         .flex_col()
                         .justify_end()
-                        .h(unit(COLUMN_HEIGHT))
+                        .h(unit(size::COLUMNS))
                         .child(
                             div()
                                 .w_full()
                                 .h(relative(height))
-                                .min_h(px(2.))
+                                .min_h(unit(size::MARKER))
                                 .bg(fill)
                                 .group_hover(format!("{id}-{index}"), |style| {
                                     style.bg(theme::primary())
@@ -166,7 +166,7 @@ pub fn columns(
                 .child(
                     div()
                         .truncate()
-                        .text_size(unit(11.))
+                        .text_size(unit(font::CAPTION))
                         .text_color(theme::faint())
                         .child(bucket.label.clone()),
                 )
@@ -174,7 +174,7 @@ pub fn columns(
 }
 
 pub fn swatch(fill: Rgba) -> Div {
-    div().size(unit(8.)).flex_none().bg(fill)
+    div().size(unit(size::SWATCH)).flex_none().bg(fill)
 }
 
 /// @name block
@@ -182,7 +182,7 @@ pub fn swatch(fill: Rgba) -> Div {
 /// or stays still when motion is off.
 ///
 /// @example
-/// block("stat-value", 0, unit(90.), unit(20.))
+/// block("stat-value", 0, unit(col::M), unit(font::FIGURE))
 pub fn block(
     id: &'static str,
     index: usize,
@@ -223,7 +223,7 @@ pub fn loader() -> AnyElement {
         .debug_selector(|| "loader".to_owned())
         .relative()
         .w_full()
-        .h(px(2.))
+        .h(unit(size::MARKER))
         .overflow_hidden()
         .bg(theme::track());
     if motion::reduced() {

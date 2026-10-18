@@ -1,6 +1,7 @@
 use kuizer::dupes;
 
 use crate::glossary::Term;
+use crate::icon::Icon;
 use crate::model::Stage;
 use crate::start::ScanOptions;
 
@@ -62,6 +63,45 @@ impl Tab {
             Self::Duplicates => Term::DuplicateFiles,
             Self::History => Term::History,
             Self::Issues => Term::Issues,
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Self::Overview => Icon::Overview,
+            Self::Artifacts => Icon::Artifacts,
+            Self::Caches => Icon::Caches,
+            Self::Toolchains => Icon::Toolchains,
+            Self::Docker => Icon::Docker,
+            Self::Repos => Icon::Repos,
+            Self::Duplicates => Icon::Duplicates,
+            Self::History => Icon::History,
+            Self::Issues => Icon::Issues,
+        }
+    }
+
+    /// The group heading the sidebar shows above this section, on the first section of a group.
+    pub fn heading(self) -> Option<&'static str> {
+        match self {
+            Self::Artifacts => Some("Reclaim"),
+            Self::Repos => Some("Tidy up"),
+            Self::History => Some("Activity"),
+            _ => None,
+        }
+    }
+
+    /// The keys that open this section: its place in the sidebar.
+    pub fn keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Overview => &["1"],
+            Self::Artifacts => &["2"],
+            Self::Caches => &["3"],
+            Self::Toolchains => &["4"],
+            Self::Docker => &["5"],
+            Self::Repos => &["6"],
+            Self::Duplicates => &["7"],
+            Self::History => &["8"],
+            Self::Issues => &["9"],
         }
     }
 

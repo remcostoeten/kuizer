@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use gpui::{
-    Div, ElementId, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled, div,
-    prelude::*, relative,
+    Div, ElementId, FontFeatures, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled,
+    div, prelude::*, relative,
 };
 
 use crate::glossary::Term;
-use crate::theme::{self, unit};
+use crate::theme::{self, font, size, space, unit};
 use crate::tooltip::{self, Tip};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,10 +31,10 @@ pub fn button(
         .id(id)
         .flex()
         .items_center()
-        .h(unit(26.))
-        .px(unit(10.))
+        .h(unit(size::CONTROL))
+        .px(unit(space::L))
         .rounded(theme::radius_button())
-        .text_size(unit(12.5))
+        .text_size(unit(font::BODY))
         .font_weight(FontWeight::MEDIUM)
         .bg(background)
         .text_color(foreground)
@@ -52,7 +54,7 @@ pub fn checkbox(checked: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .size(unit(14.))
+        .size(unit(size::CHECK))
         .flex_none()
         .rounded(theme::radius_checkbox())
         .border_1()
@@ -64,7 +66,7 @@ pub fn checkbox(checked: bool) -> Div {
         .when(checked, |this| {
             this.child(
                 div()
-                    .size(unit(6.))
+                    .size(unit(size::DOT))
                     .rounded(theme::radius_dot())
                     .bg(theme::primary()),
             )
@@ -76,8 +78,8 @@ pub fn card(title: impl Into<SharedString>) -> Div {
         .flex()
         .flex_col()
         .min_w_0()
-        .gap(unit(10.))
-        .p(unit(14.))
+        .gap(unit(space::L))
+        .p(unit(space::GUTTER))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
@@ -87,7 +89,7 @@ pub fn card(title: impl Into<SharedString>) -> Div {
 
 pub fn heading(title: impl Into<SharedString>) -> Div {
     div()
-        .text_size(unit(12.))
+        .text_size(unit(font::SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::muted())
         .child(title.into())
@@ -101,30 +103,30 @@ pub fn stat(
     div()
         .flex()
         .flex_col()
-        .gap(unit(2.))
+        .gap(unit(space::XXS))
         .flex_1()
-        .min_w(unit(140.))
-        .p(unit(14.))
+        .min_w(unit(size::STAT))
+        .p(unit(space::GUTTER))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
         .child(
             div()
-                .text_size(unit(12.))
+                .text_size(unit(font::SMALL))
                 .text_color(theme::muted())
                 .child(label.into()),
         )
-        .child(
+        .child(tabular(
             div()
-                .text_size(unit(20.))
+                .text_size(unit(font::FIGURE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value.into()),
-        )
+        ))
         .child(
             div()
                 .truncate()
-                .text_size(unit(12.))
+                .text_size(unit(font::SMALL))
                 .text_color(theme::faint())
                 .child(sub.into()),
         )
@@ -139,22 +141,22 @@ pub fn bar_row(
     div()
         .flex()
         .flex_col()
-        .gap(unit(4.))
+        .gap(unit(space::XS))
         .child(
             div()
                 .flex()
-                .gap(unit(8.))
+                .gap(unit(space::M))
                 .child(div().flex_1().min_w_0().truncate().child(label.into()))
-                .child(
+                .child(tabular(
                     div()
                         .flex_none()
                         .text_color(theme::muted())
                         .child(value.into()),
-                ),
+                )),
         )
         .child(
             div()
-                .h(unit(4.))
+                .h(unit(size::TRACK))
                 .w_full()
                 .rounded(theme::radius_bar())
                 .bg(theme::track())
@@ -170,7 +172,7 @@ pub fn bar_row(
 
 pub fn empty(text: impl Into<SharedString>) -> Div {
     div()
-        .p(unit(14.))
+        .p(unit(space::GUTTER))
         .text_color(theme::faint())
         .child(text.into())
 }
@@ -191,8 +193,8 @@ pub fn segment(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .px(unit(10.))
-        .h(unit(24.))
+        .px(unit(space::L))
+        .h(unit(size::SEGMENT))
         .flex()
         .items_center()
         .rounded(theme::radius_control())
@@ -211,8 +213,8 @@ pub fn segments() -> Div {
     div()
         .flex()
         .flex_none()
-        .gap(unit(2.))
-        .p(unit(2.))
+        .gap(unit(space::XXS))
+        .p(unit(space::XXS))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
@@ -223,8 +225,8 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
     div()
         .flex()
         .items_center()
-        .gap(unit(16.))
-        .py(unit(8.))
+        .gap(unit(space::XL))
+        .py(unit(space::M))
         .border_t_1()
         .border_color(theme::border())
         .child(
@@ -233,11 +235,11 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap(unit(2.))
+                .gap(unit(space::XXS))
                 .child(div().child(label.into()))
                 .child(
                     div()
-                        .text_size(unit(12.))
+                        .text_size(unit(font::SMALL))
                         .text_color(theme::faint())
                         .child(hint.into()),
                 ),
@@ -250,14 +252,14 @@ pub fn kbd(key: impl Into<SharedString>) -> Div {
         .flex_none()
         .items_center()
         .justify_center()
-        .min_w(unit(18.))
-        .h(unit(18.))
-        .px(unit(5.))
+        .min_w(unit(size::BADGE))
+        .h(unit(size::BADGE))
+        .px(unit(space::XS))
         .rounded(theme::radius_control())
         .bg(theme::background())
         .border_1()
         .border_color(theme::border_strong())
-        .text_size(unit(11.))
+        .text_size(unit(font::CAPTION))
         .text_color(theme::muted())
         .child(key.into())
 }
@@ -278,11 +280,92 @@ pub fn tag(id: impl Into<ElementId>, label: impl Into<SharedString>, tone: Tone)
         .flex()
         .flex_none()
         .items_center()
-        .h(unit(18.))
-        .px(unit(6.))
+        .h(unit(size::BADGE))
+        .px(unit(space::S))
         .rounded(theme::radius_control())
         .bg(background)
-        .text_size(unit(11.5))
+        .text_size(unit(font::CAPTION))
         .text_color(foreground)
         .child(label.into())
+}
+
+/// @name tabular
+/// @description Gives digits a fixed width, so sizes and counts line up in columns and do not
+/// shift while they change.
+///
+/// @example
+/// ui::tabular(div().child(theme::bytes(bytes)))
+pub fn tabular<E: Styled>(mut element: E) -> E {
+    element
+        .text_style()
+        .get_or_insert_with(Default::default)
+        .font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    element
+}
+
+/// @name figure
+/// @description A size or count in a table or the sidebar: tabular digits, right aligned, with
+/// more weight than the text around it.
+///
+/// @example
+/// ui::figure(theme::bytes(bytes))
+pub fn figure(value: impl Into<SharedString>) -> Div {
+    tabular(
+        div()
+            .flex_none()
+            .text_right()
+            .font_weight(FontWeight::MEDIUM)
+            .child(value.into()),
+    )
+}
+
+/// @name marker
+/// @description The bar on the left edge of the row that has the keyboard or the section that is
+/// open.
+///
+/// @example
+/// row.child(ui::marker())
+pub fn marker() -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(unit(size::MARKER))
+        .bg(theme::focus())
+}
+
+/// @name toolbar
+/// @description The bar at the top of a section with its filters and totals, on the shared
+/// gutter.
+///
+/// @example
+/// ui::toolbar().child(ui::segments()).child(div().flex_1()).child(total)
+pub fn toolbar() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .flex_wrap()
+        .items_center()
+        .gap_x(unit(space::L))
+        .gap_y(unit(space::XS))
+        .min_h(unit(size::TOOLBAR))
+        .px(unit(space::GUTTER))
+        .py(unit(space::S))
+        .border_b_1()
+        .border_color(theme::border())
+        .text_color(theme::muted())
+}
+
+/// @name divider
+/// @description A one pixel horizontal rule between groups in a menu or the sidebar.
+///
+/// @example
+/// menu.child(ui::divider())
+pub fn divider() -> Div {
+    div()
+        .flex_none()
+        .h(unit(size::HAIR))
+        .my(unit(space::XS))
+        .bg(theme::border())
 }

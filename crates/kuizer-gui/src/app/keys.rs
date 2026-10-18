@@ -407,7 +407,7 @@ impl Kuizer {
             | Command::ZoomIn
             | Command::ZoomOut
             | Command::ResetZoom => None,
-            Command::GoTo(_) | Command::NextTab | Command::PreviousTab => {
+            Command::GoTo(_) | Command::NextTab | Command::PreviousTab | Command::Sidebar => {
                 (!started).then_some(START_FIRST)
             }
             Command::Rescan if !started || self.roots.is_empty() => Some(START_FIRST),
@@ -604,6 +604,9 @@ impl Kuizer {
             }
             Command::ResetZoom => {
                 self.zoom.reset();
+            }
+            Command::Sidebar => {
+                self.collapsed = !self.collapsed;
             }
             Command::SpaceMap => {
                 if self.tab == Tab::Overview {

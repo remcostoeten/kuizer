@@ -184,12 +184,25 @@ impl Default for GitConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AppearanceConfig {
     pub motion: bool,
+    pub sidebar: Sidebar,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
-        Self { motion: true }
+        Self {
+            motion: true,
+            sidebar: Sidebar::default(),
+        }
     }
+}
+
+/// How wide the GUI sidebar opens: with labels, or as a narrow strip of icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sidebar {
+    #[default]
+    Expanded,
+    Collapsed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -435,6 +448,14 @@ mod tests {
         let config = parse("[appearance]\nmotion = false\n").expect("parses");
         assert!(!config.appearance.motion);
         assert!(Config::default().appearance.motion);
+    }
+
+    #[test]
+    fn sidebar_opens_expanded_unless_collapsed() {
+        let config = parse("[appearance]\nsidebar = \"collapsed\"\n").expect("parses");
+        assert_eq!(config.appearance.sidebar, Sidebar::Collapsed);
+        assert_eq!(Config::default().appearance.sidebar, Sidebar::Expanded);
+        assert!(parse("[appearance]\nsidebar = \"wide\"\n").is_err());
     }
 
     #[test]

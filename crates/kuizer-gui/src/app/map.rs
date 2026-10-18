@@ -258,9 +258,9 @@ impl Kuizer {
                 .id(("map-crumb", index))
                 .debug_selector(move || format!("map-crumb-{index}"))
                 .flex_none()
-                .max_w(unit(240.))
+                .max_w(unit(size::LABEL))
                 .truncate()
-                .px(unit(4.))
+                .px(unit(space::XS))
                 .rounded(theme::radius_control())
                 .text_color(if current {
                     theme::text()
@@ -288,7 +288,7 @@ impl Kuizer {
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(12.))
+            .gap(unit(space::L))
             .child(switch)
             .child(
                 div()
@@ -297,7 +297,7 @@ impl Kuizer {
                     .flex_1()
                     .min_w_0()
                     .items_center()
-                    .gap(unit(2.))
+                    .gap(unit(space::XXS))
                     .overflow_hidden()
                     .children(crumbs),
             )
@@ -331,18 +331,18 @@ impl Kuizer {
             .flex_none()
             .flex_wrap()
             .items_center()
-            .gap_x(unit(14.))
-            .gap_y(unit(4.))
-            .text_size(unit(11.5))
+            .gap_x(unit(space::XL))
+            .gap_y(unit(space::XS))
+            .text_size(unit(font::CAPTION))
             .text_color(theme::faint())
             .children(Category::ALL.into_iter().map(|category| {
                 div()
                     .flex()
                     .items_center()
-                    .gap(unit(6.))
+                    .gap(unit(space::S))
                     .child(
                         div()
-                            .size(unit(10.))
+                            .size(unit(size::LEGEND))
                             .flex_none()
                             .bg(theme::tile(category))
                             .border_t_2()
@@ -354,10 +354,10 @@ impl Kuizer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(unit(6.))
+                    .gap(unit(space::S))
                     .child(
                         div()
-                            .size(unit(10.))
+                            .size(unit(size::LEGEND))
                             .flex_none()
                             .bg(theme::tile_folder())
                             .border_1()
@@ -370,9 +370,9 @@ impl Kuizer {
         div()
             .flex()
             .flex_col()
-            .gap(unit(10.))
+            .gap(unit(space::L))
             .size_full()
-            .p(unit(16.))
+            .p(unit(space::XL))
             .child(header)
             .child(body)
             .child(legend)
@@ -424,7 +424,7 @@ impl Kuizer {
             .debug_selector(|| "map".to_owned())
             .relative()
             .flex_1()
-            .min_h(unit(200.))
+            .min_h(unit(size::MAP))
             .w_full()
             .overflow_hidden()
             .bg(theme::panel())
@@ -484,7 +484,7 @@ impl Kuizer {
             if selected {
                 theme::bar_strong()
             } else {
-                theme::cursor()
+                theme::focus()
             }
         });
         let marker = focused.then(|| Rc::clone(&self.cursor_bounds));
@@ -494,9 +494,9 @@ impl Kuizer {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(unit(1.))
-            .px(unit(6.))
-            .py(unit(4.))
+            .gap(unit(size::HAIR))
+            .px(unit(space::S))
+            .py(unit(space::XS))
             .bg(fill)
             .when(matches!(node.kind, Kind::Group | Kind::Folder), |this| {
                 this.border_1().border_color(theme::border_strong())
@@ -516,7 +516,7 @@ impl Kuizer {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .h(unit(2.))
+                        .h(unit(size::MARKER))
                         .bg(edge),
                 )
             })
@@ -533,7 +533,7 @@ impl Kuizer {
                 this.child(
                     div()
                         .truncate()
-                        .text_size(unit(12.))
+                        .text_size(unit(font::SMALL))
                         .text_color(if matches!(node.kind, Kind::Rest(_)) {
                             theme::muted()
                         } else {
@@ -546,7 +546,7 @@ impl Kuizer {
                 this.child(
                     div()
                         .truncate()
-                        .text_size(unit(11.))
+                        .text_size(unit(font::CAPTION))
                         .text_color(theme::muted())
                         .child(theme::bytes(node.bytes)),
                 )
@@ -555,7 +555,7 @@ impl Kuizer {
                 this.child(
                     div()
                         .truncate()
-                        .text_size(unit(11.))
+                        .text_size(unit(font::CAPTION))
                         .text_color(theme::faint())
                         .child(plural(node.items, "item")),
                 )
@@ -565,8 +565,8 @@ impl Kuizer {
                     div()
                         .debug_selector(move || format!("map-check-{index}"))
                         .absolute()
-                        .top(unit(5.))
-                        .right(unit(5.))
+                        .top(unit(space::XS))
+                        .right(unit(space::XS))
                         .child(ui::checkbox(true)),
                 )
             });
@@ -583,7 +583,7 @@ impl Kuizer {
             .top(relative(rect.y / height))
             .w(relative(rect.w / width))
             .h(relative(rect.h / height))
-            .p(px(1.))
+            .p(unit(size::HAIR))
             .when(node.opens(), |this| this.cursor_pointer())
             .tip(details.build())
             .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {

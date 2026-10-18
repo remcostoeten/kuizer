@@ -4,6 +4,7 @@ mod commands;
 mod field;
 mod frame;
 mod glossary;
+mod icon;
 mod model;
 mod motion;
 mod palette;
@@ -52,46 +53,48 @@ fn main() -> ExitCode {
     let roots = kuizer::scan::normalize_roots(&paths);
     let config = loaded.config;
 
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
-        let font = font(cx);
-        app::bind_keys(cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(frame::titlebar()),
-                window_decorations: frame::decorations(),
-                app_id: Some("kuizer-gui".to_owned()),
-                window_min_size: Some(size(px(860.), px(520.))),
-                ..WindowOptions::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    Kuizer::new(
-                        config,
-                        roots,
-                        start::Recent::for_user(),
-                        snapshot::Snapshots::for_user(),
-                        Zoom::for_user(),
-                        font,
-                        window,
-                        cx,
-                    )
-                })
-            },
-        );
-        if let Err(error) = opened {
-            eprintln!("kuizer-gui: cannot open a window: {error}");
-            cx.quit();
-            return;
-        }
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+    Application::new()
+        .with_assets(icon::Assets)
+        .run(move |cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+            let font = font(cx);
+            app::bind_keys(cx);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(frame::titlebar()),
+                    window_decorations: frame::decorations(),
+                    app_id: Some("kuizer-gui".to_owned()),
+                    window_min_size: Some(size(px(860.), px(520.))),
+                    ..WindowOptions::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        Kuizer::new(
+                            config,
+                            roots,
+                            start::Recent::for_user(),
+                            snapshot::Snapshots::for_user(),
+                            Zoom::for_user(),
+                            font,
+                            window,
+                            cx,
+                        )
+                    })
+                },
+            );
+            if let Err(error) = opened {
+                eprintln!("kuizer-gui: cannot open a window: {error}");
                 cx.quit();
+                return;
             }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
     ExitCode::SUCCESS
 }
