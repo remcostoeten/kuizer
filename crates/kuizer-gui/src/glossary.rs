@@ -19,6 +19,7 @@ pub enum Term {
     Tool,
     ProjectArtifacts,
     GlobalCaches,
+    Toolchains,
     DuplicateFiles,
     Reclaimable,
     Groups,
@@ -39,7 +40,7 @@ pub enum Term {
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 33] = [
+    pub const ALL: [Term; 34] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -57,6 +58,7 @@ impl Term {
         Self::Tool,
         Self::ProjectArtifacts,
         Self::GlobalCaches,
+        Self::Toolchains,
         Self::DuplicateFiles,
         Self::Reclaimable,
         Self::Groups,
@@ -110,6 +112,7 @@ impl Term {
             Self::Tool => "Tool",
             Self::ProjectArtifacts => "Project artifacts",
             Self::GlobalCaches => "Global caches",
+            Self::Toolchains => "Toolchains",
             Self::DuplicateFiles => "Duplicate files",
             Self::Reclaimable => "Reclaimable",
             Self::Groups => "Groups",
@@ -179,6 +182,9 @@ impl Term {
             }
             Self::GlobalCaches => {
                 "Caches that package managers and tools keep in your home folder, shared by all projects. Safe caches fill up again on the next install or build."
+            }
+            Self::Toolchains => {
+                "Installed versions of rustup, nvm, fnm, volta, pyenv, uv, SDKMAN and Go. A default version or one a project under the scanned folder pins is marked review. Removing a version deletes it for good, it does not go to the trash, and the tool downloads it again when needed."
             }
             Self::DuplicateFiles => {
                 "Files with exactly the same content in more than one place. Keeping one copy of each frees the rest."

@@ -8,6 +8,7 @@ use crate::delete::{Mode, Removal, Status};
 use crate::detect::{Category, Kind, Safety};
 use crate::dupes::{Duplicates, Group};
 use crate::scan::{Candidate, Issue, Summary};
+use crate::toolchains::Toolchain;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -301,6 +302,65 @@ pub fn cache_report(entries: &[(KnownCache, Candidate)]) -> String {
             safe_bytes: entries
                 .iter()
                 .filter(|(cache, _)| cache.safety == Safety::Safe)
+                .map(|(_, candidate)| candidate.usage.allocated)
+                .sum(),
+        },
+    };
+    serde_json::to_string_pretty(&report).unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct ToolchainJson<'a> {
+    tool: &'static str,
+    runtime: &'a str,
+    version: &'a str,
+    path: &'a Path,
+    safety: Safety,
+    default: bool,
+    pinned_by: &'a [PathBuf],
+    allocated_bytes: u64,
+    apparent_bytes: u64,
+    entries: u64,
+    partial: bool,
+}
+
+#[derive(Serialize)]
+struct ToolchainReport<'a> {
+    schema_version: u32,
+    command: &'static str,
+    toolchains: Vec<ToolchainJson<'a>>,
+    summary: CacheSummary,
+}
+
+pub fn toolchain_report(entries: &[(Toolchain, Candidate)]) -> String {
+    let report = ToolchainReport {
+        schema_version: SCHEMA_VERSION,
+        command: "toolchain",
+        toolchains: entries
+            .iter()
+            .map(|(toolchain, candidate)| ToolchainJson {
+                tool: toolchain.tool.name(),
+                runtime: &toolchain.runtime,
+                version: &toolchain.version,
+                path: &toolchain.path,
+                safety: toolchain.safety(),
+                default: toolchain.default,
+                pinned_by: &toolchain.pins,
+                allocated_bytes: candidate.usage.allocated,
+                apparent_bytes: candidate.usage.apparent,
+                entries: candidate.usage.entries,
+                partial: candidate.usage.partial,
+            })
+            .collect(),
+        summary: CacheSummary {
+            items: entries.len(),
+            bytes: entries
+                .iter()
+                .map(|(_, candidate)| candidate.usage.allocated)
+                .sum(),
+            safe_bytes: entries
+                .iter()
+                .filter(|(toolchain, _)| toolchain.safety() == Safety::Safe)
                 .map(|(_, candidate)| candidate.usage.allocated)
                 .sum(),
         },

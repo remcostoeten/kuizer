@@ -8,6 +8,7 @@ mod removal;
 mod restore;
 mod rules;
 mod scan;
+mod toolchain;
 mod ui;
 
 use std::path::PathBuf;
@@ -67,6 +68,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         }
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
+        Command::Toolchain(args) if args.command == Some(NestedCommand::Help) => Some("toolchain"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
         Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
@@ -109,6 +111,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
     }
 }

@@ -36,6 +36,7 @@ pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<
         mode: removal::mode(&args.removal, &config),
         yes: args.removal.yes,
         json,
+        remove: removal::files,
     };
     let mut candidates = collected.candidates;
     keep_idle(&config, &mut candidates, args.idle, false)?;

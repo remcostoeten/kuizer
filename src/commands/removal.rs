@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use super::AppError;
 use crate::cli::{RemovalArgs, Selection};
 use crate::config::Config;
-use crate::delete::{self, Guard, Mode, Removal, Status, Target};
+use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
 use crate::history::{self, Entry, Recorder};
 use crate::output;
 use crate::scan::{Candidate, Issue};
+
+pub type Remove = fn(&Guard, &Candidate, Mode) -> Result<(), DeleteError>;
 
 pub struct Request<'a> {
     pub command: &'static str,
@@ -16,6 +18,17 @@ pub struct Request<'a> {
     pub mode: Mode,
     pub yes: bool,
     pub json: bool,
+    pub remove: Remove,
+}
+
+/// @name files
+/// @description Removes a candidate that is a path on disk through the delete guard, the way
+/// projects and caches are removed.
+///
+/// @example
+/// let request = Request { remove: removal::files, ..request };
+pub fn files(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
+    delete::delete(guard, &target(candidate), mode)
 }
 
 pub fn mode(args: &RemovalArgs, config: &Config) -> Mode {
@@ -169,7 +182,7 @@ pub fn run(
     let mut removals = Vec::with_capacity(candidates.len());
     let mut recorder = Recorder::for_user(started_at, request.roots);
     for candidate in candidates {
-        let removal = match delete::delete(&guard, &target(&candidate), mode) {
+        let removal = match (request.remove)(&guard, &candidate, mode) {
             Ok(()) => {
                 recorder.add(Entry::new(&candidate, mode));
                 Removal {

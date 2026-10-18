@@ -7,12 +7,13 @@ use kuizer::detect::{Category, Kind, RuleInfo, Safety};
 use kuizer::dupes::{Duplicates, Group, Member};
 use kuizer::history::History;
 use kuizer::scan::{Candidate, Issue, IssueKind, Progress, Summary, Usage};
+use kuizer::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Disk, HistoryView, Report};
 use crate::start::ScanOptions;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 const LIMIT: usize = 8;
 const EXTENSION: &str = "json";
 
@@ -138,6 +139,7 @@ struct Stored {
     issues: Vec<StoredIssue>,
     summary: StoredSummary,
     caches: Vec<(String, PathBuf, StoredCandidate)>,
+    toolchains: Vec<(Toolchain, StoredCandidate)>,
     duplicates: Option<StoredDuplicates>,
     history: Result<StoredHistory, String>,
     disks: Vec<(Option<u64>, Option<u64>)>,
@@ -164,6 +166,11 @@ impl Stored {
                         StoredCandidate::new(candidate),
                     )
                 })
+                .collect(),
+            toolchains: report
+                .toolchains
+                .iter()
+                .map(|(toolchain, candidate)| (toolchain.clone(), StoredCandidate::new(candidate)))
                 .collect(),
             duplicates: report.duplicates.as_ref().map(StoredDuplicates::new),
             history: report
@@ -200,6 +207,11 @@ impl Stored {
                 .filter_map(|(name, path, candidate)| {
                     Some((caches::known(&name, path)?, candidate.restore()))
                 })
+                .collect(),
+            toolchains: self
+                .toolchains
+                .into_iter()
+                .map(|(toolchain, candidate)| (toolchain, candidate.restore()))
                 .collect(),
             duplicates: self.duplicates.map(StoredDuplicates::restore),
             history: self.history.map(|stored| HistoryView {
@@ -516,6 +528,17 @@ mod tests {
                 caches::known("npm", PathBuf::from("/h/.npm/_cacache")).unwrap(),
                 candidate(1, "/h/.npm/_cacache"),
             )],
+            toolchains: vec![(
+                Toolchain {
+                    tool: kuizer::toolchains::Tool::Nvm,
+                    runtime: "node".to_owned(),
+                    version: "v18.17.0".to_owned(),
+                    path: PathBuf::from("/h/.nvm/versions/node/v18.17.0"),
+                    default: false,
+                    pins: vec![PathBuf::from("/p/a/.nvmrc")],
+                },
+                candidate(1, "/h/.nvm/versions/node/v18.17.0"),
+            )],
             duplicates: Some(Duplicates {
                 groups: vec![Group {
                     size: 5,
@@ -572,6 +595,8 @@ mod tests {
         assert_eq!(loaded.issues[0].kind, IssueKind::PermissionDenied);
         assert_eq!(loaded.summary, saved.summary);
         assert_eq!(loaded.caches[0].0, saved.caches[0].0);
+        assert_eq!(loaded.toolchains[0].0, saved.toolchains[0].0);
+        assert_eq!(loaded.toolchains[0].1.path, saved.toolchains[0].1.path);
         let duplicates = loaded.duplicates.expect("duplicates");
         assert_eq!(
             duplicates.groups[0].members[1].links,

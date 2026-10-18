@@ -11,6 +11,7 @@ use crate::platform::{self, MountTable};
 use crate::protect::Protected;
 use crate::scan::walk::{Flow, Visitor, Walker};
 use crate::scan::{self, Cancel, Issue, Scan};
+use crate::toolchains::PinFinder;
 
 const PARTIAL: u64 = 16 * 1024;
 const CHUNK: usize = 64 * 1024;
@@ -376,6 +377,32 @@ pub fn start_scan(
     options: Option<Options>,
 ) -> Result<(Scan, crossbeam_channel::Receiver<Option<Files>>), ConfigError> {
     scan::start_with(config, roots, cancel, options.map(Files::new))
+}
+
+/// What a walk collected next to the artifacts: files for duplicate detection and toolchain pins.
+pub type Collected = (Option<Files>, Option<PinFinder>);
+
+/// @name start_scan_with_pins
+/// @description Like `start_scan`, and with `pins` set also records toolchain pin files
+/// (`.nvmrc`, `rust-toolchain.toml` and the like) during the same walk. The receiver yields the
+/// collected files and pins once the walk ends.
+///
+/// @example
+/// let (scan, found) = dupes::start_scan_with_pins(&config, &roots, Cancel::new(), None, true)?;
+/// let (_, pins) = found.recv()?;
+pub fn start_scan_with_pins(
+    config: &Config,
+    roots: &[PathBuf],
+    cancel: Cancel,
+    options: Option<Options>,
+    pins: bool,
+) -> Result<(Scan, crossbeam_channel::Receiver<Collected>), ConfigError> {
+    scan::start_with(
+        config,
+        roots,
+        cancel,
+        (options.map(Files::new), pins.then(PinFinder::new)),
+    )
 }
 
 /// @name group

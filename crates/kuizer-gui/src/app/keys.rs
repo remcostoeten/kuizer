@@ -12,7 +12,7 @@ const START_FIRST: &str = "Start a scan first";
 const NEEDS_SCAN: &str = "Available once a scan is shown";
 const WAIT_FOR_SCAN: &str = "Available once the scan finishes";
 const WAIT_FOR_CLEANUP: &str = "Available once the cleanup finishes";
-const SELECT_LISTS: &str = "Available in Project artifacts and Global caches";
+const SELECT_LISTS: &str = "Available in Project artifacts, Global caches and Toolchains";
 const LISTS_ONLY: &str = "Available in a list section";
 const NO_ROWS: &str = "This list has no rows";
 
@@ -109,6 +109,22 @@ impl Kuizer {
                 candidate.path.to_string_lossy().as_ref(),
                 cache.name,
                 cache.tool,
+            ],
+        )
+    }
+
+    pub(super) fn shows_toolchain(
+        &self,
+        toolchain: &kuizer::toolchains::Toolchain,
+        candidate: &Candidate,
+    ) -> bool {
+        found(
+            self.needle(Tab::Toolchains).as_deref(),
+            &[
+                candidate.path.to_string_lossy().as_ref(),
+                toolchain.tool.name(),
+                toolchain.runtime.as_str(),
+                toolchain.version.as_str(),
             ],
         )
     }
@@ -433,7 +449,7 @@ impl Kuizer {
                 })
             }
             Command::SelectAll | Command::SelectNone | Command::Toggle => {
-                if matches!(self.tab, Tab::Artifacts | Tab::Caches) {
+                if self.tab.selects() {
                     self.wait()
                 } else {
                     Some(SELECT_LISTS)
@@ -466,7 +482,7 @@ impl Kuizer {
     fn wait(&self) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
-        } else if matches!(self.dialog, Some(Dialog::Running)) {
+        } else if matches!(self.dialog, Some(Dialog::Running { .. })) {
             Some(WAIT_FOR_CLEANUP)
         } else if matches!(self.phase, Phase::Loading(_)) {
             Some(WAIT_FOR_SCAN)
@@ -607,6 +623,14 @@ impl Kuizer {
                 .filter(|(cache, candidate)| self.shows_cache(cache, candidate))
                 .map(|(_, candidate)| {
                     Target::Item(Source::Cache, candidate.id, candidate.path.clone())
+                })
+                .collect(),
+            Tab::Toolchains => report
+                .toolchains
+                .iter()
+                .filter(|(toolchain, candidate)| self.shows_toolchain(toolchain, candidate))
+                .map(|(_, candidate)| {
+                    Target::Item(Source::Toolchain, candidate.id, candidate.path.clone())
                 })
                 .collect(),
             Tab::Duplicates => report
@@ -751,6 +775,7 @@ impl Kuizer {
             Tab::Overview => 0,
             Tab::Artifacts => report.candidates.len(),
             Tab::Caches => report.caches.len(),
+            Tab::Toolchains => report.toolchains.len(),
             Tab::Duplicates => report.duplicates.as_ref().map_or(0, |found| {
                 found
                     .groups
@@ -1229,7 +1254,7 @@ mod tests {
         cx.simulate_keystrokes("3");
         assert_eq!(tab(cx), Tab::Caches);
         cx.simulate_keystrokes("ctrl-tab");
-        assert_eq!(tab(cx), Tab::Duplicates);
+        assert_eq!(tab(cx), Tab::Toolchains);
         cx.simulate_keystrokes("ctrl-shift-tab ctrl-shift-tab ctrl-shift-tab");
         assert_eq!(tab(cx), Tab::Overview);
         cx.simulate_keystrokes("ctrl-shift-tab");

@@ -12,5 +12,6 @@ pub mod platform;
 pub mod protect;
 pub mod scan;
 pub mod stats;
+pub mod toolchains;
 pub mod tui;
 pub mod units;

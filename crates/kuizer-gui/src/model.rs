@@ -16,6 +16,7 @@ use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
+use kuizer::toolchains::{self, Toolchain};
 
 use crate::start::ScanOptions;
 
@@ -28,6 +29,7 @@ pub enum Stage {
     Scanning(Progress),
     Duplicates(dupes::Stage),
     Caches,
+    Toolchains,
     History,
 }
 
@@ -49,6 +51,7 @@ impl Stage {
                 format!("Duplicates  comparing {groups} groups")
             }
             Self::Caches => "Measuring global caches".to_owned(),
+            Self::Toolchains => "Measuring installed toolchains".to_owned(),
             Self::History => "Reading the cleanup history".to_owned(),
         }
     }
@@ -157,6 +160,7 @@ pub struct Report {
     pub issues: Vec<Issue>,
     pub summary: Summary,
     pub caches: Vec<(KnownCache, Candidate)>,
+    pub toolchains: Vec<(Toolchain, Candidate)>,
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
     pub disks: Vec<Disk>,
@@ -180,6 +184,14 @@ impl Report {
 
     pub fn cache_total(&self, safety: Option<Safety>) -> u64 {
         self.caches
+            .iter()
+            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
+            .map(|(_, candidate)| candidate.usage.allocated)
+            .sum()
+    }
+
+    pub fn toolchain_total(&self, safety: Option<Safety>) -> u64 {
+        self.toolchains
             .iter()
             .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
             .map(|(_, candidate)| candidate.usage.allocated)
@@ -222,6 +234,8 @@ impl Report {
         let gone = |path: &Path| paths.iter().any(|excluded| path.starts_with(excluded));
         self.candidates.retain(|candidate| !gone(&candidate.path));
         self.caches.retain(|(_, candidate)| !gone(&candidate.path));
+        self.toolchains
+            .retain(|(_, candidate)| !gone(&candidate.path));
         self.issues.retain(|issue| !gone(&issue.path));
         if let Some(duplicates) = &mut self.duplicates {
             for group in &mut duplicates.groups {
@@ -282,8 +296,9 @@ fn set(stage: &Mutex<Stage>, next: Stage) {
 }
 
 /// @name load
-/// @description Gathers everything the dashboard shows in one pass: project artifacts and
-/// duplicate files from a single walk, global caches, the cleanup history and free disk space.
+/// @description Gathers everything the dashboard shows in one pass: project artifacts, duplicate
+/// files and toolchain pins from a single walk, global caches, installed toolchains, the cleanup
+/// history and free disk space.
 /// The start screen's options decide which of these run. Reports progress through `stage` so the
 /// window can show it while this runs on a worker thread, and stops early once `cancel` is set.
 ///
@@ -299,10 +314,17 @@ pub fn load(
 ) -> Result<Report, String> {
     let config = options.apply(config);
     let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
-    let (handle, files) = dupes::start_scan(&config, roots, cancel.clone(), duplicate_options)
-        .map_err(|error| error.to_string())?;
+    let pin_search = options.toolchains && config.toolchains.pins;
+    let (handle, found) = dupes::start_scan_with_pins(
+        &config,
+        roots,
+        cancel.clone(),
+        duplicate_options,
+        pin_search,
+    )
+    .map_err(|error| error.to_string())?;
     let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
-    let files = files.recv().ok().flatten();
+    let (files, pins) = found.recv().unwrap_or_default();
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
@@ -340,6 +362,24 @@ pub fn load(
         Vec::new()
     };
 
+    let toolchains = if options.toolchains {
+        set(stage, Stage::Toolchains);
+        toolchains::Locations::for_user()
+            .map(|locations| {
+                let mut found = toolchains::find(&locations, &config.toolchains.tools);
+                if let Some(pins) = &pins {
+                    toolchains::apply_pins(&mut found, &pins.pins);
+                }
+                toolchains::measure(found)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
     set(stage, Stage::History);
     let history = HistoryView::load();
     let disks = roots
@@ -357,6 +397,7 @@ pub fn load(
         issues: collected.issues,
         summary: collected.summary,
         caches,
+        toolchains,
         duplicates,
         history,
         disks,
@@ -368,6 +409,14 @@ pub fn load(
 pub enum Source {
     Artifact,
     Cache,
+    Toolchain,
+}
+
+impl Source {
+    /// Toolchains are deleted for good; everything else goes to the trash.
+    pub fn permanent(self) -> bool {
+        self == Self::Toolchain
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +489,13 @@ impl Outcome {
             .filter(|(_, removal)| removal.status == Status::Removed)
     }
 
+    /// Items that were deleted for good, which the undo bar cannot bring back.
+    pub fn deleted(&self) -> usize {
+        self.removed()
+            .filter(|(source, _)| source.permanent())
+            .count()
+    }
+
     pub fn failed(&self) -> impl Iterator<Item = &(Source, Removal)> {
         self.removals
             .iter()
@@ -447,32 +503,33 @@ impl Outcome {
     }
 }
 
-/// @name trash
-/// @description Moves every candidate to the trash. Each batch is checked against its own guard
-/// right before acting, exactly like the CLI, and everything that was moved is recorded as one
-/// run in the history file so `kuizer history` and `kuizer restore` see it.
-///
-/// @example
-/// let outcome = trash(vec![Batch { source: Source::Artifact, roots, candidates }]);
-pub fn trash(batches: Vec<Batch>) -> Outcome {
-    let mut all_roots: Vec<PathBuf> = batches
+fn run_batches(
+    batches: Vec<Batch>,
+    mode: Mode,
+    removals: &mut Vec<(Source, Removal)>,
+) -> (Option<u64>, Option<String>) {
+    let mut roots: Vec<PathBuf> = batches
         .iter()
         .flat_map(|batch| batch.roots.iter().cloned())
         .collect();
-    all_roots.sort();
-    all_roots.dedup();
-    let mut recorder = Recorder::for_user(history::now(), &all_roots);
-    let mut removals = Vec::new();
+    roots.sort();
+    roots.dedup();
+    let mut recorder = Recorder::for_user(history::now(), &roots);
     for batch in batches {
         let guard = Guard::new(&batch.roots);
         for candidate in batch.candidates {
-            let target = Target {
-                path: candidate.path.clone(),
-                identity: candidate.identity,
+            let result = if batch.source.permanent() {
+                toolchains::remove(&guard, &candidate, mode)
+            } else {
+                let target = Target {
+                    path: candidate.path.clone(),
+                    identity: candidate.identity,
+                };
+                delete::delete(&guard, &target, mode)
             };
-            let removal = match delete::delete(&guard, &target, Mode::Trash) {
+            let removal = match result {
                 Ok(()) => {
-                    recorder.add(Entry::new(&candidate, Mode::Trash));
+                    recorder.add(Entry::new(&candidate, mode));
                     Removal {
                         candidate,
                         status: Status::Removed,
@@ -488,10 +545,32 @@ pub fn trash(batches: Vec<Batch>) -> Outcome {
             removals.push((batch.source, removal));
         }
     }
+    let session = recorder.session();
+    (
+        session,
+        recorder.finish().err().map(|error| error.to_string()),
+    )
+}
+
+/// @name clean
+/// @description Moves artifacts and caches to the trash and deletes toolchains for good. Each
+/// batch is checked against its own guard right before acting, exactly like the CLI. Trashed
+/// items are recorded as one run in the history file, so `kuizer restore` and the undo bar see
+/// it; permanent removals are recorded as a separate run that nothing offers to undo.
+///
+/// @example
+/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }]);
+pub fn clean(batches: Vec<Batch>) -> Outcome {
+    let (permanent, trashed): (Vec<Batch>, Vec<Batch>) = batches
+        .into_iter()
+        .partition(|batch| batch.source.permanent());
+    let mut removals = Vec::new();
+    let (session, trash_error) = run_batches(trashed, Mode::Trash, &mut removals);
+    let (_, permanent_error) = run_batches(permanent, Mode::Permanent, &mut removals);
     Outcome {
         removals,
-        session: recorder.session(),
-        history_error: recorder.finish().err().map(|error| error.to_string()),
+        session,
+        history_error: trash_error.or(permanent_error),
     }
 }
 
@@ -717,6 +796,7 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            toolchains: Vec::new(),
             duplicates: Some(Duplicates {
                 groups: vec![
                     group(&["/p/a/node_modules/x", "/p/b/x"]),
@@ -772,6 +852,7 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            toolchains: Vec::new(),
             duplicates: None,
             history: Err(String::new()),
             disks: Vec::new(),
