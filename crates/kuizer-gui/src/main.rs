@@ -4,6 +4,7 @@ mod frame;
 mod glossary;
 mod model;
 mod motion;
+mod snapshot;
 mod start;
 mod theme;
 mod tooltip;
@@ -63,6 +64,7 @@ fn main() -> ExitCode {
                         config,
                         roots,
                         start::Recent::for_user(),
+                        snapshot::Snapshots::for_user(),
                         Zoom::for_user(),
                         font,
                         window,
