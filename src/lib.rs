@@ -10,6 +10,7 @@ pub mod history;
 pub mod output;
 pub mod platform;
 pub mod protect;
+pub mod repos;
 pub mod scan;
 pub mod stats;
 pub mod tui;

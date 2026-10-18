@@ -23,6 +23,7 @@ const RESET: &str = "\x1b[0m";
 const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
+const ABOUT_GIT: &str = "Pack loose git objects and delete merged branches";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
 const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
 const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
@@ -37,6 +38,7 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("scan", ABOUT_SCAN),
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
+            ("git", ABOUT_GIT),
             ("restore", ABOUT_RESTORE),
         ],
     ),
@@ -235,6 +237,26 @@ fn cache_examples() -> String {
     ])
 }
 
+fn git_help() -> String {
+    format!(
+        "Neither action goes through the trash. Restore a deleted branch with the\n`git branch NAME COMMIT` line kuizer prints for it.\n\n{}",
+        examples(&[
+            ("kuizer git", "~/apps", "List repositories worth cleaning"),
+            (
+                "kuizer git",
+                "--gc --dry-run",
+                "Show where git gc would run and its expected gain",
+            ),
+            ("kuizer git", "--gc", "Run git gc, after a confirmation"),
+            (
+                "kuizer git",
+                "--branches",
+                "Delete local branches already merged, after a confirmation",
+            ),
+        ])
+    )
+}
+
 fn duplicates_help() -> String {
     format!(
         "Reports only; kuizer never deletes duplicates.\n\n{}",
@@ -399,6 +421,8 @@ pub enum Command {
     },
     #[command(about = ABOUT_CACHE, after_help = cache_examples())]
     Cache(CacheArgs),
+    #[command(about = ABOUT_GIT, visible_alias = "repos", after_help = git_help())]
+    Git(GitArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
     #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
@@ -627,6 +651,43 @@ pub struct CacheArgs {
     pub clean: bool,
     #[command(flatten)]
     pub removal: RemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct GitArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to search for repositories [default: current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Run git gc in each listed repository after a preview [config: git.aggressive]",
+        help_heading = "Cleanup"
+    )]
+    pub gc: bool,
+    #[arg(
+        long,
+        help = "Delete the listed merged local branches after a preview",
+        help_heading = "Cleanup"
+    )]
+    pub branches: bool,
+    #[arg(
+        long,
+        help = "Show what would run without changing anything",
+        help_heading = "Cleanup"
+    )]
+    pub dry_run: bool,
+    #[arg(
+        short,
+        long,
+        help = "Run without asking for confirmation",
+        help_heading = "Cleanup"
+    )]
+    pub yes: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }

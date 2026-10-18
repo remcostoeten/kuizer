@@ -35,5 +35,14 @@ verify = false
 mode = "trash"
 confirm = false
 
+# Git repositories found under the scan roots. kuizer lists a repository when `git gc`
+# would free at least min_gain, or when it has local branches already merged into its
+# default branch. Neither action can be undone from the trash.
+[git]
+min_gain = "1MiB"
+aggressive = false
+keep_branches = ["main", "master", "develop", "trunk"]
+threads = 0
+
 [appearance]
 motion = true

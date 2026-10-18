@@ -1,8 +1,10 @@
+mod git;
 mod html;
 mod json;
 mod style;
 mod text;
 
+pub use git::{GitOutcome, git_report, print_git_outcome, print_repositories};
 pub use html::{Dashboard, dashboard_data, dashboard_html, scan_html};
 pub use json::{SCHEMA_VERSION, cache_report, duplicates_report, removal_report, scan_report};
 pub use text::{

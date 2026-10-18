@@ -3,6 +3,7 @@ mod clean;
 mod config;
 mod dashboard;
 mod duplicates;
+mod git;
 mod history;
 mod removal;
 mod restore;
@@ -52,6 +53,8 @@ pub enum AppError {
     Trash(String),
     #[error("{0} items could not be restored")]
     RestoreFailed(usize),
+    #[error("{0} git actions failed")]
+    GitFailed(usize),
 }
 
 fn interactive() -> bool {
@@ -67,6 +70,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         }
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
+        Command::Git(args) if args.command == Some(NestedCommand::Help) => Some("git"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
         Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
@@ -109,6 +113,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Git(args)) => git::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
     }
 }

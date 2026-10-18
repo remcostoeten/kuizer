@@ -20,6 +20,7 @@ kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `targ
 - `kuizer scan --report` writes a single HTML file with a zoomable treemap of every result, grouped by project, category or rule, and opens it in your browser. The file loads nothing from the network.
 - `kuizer dashboard` writes one HTML page with tabs for an overview with insights, project artifacts, a folder drill-down, global caches, duplicates and the deletion history with charts per week or month. Like the report, it loads nothing from the network.
 - `kuizer cache` lists global caches for npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven, Playwright and others.
+- `kuizer git` finds git repositories with many loose objects and local branches already merged into the default branch. It shows what `git gc` would free before it runs, then packs (`--gc`) or deletes the merged branches (`--branches`) after one confirmation. Neither goes through the trash; every deleted branch is printed with the `git branch NAME COMMIT` line that brings it back. Repositories in the middle of a rebase, merge or another git command are skipped.
 - `kuizer duplicates` finds files with identical contents by size and BLAKE3 hash. It never deletes them: you choose which copy to keep.
 
 ```sh
@@ -32,6 +33,7 @@ kuizer clean ~/projects --dry-run          # show what clean would remove
 kuizer clean ~/projects --idle 3mo         # remove safe items of projects untouched for three months
 kuizer clean ~/projects --select all       # remove safe and review items, after a confirmation
 kuizer cache --clean --select npm          # remove the npm cache
+kuizer git ~/apps --gc --branches          # pack loose objects, delete merged branches
 kuizer restore --last                      # put the last run back from the trash
 kuizer duplicates ~/Downloads --verify     # duplicate files, compared byte by byte
 kuizer --json scan ~/projects              # every command prints JSON with --json

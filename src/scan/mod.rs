@@ -106,6 +106,10 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
         self.companion.file(path, file_type)
     }
 
+    fn repository(&mut self, root: &Path) {
+        self.companion.repository(root);
+    }
+
     fn artifact(&mut self, found: Found) -> Flow {
         match self.found.send(found) {
             Ok(()) => Flow::Continue,

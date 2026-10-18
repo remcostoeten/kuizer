@@ -22,6 +22,7 @@ Every item comes from a source, and every source has the same verbs, filters, se
 | `cache` | global tool caches: npm, pnpm, cargo, pip, uv and others | yes |
 | `toolchain` | rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions | yes |
 | `docker` | dangling images, build cache, stopped containers | yes, through the `docker` CLI |
+| `git` | git repositories with loose objects to pack and local branches already merged | yes, through the `git` CLI, not restorable from the trash |
 | `duplicates` | groups of files with identical contents | no, report only |
 | `big` | large files and directories that match no artifact rule | no, report only |
 
@@ -55,6 +56,7 @@ Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the p
 | `tui` (phase 2) | Ratatui app state, key handling, rendering | filesystem calls; it reads `scan::Event` and calls `delete` |
 | `delete` (phase 4) | revalidation, trash or unlink, per-item results | detection |
 | `dupes` (phase 5) | size grouping, partial and full BLAKE3 hashing, byte compare | artifact rules |
+| `repos` | git repositories noted during the walk, `count-objects` estimates, merged branches, busy checks, `git gc` and branch deletion with revalidation | artifact rules, the trash |
 
 Scan pipeline:
 
