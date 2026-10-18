@@ -36,6 +36,7 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ResetZoom,
+    Sidebar,
     SpaceMap,
     MapIn,
     MapOut,
@@ -139,18 +140,6 @@ impl Spec {
     }
 }
 
-const TAB_KEYS: [&[&str]; 9] = [
-    &["1"],
-    &["2"],
-    &["3"],
-    &["4"],
-    &["5"],
-    &["6"],
-    &["7"],
-    &["8"],
-    &["9"],
-];
-
 /// @name table
 /// @description The command table. The palette, the key handling, the GPUI key bindings and the
 /// shortcuts overlay are all generated from it, so they cannot drift apart.
@@ -172,13 +161,13 @@ pub fn table() -> Vec<Spec> {
             .keys(&["secondary-z"])
             .global(),
     ];
-    specs.extend(Tab::ALL.into_iter().zip(TAB_KEYS).map(|(tab, keys)| {
+    specs.extend(Tab::ALL.into_iter().map(|tab| {
         Spec::new(
             Command::GoTo(tab),
             format!("Go to {}", tab.label()),
             Sections,
         )
-        .keys(keys)
+        .keys(tab.keys())
     }));
     specs.extend([
         Spec::new(Command::SpaceMap, "Show or hide the space map", Sections).keys(&["m"]),
@@ -271,6 +260,7 @@ pub fn table() -> Vec<Spec> {
         Spec::new(Command::ResetZoom, "Reset zoom", View)
             .keys(&["secondary-0"])
             .global(),
+        Spec::new(Command::Sidebar, "Collapse or expand the sidebar", View).keys(&["secondary-b"]),
     ]);
     specs
 }

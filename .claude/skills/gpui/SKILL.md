@@ -17,7 +17,16 @@ explain the mechanics well but can name APIs that 0.2.2 does not have.
 - `use gpui::*` / `gpui::prelude::*`. Never `gpui_kit` or `gpui-component`;
   kuizer does not depend on them.
 - Colors, spacing, radii and sizes come from `crates/kuizer-gui/src/theme.rs`.
-  No hardcoded values in views.
+  No hardcoded values in views: wrap a token in `unit(..)`, for example
+  `.gap(unit(space::L))`, `.text_size(unit(font::SMALL))`, `.h(unit(size::ROW))`,
+  `column(col::M)`. `space::GUTTER` is the left edge shared by the titlebar,
+  sidebar items, lists and status bar. Add a token before adding a new number.
+- Reuse the building blocks in `ui.rs`: `toolbar()` for a section's top bar,
+  `figure()`/`tabular()` for sizes and counts, `marker()` for the row or
+  section that has the keyboard, `divider()`, `card()`, `stat()`. Icons are
+  monochrome SVGs in `assets/icons`, drawn with `icon::view(Icon::X, color)`.
+- Depth comes from 1px borders and the surface steps (`background`, `panel`,
+  `elevated`, `hover`, `selected`), never from shadows.
 - Logic lives in the `kuizer` core crate. The GUI renders state and dispatches
   actions; it never walks the filesystem or deletes files itself.
 - Repeated elements need stable ids derived from the data

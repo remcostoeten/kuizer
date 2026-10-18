@@ -11,10 +11,10 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
     FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
-    Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, point, prelude::*, px,
-    uniform_list,
+    Stateful, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, point,
+    prelude::*, px, uniform_list,
 };
-use kuizer::config::Config;
+use kuizer::config::{Config, Sidebar};
 use kuizer::delete::{Removal, Status};
 use kuizer::detect::{Category, Safety};
 use kuizer::history::Action;
@@ -28,6 +28,7 @@ use crate::commands::{self, Command, ResetZoom, TogglePalette, Undo, ZoomIn, Zoo
 use crate::field;
 use crate::frame;
 use crate::glossary::Term;
+use crate::icon::{self, Icon};
 use crate::model::{
     self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, Stage,
     TrashState,
@@ -38,7 +39,7 @@ use crate::reveal;
 use crate::snapshot::{self, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
 use crate::tab::Tab;
-use crate::theme::{self, unit};
+use crate::theme::{self, col, font, size, space, unit};
 use crate::tooltip::{self, Tip, Tooltip};
 use crate::ui::{self, ButtonKind};
 use crate::zoom::Zoom;
@@ -56,6 +57,11 @@ const UNDO_KEY: &str = if cfg!(target_os = "macos") {
     "Cmd+Z"
 } else {
     "Ctrl+Z"
+};
+const SIDEBAR_KEY: &str = if cfg!(target_os = "macos") {
+    "Cmd+B"
+} else {
+    "Ctrl+B"
 };
 
 mod keys;
@@ -248,6 +254,7 @@ pub struct Kuizer {
     options: ScanOptions,
     folder: String,
     whole_home: bool,
+    collapsed: bool,
     folder_error: Option<String>,
     recent: Recent,
     snapshots: Snapshots,
@@ -314,12 +321,14 @@ impl Kuizer {
             .unwrap_or_default();
         cx.set_global(tooltip::Typeface(font.clone()));
         motion::configure(config.appearance.motion);
+        let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
         let mut app = Self {
             options: ScanOptions::from_config(&config),
             config,
             roots,
             folder,
             whole_home: false,
+            collapsed,
             folder_error: None,
             recent,
             snapshots,
@@ -1250,7 +1259,7 @@ impl Kuizer {
         let Some(target) = self.cursor_target() else {
             return;
         };
-        let indent = unit(24.).to_pixels(window.rem_size());
+        let indent = unit(space::XXL).to_pixels(window.rem_size());
         let position = self.cursor_bounds.get().map_or_else(
             || {
                 let size = window.viewport_size();
@@ -1508,16 +1517,7 @@ impl Kuizer {
                 .left_0()
                 .size_full(),
             )
-            .child(
-                div()
-                    .debug_selector(|| "cursor".to_owned())
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(unit(2.))
-                    .bg(theme::cursor()),
-            )
+            .child(ui::marker().debug_selector(|| "cursor".to_owned()))
         })
         .when(open, |this| this.bg(theme::hover()))
         .on_mouse_down(
@@ -1546,14 +1546,13 @@ impl Kuizer {
             .debug_selector(|| "menu".to_owned())
             .flex()
             .flex_col()
-            .min_w(unit(220.))
-            .py(unit(4.))
+            .min_w(unit(size::MENU))
+            .py(unit(space::XS))
             .rounded(theme::radius_panel())
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
-            .shadow_lg()
-            .text_size(unit(12.5))
+            .text_size(unit(font::BODY))
             .font_family(self.font.clone())
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1561,18 +1560,21 @@ impl Kuizer {
             .children(items.into_iter().enumerate().map(|(index, item)| {
                 let label = item.label;
                 let enabled = item.enabled;
-                let divider = item
-                    .divided
-                    .then(|| div().h(unit(1.)).my(unit(4.)).bg(theme::border()));
+                let divider = item.divided.then(|| {
+                    div()
+                        .h(unit(size::HAIR))
+                        .my(unit(space::XS))
+                        .bg(theme::border())
+                });
                 let row = div()
                     .id(("menu-item", index))
                     .debug_selector(move || format!("menu-{label}"))
                     .flex()
                     .items_center()
-                    .gap(unit(16.))
-                    .h(unit(26.))
-                    .mx(unit(4.))
-                    .px(unit(8.))
+                    .gap(unit(space::XL))
+                    .h(unit(size::CONTROL))
+                    .mx(unit(space::XS))
+                    .px(unit(space::M))
                     .rounded(theme::radius_control())
                     .text_color(if enabled {
                         theme::text()
@@ -1650,7 +1652,7 @@ impl Kuizer {
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap(unit(6.))
+                .gap(unit(space::S))
                 .debug_selector(|| "stale".to_owned())
                 .child(
                     ui::tag(
@@ -1669,11 +1671,14 @@ impl Kuizer {
         });
         let controls = frame::controls(window);
         let custom = controls.is_some();
+        let aligned = !matches!(self.phase, Phase::Start)
+            && !self.collapsed
+            && frame::inset(window).is_none();
         let actions = div()
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(12.))
+            .gap(unit(space::L))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
@@ -1716,12 +1721,12 @@ impl Kuizer {
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(12.))
-            .h(unit(40.))
+            .gap(unit(space::L))
+            .h(unit(size::BAR))
             .min_h(frame::TITLEBAR)
-            .px(unit(14.))
+            .px(unit(space::GUTTER))
             .when_some(frame::inset(window), |this, inset| this.pl(inset))
-            .when(custom, |this| this.pr(unit(6.)))
+            .when(custom, |this| this.pr(unit(space::S)))
             .bg(theme::panel())
             .border_b_1()
             .border_color(theme::border())
@@ -1733,7 +1738,13 @@ impl Kuizer {
                     window.show_window_menu(event.position);
                 })
             })
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("kuizer"))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(aligned, |this| this.w(unit(size::SIDEBAR - space::L)))
+                    .child("kuizer"),
+            )
             .child(
                 div()
                     .id("roots")
@@ -1790,47 +1801,182 @@ impl Kuizer {
         }
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+    /// The space a section can free, shown next to it in the sidebar.
+    fn tab_bytes(&self, tab: Tab) -> Option<u64> {
+        let report = self.report()?;
+        let bytes = match tab {
+            Tab::Overview | Tab::History | Tab::Issues => return None,
+            Tab::Artifacts => report.total(None),
+            Tab::Caches => report.cache_total(None),
+            Tab::Toolchains => report.toolchain_total(None),
+            Tab::Docker => report.docker_total(None),
+            Tab::Repos => report
+                .repos
+                .iter()
+                .filter(|repository| repository.collectable(self.config.git.min_gain.0))
+                .map(|repository| repository.objects.gain())
+                .sum(),
+            Tab::Duplicates => report
+                .duplicates
+                .as_ref()
+                .map_or(0, kuizer::dupes::Duplicates::reclaimable),
+        };
+        Some(bytes)
+    }
+
+    /// What the sidebar shows to the right of a section: the space it can free, or for history
+    /// and issues how many entries there are.
+    fn tab_figure(&self, tab: Tab) -> Option<String> {
+        match self.tab_bytes(tab) {
+            Some(bytes) if bytes > 0 => Some(theme::bytes(bytes)),
+            _ => self
+                .tab_count(tab)
+                .filter(|&count| count > 0)
+                .map(|count| count.to_string()),
+        }
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let collapsed = self.collapsed;
+        let mut items: Vec<AnyElement> = Vec::new();
+        for tab in Tab::ALL {
+            let heading = tab.heading().map(|heading| {
+                if collapsed {
+                    ui::divider().mx(unit(space::M)).into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .items_end()
+                        .h(unit(size::ROW))
+                        .px(unit(space::M))
+                        .pb(unit(space::S))
+                        .text_size(unit(font::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::faint())
+                        .child(heading)
+                        .into_any_element()
+                }
+            });
+            items.extend(heading);
+            items.push(self.render_tab(tab, cx).into_any_element());
+        }
+        let toggle = div()
+            .id("sidebar-toggle")
+            .debug_selector(|| "sidebar-toggle".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::M))
+            .h(unit(size::ROW))
+            .px(unit(space::M))
+            .rounded(theme::radius_control())
+            .cursor_pointer()
+            .text_color(theme::faint())
+            .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
+            .tip(
+                Tooltip::new(if collapsed {
+                    "Show section names"
+                } else {
+                    "Show only icons"
+                })
+                .keys(&[SIDEBAR_KEY])
+                .build(),
+            )
+            .child(icon::view(Icon::Sidebar, theme::faint()))
+            .when(!collapsed, |this| this.child("Collapse"))
+            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                app.collapsed = !app.collapsed;
+                cx.notify();
+            }));
         div()
+            .id("sidebar")
+            .debug_selector(|| "sidebar".to_owned())
             .flex()
             .flex_col()
             .flex_none()
-            .w(unit(200.))
-            .gap(unit(2.))
-            .p(unit(8.))
+            .w(unit(if collapsed {
+                size::SIDEBAR_COLLAPSED
+            } else {
+                size::SIDEBAR
+            }))
+            .py(unit(space::M))
+            .px(unit(space::INSET))
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
-            .children(Tab::ALL.into_iter().map(|tab| {
-                let active = self.tab == tab;
-                let count = self.tab_count(tab);
+            .child(
                 div()
-                    .id(tab.label())
-                    .debug_selector(|| tab.label().to_owned())
+                    .id("sidebar-items")
                     .flex()
-                    .items_center()
-                    .h(unit(28.))
-                    .px(unit(10.))
-                    .rounded(theme::radius_control())
-                    .cursor_pointer()
-                    .text_color(if active {
-                        theme::text()
-                    } else {
-                        theme::muted()
-                    })
-                    .when(active, |this| this.bg(theme::selected()))
-                    .hover(|style| style.bg(theme::hover()))
-                    .tip(tooltip::term(tab.term()))
-                    .child(div().flex_1().child(tab.label()))
-                    .children(count.map(|count| {
-                        div()
-                            .text_size(unit(12.))
-                            .text_color(theme::faint())
-                            .child(count.to_string())
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(items),
+            )
+            .child(toggle)
+    }
+
+    fn render_tab(&self, tab: Tab, cx: &mut Context<Self>) -> Stateful<Div> {
+        let active = self.tab == tab;
+        let collapsed = self.collapsed;
+        let figure = self.tab_figure(tab);
+        let tip = Tooltip::new(tab.term().text())
+            .title(match (collapsed, &figure) {
+                (true, Some(figure)) => format!("{}  {figure}", tab.label()),
+                _ => tab.label().to_owned(),
+            })
+            .keys(tab.keys())
+            .build();
+        div()
+            .id(tab.label())
+            .debug_selector(|| tab.label().to_owned())
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::M))
+            .h(unit(size::ROW))
+            .px(unit(space::M))
+            .rounded(theme::radius_control())
+            .cursor_pointer()
+            .text_color(if active {
+                theme::text()
+            } else {
+                theme::muted()
+            })
+            .when(active, |this| {
+                this.bg(theme::selected())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(ui::marker())
+            })
+            .when(!active, |this| {
+                this.hover(|style| style.bg(theme::hover()).text_color(theme::text()))
+            })
+            .tip(tip)
+            .child(icon::view(
+                tab.icon(),
+                if active {
+                    theme::text()
+                } else {
+                    theme::muted()
+                },
+            ))
+            .when(!collapsed, |this| {
+                this.child(div().flex_1().min_w_0().truncate().child(tab.label()))
+                    .children(figure.map(|figure| {
+                        ui::figure(figure)
+                            .text_size(unit(font::SMALL))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(if active {
+                                theme::muted()
+                            } else {
+                                theme::faint()
+                            })
                     }))
-                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                        app.go_to(tab, cx);
-                    }))
+            })
+            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                app.go_to(tab, cx);
             }))
     }
 
@@ -1857,9 +2003,9 @@ impl Kuizer {
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(8.))
-            .h(unit(40.))
-            .px(unit(14.))
+            .gap(unit(space::M))
+            .h(unit(size::BAR))
+            .px(unit(space::GUTTER))
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::border())
@@ -1939,7 +2085,7 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(unit(6.))
+                    .gap(unit(space::S))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -1984,15 +2130,17 @@ impl Kuizer {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .h(unit(32.))
-            .px(unit(10.))
+            .h(unit(size::INPUT))
+            .px(unit(space::L))
             .rounded(theme::radius_control())
             .bg(theme::background())
             .border_1()
             .border_color(if self.folder_error.is_some() {
                 theme::danger()
-            } else {
+            } else if self.whole_home {
                 theme::border_strong()
+            } else {
+                theme::focus()
             })
             .cursor(CursorStyle::IBeam)
             .tip(
@@ -2004,13 +2152,18 @@ impl Kuizer {
                     .build(),
             )
             .when(field_text.is_empty(), |this| {
-                this.child(div().w(unit(1.)).h(unit(16.)).bg(theme::text()))
-                    .child(
-                        div()
-                            .pl(unit(2.))
-                            .text_color(theme::faint())
-                            .child("Type a path, for example ~/apps"),
-                    )
+                this.child(
+                    div()
+                        .w(unit(size::HAIR))
+                        .h(unit(size::CARET))
+                        .bg(theme::text()),
+                )
+                .child(
+                    div()
+                        .pl(unit(space::XXS))
+                        .text_color(theme::faint())
+                        .child("Type a path, for example ~/apps"),
+                )
             })
             .when(!field_text.is_empty(), |this| {
                 this.child(
@@ -2024,7 +2177,13 @@ impl Kuizer {
                         .child(field_text),
                 )
                 .when(!self.whole_home, |this| {
-                    this.child(div().flex_none().w(unit(1.)).h(unit(16.)).bg(theme::text()))
+                    this.child(
+                        div()
+                            .flex_none()
+                            .w(unit(size::HAIR))
+                            .h(unit(size::CARET))
+                            .bg(theme::text()),
+                    )
                 })
             })
             .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
@@ -2062,7 +2221,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(unit(8.))
+                    .gap(unit(space::M))
                     .child(field)
                     .child(
                         ui::button("browse", "Choose folder", ButtonKind::Secondary, true).tip(tooltip::plain("Pick a folder with the system dialog"))
@@ -2084,7 +2243,7 @@ impl Kuizer {
             )
             .child(
                 div()
-                    .text_size(unit(12.))
+                    .text_size(unit(font::SMALL))
                     .text_color(theme::faint())
                     .child(if self.whole_home {
                         "Walks everything under your home folder. Expect this to take a while."
@@ -2104,9 +2263,9 @@ impl Kuizer {
                         .id(("recent", index))
                         .flex()
                         .items_center()
-                        .gap(unit(8.))
-                        .h(unit(26.))
-                        .px(unit(8.))
+                        .gap(unit(space::M))
+                        .h(unit(size::CONTROL))
+                        .px(unit(space::M))
                         .rounded(theme::radius_control())
                         .cursor_pointer()
                         .hover(|style| style.bg(theme::hover()))
@@ -2124,13 +2283,16 @@ impl Kuizer {
                                 })
                                 .child(label),
                         )
-                        .child(div().text_size(unit(12.)).text_color(theme::faint()).child(
-                            if missing {
-                                "missing"
-                            } else {
-                                "double-click to scan"
-                            },
-                        ))
+                        .child(
+                            div()
+                                .text_size(unit(font::SMALL))
+                                .text_color(theme::faint())
+                                .child(if missing {
+                                    "missing"
+                                } else {
+                                    "double-click to scan"
+                                }),
+                        )
                         .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
                             app.pick_recent(&path, cx);
                             if event.click_count() >= 2 {
@@ -2181,16 +2343,16 @@ impl Kuizer {
         let categories =
             Category::ALL
                 .into_iter()
-                .fold(div().flex().gap(unit(2.)), |row, category| {
+                .fold(div().flex().gap(unit(space::XXS)), |row, category| {
                     let on = options.categories.contains(&category);
                     row.child(
                         div()
                             .id(("category", category as usize))
                             .flex()
                             .items_center()
-                            .gap(unit(6.))
-                            .px(unit(8.))
-                            .h(unit(24.))
+                            .gap(unit(space::S))
+                            .px(unit(space::M))
+                            .h(unit(size::SEGMENT))
                             .rounded(theme::radius_control())
                             .cursor_pointer()
                             .text_color(if on { theme::text() } else { theme::faint() })
@@ -2209,7 +2371,7 @@ impl Kuizer {
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(unit(6.))
+                .gap(unit(space::S))
                 .cursor_pointer()
                 .child(ui::checkbox(on))
                 .child(
@@ -2297,22 +2459,22 @@ impl Kuizer {
             .items_center()
             .size_full()
             .overflow_y_scroll()
-            .p(unit(24.))
+            .p(unit(space::XXL))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(unit(14.))
+                    .gap(unit(space::XL))
                     .w_full()
-                    .max_w(unit(760.))
+                    .max_w(unit(size::PAGE))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(unit(4.))
+                            .gap(unit(space::XS))
                             .child(
                                 div()
-                                    .text_size(unit(18.))
+                                    .text_size(unit(font::HEADING))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Start a scan"),
                             )
@@ -2332,14 +2494,14 @@ impl Kuizer {
         let header = div()
             .flex()
             .items_end()
-            .gap(unit(16.))
+            .gap(unit(space::XL))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .gap(unit(2.))
+                    .gap(unit(space::XXS))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -2357,9 +2519,9 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .items_end()
-                    .gap(unit(2.))
+                    .gap(unit(space::XXS))
                     .flex_none()
-                    .text_size(unit(12.))
+                    .text_size(unit(font::SMALL))
                     .text_color(theme::faint())
                     .child(stage.describe())
                     .child(format!(
@@ -2415,7 +2577,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(unit(10.))
+                    .gap(unit(space::L))
                     .child(
                         ui::stat(
                             "Project artifacts",
@@ -2520,7 +2682,7 @@ impl Kuizer {
             .child(
                 div()
                     .flex()
-                    .gap(unit(10.))
+                    .gap(unit(space::L))
                     .items_start()
                     .child(
                         ui::card("Where the space is")
@@ -2608,7 +2770,7 @@ impl Kuizer {
             .child(overview_trends(report))
             .child(
                 div()
-                    .text_size(unit(12.))
+                    .text_size(unit(font::SMALL))
                     .text_color(theme::faint())
                     .child(format!(
                         "Scanned {} folders and {} files in {:.1}s{}",
@@ -2656,9 +2818,9 @@ impl Kuizer {
                 .id(category.as_str())
                 .flex()
                 .items_center()
-                .gap(unit(6.))
-                .px(unit(8.))
-                .h(unit(24.))
+                .gap(unit(space::S))
+                .px(unit(space::M))
+                .h(unit(size::SEGMENT))
                 .rounded(theme::radius_control())
                 .cursor_pointer()
                 .text_color(if shown { theme::text() } else { theme::faint() })
@@ -2674,16 +2836,7 @@ impl Kuizer {
                     cx.notify();
                 }))
         };
-        let toolbar = div()
-            .flex()
-            .flex_none()
-            .flex_wrap()
-            .items_center()
-            .gap(unit(12.))
-            .px(unit(14.))
-            .py(unit(8.))
-            .border_b_1()
-            .border_color(theme::border())
+        let toolbar = ui::toolbar()
             .child(
                 ui::segments()
                     .child(segment("safety-all", "All", None))
@@ -2693,7 +2846,7 @@ impl Kuizer {
             .child(
                 div()
                     .flex()
-                    .gap(unit(2.))
+                    .gap(unit(space::XXS))
                     .children(Category::ALL.into_iter().map(chip)),
             )
             .child(div().flex_1())
@@ -2715,11 +2868,11 @@ impl Kuizer {
                         }
                     })),
             )
-            .child(head(90., "Size", Term::Size).text_right())
-            .child(head(64., "Safety", Term::Safety))
-            .child(head(110., "Category", Term::Category))
-            .child(head(150., "Rule", Term::Rule))
-            .child(head(56., "Changed", Term::Changed).text_right())
+            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(head(col::S, "Safety", Term::Safety))
+            .child(head(col::L, "Category", Term::Category))
+            .child(head(col::XL, "Rule", Term::Rule))
+            .child(head(col::XS, "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
         let list = uniform_list(
             "artifacts",
@@ -2742,25 +2895,27 @@ impl Kuizer {
                             app.menu_row(row, target, cursor.as_ref(), cx)
                                 .child(ui::checkbox(checked))
                                 .child(
-                                    column(90.)
+                                    column(col::M)
                                         .id(("artifact-size", id))
                                         .text_right()
                                         .tip(size_details(candidate, &report.roots))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .child(theme::bytes(candidate.usage.allocated)),
                                 )
                                 .child(
-                                    column(64.)
+                                    column(col::S)
+                                        .flex()
                                         .child(ui::safety_label(("artifact-safety", id), review)),
                                 )
                                 .child(
-                                    column(110.)
+                                    column(col::L)
                                         .id(("artifact-category", id))
                                         .text_color(theme::muted())
                                         .tip(tooltip::term(Term::category(candidate.rule.category)))
                                         .child(candidate.rule.category.as_str()),
                                 )
                                 .child(
-                                    column(150.)
+                                    column(col::XL)
                                         .id(("artifact-rule", id))
                                         .truncate()
                                         .tip(tooltip::titled(
@@ -2774,7 +2929,7 @@ impl Kuizer {
                                         .child(candidate.rule.name.clone()),
                                 )
                                 .child(
-                                    column(56.)
+                                    column(col::XS)
                                         .text_right()
                                         .text_color(theme::muted())
                                         .child(theme::age(candidate.newest)),
@@ -2822,12 +2977,12 @@ impl Kuizer {
             return div().into_any_element();
         };
         let header = table_header()
-            .child(div().w(unit(14.)))
-            .child(head(90., "Size", Term::Size).text_right())
-            .child(head(64., "Safety", Term::Safety))
-            .child(head(90., "Tool", Term::Tool))
-            .child(column(170.).child("Cache"))
-            .child(head(56., "Changed", Term::Changed).text_right())
+            .child(div().w(unit(size::CHECK)))
+            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(head(col::S, "Safety", Term::Safety))
+            .child(head(col::M, "Tool", Term::Tool))
+            .child(column(col::XXL).child("Cache"))
+            .child(head(col::XS, "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
         let cursor = self.cursor_target();
         let rows = report
@@ -2845,17 +3000,22 @@ impl Kuizer {
                 self.menu_row(row, target, cursor.as_ref(), cx)
                     .child(ui::checkbox(checked))
                     .child(
-                        column(90.)
+                        column(col::M)
                             .id(("cache-size", id))
                             .text_right()
                             .tip(size_details(candidate, &[]))
+                            .font_weight(FontWeight::MEDIUM)
                             .child(theme::bytes(candidate.usage.allocated)),
                     )
-                    .child(column(64.).child(ui::safety_label(("cache-safety", id), review)))
-                    .child(column(90.).text_color(theme::muted()).child(cache.tool))
-                    .child(column(170.).truncate().child(cache.name))
                     .child(
-                        column(56.)
+                        column(col::S)
+                            .flex()
+                            .child(ui::safety_label(("cache-safety", id), review)),
+                    )
+                    .child(column(col::M).text_color(theme::muted()).child(cache.tool))
+                    .child(column(col::XXL).truncate().child(cache.name))
+                    .child(
+                        column(col::XS)
                             .text_right()
                             .text_color(theme::muted())
                             .child(theme::age(candidate.newest)),
@@ -2879,13 +3039,13 @@ impl Kuizer {
                                 this.child(
                                     div()
                                         .truncate()
-                                        .text_size(unit(12.))
+                                        .text_size(unit(font::SMALL))
                                         .text_color(theme::faint())
                                         .child(cache.note),
                                 )
                             }),
                     )
-                    .h(unit(44.))
+                    .h(unit(size::ROW_TALL))
                     .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                         if !app.busy() {
                             app.toggle(Source::Cache, id, cx);
@@ -2897,15 +3057,7 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .gap(unit(16.))
-                    .px(unit(14.))
-                    .py(unit(10.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_color(theme::muted())
+                ui::toolbar()
                     .child(format!(
                         "{} in {} caches",
                         theme::bytes(report.cache_total(None)),
@@ -2964,11 +3116,11 @@ impl Kuizer {
             return div().into_any_element();
         };
         let header = table_header()
-            .child(div().w(unit(14.)))
-            .child(head(90., "Size", Term::Size).text_right())
-            .child(head(64., "Safety", Term::Safety))
-            .child(head(70., "Tool", Term::Tool))
-            .child(column(240.).child("Version"))
+            .child(div().w(unit(size::CHECK)))
+            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(head(col::S, "Safety", Term::Safety))
+            .child(head(col::S, "Tool", Term::Tool))
+            .child(column(col::WIDE).child("Version"))
             .child(div().flex_1().child("Path"));
         let cursor = self.cursor_target();
         let rows = report
@@ -2987,20 +3139,25 @@ impl Kuizer {
                 self.menu_row(row, target, cursor.as_ref(), cx)
                     .child(ui::checkbox(checked))
                     .child(
-                        column(90.)
+                        column(col::M)
                             .id(("toolchain-size", id))
                             .text_right()
                             .tip(size_details(candidate, &[]))
+                            .font_weight(FontWeight::MEDIUM)
                             .child(theme::bytes(candidate.usage.allocated)),
                     )
-                    .child(column(64.).child(ui::safety_label(("toolchain-safety", id), review)))
                     .child(
-                        column(70.)
+                        column(col::S)
+                            .flex()
+                            .child(ui::safety_label(("toolchain-safety", id), review)),
+                    )
+                    .child(
+                        column(col::S)
                             .text_color(theme::muted())
                             .child(toolchain.tool.name()),
                     )
                     .child(
-                        column(240.)
+                        column(col::WIDE)
                             .id(("toolchain-version", id))
                             .truncate()
                             .tip(tooltip::plain(toolchain.version.clone()))
@@ -3025,13 +3182,13 @@ impl Kuizer {
                                 this.child(
                                     div()
                                         .truncate()
-                                        .text_size(unit(12.))
+                                        .text_size(unit(font::SMALL))
                                         .text_color(theme::faint())
                                         .child(note),
                                 )
                             }),
                     )
-                    .h(unit(44.))
+                    .h(unit(size::ROW_TALL))
                     .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                         if !app.busy() {
                             app.toggle(Source::Toolchain, id, cx);
@@ -3043,15 +3200,7 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .gap(unit(16.))
-                    .px(unit(14.))
-                    .py(unit(10.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_color(theme::muted())
+                ui::toolbar()
                     .child(format!(
                         "{} in {}",
                         theme::bytes(report.toolchain_total(None)),
@@ -3110,11 +3259,11 @@ impl Kuizer {
             return div().into_any_element();
         };
         let header = table_header()
-            .child(div().w(unit(14.)))
-            .child(head(90., "Size", Term::Size).text_right())
-            .child(head(64., "Safety", Term::Safety))
-            .child(column(70.).child("Engine"))
-            .child(column(100.).child("Object"))
+            .child(div().w(unit(size::CHECK)))
+            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(head(col::S, "Safety", Term::Safety))
+            .child(column(col::S).child("Engine"))
+            .child(column(col::L).child("Object"))
             .child(div().flex_1().child("Name"));
         let cursor = self.cursor_target();
         let rows = report
@@ -3132,18 +3281,23 @@ impl Kuizer {
                 self.menu_row(row, target, cursor.as_ref(), cx)
                     .child(ui::checkbox(checked))
                     .child(
-                        column(90.)
+                        column(col::M)
                             .text_right()
+                            .font_weight(FontWeight::MEDIUM)
                             .child(theme::bytes(candidate.usage.allocated)),
                     )
-                    .child(column(64.).child(ui::safety_label(("docker-safety", id), review)))
                     .child(
-                        column(70.)
+                        column(col::S)
+                            .flex()
+                            .child(ui::safety_label(("docker-safety", id), review)),
+                    )
+                    .child(
+                        column(col::S)
                             .text_color(theme::muted())
                             .child(item.engine.clone()),
                     )
                     .child(
-                        column(100.)
+                        column(col::L)
                             .text_color(theme::muted())
                             .child(item.object.name()),
                     )
@@ -3165,13 +3319,13 @@ impl Kuizer {
                                 this.child(
                                     div()
                                         .truncate()
-                                        .text_size(unit(12.))
+                                        .text_size(unit(font::SMALL))
                                         .text_color(theme::faint())
                                         .child(item.note.clone()),
                                 )
                             }),
                     )
-                    .h(unit(44.))
+                    .h(unit(size::ROW_TALL))
                     .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                         if !app.busy() {
                             app.toggle(Source::Docker, id, cx);
@@ -3190,15 +3344,7 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .gap(unit(16.))
-                    .px(unit(14.))
-                    .py(unit(10.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_color(theme::muted())
+                ui::toolbar()
                     .child(format!(
                         "{} in {}",
                         theme::bytes(report.docker_total(None)),
@@ -3235,8 +3381,8 @@ impl Kuizer {
                 |this| {
                     this.child(
                         div()
-                            .px(unit(14.))
-                            .py(unit(6.))
+                            .px(unit(space::GUTTER))
+                            .py(unit(space::S))
                             .text_color(theme::faint())
                             .child(report.docker_issues.join(". ")),
                     )
@@ -3284,7 +3430,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(unit(10.))
+                    .gap(unit(space::L))
                     .child(
                         ui::stat(
                             "Reclaimable",
@@ -3339,8 +3485,8 @@ impl Kuizer {
                             div()
                                 .flex()
                                 .flex_col()
-                                .gap(unit(4.))
-                                .pt(unit(8.))
+                                .gap(unit(space::XS))
+                                .pt(unit(space::M))
                                 .border_t_1()
                                 .border_color(theme::border())
                                 .child(
@@ -3376,7 +3522,7 @@ impl Kuizer {
                                         .map(|(position, member)| {
                                             let row = div()
                                                 .flex()
-                                                .gap(unit(8.))
+                                                .gap(unit(space::M))
                                                 .text_color(theme::muted())
                                                 .debug_selector(move || {
                                                     format!("duplicate-{index}-{position}")
@@ -3454,17 +3600,17 @@ impl Kuizer {
         let chart = div()
             .flex()
             .items_end()
-            .gap(unit(4.))
-            .h(unit(120.))
+            .gap(unit(space::XS))
+            .h(unit(size::CHART))
             .children(recent.iter().map(|run| {
                 div()
                     .id(("cleanup-bar", run.id))
                     .flex_1()
-                    .max_w(unit(40.))
+                    .max_w(unit(size::BAR))
                     .h(gpui::relative(
                         theme::share(run.total.bytes, tallest).max(0.02),
                     ))
-                    .rounded_t(unit(2.))
+                    .rounded_t(theme::radius_bar())
                     .bg(theme::bar())
                     .hover(|style| style.bg(theme::text()))
                     .tip(
@@ -3476,12 +3622,12 @@ impl Kuizer {
                     )
             }));
         let header = table_header()
-            .child(head(56., "Run", Term::Run))
-            .child(column(150.).child("Started"))
-            .child(column(70.).text_right().child("Items"))
-            .child(head(90., "Size", Term::Size).text_right())
-            .child(head(80., "Mode", Term::Mode))
-            .child(head(110., "Trash", Term::Restore))
+            .child(head(col::XS, "Run", Term::Run))
+            .child(column(col::XL).child("Started"))
+            .child(column(col::S).text_right().child("Items"))
+            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(head(col::M, "Mode", Term::Mode))
+            .child(head(col::L, "Trash", Term::Restore))
             .child(
                 div()
                     .id("Command")
@@ -3496,7 +3642,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_wrap()
-                    .gap(unit(10.))
+                    .gap(unit(space::L))
                     .child(
                         ui::stat(
                             "Cleanups",
@@ -3567,30 +3713,35 @@ impl Kuizer {
                         let row = div()
                             .flex()
                             .items_center()
-                            .gap(unit(12.))
-                            .h(unit(30.))
-                            .px(unit(14.))
+                            .gap(unit(space::L))
+                            .h(unit(size::ROW))
+                            .px(unit(space::GUTTER))
                             .border_t_1()
                             .border_color(theme::border())
                             .debug_selector(move || format!("run-{session}"));
                         let target = Target::Run(run.id, run.command.clone());
                         self.menu_row(row, target, cursor.as_ref(), cx)
-                            .child(column(56.).child(run.session()))
+                            .child(column(col::XS).child(run.session()))
                             .child(
-                                column(150.)
+                                column(col::XL)
                                     .id(("started", index))
                                     .text_color(theme::muted())
                                     .tip(tooltip::plain(run.started_at.clone()))
                                     .child(short_time(&run.started_at)),
                             )
-                            .child(column(70.).text_right().child(run.total.items.to_string()))
                             .child(
-                                column(90.)
+                                column(col::S)
                                     .text_right()
+                                    .child(run.total.items.to_string()),
+                            )
+                            .child(
+                                column(col::M)
+                                    .text_right()
+                                    .font_weight(FontWeight::MEDIUM)
                                     .child(theme::bytes(run.total.bytes)),
                             )
-                            .child(column(80.).text_color(theme::muted()).child(mode))
-                            .child(column(110.).flex().child(self.restore_cell(
+                            .child(column(col::M).text_color(theme::muted()).child(mode))
+                            .child(column(col::L).flex().child(self.restore_cell(
                                 view.trash_state(index),
                                 run,
                                 can_restore,
@@ -3616,7 +3767,7 @@ impl Kuizer {
                     .any(|run| run.action == Action::Restore)
                     .then(|| {
                         div()
-                            .text_size(unit(12.))
+                            .text_size(unit(font::SMALL))
                             .text_color(theme::faint())
                             .child("Restores are counted in Items removed as restored")
                     }),
@@ -3714,8 +3865,8 @@ impl Kuizer {
                         let row = div()
                             .flex()
                             .flex_col()
-                            .gap(unit(2.))
-                            .py(unit(6.))
+                            .gap(unit(space::XXS))
+                            .py(unit(space::S))
                             .border_b_1()
                             .border_color(theme::border())
                             .debug_selector(move || format!("issue-row-{index}"));
@@ -3729,7 +3880,7 @@ impl Kuizer {
                             )
                             .child(
                                 div()
-                                    .text_size(unit(12.))
+                                    .text_size(unit(font::SMALL))
                                     .text_color(theme::faint())
                                     .child(issue.message.clone()),
                             )
@@ -3746,21 +3897,20 @@ impl Kuizer {
                 .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
                 .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.dismiss_toast(cx)))
         };
-        let line = div().flex().items_center().gap(unit(10.));
+        let line = div().flex().items_center().gap(unit(space::L));
         let panel = div()
             .id("toast")
             .debug_selector(|| "toast".to_owned())
             .flex()
             .flex_col()
-            .gap(unit(6.))
-            .max_w(unit(560.))
-            .py(unit(8.))
-            .px(unit(12.))
+            .gap(unit(space::S))
+            .max_w(unit(size::PALETTE))
+            .py(unit(space::M))
+            .px(unit(space::L))
             .rounded(theme::radius_panel())
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
-            .shadow_lg()
             .occlude();
         let panel = match &toast.notice {
             Notice::Trashed {
@@ -3839,19 +3989,22 @@ impl Kuizer {
                                     div()
                                         .id(("toast-problem", index))
                                         .truncate()
-                                        .text_size(unit(12.))
+                                        .text_size(unit(font::SMALL))
                                         .text_color(theme::faint())
                                         .tip(tooltip::path(path))
                                         .child(format!("{} {reason}", self.shown_path(path)))
                                 }),
                         )
                         .when(failed > TOAST_PROBLEMS, |this| {
-                            this.child(div().text_size(unit(12.)).text_color(theme::faint()).child(
-                                format!(
-                                    "and {} more, kuizer history show lists them",
-                                    failed - TOAST_PROBLEMS
-                                ),
-                            ))
+                            this.child(
+                                div()
+                                    .text_size(unit(font::SMALL))
+                                    .text_color(theme::faint())
+                                    .child(format!(
+                                        "and {} more, kuizer history show lists them",
+                                        failed - TOAST_PROBLEMS
+                                    )),
+                            )
                         })
                     })
                     .children(restored.history_error.as_ref().map(|error| {
@@ -3878,12 +4031,12 @@ impl Kuizer {
         Some(
             div()
                 .absolute()
-                .bottom(unit(12.))
+                .bottom(unit(space::L))
                 .left_0()
                 .right_0()
                 .flex()
                 .justify_center()
-                .px(unit(16.))
+                .px(unit(space::XL))
                 .child(panel)
                 .into_any_element(),
         )
@@ -3901,14 +4054,13 @@ impl Kuizer {
         let panel = div()
             .flex()
             .flex_col()
-            .gap(unit(12.))
-            .w(unit(520.))
-            .p(unit(18.))
+            .gap(unit(space::L))
+            .w(unit(size::DIALOG))
+            .p(unit(space::XL))
             .rounded(theme::radius_dialog())
             .bg(theme::elevated())
             .border_1()
-            .border_color(theme::border_strong())
-            .shadow_lg();
+            .border_color(theme::border_strong());
         let body = match dialog {
             Dialog::Confirm { rule, typed, .. } => {
                 let selected = self.confirming();
@@ -3946,7 +4098,7 @@ impl Kuizer {
                 panel
                     .child(
                         div()
-                            .text_size(unit(15.))
+                            .text_size(unit(font::TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
@@ -3984,14 +4136,14 @@ impl Kuizer {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(unit(4.))
-                            .p(unit(10.))
+                            .gap(unit(space::XS))
+                            .p(unit(space::L))
                             .rounded(theme::radius_panel())
                             .bg(theme::panel())
                             .children(selected.iter().take(LIST_LIMIT).map(|(_, candidate)| {
                                 div()
                                     .flex()
-                                    .gap(unit(8.))
+                                    .gap(unit(space::M))
                                     .child(
                                         div()
                                             .id(("dialog-path", candidate.id))
@@ -4007,10 +4159,11 @@ impl Kuizer {
                                     ))
                                     .child(
                                         div()
-                                            .w(unit(80.))
+                                            .w(unit(col::M))
                                             .text_right()
                                             .text_color(theme::muted())
-                                            .child(theme::bytes(candidate.usage.allocated)),
+                                            .font_weight(FontWeight::MEDIUM)
+.child(theme::bytes(candidate.usage.allocated)),
                                     )
                             }))
                             .when(selected.len() > LIST_LIMIT, |this| {
@@ -4033,8 +4186,8 @@ impl Kuizer {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .h(unit(30.))
-                                    .px(unit(10.))
+                                    .h(unit(size::ROW))
+                                    .px(unit(space::L))
                                     .rounded(theme::radius_control())
                                     .bg(theme::background())
                                     .border_1()
@@ -4044,7 +4197,7 @@ impl Kuizer {
                                         theme::border_strong()
                                     })
                                     .child(typed.clone())
-                                    .child(div().w(unit(1.)).h(unit(16.)).bg(theme::text())),
+                                    .child(div().w(unit(size::HAIR)).h(unit(size::CARET)).bg(theme::text())),
                             )
                         },
                     )
@@ -4052,7 +4205,7 @@ impl Kuizer {
                         div()
                             .flex()
                             .justify_end()
-                            .gap(unit(8.))
+                            .gap(unit(space::M))
                             .child(
                                 ui::button("cancel", "Cancel", ButtonKind::Secondary, true).tip(Tooltip::new("Keep everything where it is").keys(&["Esc"]).build())
                                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
@@ -4087,7 +4240,7 @@ impl Kuizer {
             Dialog::Finished(finished) => panel
                 .child(
                     div()
-                        .text_size(unit(15.))
+                        .text_size(unit(font::TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!(
                             "{} {} items, {}",
@@ -4128,7 +4281,7 @@ impl Kuizer {
                                     )
                                     .child(
                                         div()
-                                            .text_size(unit(12.))
+                                            .text_size(unit(font::SMALL))
                                             .text_color(theme::faint())
                                             .child(error.clone()),
                                     )
@@ -4203,7 +4356,7 @@ impl Render for Kuizer {
             .bg(theme::background())
             .text_color(theme::text())
             .font_family(self.font.clone())
-            .text_size(unit(13.))
+            .text_size(unit(font::BODY))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_action(cx.listener(Self::zoom_in))
@@ -4337,11 +4490,11 @@ fn overview_trends(report: &Report) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(unit(10.))
+        .gap(unit(space::L))
         .child(
             div()
                 .flex()
-                .gap(unit(10.))
+                .gap(unit(space::L))
                 .items_start()
                 .child(
                     ui::card("Idle since")
@@ -4415,30 +4568,35 @@ fn skeleton_stat(label: &'static str, index: usize, live: Option<String>) -> Div
     div()
         .flex()
         .flex_col()
-        .gap(unit(6.))
+        .gap(unit(space::S))
         .flex_1()
-        .min_w(unit(140.))
-        .p(unit(14.))
+        .min_w(unit(size::STAT))
+        .p(unit(space::GUTTER))
         .rounded(theme::radius_panel())
         .bg(theme::panel())
         .border_1()
         .border_color(theme::border())
         .child(
             div()
-                .text_size(unit(12.))
+                .text_size(unit(font::SMALL))
                 .text_color(theme::muted())
                 .child(label),
         )
         .child(match live {
             Some(value) => div()
-                .h(unit(24.))
-                .text_size(unit(20.))
+                .h(unit(size::SEGMENT))
+                .text_size(unit(font::FIGURE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value)
                 .into_any_element(),
-            None => chart::block("stat-value", index, unit(96.), unit(24.)),
+            None => chart::block("stat-value", index, unit(col::M), unit(font::FIGURE)),
         })
-        .child(chart::block("stat-sub", index, unit(72.), unit(12.)))
+        .child(chart::block(
+            "stat-sub",
+            index,
+            unit(col::S),
+            unit(size::METER),
+        ))
 }
 
 fn skeleton_bars(id: &'static str, title: &'static str) -> Div {
@@ -4446,14 +4604,19 @@ fn skeleton_bars(id: &'static str, title: &'static str) -> Div {
         div()
             .flex()
             .flex_col()
-            .gap(unit(6.))
+            .gap(unit(space::S))
             .child(chart::block(
                 id,
                 index,
                 gpui::relative(WIDTHS[index]),
-                unit(12.),
+                unit(size::METER),
             ))
-            .child(chart::block(id, index + 10, gpui::relative(1.), unit(4.)))
+            .child(chart::block(
+                id,
+                index + 10,
+                gpui::relative(1.),
+                unit(size::TRACK),
+            ))
     }))
 }
 
@@ -4462,8 +4625,8 @@ fn skeleton_columns(id: &'static str, title: &'static str) -> Div {
         div()
             .flex()
             .items_end()
-            .gap(unit(4.))
-            .h(unit(88.))
+            .gap(unit(space::XS))
+            .h(unit(size::COLUMNS))
             .children(HEIGHTS.iter().enumerate().map(move |(index, height)| {
                 div()
                     .flex_1()
@@ -4486,12 +4649,12 @@ fn skeleton_overview(stage: Stage) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(unit(14.))
+        .gap(unit(space::XL))
         .child(
             div()
                 .flex()
                 .flex_wrap()
-                .gap(unit(10.))
+                .gap(unit(space::L))
                 .child(skeleton_stat("Project artifacts", 0, found))
                 .child(skeleton_stat("Safe to remove", 1, None))
                 .child(skeleton_stat("Needs review", 2, None))
@@ -4503,15 +4666,24 @@ fn skeleton_overview(stage: Stage) -> Div {
         )
         .child(
             ui::card("Disk")
-                .child(chart::block("disk", 0, gpui::relative(1.), unit(12.)))
-                .child(div().flex().gap(unit(16.)).children(
-                    (1..8).map(|index| chart::block("disk", index, unit(84.), unit(12.))),
-                )),
+                .child(chart::block(
+                    "disk",
+                    0,
+                    gpui::relative(1.),
+                    unit(size::METER),
+                ))
+                .child(
+                    div().flex().gap(unit(space::XL)).children(
+                        (1..8).map(|index| {
+                            chart::block("disk", index, unit(col::S), unit(size::METER))
+                        }),
+                    ),
+                ),
         )
         .child(
             div()
                 .flex()
-                .gap(unit(10.))
+                .gap(unit(space::L))
                 .items_start()
                 .child(skeleton_bars("space", "Where the space is"))
                 .child(skeleton_bars("projects", "Largest projects"))
@@ -4520,7 +4692,7 @@ fn skeleton_overview(stage: Stage) -> Div {
         .child(
             div()
                 .flex()
-                .gap(unit(10.))
+                .gap(unit(space::L))
                 .items_start()
                 .child(skeleton_columns("ages", "Idle since"))
                 .child(skeleton_columns("sizes", "Artifact sizes"))
@@ -4535,24 +4707,34 @@ fn skeleton_table() -> Div {
         .rounded(theme::radius_panel())
         .border_1()
         .border_color(theme::border())
-        .child(table_header().child(chart::block("head", 0, unit(120.), unit(10.))))
+        .child(table_header().child(chart::block("head", 0, unit(col::L), unit(size::LINE))))
         .children((0..12).map(|index| {
             div()
                 .flex()
                 .items_center()
-                .gap(unit(12.))
-                .h(unit(30.))
-                .px(unit(14.))
+                .gap(unit(space::L))
+                .h(unit(size::ROW))
+                .px(unit(space::GUTTER))
                 .border_b_1()
                 .border_color(theme::border())
-                .child(chart::block("row-check", index, unit(14.), unit(14.)))
+                .child(chart::block(
+                    "row-check",
+                    index,
+                    unit(size::CHECK),
+                    unit(size::CHECK),
+                ))
                 .child(div().flex_1().min_w_0().child(chart::block(
                     "row-path",
                     index,
                     gpui::relative(WIDTHS[index % WIDTHS.len()]),
-                    unit(10.),
+                    unit(size::LINE),
                 )))
-                .child(chart::block("row-size", index, unit(64.), unit(10.)))
+                .child(chart::block(
+                    "row-size",
+                    index,
+                    unit(col::S),
+                    unit(size::LINE),
+                ))
         }))
 }
 
@@ -4571,9 +4753,9 @@ fn scroll(id: &'static str) -> gpui::Stateful<Div> {
         .id(id)
         .flex()
         .flex_col()
-        .gap(unit(14.))
+        .gap(unit(space::XL))
         .size_full()
-        .p(unit(16.))
+        .p(unit(space::GUTTER))
         .overflow_y_scroll()
 }
 
@@ -4589,29 +4771,29 @@ fn head(width: f32, label: &'static str, term: Term) -> gpui::Stateful<Div> {
 }
 
 fn table_header() -> Div {
-    div()
+    ui::tabular(div())
         .flex()
         .flex_none()
         .items_center()
-        .gap(unit(12.))
-        .h(unit(30.))
-        .px(unit(14.))
+        .gap(unit(space::L))
+        .h(unit(size::ROW))
+        .px(unit(space::GUTTER))
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::border())
-        .text_size(unit(12.))
+        .text_size(unit(font::SMALL))
         .text_color(theme::muted())
 }
 
 fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
-    div()
+    ui::tabular(div())
         .id(gpui::ElementId::NamedInteger(id.0.into(), id.1))
         .flex()
         .items_center()
-        .gap(unit(12.))
+        .gap(unit(space::L))
         .w_full()
-        .h(unit(30.))
-        .px(unit(14.))
+        .h(unit(size::ROW))
+        .px(unit(space::GUTTER))
         .cursor_pointer()
         .border_b_1()
         .border_color(theme::border())
@@ -4989,6 +5171,69 @@ mod tests {
         view.read_with(cx, |app, _| {
             assert!(matches!(app.phase, Phase::Ready(_)));
             assert_eq!(app.tab, Tab::Duplicates);
+        });
+    }
+
+    #[gpui::test]
+    fn the_sidebar_collapses_to_icons_and_back(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_scan(&view, cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        let wide = cx.debug_bounds("sidebar").expect("the sidebar").size.width;
+        cx.simulate_keystrokes("ctrl-b");
+        view.read_with(cx, |app, _| assert!(app.collapsed));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let narrow = cx.debug_bounds("sidebar").expect("the sidebar").size.width;
+        assert!(narrow < wide / 2.);
+        let history = cx.debug_bounds("History").expect("a sidebar icon");
+        cx.simulate_click(history.center(), Modifiers::default());
+        view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::History));
+        let toggle = cx
+            .debug_bounds("sidebar-toggle")
+            .expect("the collapse button");
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        view.read_with(cx, |app, _| assert!(!app.collapsed));
+    }
+
+    #[gpui::test]
+    fn the_sidebar_opens_collapsed_when_configured(cx: &mut TestAppContext) {
+        let mut config = Config::default();
+        config.appearance.sidebar = Sidebar::Collapsed;
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Kuizer::new(
+                config,
+                Vec::new(),
+                Recent::load(None),
+                Snapshots::new(None),
+                Zoom::load(None),
+                "Noto Sans".into(),
+                window,
+                cx,
+            )
+        });
+        view.read_with(cx, |app, _| assert!(app.collapsed));
+    }
+
+    #[gpui::test]
+    fn the_sidebar_shows_what_each_section_frees(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_scan(&view, cx);
+        view.read_with(cx, |app, _| {
+            let report = app.report().expect("a report");
+            assert_eq!(
+                app.tab_figure(Tab::Artifacts),
+                Some(theme::bytes(report.total(None)))
+            );
+            assert_eq!(app.tab_figure(Tab::Overview), None);
+            assert_eq!(app.tab_figure(Tab::Issues), None);
         });
     }
 

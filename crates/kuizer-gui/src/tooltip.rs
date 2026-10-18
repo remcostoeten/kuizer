@@ -13,7 +13,7 @@ use kuizer::output::display_path;
 
 use crate::glossary::Term;
 use crate::motion;
-use crate::theme::{self, unit};
+use crate::theme::{self, font, size, space, unit};
 use crate::ui;
 
 const DELAY: Duration = Duration::from_millis(500);
@@ -92,7 +92,7 @@ impl Render for Tooltip {
             div()
                 .flex()
                 .items_center()
-                .gap(unit(12.))
+                .gap(unit(space::L))
                 .child(
                     div()
                         .flex_1()
@@ -106,17 +106,16 @@ impl Render for Tooltip {
         div()
             .flex()
             .flex_col()
-            .gap(unit(4.))
-            .max_w(unit(340.))
-            .px(unit(8.))
-            .py(unit(6.))
+            .gap(unit(space::XS))
+            .max_w(unit(size::LIST))
+            .px(unit(space::M))
+            .py(unit(space::S))
             .rounded(theme::radius_control())
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
-            .shadow_md()
             .debug_selector(|| "tooltip".to_owned())
-            .text_size(unit(12.))
+            .text_size(unit(font::SMALL))
             .text_color(theme::muted())
             .when_some(font, |this, font| this.font_family(font))
             .children(heading)
@@ -125,7 +124,7 @@ impl Render for Tooltip {
                     div()
                         .flex()
                         .items_center()
-                        .gap(unit(12.))
+                        .gap(unit(space::L))
                         .child(div().flex_1().child(text))
                         .when(keys_inline, |this| {
                             this.children(self.keys.iter().cloned().map(ui::kbd))
@@ -133,24 +132,20 @@ impl Render for Tooltip {
                 )
             })
             .when(!self.rows.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(unit(2.))
-                        .children(self.rows.iter().map(|(label, value)| {
-                            div()
-                                .flex()
-                                .gap(unit(16.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(theme::faint())
-                                        .child(label.clone()),
-                                )
-                                .child(div().text_color(theme::text()).child(value.clone()))
-                        })),
-                )
+                this.child(div().flex().flex_col().gap(unit(space::XXS)).children(
+                    self.rows.iter().map(|(label, value)| {
+                        div()
+                            .flex()
+                            .gap(unit(space::XL))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(theme::faint())
+                                    .child(label.clone()),
+                            )
+                            .child(div().text_color(theme::text()).child(value.clone()))
+                    }),
+                ))
             })
     }
 }

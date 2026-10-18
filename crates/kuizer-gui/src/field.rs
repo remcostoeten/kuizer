@@ -1,6 +1,6 @@
 use gpui::{CursorStyle, Div, ElementId, Keystroke, SharedString, Stateful, div, prelude::*};
 
-use crate::theme::{self, unit};
+use crate::theme::{self, size, space, unit};
 
 /// Separators Ctrl+Backspace stops at in a path field.
 pub const PATH: &[char] = &['/'];
@@ -56,7 +56,11 @@ fn delete_word(text: &mut String, separators: &[char]) {
 }
 
 fn caret() -> Div {
-    div().flex_none().w(unit(1.)).h(unit(14.)).bg(theme::text())
+    div()
+        .flex_none()
+        .w(unit(size::HAIR))
+        .h(unit(size::CARET))
+        .bg(theme::text())
 }
 
 /// @name view
@@ -78,22 +82,22 @@ pub fn view(
         .items_center()
         .min_w_0()
         .overflow_hidden()
-        .h(unit(26.))
-        .px(unit(8.))
+        .h(unit(size::CONTROL))
+        .px(unit(space::M))
         .rounded(theme::radius_control())
         .bg(theme::background())
         .border_1()
         .border_color(if active {
-            theme::faint()
+            theme::focus()
         } else {
-            theme::border()
+            theme::border_strong()
         })
         .cursor(CursorStyle::IBeam)
         .when(empty && active, |this| this.child(caret()))
         .when(empty, |this| {
             this.child(
                 div()
-                    .pl(unit(2.))
+                    .pl(unit(space::XXS))
                     .truncate()
                     .text_color(theme::faint())
                     .child(placeholder.into()),

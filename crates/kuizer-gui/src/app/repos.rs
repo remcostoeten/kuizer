@@ -270,11 +270,11 @@ impl Kuizer {
             .sum();
         let branches: usize = shown.iter().map(|repository| repository.merged.len()).sum();
         let header = table_header()
-            .child(head(90., "git gc gain", Term::GcGain).text_right())
-            .child(head(70., "Loose", Term::LooseObjects).text_right())
-            .child(head(70., "Merged", Term::MergedBranches).text_right())
+            .child(head(col::M, "git gc gain", Term::GcGain).text_right())
+            .child(head(col::S, "Loose", Term::LooseObjects).text_right())
+            .child(head(col::S, "Merged", Term::MergedBranches).text_right())
             .child(div().flex_1().child("Repository"))
-            .child(div().w(unit(196.)).flex_none());
+            .child(div().w(unit(size::ACTIONS)).flex_none());
         let cursor = self.cursor_target();
         let rows = shown
             .iter()
@@ -309,22 +309,23 @@ impl Kuizer {
                 let gc_root = root.clone();
                 let branch_root = root.clone();
                 self.menu_row(row, target, cursor.as_ref(), cx)
-                    .h(unit(44.))
+                    .h(unit(size::ROW_TALL))
                     .child(
-                        column(90.)
+                        column(col::M)
                             .id(("repo-gain", id))
                             .text_right()
                             .tip(gain_details(repository))
+                            .font_weight(FontWeight::MEDIUM)
                             .child(theme::bytes(repository.objects.gain())),
                     )
                     .child(
-                        column(70.)
+                        column(col::S)
                             .text_right()
                             .text_color(theme::muted())
                             .child(repository.objects.loose.to_string()),
                     )
                     .child(
-                        column(70.)
+                        column(col::S)
                             .text_right()
                             .text_color(theme::muted())
                             .child(repository.merged.len().to_string()),
@@ -346,7 +347,7 @@ impl Kuizer {
                             .children(detail.map(|(text, busy)| {
                                 div()
                                     .truncate()
-                                    .text_size(unit(12.))
+                                    .text_size(unit(font::SMALL))
                                     .text_color(if busy {
                                         theme::review()
                                     } else {
@@ -360,8 +361,8 @@ impl Kuizer {
                             .flex()
                             .flex_none()
                             .justify_end()
-                            .gap(unit(6.))
-                            .w(unit(196.))
+                            .gap(unit(space::S))
+                            .w(unit(size::ACTIONS))
                             .child(
                                 ui::button(
                                     ("repo-gc", id),
@@ -423,16 +424,7 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(unit(16.))
-                    .px(unit(14.))
-                    .py(unit(8.))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_color(theme::muted())
+                ui::toolbar()
                     .child(format!(
                         "{} frees up to {}",
                         count(shown.len(), "repository", "repositories"),
@@ -535,7 +527,7 @@ impl Kuizer {
         panel
             .child(
                 div()
-                    .text_size(unit(15.))
+                    .text_size(unit(font::TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!(
                         "Delete {} for good?",
@@ -558,14 +550,14 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(unit(4.))
-                    .p(unit(10.))
+                    .gap(unit(space::XS))
+                    .p(unit(space::L))
                     .rounded(theme::radius_panel())
                     .bg(theme::panel())
                     .children(lines.iter().take(LIST_LIMIT).map(|(repository, branch)| {
                         div()
                             .flex()
-                            .gap(unit(8.))
+                            .gap(unit(space::M))
                             .child(div().flex_none().child(branch.clone()))
                             .child(
                                 div()
@@ -589,7 +581,7 @@ impl Kuizer {
                 div()
                     .flex()
                     .justify_end()
-                    .gap(unit(8.))
+                    .gap(unit(space::M))
                     .child(
                         ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
                             .tip(Tooltip::new("Keep every branch").keys(&["Esc"]).build())
