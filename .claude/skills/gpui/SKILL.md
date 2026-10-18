@@ -24,7 +24,9 @@ explain the mechanics well but can name APIs that 0.2.2 does not have.
 - Reuse the building blocks in `ui.rs`: `toolbar()` for a section's top bar,
   `figure()`/`tabular()` for sizes and counts, `marker()` for the row or
   section that has the keyboard, `divider()`, `card()`, `stat()`. Icons are
-  monochrome SVGs in `assets/icons`, drawn with `icon::view(Icon::X, color)`.
+  monochrome Lucide line paths in `icon.rs`, split into layers that move on
+  hover: `icon::view(Icon::X, color, epoch, rem)`. Bump the epoch on hover
+  enter to replay the animation; motion off keeps them still.
 - Depth comes from 1px borders and the surface steps (`background`, `panel`,
   `elevated`, `hover`, `selected`), never from shadows.
 - Logic lives in the `kuizer` core crate. The GUI renders state and dispatches

@@ -351,6 +351,16 @@ pub fn layer(cx: &mut App) -> Entity<Layer> {
 
 pub trait Tip: StatefulInteractiveElement + ParentElement + Sized {
     fn tip(self, build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
+        self.tip_hover(build, |_, _, _| {})
+    }
+
+    /// Like `tip`, and also calls `listener` when the hover starts or ends. GPUI keeps one
+    /// hover listener per element, so use this instead of `on_hover` next to a tooltip.
+    fn tip_hover(
+        self,
+        build: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+        listener: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
         let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let probe = {
             let bounds = Rc::clone(&bounds);
@@ -362,6 +372,7 @@ pub trait Tip: StatefulInteractiveElement + ParentElement + Sized {
         };
         let build: Build = Rc::new(build);
         self.child(probe).on_hover(move |hovered, window, cx| {
+            listener(hovered, window, cx);
             let Some(area) = bounds.get() else {
                 return;
             };

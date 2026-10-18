@@ -255,6 +255,7 @@ pub struct Kuizer {
     folder: String,
     whole_home: bool,
     collapsed: bool,
+    icon_hovers: HashMap<&'static str, u64>,
     folder_error: Option<String>,
     recent: Recent,
     snapshots: Snapshots,
@@ -329,6 +330,7 @@ impl Kuizer {
             folder,
             whole_home: false,
             collapsed,
+            icon_hovers: HashMap::new(),
             folder_error: None,
             recent,
             snapshots,
@@ -1740,26 +1742,43 @@ impl Kuizer {
             })
             .child(
                 div()
-                    .flex_none()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .when(aligned, |this| this.w(unit(size::SIDEBAR - space::L)))
-                    .child("kuizer"),
-            )
-            .child(
-                div()
-                    .id("roots")
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_color(theme::muted())
-                    .when(!matches!(self.phase, Phase::Start), |this| {
-                        this.tip(tooltip::plain(roots.clone()))
-                    })
-                    .child(roots),
+                    .items_center()
+                    .gap(unit(space::L))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(aligned, |this| this.w(unit(size::SIDEBAR - space::L)))
+                            .child("kuizer"),
+                    )
+                    .child(
+                        div()
+                            .id("roots")
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::muted())
+                            .when(!matches!(self.phase, Phase::Start), |this| {
+                                this.tip(tooltip::plain(roots.clone()))
+                            })
+                            .child(roots),
+                    ),
             )
-            .children(stale)
-            .child(actions)
-            .children(controls)
+            .child(self.render_search(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .justify_end()
+                    .gap(unit(space::L))
+                    .children(stale)
+                    .child(actions)
+                    .children(controls),
+            )
     }
 
     fn titlebar_down(
@@ -1873,7 +1892,7 @@ impl Kuizer {
             .cursor_pointer()
             .text_color(theme::faint())
             .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
-            .tip(
+            .tip_hover(
                 Tooltip::new(if collapsed {
                     "Show section names"
                 } else {
@@ -1881,8 +1900,16 @@ impl Kuizer {
                 })
                 .keys(&[SIDEBAR_KEY])
                 .build(),
+                cx.listener(|app, hovered: &bool, _, cx| {
+                    app.hover_icon(Icon::Sidebar, *hovered, cx);
+                }),
             )
-            .child(icon::view(Icon::Sidebar, theme::faint()))
+            .child(icon::view(
+                Icon::Sidebar,
+                theme::faint(),
+                self.icon_epoch(Icon::Sidebar),
+                self.zoom.rem_size(),
+            ))
             .when(!collapsed, |this| this.child("Collapse"))
             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                 app.collapsed = !app.collapsed;
@@ -1917,6 +1944,17 @@ impl Kuizer {
             .child(toggle)
     }
 
+    fn hover_icon(&mut self, icon: Icon, hovered: bool, cx: &mut Context<Self>) {
+        if hovered && !motion::reduced() {
+            *self.icon_hovers.entry(icon.name()).or_default() += 1;
+            cx.notify();
+        }
+    }
+
+    fn icon_epoch(&self, icon: Icon) -> Option<u64> {
+        self.icon_hovers.get(icon.name()).copied()
+    }
+
     fn render_tab(&self, tab: Tab, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self.tab == tab;
         let collapsed = self.collapsed;
@@ -1946,14 +1984,17 @@ impl Kuizer {
                 theme::muted()
             })
             .when(active, |this| {
-                this.bg(theme::selected())
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(ui::marker())
+                this.bg(theme::selected()).font_weight(FontWeight::MEDIUM)
             })
             .when(!active, |this| {
                 this.hover(|style| style.bg(theme::hover()).text_color(theme::text()))
             })
-            .tip(tip)
+            .tip_hover(
+                tip,
+                cx.listener(move |app, hovered: &bool, _, cx| {
+                    app.hover_icon(tab.icon(), *hovered, cx);
+                }),
+            )
             .child(icon::view(
                 tab.icon(),
                 if active {
@@ -1961,6 +2002,8 @@ impl Kuizer {
                 } else {
                     theme::muted()
                 },
+                self.icon_epoch(tab.icon()),
+                self.zoom.rem_size(),
             ))
             .when(!collapsed, |this| {
                 this.child(div().flex_1().min_w_0().truncate().child(tab.label()))
@@ -2027,7 +2070,6 @@ impl Kuizer {
                 )
             })
             .child(div().flex_1())
-            .child(self.render_palette_hint(cx))
             .child(
                 ui::button("select-safe", "Select safe", ButtonKind::Ghost, can_select)
                     .tip(tooltip::term(Term::SelectSafe))
@@ -5143,6 +5185,27 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("tooltip").is_some());
+        let legend = cx
+            .debug_bounds("disk-legend-2")
+            .expect("the global caches legend item");
+        cx.simulate_mouse_move(legend.center(), None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(700));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let tip = cx.debug_bounds("tooltip").expect("the legend tooltip");
+        assert!(tip.origin.y >= legend.bottom());
+    }
+
+    #[gpui::test]
+    fn the_titlebar_search_opens_the_palette(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let search = cx
+            .debug_bounds("search")
+            .expect("the titlebar search field");
+        cx.simulate_click(search.center(), Modifiers::default());
+        view.read_with(cx, |app, _| assert!(app.palette.is_some()));
     }
 
     #[gpui::test]
@@ -5254,6 +5317,9 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         let tip = cx.debug_bounds("tooltip").expect("the History tooltip");
         assert!(tip.origin.y >= history.bottom());
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.icon_epoch(Icon::History), Some(1));
+        });
         cx.simulate_mouse_move(issues.center(), None, Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear());
         let next = cx

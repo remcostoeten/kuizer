@@ -65,12 +65,7 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
                         .flex_shrink()
                         .bg(segment.fill)
                         .hover(|style| style.opacity(0.8))
-                        .tip(
-                            Tooltip::details(segment.label.clone())
-                                .row("Size", theme::bytes(segment.bytes))
-                                .row("Share", percent(share))
-                                .build(),
-                        )
+                        .tip(segment_tip(segment, share))
                 }),
         );
     let legend = div()
@@ -79,8 +74,11 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
         .gap_x(unit(space::XL))
         .gap_y(unit(space::S))
         .text_size(unit(font::SMALL))
-        .children(segments.iter().map(|segment| {
+        .children(segments.iter().enumerate().map(|(index, segment)| {
             div()
+                .id(ElementId::NamedInteger(legend_id(id), index as u64))
+                .debug_selector(move || format!("{id}-legend-{index}"))
+                .group("legend")
                 .flex()
                 .items_center()
                 .gap(unit(space::S))
@@ -88,9 +86,11 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
                 .child(
                     div()
                         .text_color(theme::muted())
+                        .group_hover("legend", |style| style.text_color(theme::text()))
                         .child(segment.label.clone()),
                 )
                 .child(div().child(theme::bytes(segment.bytes)))
+                .tip(segment_tip(segment, theme::share(segment.bytes, whole)))
         }));
     div()
         .flex()
@@ -98,6 +98,20 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
         .gap(unit(space::L))
         .child(bar)
         .child(legend)
+}
+
+fn segment_tip(
+    segment: &Segment,
+    share: f32,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    Tooltip::details(segment.label.clone())
+        .row("Size", theme::bytes(segment.bytes))
+        .row("Share", percent(share))
+        .build()
+}
+
+fn legend_id(id: &'static str) -> SharedString {
+    format!("{id}-legend").into()
 }
 
 /// @name columns
