@@ -64,6 +64,7 @@ fn main() -> ExitCode {
                         config,
                         roots,
                         start::Recent::for_user(),
+                        snapshot::Snapshots::for_user(),
                         Zoom::for_user(),
                         font,
                         window,
