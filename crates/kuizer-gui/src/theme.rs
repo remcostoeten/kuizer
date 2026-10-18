@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use gpui::{Pixels, Rems, Rgba, px, rems, rgb, rgba};
+use kuizer::detect::Category;
 use kuizer::units::ByteSize;
 
 pub const REM: f32 = 16.;
@@ -103,6 +104,40 @@ pub fn primary() -> Rgba {
 
 pub fn on_primary() -> Rgba {
     rgb(0x0016_1616)
+}
+
+/// A folder tile of the space map: darker than the items it holds.
+pub fn tile_folder() -> Rgba {
+    rgb(0x0020_2020)
+}
+
+/// The "n smaller" tile of the space map.
+pub fn tile_rest() -> Rgba {
+    rgb(0x001c_1c1c)
+}
+
+/// An item tile of the space map. Categories differ by a small step in grey, never by hue.
+pub fn tile(category: Category) -> Rgba {
+    match category {
+        Category::Dependencies => rgb(0x002c_2c2c),
+        Category::Build => rgb(0x0029_2929),
+        Category::Cache => rgb(0x0026_2626),
+        Category::Temp => rgb(0x0023_2323),
+    }
+}
+
+/// The thin top edge of an item tile, a second neutral cue for its category.
+pub fn tile_edge(category: Category) -> Rgba {
+    match category {
+        Category::Dependencies => rgb(0x0070_7070),
+        Category::Build => rgb(0x0058_5858),
+        Category::Cache => rgb(0x0046_4646),
+        Category::Temp => rgb(0x0038_3838),
+    }
+}
+
+pub fn tile_selected() -> Rgba {
+    rgb(0x003c_3c3c)
 }
 
 pub fn radius_button() -> Pixels {

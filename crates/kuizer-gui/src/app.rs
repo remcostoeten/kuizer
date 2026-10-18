@@ -59,9 +59,11 @@ const UNDO_KEY: &str = if cfg!(target_os = "macos") {
 };
 
 mod keys;
+mod map;
 mod overlay;
 
 use keys::{found, found_path, keep_visible, shows_run};
+use map::SpaceMap;
 
 pub use crate::commands::bind_keys;
 
@@ -265,6 +267,7 @@ pub struct Kuizer {
     config_path: Option<PathBuf>,
     excluded: Vec<PathBuf>,
     reveal: Reveal,
+    map: SpaceMap,
 }
 
 impl Kuizer {
@@ -337,6 +340,7 @@ impl Kuizer {
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
             reveal: reveal::reveal,
+            map: SpaceMap::default(),
         };
         if !app.roots.is_empty() {
             app.recent.remember(&app.roots);
@@ -953,6 +957,7 @@ impl Kuizer {
             }
         }
         self.refresh_rows();
+        self.rebuild_map();
         let clean = finished.failures.is_empty() && finished.history_error.is_none();
         if let Some(session) = outcome.session.filter(|_| finished.removed > 0) {
             self.show_toast(
@@ -1086,7 +1091,7 @@ impl Kuizer {
         keyboard: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.dialog.is_some() || !self.target_exists(&target) {
+        if self.dialog.is_some() || !self.known(&target) {
             return;
         }
         let active = if keyboard {
@@ -1301,13 +1306,21 @@ impl Kuizer {
             self.selection.retain(|key| known.contains(key));
         }
         self.refresh_rows();
+        self.rebuild_map();
         if self
             .menu
             .as_ref()
-            .is_some_and(|menu| !self.target_exists(&menu.target))
+            .is_some_and(|menu| !self.known(&menu.target))
         {
             self.menu = None;
         }
+    }
+
+    /// Whether a menu target is still on screen: a row of its list, or an item of the report
+    /// that the space map shows whatever the list filters are.
+    fn known(&self, target: &Target) -> bool {
+        self.target_exists(target)
+            || matches!(target, Target::Item(source, id, _) if self.item((*source, *id)).is_some())
     }
 
     /// Adds the right-click menu to a row, and marks the row the keyboard menu would open for.
@@ -1775,7 +1788,7 @@ impl Kuizer {
             ),
             Phase::Ready(_) => {
                 let list = match self.tab {
-                    Tab::Overview => return self.render_overview(),
+                    Tab::Overview => return self.render_overview(cx),
                     Tab::Artifacts => self.render_artifacts(cx),
                     Tab::Caches => self.render_caches(cx),
                     Tab::Duplicates => self.render_duplicates(cx),
@@ -2174,10 +2187,13 @@ impl Kuizer {
             .into_any_element()
     }
 
-    fn render_overview(&self) -> AnyElement {
+    fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
+        if self.map.shown {
+            return self.render_map(cx);
+        }
         let total = report.total(None);
         let safe = report.total(Some(Safety::Safe));
         let review = report.total(Some(Safety::Review));
@@ -2200,6 +2216,7 @@ impl Kuizer {
             .map_or(0, |(_, candidate)| candidate.usage.allocated);
 
         scroll("overview")
+            .child(div().flex().child(self.overview_switch(cx)))
             .child(
                 div()
                     .flex()
