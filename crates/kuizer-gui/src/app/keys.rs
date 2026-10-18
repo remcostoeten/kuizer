@@ -235,6 +235,14 @@ impl Kuizer {
                 }
             },
             Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
+            Some(Dialog::Branches(_)) => match key {
+                "escape" => self.dialog = None,
+                "enter" => {
+                    self.accept_branches(cx);
+                    return;
+                }
+                _ => return,
+            },
             _ => return,
         }
         cx.notify();
@@ -469,6 +477,14 @@ impl Kuizer {
                 }
             }
             Command::FocusFilter => (self.tab == Tab::Overview).then_some(LISTS_ONLY),
+            Command::Gc => self.gc_blocked(self.cursor_repo().map(GitScope::One).as_ref()),
+            Command::GcAll => self.gc_blocked(self.in_repos().then_some(&GitScope::All)),
+            Command::Branches => {
+                self.branches_blocked(self.cursor_repo().map(GitScope::One).as_ref())
+            }
+            Command::BranchesAll => {
+                self.branches_blocked(self.in_repos().then_some(&GitScope::All))
+            }
             Command::Reveal | Command::CopyPath | Command::OpenMenu if self.map_active() => self
                 .cursor_target()
                 .is_none()
@@ -496,12 +512,18 @@ impl Kuizer {
         }
     }
 
+    fn in_repos(&self) -> bool {
+        self.tab == Tab::Repos
+    }
+
     /// Why work that replaces the results has to wait, or `None` when nothing is running.
-    fn wait(&self) -> Option<&'static str> {
+    pub(super) fn wait(&self) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
         } else if matches!(self.dialog, Some(Dialog::Running { .. })) {
             Some(WAIT_FOR_CLEANUP)
+        } else if self.git_running() {
+            Some(repos::GIT_RUNNING)
         } else if matches!(self.phase, Phase::Loading(_)) {
             Some(WAIT_FOR_SCAN)
         } else if self.refreshing() {
@@ -601,6 +623,18 @@ impl Kuizer {
             Command::MapMove(direction) => self.map_move(direction),
             Command::MapToggle => self.map_toggle(cx),
             Command::Scan(path) => self.scan_folder(&path, cx),
+            Command::Gc => {
+                if let Some(root) = self.cursor_repo() {
+                    self.collect_garbage(&GitScope::One(root), cx);
+                }
+            }
+            Command::GcAll => self.collect_garbage(&GitScope::All, cx),
+            Command::Branches => {
+                if let Some(root) = self.cursor_repo() {
+                    self.ask_branches(GitScope::One(root), cx);
+                }
+            }
+            Command::BranchesAll => self.ask_branches(GitScope::All, cx),
         }
         cx.notify();
     }
@@ -681,6 +715,12 @@ impl Kuizer {
                     )
                 })
                 .map(|issue| Target::Issue(issue.path.clone()))
+                .collect(),
+            Tab::Repos => report
+                .repos
+                .iter()
+                .filter(|repository| self.shows_repo(repository))
+                .map(|repository| Target::Repo(repository.root.clone()))
                 .collect(),
             Tab::History => report
                 .history
@@ -803,6 +843,7 @@ impl Kuizer {
             Tab::Caches => report.caches.len(),
             Tab::Toolchains => report.toolchains.len(),
             Tab::Docker => report.docker.len(),
+            Tab::Repos => report.repos.len(),
             Tab::Duplicates => report.duplicates.as_ref().map_or(0, |found| {
                 found
                     .groups

@@ -24,6 +24,7 @@ pub struct Config {
     pub rules: Vec<RuleSpec>,
     pub duplicates: DuplicateConfig,
     pub delete: DeleteConfig,
+    pub git: GitConfig,
     pub appearance: AppearanceConfig,
     pub toolchains: ToolchainConfig,
     pub docker: DockerConfig,
@@ -155,6 +156,28 @@ pub enum DeleteMode {
 pub struct DeleteConfig {
     pub mode: DeleteMode,
     pub confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    pub min_gain: ByteSize,
+    pub aggressive: bool,
+    pub keep_branches: Vec<String>,
+    pub threads: usize,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            min_gain: ByteSize(1024 * 1024),
+            aggressive: false,
+            keep_branches: ["main", "master", "develop", "trunk"]
+                .map(String::from)
+                .to_vec(),
+            threads: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -374,6 +397,8 @@ mod tests {
         assert_eq!(config.rules.len(), 1);
         assert_eq!(config.rules[0].safety, Safety::Review);
         assert_eq!(config.delete.mode, DeleteMode::Trash);
+        assert_eq!(config.git.min_gain, ByteSize(1024 * 1024));
+        assert!(!config.git.aggressive);
         assert!(config.appearance.motion);
     }
 

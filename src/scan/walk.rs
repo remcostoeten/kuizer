@@ -9,6 +9,8 @@ use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
 use crate::platform::{self, MountTable};
 use crate::protect::{self, Protected};
 
+const GIT_DIR: &str = ".git";
+
 pub struct Found {
     pub path: PathBuf,
     pub kind: Kind,
@@ -38,6 +40,8 @@ pub trait Visitor {
     fn file(&mut self, _path: &Path, _file_type: fs::FileType) -> Flow {
         Flow::Continue
     }
+
+    fn repository(&mut self, _root: &Path) {}
 }
 
 impl Visitor for () {
@@ -66,6 +70,12 @@ impl<V: Visitor> Visitor for Option<V> {
             None => Flow::Continue,
         }
     }
+
+    fn repository(&mut self, root: &Path) {
+        if let Some(visitor) = self {
+            visitor.repository(root);
+        }
+    }
 }
 
 impl<A: Visitor, B: Visitor> Visitor for (A, B) {
@@ -86,6 +96,11 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
             _ => Flow::Stop,
         }
+    }
+
+    fn repository(&mut self, root: &Path) {
+        self.0.repository(root);
+        self.1.repository(root);
     }
 }
 
@@ -228,6 +243,9 @@ impl<V: Visitor> Walker<'_, V> {
             }
             let path = pending.path.join(&name);
             if file_type.is_dir() {
+                if name == GIT_DIR {
+                    self.visitor.repository(&pending.path);
+                }
                 if self.scan.skip_dirs.iter().any(|skip| name == skip.as_str())
                     || self.excludes.path(&path)
                     || self.protected.is_known(&path)

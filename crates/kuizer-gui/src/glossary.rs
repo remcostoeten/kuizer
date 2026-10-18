@@ -37,11 +37,15 @@ pub enum Term {
     Mode,
     Command,
     Issues,
+    GitRepositories,
+    GcGain,
+    LooseObjects,
+    MergedBranches,
 }
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 35] = [
+    pub const ALL: [Term; 39] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -77,6 +81,10 @@ impl Term {
         Self::Mode,
         Self::Command,
         Self::Issues,
+        Self::GitRepositories,
+        Self::GcGain,
+        Self::LooseObjects,
+        Self::MergedBranches,
     ];
 
     pub fn safety(safety: Safety) -> Self {
@@ -132,6 +140,10 @@ impl Term {
             Self::Mode => "Mode",
             Self::Command => "Command",
             Self::Issues => "Issues",
+            Self::GitRepositories => "Git repositories",
+            Self::GcGain => "git gc gain",
+            Self::LooseObjects => "Loose objects",
+            Self::MergedBranches => "Merged branches",
         }
     }
 
@@ -231,6 +243,18 @@ impl Term {
             Self::Command => "The command that started this cleanup.",
             Self::Issues => {
                 "Folders the scan could not read or chose to skip, such as other disks or protected folders. Nothing in them is listed."
+            }
+            Self::GitRepositories => {
+                "Git repositories under the scanned folders that have loose objects git gc can pack, or local branches already merged into the default branch."
+            }
+            Self::GcGain => {
+                "An estimate of what git gc frees: the loose objects it packs and the garbage it removes. Packing keeps a compressed copy, so the real gain is a little lower."
+            }
+            Self::LooseObjects => {
+                "Objects git stores as separate files. Every commit adds some until git gc packs them into one compressed file."
+            }
+            Self::MergedBranches => {
+                "Local branches whose last commit is already in the default branch. Deleting one loses nothing: the commits stay in the default branch and remote branches are never touched."
             }
         }
     }

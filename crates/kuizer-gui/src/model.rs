@@ -16,6 +16,7 @@ use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
+use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
 use kuizer::toolchains::{self, Toolchain};
 
@@ -32,6 +33,7 @@ pub enum Stage {
     Caches,
     Toolchains,
     Docker,
+    Repos,
     History,
 }
 
@@ -55,6 +57,7 @@ impl Stage {
             Self::Caches => "Measuring global caches".to_owned(),
             Self::Toolchains => "Measuring installed toolchains".to_owned(),
             Self::Docker => "Asking Docker and Podman".to_owned(),
+            Self::Repos => "Checking git repositories".to_owned(),
             Self::History => "Reading the cleanup history".to_owned(),
         }
     }
@@ -166,6 +169,7 @@ pub struct Report {
     pub toolchains: Vec<(Toolchain, Candidate)>,
     pub docker: Vec<(docker::Item, Candidate)>,
     pub docker_issues: Vec<String>,
+    pub repos: Vec<Repository>,
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
     pub disks: Vec<Disk>,
@@ -249,6 +253,7 @@ impl Report {
         self.caches.retain(|(_, candidate)| !gone(&candidate.path));
         self.toolchains
             .retain(|(_, candidate)| !gone(&candidate.path));
+        self.repos.retain(|repository| !gone(&repository.root));
         self.issues.retain(|issue| !gone(&issue.path));
         if let Some(duplicates) = &mut self.duplicates {
             for group in &mut duplicates.groups {
@@ -340,7 +345,7 @@ pub fn load(
             })
     });
     let pin_search = options.toolchains && config.toolchains.pins;
-    let (handle, found) = dupes::start_scan_with_pins(
+    let (handle, walked) = repos::start_scan(
         &config,
         roots,
         cancel.clone(),
@@ -349,7 +354,10 @@ pub fn load(
     )
     .map_err(|error| error.to_string())?;
     let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
-    let (files, pins) = found.recv().unwrap_or_default();
+    let (files, pins, found_repos) = walked
+        .recv()
+        .map(|walked| (walked.files, walked.pins, walked.repositories))
+        .unwrap_or_default();
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
@@ -414,6 +422,16 @@ pub fn load(
         return Err(CANCELLED.to_owned());
     }
 
+    let repos = if options.repos {
+        set(stage, Stage::Repos);
+        repos::inspect_all(found_repos, &config.git, cancel)
+    } else {
+        Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
     let listing = match containers {
         Some(Ok(handle)) => {
             set(stage, Stage::Docker);
@@ -449,6 +467,7 @@ pub fn load(
         toolchains,
         docker: docker::entries(listing.items),
         docker_issues: listing.issues,
+        repos,
         duplicates,
         history,
         disks,
@@ -854,6 +873,7 @@ mod tests {
             toolchains: Vec::new(),
             docker: Vec::new(),
             docker_issues: Vec::new(),
+            repos: Vec::new(),
             duplicates: Some(Duplicates {
                 groups: vec![
                     group(&["/p/a/node_modules/x", "/p/b/x"]),
@@ -912,6 +932,7 @@ mod tests {
             toolchains: Vec::new(),
             docker: Vec::new(),
             docker_issues: Vec::new(),
+            repos: Vec::new(),
             duplicates: None,
             history: Err(String::new()),
             disks: Vec::new(),

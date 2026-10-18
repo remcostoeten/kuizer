@@ -12,18 +12,20 @@ pub enum Tab {
     Caches,
     Toolchains,
     Docker,
+    Repos,
     Duplicates,
     History,
     Issues,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 9] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
         Self::Toolchains,
         Self::Docker,
+        Self::Repos,
         Self::Duplicates,
         Self::History,
         Self::Issues,
@@ -56,6 +58,7 @@ impl Tab {
             Self::Caches => Term::GlobalCaches,
             Self::Toolchains => Term::Toolchains,
             Self::Docker => Term::Docker,
+            Self::Repos => Term::GitRepositories,
             Self::Duplicates => Term::DuplicateFiles,
             Self::History => Term::History,
             Self::Issues => Term::Issues,
@@ -69,6 +72,7 @@ impl Tab {
             Self::Caches => "Global caches",
             Self::Toolchains => "Toolchains",
             Self::Docker => "Docker",
+            Self::Repos => "Git repositories",
             Self::Duplicates => "Duplicates",
             Self::History => "History",
             Self::Issues => "Issues",
@@ -108,6 +112,13 @@ impl Tab {
                 Stage::Docker => "Asking Docker and Podman",
                 Stage::History => "Docker objects listed, shown once the scan is done",
                 _ => "Asked while the folders are scanned",
+            },
+            Self::Repos if !options.repos => "Git repositories are off for this scan",
+            Self::Repos if walking => "Noting git repositories while scanning folders",
+            Self::Repos => match stage {
+                Stage::Repos => "Checking git repositories",
+                Stage::History => "Repositories checked, shown once the scan is done",
+                _ => "Checked after the folder scan",
             },
             Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",
             Self::History => "Read at the end of the scan",

@@ -21,6 +21,8 @@ pub struct ScanOptions {
     pub toolchains: bool,
     #[serde(default = "enabled")]
     pub docker: bool,
+    #[serde(default = "enabled")]
+    pub repos: bool,
     pub duplicates: bool,
     pub one_file_system: bool,
 }
@@ -38,6 +40,7 @@ impl ScanOptions {
             caches: true,
             toolchains: true,
             docker: true,
+            repos: true,
             duplicates: true,
             one_file_system: config.scan.one_file_system,
         }

@@ -7,6 +7,7 @@ use kuizer::detect::{Category, Kind, RuleInfo, Safety};
 use kuizer::docker;
 use kuizer::dupes::{Duplicates, Group, Member};
 use kuizer::history::History;
+use kuizer::repos::Repository;
 use kuizer::scan::{Candidate, Issue, IssueKind, Progress, Summary, Usage};
 use kuizer::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
@@ -143,6 +144,8 @@ struct Stored {
     toolchains: Vec<(Toolchain, StoredCandidate)>,
     docker: Vec<docker::Item>,
     docker_issues: Vec<String>,
+    #[serde(default)]
+    repos: Vec<Repository>,
     duplicates: Option<StoredDuplicates>,
     history: Result<StoredHistory, String>,
     disks: Vec<(Option<u64>, Option<u64>)>,
@@ -177,6 +180,7 @@ impl Stored {
                 .collect(),
             docker: report.docker.iter().map(|(item, _)| item.clone()).collect(),
             docker_issues: report.docker_issues.clone(),
+            repos: report.repos.clone(),
             duplicates: report.duplicates.as_ref().map(StoredDuplicates::new),
             history: report
                 .history
@@ -220,6 +224,7 @@ impl Stored {
                 .collect(),
             docker: docker::entries(self.docker),
             docker_issues: self.docker_issues,
+            repos: self.repos,
             duplicates: self.duplicates.map(StoredDuplicates::restore),
             history: self.history.map(|stored| HistoryView {
                 history: stored.history,
@@ -557,6 +562,22 @@ mod tests {
                 note: String::new(),
             }]),
             docker_issues: vec!["podman is not running: down".to_owned()],
+            repos: vec![Repository {
+                root: PathBuf::from("/p/kearn"),
+                git_dir: PathBuf::from("/p/kearn/.git"),
+                objects: kuizer::repos::Objects {
+                    loose: 900,
+                    loose_bytes: 4 << 20,
+                    ..Default::default()
+                },
+                default_branch: Some("main".to_owned()),
+                current_branch: Some("main".to_owned()),
+                merged: vec![kuizer::repos::Branch {
+                    name: "done".to_owned(),
+                    commit: "abc".to_owned(),
+                }],
+                busy: None,
+            }],
             duplicates: Some(Duplicates {
                 groups: vec![Group {
                     size: 5,
@@ -617,6 +638,7 @@ mod tests {
         assert_eq!(loaded.docker[0].1.path, PathBuf::from("docker:image/abc"));
         assert_eq!(loaded.docker_issues, saved.docker_issues);
         assert_eq!(loaded.toolchains[0].1.path, saved.toolchains[0].1.path);
+        assert_eq!(loaded.repos, saved.repos);
         let duplicates = loaded.duplicates.expect("duplicates");
         assert_eq!(
             duplicates.groups[0].members[1].links,

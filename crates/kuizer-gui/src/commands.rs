@@ -43,6 +43,10 @@ pub enum Command {
     MapMove(Direction),
     MapToggle,
     Scan(PathBuf),
+    Gc,
+    GcAll,
+    Branches,
+    BranchesAll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,15 +55,17 @@ pub enum Group {
     Sections,
     Lists,
     Map,
+    Git,
     View,
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Self::General,
         Self::Sections,
         Self::Lists,
         Self::Map,
+        Self::Git,
         Self::View,
     ];
 
@@ -69,6 +75,7 @@ impl Group {
             Self::Sections => "Sections",
             Self::Lists => "Lists",
             Self::Map => "Space map",
+            Self::Git => "Git repositories",
             Self::View => "View",
         }
     }
@@ -132,7 +139,7 @@ impl Spec {
     }
 }
 
-const TAB_KEYS: [&[&str]; 8] = [
+const TAB_KEYS: [&[&str]; 9] = [
     &["1"],
     &["2"],
     &["3"],
@@ -141,6 +148,7 @@ const TAB_KEYS: [&[&str]; 8] = [
     &["6"],
     &["7"],
     &["8"],
+    &["9"],
 ];
 
 /// @name table
@@ -150,7 +158,7 @@ const TAB_KEYS: [&[&str]; 8] = [
 /// @example
 /// let spec = table().into_iter().find(|spec| spec.answers(&keystroke));
 pub fn table() -> Vec<Spec> {
-    use Group::{General, Lists, Map, Sections, View};
+    use Group::{General, Git, Lists, Map, Sections, View};
     let mut specs = vec![
         Spec::new(Command::Palette, "Command palette", General)
             .keys(&["secondary-k"])
@@ -239,6 +247,20 @@ pub fn table() -> Vec<Spec> {
         )
         .keys(&["down"])
         .hidden(),
+        Spec::new(Command::Gc, "Run git gc in the repository", Git).keys(&["c"]),
+        Spec::new(Command::GcAll, "Run git gc in every listed repository", Git).keys(&["C"]),
+        Spec::new(
+            Command::Branches,
+            "Delete merged branches of the repository",
+            Git,
+        )
+        .keys(&["b"]),
+        Spec::new(
+            Command::BranchesAll,
+            "Delete every listed merged branch",
+            Git,
+        )
+        .keys(&["B"]),
         Spec::new(Command::ZoomIn, "Zoom in", View)
             .keys(&["secondary-="])
             .extra(&["secondary-+", "secondary-shift-="])
