@@ -20,6 +20,7 @@ pub enum Term {
     ProjectArtifacts,
     GlobalCaches,
     Toolchains,
+    Docker,
     DuplicateFiles,
     Reclaimable,
     Groups,
@@ -40,7 +41,7 @@ pub enum Term {
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 34] = [
+    pub const ALL: [Term; 35] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -59,6 +60,7 @@ impl Term {
         Self::ProjectArtifacts,
         Self::GlobalCaches,
         Self::Toolchains,
+        Self::Docker,
         Self::DuplicateFiles,
         Self::Reclaimable,
         Self::Groups,
@@ -113,6 +115,7 @@ impl Term {
             Self::ProjectArtifacts => "Project artifacts",
             Self::GlobalCaches => "Global caches",
             Self::Toolchains => "Toolchains",
+            Self::Docker => "Docker",
             Self::DuplicateFiles => "Duplicate files",
             Self::Reclaimable => "Reclaimable",
             Self::Groups => "Groups",
@@ -185,6 +188,9 @@ impl Term {
             }
             Self::Toolchains => {
                 "Installed versions of rustup, nvm, fnm, volta, pyenv, uv, SDKMAN and Go. A default version or one a project under the scanned folder pins is marked review. Removing a version deletes it for good, it does not go to the trash, and the tool downloads it again when needed."
+            }
+            Self::Docker => {
+                "Dangling images, stopped containers, the build cache and volumes no container uses, from Docker and Podman. kuizer removes them through the engine, which refuses anything in use. Removal is permanent: nothing goes to the trash. Volumes can hold data and are always marked review."
             }
             Self::DuplicateFiles => {
                 "Files with exactly the same content in more than one place. Keeping one copy of each frees the rest."

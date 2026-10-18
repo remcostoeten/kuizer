@@ -145,6 +145,7 @@ impl Target {
             Self::Item(Source::Artifact, ..) => Tab::Artifacts,
             Self::Item(Source::Cache, ..) => Tab::Caches,
             Self::Item(Source::Toolchain, ..) => Tab::Toolchains,
+            Self::Item(Source::Docker, ..) => Tab::Docker,
             Self::Duplicate(_) => Tab::Duplicates,
             Self::Issue(_) => Tab::Issues,
             Self::Run(..) => Tab::History,
@@ -225,6 +226,7 @@ struct Menu {
 
 const WAIT_FOR_REFRESH: &str = "Available once the fresh scan finishes";
 const WAIT_FOR_RESTORE: &str = "Available once the restore finishes";
+const NOT_ON_DISK: &str = "Docker and Podman objects are not files on disk";
 const EXCLUDE_TIP: &str =
     "Skip this path in every future scan. It is added to scan.exclude in the config file";
 
@@ -339,6 +341,7 @@ impl Kuizer {
             scrolls: [
                 Tab::Caches,
                 Tab::Toolchains,
+                Tab::Docker,
                 Tab::Duplicates,
                 Tab::History,
                 Tab::Issues,
@@ -600,9 +603,14 @@ impl Kuizer {
                 .toolchains
                 .iter()
                 .map(|(_, candidate)| (Source::Toolchain, candidate));
+            let docker = report
+                .docker
+                .iter()
+                .map(|(_, candidate)| (Source::Docker, candidate));
             artifacts
                 .chain(caches)
                 .chain(toolchains)
+                .chain(docker)
                 .filter(|(source, candidate)| kept.contains(&(*source, candidate.path.as_path())))
                 .map(|(source, candidate)| (source, candidate.id))
                 .collect()
@@ -762,7 +770,17 @@ impl Kuizer {
             .map(|(_, candidate)| candidate)
             .filter(|candidate| self.selection.contains(&(Source::Toolchain, candidate.id)))
             .map(|candidate| (Source::Toolchain, candidate));
-        artifacts.chain(caches).chain(toolchains).collect()
+        let docker = report
+            .docker
+            .iter()
+            .map(|(_, candidate)| candidate)
+            .filter(|candidate| self.selection.contains(&(Source::Docker, candidate.id)))
+            .map(|candidate| (Source::Docker, candidate));
+        artifacts
+            .chain(caches)
+            .chain(toolchains)
+            .chain(docker)
+            .collect()
     }
 
     fn toggle(&mut self, source: Source, id: u64, cx: &mut Context<Self>) {
@@ -790,6 +808,13 @@ impl Kuizer {
                 .filter(|(toolchain, candidate)| self.shows_toolchain(toolchain, candidate))
                 .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
                 .map(|(_, candidate)| (Source::Toolchain, candidate.id))
+                .collect(),
+            Tab::Docker => report
+                .docker
+                .iter()
+                .filter(|(item, candidate)| self.shows_docker(item, candidate))
+                .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
+                .map(|(_, candidate)| (Source::Docker, candidate.id))
                 .collect(),
             _ => self
                 .rows
@@ -864,6 +889,11 @@ impl Kuizer {
                 .iter()
                 .map(|(_, candidate)| candidate)
                 .find(|c| c.id == id),
+            Source::Docker => report
+                .docker
+                .iter()
+                .map(|(_, candidate)| candidate)
+                .find(|c| c.id == id),
         }?;
         Some((source, candidate))
     }
@@ -891,11 +921,13 @@ impl Kuizer {
         let mut artifacts = Vec::new();
         let mut caches = Vec::new();
         let mut toolchains = Vec::new();
+        let mut docker = Vec::new();
         for (source, candidate) in self.confirming() {
             match source {
                 Source::Artifact => artifacts.push(candidate.clone()),
                 Source::Cache => caches.push(candidate.clone()),
                 Source::Toolchain => toolchains.push(candidate.clone()),
+                Source::Docker => docker.push(candidate.clone()),
             }
         }
         let mut batches = Vec::new();
@@ -918,6 +950,13 @@ impl Kuizer {
                 source: Source::Toolchain,
                 roots: kuizer::toolchains::roots(&toolchains),
                 candidates: toolchains,
+            });
+        }
+        if !docker.is_empty() {
+            batches.push(Batch {
+                source: Source::Docker,
+                roots: Vec::new(),
+                candidates: docker,
             });
         }
         let permanent = batches.iter().any(|batch| batch.source.permanent());
@@ -997,6 +1036,9 @@ impl Kuizer {
             report
                 .toolchains
                 .retain(|(_, candidate)| !removed.contains(&(Source::Toolchain, candidate.id)));
+            report
+                .docker
+                .retain(|(_, candidate)| !removed.contains(&(Source::Docker, candidate.id)));
             report.history = history;
         }
         for (source, removal) in &outcome.removals {
@@ -1094,8 +1136,16 @@ impl Kuizer {
         match target {
             Target::Item(source, id, _) => {
                 let selected = self.selection.contains(&(*source, *id));
+                let external = *source == Source::Docker;
+                let remove = if source.permanent() {
+                    MenuItem::new(Choice::Trash, "Delete for good", "Del")
+                        .tip("Delete only this item, after a confirmation. It skips the trash")
+                } else {
+                    MenuItem::new(Choice::Trash, "Move to trash", "Del")
+                        .tip("Move only this item to the trash, after a confirmation")
+                };
                 vec![
-                    reveal,
+                    reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,
                     MenuItem::new(
                         Choice::Toggle,
@@ -1104,10 +1154,8 @@ impl Kuizer {
                     )
                     .divided()
                     .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
-                    MenuItem::new(Choice::Trash, "Move to trash", "Del")
-                        .tip("Move only this item to the trash, after a confirmation")
-                        .unless(self.trash_lock()),
-                    exclude,
+                    remove.unless(self.trash_lock()),
+                    exclude.unless(external.then_some(NOT_ON_DISK)),
                 ]
             }
             Target::Duplicate(_) | Target::Issue(_) => vec![reveal, copy, exclude],
@@ -1365,6 +1413,12 @@ impl Kuizer {
                         .toolchains
                         .iter()
                         .map(|(_, candidate)| (Source::Toolchain, candidate.id)),
+                )
+                .chain(
+                    report
+                        .docker
+                        .iter()
+                        .map(|(_, candidate)| (Source::Docker, candidate.id)),
                 )
                 .collect();
             self.selection.retain(|key| known.contains(key));
@@ -1690,6 +1744,7 @@ impl Kuizer {
             Tab::Artifacts => Some(report.candidates.len()),
             Tab::Caches => Some(report.caches.len()),
             Tab::Toolchains => Some(report.toolchains.len()),
+            Tab::Docker => Some(report.docker.len()),
             Tab::Duplicates => report.duplicates.as_ref().map(|found| found.groups.len()),
             Tab::History => report
                 .history
@@ -1831,7 +1886,7 @@ impl Kuizer {
                 .when(!refreshing && !permanent, |this| this.tip(tooltip::term(Term::Trash)))
                 .when(!refreshing && permanent, |this| {
                     this.tip(tooltip::plain(
-                        "Toolchains in the selection are deleted for good, the rest moves to the trash",
+                        "Toolchains and Docker objects in the selection are deleted for good, the rest moves to the trash",
                     ))
                 })
                 .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
@@ -1863,6 +1918,7 @@ impl Kuizer {
                     Tab::Artifacts => self.render_artifacts(cx),
                     Tab::Caches => self.render_caches(cx),
                     Tab::Toolchains => self.render_toolchains(cx),
+                    Tab::Docker => self.render_docker(cx),
                     Tab::Duplicates => self.render_duplicates(cx),
                     Tab::History => self.render_history(cx),
                     Tab::Issues => self.render_issues(cx),
@@ -2163,6 +2219,15 @@ impl Kuizer {
             )
             .child(
                 ui::option_row(
+                    "Docker and Podman",
+                    "List dangling images, stopped containers, build cache and unused volumes",
+                )
+                .child(toggle("opt-docker", options.docker, |options| {
+                    options.docker = !options.docker;
+                })),
+            )
+            .child(
+                ui::option_row(
                     "Duplicate files",
                     "Hash files to find identical copies. Reads every file, so it is slower",
                 )
@@ -2280,7 +2345,8 @@ impl Kuizer {
         let review = report.total(Some(Safety::Review));
         let caches = report.cache_total(None);
         let toolchains = report.toolchain_total(None);
-        let space = total + caches + toolchains;
+        let containers = report.docker_total(None);
+        let space = total + caches + toolchains + containers;
         let duplicates = report
             .duplicates
             .as_ref()
@@ -2352,6 +2418,15 @@ impl Kuizer {
                     )
                     .child(
                         ui::stat(
+                            "Docker",
+                            theme::bytes(containers),
+                            plural(report.docker.len(), "object"),
+                        )
+                        .id("stat-docker")
+                        .tip(tooltip::term(Term::Docker)),
+                    )
+                    .child(
+                        ui::stat(
                             "Duplicate files",
                             theme::bytes(duplicates),
                             "keep one copy of each",
@@ -2408,6 +2483,14 @@ impl Kuizer {
                                     ),
                                     theme::bytes(toolchains),
                                     theme::share(toolchains, space),
+                                    theme::faint(),
+                                ))
+                            })
+                            .when(report.options.docker, |this| {
+                                this.child(ui::bar_row(
+                                    format!("docker  {}", plural(report.docker.len(), "object")),
+                                    theme::bytes(containers),
+                                    theme::share(containers, space),
                                     theme::faint(),
                                 ))
                             })
@@ -2947,6 +3030,161 @@ impl Kuizer {
                         } else {
                             "Toolchains were skipped for this scan"
                         }))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_docker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(report) = self.report() else {
+            return div().into_any_element();
+        };
+        let header = table_header()
+            .child(div().w(unit(14.)))
+            .child(head(90., "Size", Term::Size).text_right())
+            .child(head(64., "Safety", Term::Safety))
+            .child(column(70.).child("Engine"))
+            .child(column(100.).child("Object"))
+            .child(div().flex_1().child("Name"));
+        let cursor = self.cursor_target();
+        let rows = report
+            .docker
+            .iter()
+            .filter(|(item, candidate)| self.shows_docker(item, candidate))
+            .enumerate()
+            .map(|(index, (item, candidate))| {
+                let id = candidate.id;
+                let checked = self.selection.contains(&(Source::Docker, id));
+                let review = candidate.rule.safety == Safety::Review;
+                let row = table_row(("docker", id), checked)
+                    .debug_selector(move || format!("docker-row-{index}"));
+                let target = Target::Item(Source::Docker, id, candidate.path.clone());
+                self.menu_row(row, target, cursor.as_ref(), cx)
+                    .child(ui::checkbox(checked))
+                    .child(
+                        column(90.)
+                            .text_right()
+                            .child(theme::bytes(candidate.usage.allocated)),
+                    )
+                    .child(column(64.).child(ui::safety_label(("docker-safety", id), review)))
+                    .child(
+                        column(70.)
+                            .text_color(theme::muted())
+                            .child(item.engine.clone()),
+                    )
+                    .child(
+                        column(100.)
+                            .text_color(theme::muted())
+                            .child(item.object.name()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id(("docker-name", id))
+                                    .truncate()
+                                    .tip(tooltip::plain(format!("{}  {}", item.label, item.id)))
+                                    .child(item.label.clone()),
+                            )
+                            .when(!item.note.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(unit(12.))
+                                        .text_color(theme::faint())
+                                        .child(item.note.clone()),
+                                )
+                            }),
+                    )
+                    .h(unit(44.))
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        if !app.busy() {
+                            app.toggle(Source::Docker, id, cx);
+                        }
+                    }))
+            });
+        let empty = if !report.options.docker {
+            "Docker and Podman were skipped for this scan".to_owned()
+        } else if report.docker_issues.is_empty() {
+            "Nothing to free in Docker or Podman".to_owned()
+        } else {
+            report.docker_issues.join(". ")
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(unit(16.))
+                    .px(unit(14.))
+                    .py(unit(10.))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .text_color(theme::muted())
+                    .child(format!(
+                        "{} in {}",
+                        theme::bytes(report.docker_total(None)),
+                        plural(report.docker.len(), "object")
+                    ))
+                    .child(
+                        div()
+                            .id("docker-safe")
+                            .tip(tooltip::term(Term::Safe))
+                            .child(format!(
+                                "safe {}",
+                                theme::bytes(report.docker_total(Some(Safety::Safe)))
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("docker-review")
+                            .text_color(theme::review())
+                            .tip(tooltip::term(Term::Review))
+                            .child(format!(
+                                "review {}",
+                                theme::bytes(report.docker_total(Some(Safety::Review)))
+                            )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_color(theme::faint())
+                            .child("Removed through the engine, not moved to the trash"),
+                    ),
+            )
+            .when(
+                !report.docker.is_empty() && !report.docker_issues.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .px(unit(14.))
+                            .py(unit(6.))
+                            .text_color(theme::faint())
+                            .child(report.docker_issues.join(". ")),
+                    )
+                },
+            )
+            .child(header)
+            .child(
+                div()
+                    .id("docker-rows")
+                    .debug_selector(|| "docker-list".to_owned())
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_for(Tab::Docker))
+                    .children(rows)
+                    .when(report.docker.is_empty(), |this| {
+                        this.child(ui::empty(empty))
                     }),
             )
             .into_any_element()
@@ -3625,7 +3863,7 @@ impl Kuizer {
                         "Move to trash",
                     ),
                     (count, 0) => (
-                        format!("Delete {count} toolchain versions for good?"),
+                        format!("Delete {count} items for good?"),
                         "delete",
                         "Delete for good",
                     ),
@@ -3654,8 +3892,13 @@ impl Kuizer {
                                 .debug_selector(|| "permanent-warning".to_owned())
                                 .text_color(theme::danger())
                                 .child(format!(
-                                    "{} toolchain versions are deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back. The tool downloads a version again when it is needed.",
-                                    permanent
+                                    "{permanent} {} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.{}",
+                                    permanent_kinds(&selected),
+                                    if selected.iter().any(|(source, _)| *source == Source::Toolchain) {
+                                        " The tool downloads a toolchain version again when it is needed."
+                                    } else {
+                                        ""
+                                    }
                                 )),
                         )
                         .child(div().text_color(theme::muted()).child(if trashed > 0 {
@@ -3787,10 +4030,10 @@ impl Kuizer {
                         (0, _) => "kuizer history lists this run and kuizer restore brings it back."
                             .to_owned(),
                         (deleted, 0) => format!(
-                            "{deleted} toolchain versions were deleted for good. kuizer history lists them."
+                            "{deleted} items were deleted for good. kuizer history lists them."
                         ),
                         (deleted, trashed) => format!(
-                            "{deleted} toolchain versions were deleted for good. The other {trashed} items are in the trash and kuizer restore brings them back."
+                            "{deleted} items were deleted for good. The other {trashed} items are in the trash and kuizer restore brings them back."
                         ),
                     },
                 ))
@@ -3937,11 +4180,12 @@ fn overview_disk(report: &Report) -> Div {
     let review = report.total(Some(Safety::Review));
     let caches = report.cache_total(None);
     let toolchains = report.toolchain_total(Some(Safety::Safe));
+    let containers = report.docker_total(Some(Safety::Safe));
     let duplicates = report
         .duplicates
         .as_ref()
         .map_or(0, kuizer::dupes::Duplicates::reclaimable);
-    let reclaimable = safe + review + caches + toolchains + duplicates;
+    let reclaimable = safe + review + caches + toolchains + containers + duplicates;
     let mut segments = vec![
         Segment {
             label: "Safe artifacts".into(),
@@ -3962,6 +4206,11 @@ fn overview_disk(report: &Report) -> Div {
             label: "Unused toolchains".into(),
             bytes: toolchains,
             fill: theme::bar_mid(),
+        },
+        Segment {
+            label: "Docker".into(),
+            bytes: containers,
+            fill: theme::bar_soft(),
         },
         Segment {
             label: "Duplicates".into(),
@@ -4177,14 +4426,15 @@ fn skeleton_overview(stage: Stage) -> Div {
                 .child(skeleton_stat("Needs review", 2, None))
                 .child(skeleton_stat("Global caches", 3, None))
                 .child(skeleton_stat("Toolchains", 4, None))
-                .child(skeleton_stat("Duplicate files", 5, None))
-                .child(skeleton_stat("Disk free", 6, None)),
+                .child(skeleton_stat("Docker", 5, None))
+                .child(skeleton_stat("Duplicate files", 6, None))
+                .child(skeleton_stat("Disk free", 7, None)),
         )
         .child(
             ui::card("Disk")
                 .child(chart::block("disk", 0, gpui::relative(1.), unit(12.)))
                 .child(div().flex().gap(unit(16.)).children(
-                    (1..7).map(|index| chart::block("disk", index, unit(84.), unit(12.))),
+                    (1..8).map(|index| chart::block("disk", index, unit(84.), unit(12.))),
                 )),
         )
         .child(
@@ -4353,6 +4603,7 @@ fn selection_details(
         )
         .row("Global caches", line(total(&|(s, _)| *s == Source::Cache)))
         .row("Toolchains", line(total(&|(s, _)| *s == Source::Toolchain)))
+        .row("Docker", line(total(&|(s, _)| *s == Source::Docker)))
         .build()
 }
 
@@ -4375,6 +4626,18 @@ fn plural(count: usize, noun: &str) -> String {
         format!("1 {noun}")
     } else {
         format!("{count} {noun}s")
+    }
+}
+
+fn permanent_kinds(selected: &[(Source, &Candidate)]) -> &'static str {
+    let toolchains = selected
+        .iter()
+        .any(|(source, _)| *source == Source::Toolchain);
+    let docker = selected.iter().any(|(source, _)| *source == Source::Docker);
+    match (toolchains, docker) {
+        (true, true) => "toolchain versions and Docker objects are",
+        (true, false) => "toolchain versions are",
+        _ => "Docker objects are",
     }
 }
 
@@ -4426,6 +4689,7 @@ mod tests {
             );
             app.options.caches = false;
             app.options.toolchains = false;
+            app.options.docker = false;
             app.config_path = recent.parent().map(|dir| dir.join("config.toml"));
             app.reveal = |_| Err("no file manager in tests".to_owned());
             app
@@ -4983,6 +5247,82 @@ mod tests {
             let history = report.history.as_ref().unwrap();
             assert_eq!(history.history.cumulative.restored_items, 1);
             assert_eq!(history.trash_state(0), TrashState::Restored);
+        });
+    }
+
+    #[test]
+    fn docker_objects_are_removed_through_the_engine() {
+        isolated("docker_objects_are_removed_through_the_engine_inside");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    #[ignore = "runs in its own process through docker_objects_are_removed_through_the_engine"]
+    fn docker_objects_are_removed_through_the_engine_inside(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(base) = isolated_base() else {
+            return;
+        };
+        cx.update(bind_keys);
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let engine = bin.join("docker");
+        std::fs::write(
+            &engine,
+            r#"#!/bin/sh
+echo "$*" >> "$(dirname "$0")/calls"
+case "$1 $2" in
+  "image ls") printf 'sha256:aaaaaaaaaaaaaaaa\t1.5GB\t3 weeks ago\n' ;;
+  "volume ls") echo pgdata ;;
+  *) exit 0 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = project(&base.join("work"));
+        let (view, cx) = open(cx, base.join("recent"));
+        view.update(cx, |app, _| {
+            app.options.docker = true;
+            app.config.docker.engines = vec![engine.display().to_string()];
+        });
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        let image = view.read_with(cx, |app, _| {
+            let docker = &app.report().unwrap().docker;
+            assert_eq!(docker.len(), 2);
+            assert_eq!(docker[0].1.rule.safety, Safety::Safe);
+            assert_eq!(docker[1].0.object, kuizer::docker::Object::Volume);
+            assert_eq!(docker[1].1.rule.safety, Safety::Review);
+            docker[0].1.id
+        });
+
+        cx.simulate_keystrokes("5");
+        view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Docker));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("docker-row-1").is_some());
+        let target = view.read_with(cx, |app, _| app.targets(Tab::Docker)[0].clone());
+        let menu = view.read_with(cx, |app, _| app.menu_items(&target));
+        let reveal = menu
+            .iter()
+            .find(|item| item.choice == Choice::Reveal)
+            .unwrap();
+        assert!(!reveal.enabled, "a Docker object has no folder to reveal");
+        view.update(cx, |app, cx| app.toggle(Source::Docker, image, cx));
+        cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("permanent-warning").is_some());
+        cx.simulate_keystrokes("enter");
+        wait_until(&view, cx, "the removal", |app| {
+            matches!(app.dialog, Some(Dialog::Finished(_)))
+        });
+        let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
+        assert_eq!(calls.lines().last(), Some("image rm aaaaaaaaaaaaaaaa"));
+        view.read_with(cx, |app, _| {
+            assert!(app.toast.is_none(), "nothing to undo");
+            assert_eq!(app.report().unwrap().docker.len(), 1);
         });
     }
 

@@ -24,6 +24,7 @@ const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
 const ABOUT_TOOLCHAIN: &str = "List and remove installed toolchain versions";
+const ABOUT_DOCKER: &str = "List and remove unused Docker and Podman objects";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
 const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
 const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
@@ -39,6 +40,7 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
             ("toolchain", ABOUT_TOOLCHAIN),
+            ("docker", ABOUT_DOCKER),
             ("restore", ABOUT_RESTORE),
         ],
     ),
@@ -261,6 +263,29 @@ fn toolchain_help() -> String {
     )
 }
 
+fn docker_help() -> String {
+    format!(
+        "Lists dangling images, stopped containers, the build cache and volumes no container uses, for every engine in docker.engines. Only the engines' own CLIs run, so DOCKER_HOST and contexts apply. Removal is always permanent and goes through `image rm`, `container rm`, `builder prune` and `volume rm` without force, so the engine refuses anything still in use. Volumes and containers that stopped recently are marked review.\n\n{}",
+        examples(&[
+            (
+                "kuizer docker",
+                "",
+                "List what Docker and Podman could free"
+            ),
+            (
+                "kuizer docker",
+                "--clean --dry-run",
+                "Show which objects would be removed",
+            ),
+            (
+                "kuizer docker",
+                "--clean --select image --select build-cache",
+                "Remove dangling images and the build cache",
+            ),
+        ])
+    )
+}
+
 fn duplicates_help() -> String {
     format!(
         "Reports only; kuizer never deletes duplicates.\n\n{}",
@@ -427,6 +452,8 @@ pub enum Command {
     Cache(CacheArgs),
     #[command(about = ABOUT_TOOLCHAIN, visible_alias = "toolchains", after_help = toolchain_help())]
     Toolchain(ToolchainArgs),
+    #[command(about = ABOUT_DOCKER, visible_alias = "podman", after_help = docker_help())]
+    Docker(DockerArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
     #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
@@ -670,6 +697,21 @@ pub struct ToolchainArgs {
     #[arg(
         long,
         help = "Remove the selected versions after a preview, always permanently",
+        help_heading = "Removal"
+    )]
+    pub clean: bool,
+    #[command(flatten)]
+    pub removal: RemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct DockerArgs {
+    #[arg(
+        long,
+        help = "Remove the selected objects after a preview, always permanently",
         help_heading = "Removal"
     )]
     pub clean: bool,

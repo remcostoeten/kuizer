@@ -2,6 +2,7 @@ mod cache;
 mod clean;
 mod config;
 mod dashboard;
+mod docker;
 mod duplicates;
 mod history;
 mod removal;
@@ -69,6 +70,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
         Command::Toolchain(args) if args.command == Some(NestedCommand::Help) => Some("toolchain"),
+        Command::Docker(args) if args.command == Some(NestedCommand::Help) => Some("docker"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
         Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
@@ -111,6 +113,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Docker(args)) => docker::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
     }

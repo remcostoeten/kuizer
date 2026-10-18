@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::caches::KnownCache;
 use crate::delete::{Mode, Removal, Status};
 use crate::detect::{Category, Kind, Safety};
+use crate::docker::{Item, Object};
 use crate::dupes::{Duplicates, Group};
 use crate::scan::{Candidate, Issue, Summary};
 use crate::toolchains::Toolchain;
@@ -361,6 +362,61 @@ pub fn toolchain_report(entries: &[(Toolchain, Candidate)]) -> String {
             safe_bytes: entries
                 .iter()
                 .filter(|(toolchain, _)| toolchain.safety() == Safety::Safe)
+                .map(|(_, candidate)| candidate.usage.allocated)
+                .sum(),
+        },
+    };
+    serde_json::to_string_pretty(&report).unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct DockerJson<'a> {
+    engine: &'a str,
+    object: Object,
+    id: &'a str,
+    name: &'a str,
+    path: &'a Path,
+    safety: Safety,
+    note: Option<&'a str>,
+    allocated_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct DockerReport<'a> {
+    schema_version: u32,
+    command: &'static str,
+    objects: Vec<DockerJson<'a>>,
+    issues: &'a [String],
+    summary: CacheSummary,
+}
+
+pub fn docker_report(entries: &[(Item, Candidate)], issues: &[String]) -> String {
+    let report = DockerReport {
+        schema_version: SCHEMA_VERSION,
+        command: "docker",
+        objects: entries
+            .iter()
+            .map(|(item, candidate)| DockerJson {
+                engine: &item.engine,
+                object: item.object,
+                id: &item.id,
+                name: &item.label,
+                path: &candidate.path,
+                safety: item.safety,
+                note: (!item.note.is_empty()).then_some(item.note.as_str()),
+                allocated_bytes: candidate.usage.allocated,
+            })
+            .collect(),
+        issues,
+        summary: CacheSummary {
+            items: entries.len(),
+            bytes: entries
+                .iter()
+                .map(|(_, candidate)| candidate.usage.allocated)
+                .sum(),
+            safe_bytes: entries
+                .iter()
+                .filter(|(item, _)| item.safety == Safety::Safe)
                 .map(|(_, candidate)| candidate.usage.allocated)
                 .sum(),
         },

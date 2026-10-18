@@ -31,6 +31,8 @@ pub enum RuleError {
     Duplicate(String),
     #[error("rule `{name}`: `{value}` must be a plain file name, not a path")]
     NotAName { name: String, value: String },
+    #[error("rule `{0}`: kind must be dir or file")]
+    External(String),
 }
 
 enum Marker {
@@ -140,6 +142,7 @@ impl Detector {
             let target = match spec.kind {
                 Kind::Dir => &mut dirs,
                 Kind::File => &mut files,
+                Kind::External => return Err(RuleError::External(spec.name.clone())),
             };
             if has_glob_meta(&spec.pattern) {
                 target

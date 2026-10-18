@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use kuizer::caches;
 use kuizer::detect::{Category, Kind, RuleInfo, Safety};
+use kuizer::docker;
 use kuizer::dupes::{Duplicates, Group, Member};
 use kuizer::history::History;
 use kuizer::scan::{Candidate, Issue, IssueKind, Progress, Summary, Usage};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Disk, HistoryView, Report};
 use crate::start::ScanOptions;
 
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 const LIMIT: usize = 8;
 const EXTENSION: &str = "json";
 
@@ -140,6 +141,8 @@ struct Stored {
     summary: StoredSummary,
     caches: Vec<(String, PathBuf, StoredCandidate)>,
     toolchains: Vec<(Toolchain, StoredCandidate)>,
+    docker: Vec<docker::Item>,
+    docker_issues: Vec<String>,
     duplicates: Option<StoredDuplicates>,
     history: Result<StoredHistory, String>,
     disks: Vec<(Option<u64>, Option<u64>)>,
@@ -172,6 +175,8 @@ impl Stored {
                 .iter()
                 .map(|(toolchain, candidate)| (toolchain.clone(), StoredCandidate::new(candidate)))
                 .collect(),
+            docker: report.docker.iter().map(|(item, _)| item.clone()).collect(),
+            docker_issues: report.docker_issues.clone(),
             duplicates: report.duplicates.as_ref().map(StoredDuplicates::new),
             history: report
                 .history
@@ -213,6 +218,8 @@ impl Stored {
                 .into_iter()
                 .map(|(toolchain, candidate)| (toolchain, candidate.restore()))
                 .collect(),
+            docker: docker::entries(self.docker),
+            docker_issues: self.docker_issues,
             duplicates: self.duplicates.map(StoredDuplicates::restore),
             history: self.history.map(|stored| HistoryView {
                 history: stored.history,
@@ -539,6 +546,17 @@ mod tests {
                 },
                 candidate(1, "/h/.nvm/versions/node/v18.17.0"),
             )],
+            docker: docker::entries(vec![docker::Item {
+                engine: "docker".to_owned(),
+                program: "docker".to_owned(),
+                object: docker::Object::Image,
+                id: "abc".to_owned(),
+                label: "<none> abc".to_owned(),
+                bytes: 5,
+                safety: Safety::Safe,
+                note: String::new(),
+            }]),
+            docker_issues: vec!["podman is not running: down".to_owned()],
             duplicates: Some(Duplicates {
                 groups: vec![Group {
                     size: 5,
@@ -596,6 +614,8 @@ mod tests {
         assert_eq!(loaded.summary, saved.summary);
         assert_eq!(loaded.caches[0].0, saved.caches[0].0);
         assert_eq!(loaded.toolchains[0].0, saved.toolchains[0].0);
+        assert_eq!(loaded.docker[0].1.path, PathBuf::from("docker:image/abc"));
+        assert_eq!(loaded.docker_issues, saved.docker_issues);
         assert_eq!(loaded.toolchains[0].1.path, saved.toolchains[0].1.path);
         let duplicates = loaded.duplicates.expect("duplicates");
         assert_eq!(
