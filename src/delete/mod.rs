@@ -42,6 +42,8 @@ pub enum DeleteError {
     Io(#[from] std::io::Error),
     #[error("trash: {0}")]
     Trash(String),
+    #[error("{0}")]
+    Tool(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

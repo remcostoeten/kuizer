@@ -68,6 +68,27 @@ impl<V: Visitor> Visitor for Option<V> {
     }
 }
 
+impl<A: Visitor, B: Visitor> Visitor for (A, B) {
+    fn issue(&mut self, issue: Issue) -> Flow {
+        match (self.0.issue(issue.clone()), self.1.issue(issue)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+
+    fn counted(&mut self, file_type: fs::FileType) {
+        self.0.counted(file_type);
+        self.1.counted(file_type);
+    }
+
+    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+        match (self.0.file(path, file_type), self.1.file(path, file_type)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+}
+
 pub struct Walker<'a, V> {
     pub scan: &'a ScanConfig,
     pub detector: &'a Detector,

@@ -37,3 +37,7 @@ confirm = false
 
 [appearance]
 motion = true
+
+[toolchains]
+tools = ["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]
+pins = true

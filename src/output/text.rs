@@ -9,6 +9,7 @@ use crate::detect::{Category, Safety};
 use crate::dupes::{Duplicates, Group};
 use crate::platform;
 use crate::scan::{Candidate, Issue, Progress, Summary};
+use crate::toolchains::Toolchain;
 use crate::units::{ByteSize, age};
 
 const MAX_ISSUES: usize = 10;
@@ -472,6 +473,63 @@ pub fn print_caches(entries: &[(KnownCache, Candidate)], quiet: bool) {
         "{}",
         dim(
             "Browser profiles, cookies and sessions are never listed. Clean with `kuizer cache --clean`."
+        )
+    );
+}
+
+pub fn print_toolchains(entries: &[(Toolchain, Candidate)], quiet: bool) {
+    if entries.is_empty() {
+        println!("No installed toolchain versions found");
+        return;
+    }
+    let mut out = io::stdout().lock();
+    let _ = writeln!(
+        out,
+        "{}",
+        dim(&format!(
+            "{:>10}  {:<6}  {:<7}  {:<32}  PATH",
+            "SIZE", "SAFETY", "TOOL", "VERSION"
+        ))
+    );
+    for (toolchain, candidate) in entries {
+        let _ = writeln!(
+            out,
+            "{}  {:<6}  {:<7}  {:<32}  {}",
+            bold(&format!(
+                "{:>10}",
+                ByteSize(candidate.usage.allocated).to_string()
+            )),
+            toolchain.safety().as_str(),
+            toolchain.tool.name(),
+            toolchain.version,
+            display_path(&toolchain.path),
+        );
+        let note = toolchain.note();
+        if !note.is_empty() {
+            let _ = writeln!(out, "{}", dim(&format!("{:>12}{note}", "")));
+        }
+    }
+    drop(out);
+    if quiet {
+        return;
+    }
+    let total: u64 = entries.iter().map(|(_, c)| c.usage.allocated).sum();
+    let safe: u64 = entries
+        .iter()
+        .filter(|(toolchain, _)| toolchain.safety() == Safety::Safe)
+        .map(|(_, c)| c.usage.allocated)
+        .sum();
+    println!(
+        "\n{} in {} versions: {} unused, {} default or pinned",
+        bold(&ByteSize(total).to_string()),
+        entries.len(),
+        ByteSize(safe),
+        ByteSize(total - safe),
+    );
+    println!(
+        "{}",
+        dim(
+            "Removal is permanent and skips the trash; the tool downloads a version again when needed. Clean with `kuizer toolchain --clean`."
         )
     );
 }

@@ -1,6 +1,6 @@
 # Phase 10: toolchain, Docker and big-file sources
 
-Status: plan. Projects and global caches are sources today, each with its own code path (`src/commands/scan.rs`, `src/commands/cache.rs`). Duplicates is a report. Behaviour is specified in `design.md` sections 1 and 6.2.
+Status: `toolchain` is done (`src/toolchains/`, `kuizer toolchain`, the GUI's Toolchains section) without the source abstraction: it follows the `cache` pattern and adds a `remove` function to `removal::Request`. It also lists SDKMAN candidates and Go SDKs, reads `.sdkmanrc`, `.tool-versions` and `go.mod` pins, and always removes permanently. The rest is a plan. Projects and global caches are sources today, each with its own code path (`src/commands/scan.rs`, `src/commands/cache.rs`). Duplicates is a report. Behaviour is specified in `design.md` sections 1 and 6.2.
 
 This phase is four pull requests: the source abstraction, `toolchain`, `docker`, `big`.
 

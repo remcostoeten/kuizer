@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::{Category, Detector, Listing, RuleError, RuleSpec, builtin_rules};
 use crate::platform;
+use crate::toolchains::Tool;
 use crate::units::ByteSize;
 
 pub use edit::{EditError, add_exclude, exclude_pattern};
@@ -24,6 +25,7 @@ pub struct Config {
     pub duplicates: DuplicateConfig,
     pub delete: DeleteConfig,
     pub appearance: AppearanceConfig,
+    pub toolchains: ToolchainConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,6 +165,22 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self { motion: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolchainConfig {
+    pub tools: Vec<Tool>,
+    pub pins: bool,
+}
+
+impl Default for ToolchainConfig {
+    fn default() -> Self {
+        Self {
+            tools: Tool::ALL.to_vec(),
+            pins: true,
+        }
     }
 }
 
@@ -332,6 +350,21 @@ mod tests {
         assert_eq!(config.rules[0].safety, Safety::Review);
         assert_eq!(config.delete.mode, DeleteMode::Trash);
         assert!(config.appearance.motion);
+    }
+
+    #[test]
+    fn toolchain_tools_and_pins_are_configurable() {
+        let defaults = Config::default();
+        assert_eq!(defaults.toolchains.tools, Tool::ALL);
+        assert!(defaults.toolchains.pins);
+        let config =
+            parse("[toolchains]\ntools = [\"nvm\", \"go\"]\npins = false\n").expect("parses");
+        assert_eq!(config.toolchains.tools, [Tool::Nvm, Tool::Go]);
+        assert!(!config.toolchains.pins);
+        assert!(matches!(
+            parse("[toolchains]\ntools = [\"asdf\"]\n"),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 
     #[test]

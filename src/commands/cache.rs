@@ -92,6 +92,7 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         mode: removal::mode(&args.removal, config),
         yes: args.removal.yes,
         json,
+        remove: removal::files,
     };
     removal::run(&request, selected, &[])
 }
