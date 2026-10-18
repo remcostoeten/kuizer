@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::Receiver;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConfigError, GitConfig};
 use crate::dupes::{Files, Options};
@@ -18,7 +18,7 @@ use crate::scan::{self, Cancel, Issue, Scan};
 const KIB: u64 = 1024;
 const STALE_GC: Duration = Duration::from_secs(12 * 60 * 60);
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Objects {
     pub loose: u64,
     pub loose_bytes: u64,
@@ -44,13 +44,13 @@ impl Objects {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
     pub name: String,
     pub commit: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Busy {
     Rebase,
@@ -76,7 +76,7 @@ impl Busy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {
     pub root: PathBuf,
     pub git_dir: PathBuf,

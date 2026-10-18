@@ -61,9 +61,11 @@ const UNDO_KEY: &str = if cfg!(target_os = "macos") {
 mod keys;
 mod map;
 mod overlay;
+mod repos;
 
 use keys::{found, found_path, keep_visible, shows_run};
 use map::SpaceMap;
+use repos::{GitJob, GitScope};
 
 pub use crate::commands::bind_keys;
 
@@ -125,6 +127,7 @@ enum Dialog {
     },
     Running,
     Finished(Finished),
+    Branches(GitScope),
 }
 
 /// One row a context menu can act on.
@@ -134,6 +137,7 @@ enum Target {
     Duplicate(PathBuf),
     Issue(PathBuf),
     Run(u64, String),
+    Repo(PathBuf),
 }
 
 impl Target {
@@ -144,12 +148,16 @@ impl Target {
             Self::Duplicate(_) => Tab::Duplicates,
             Self::Issue(_) => Tab::Issues,
             Self::Run(..) => Tab::History,
+            Self::Repo(_) => Tab::Repos,
         }
     }
 
     fn path(&self) -> Option<&Path> {
         match self {
-            Self::Item(_, _, path) | Self::Duplicate(path) | Self::Issue(path) => Some(path),
+            Self::Item(_, _, path)
+            | Self::Duplicate(path)
+            | Self::Issue(path)
+            | Self::Repo(path) => Some(path),
             Self::Run(..) => None,
         }
     }
@@ -164,6 +172,8 @@ enum Choice {
     Exclude,
     Restore,
     CopyCommand,
+    Gc,
+    Branches,
 }
 
 struct MenuItem {
@@ -268,6 +278,8 @@ pub struct Kuizer {
     excluded: Vec<PathBuf>,
     reveal: Reveal,
     map: SpaceMap,
+    git: GitJob,
+    git_task: Option<Task<()>>,
 }
 
 impl Kuizer {
@@ -332,15 +344,23 @@ impl Kuizer {
             cursors: HashMap::new(),
             cursor_bounds: Rc::new(Cell::new(None)),
             artifact_scroll: UniformListScrollHandle::new(),
-            scrolls: [Tab::Caches, Tab::Duplicates, Tab::History, Tab::Issues]
-                .into_iter()
-                .map(|tab| (tab, ScrollHandle::new()))
-                .collect(),
+            scrolls: [
+                Tab::Caches,
+                Tab::Repos,
+                Tab::Duplicates,
+                Tab::History,
+                Tab::Issues,
+            ]
+            .into_iter()
+            .map(|tab| (tab, ScrollHandle::new()))
+            .collect(),
             reveal_cursor: Rc::new(Cell::new(false)),
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
             reveal: reveal::reveal,
             map: SpaceMap::default(),
+            git: GitJob::default(),
+            git_task: None,
         };
         if !app.roots.is_empty() {
             app.recent.remember(&app.roots);
@@ -1053,6 +1073,21 @@ impl Kuizer {
                 ]
             }
             Target::Duplicate(_) | Target::Issue(_) => vec![reveal, copy, exclude],
+            Target::Repo(root) => {
+                let scope = GitScope::One(root.clone());
+                vec![
+                    reveal.tip("Open the folder that holds this repository"),
+                    copy,
+                    MenuItem::new(Choice::Gc, "Run git gc", "G")
+                        .tip("Pack loose objects now")
+                        .divided()
+                        .unless(self.gc_blocked(Some(&scope))),
+                    MenuItem::new(Choice::Branches, "Delete merged branches", "B")
+                        .tip("Delete the merged local branches, after a confirmation")
+                        .unless(self.branches_blocked(Some(&scope))),
+                    exclude,
+                ]
+            }
             Target::Run(session, _) => {
                 let restorable = self.report().is_some_and(|report| {
                     report.history.as_ref().is_ok_and(|view| {
@@ -1232,6 +1267,10 @@ impl Kuizer {
             }
             (Choice::CopyCommand, Target::Run(_, command)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(command));
+            }
+            (Choice::Gc, Target::Repo(root)) => self.collect_garbage(&GitScope::One(root), cx),
+            (Choice::Branches, Target::Repo(root)) => {
+                self.ask_branches(GitScope::One(root), cx);
             }
             _ => {}
         }
@@ -1625,6 +1664,7 @@ impl Kuizer {
             Tab::Overview => None,
             Tab::Artifacts => Some(report.candidates.len()),
             Tab::Caches => Some(report.caches.len()),
+            Tab::Repos => Some(report.repos.len()),
             Tab::Duplicates => report.duplicates.as_ref().map(|found| found.groups.len()),
             Tab::History => report
                 .history
@@ -1791,6 +1831,7 @@ impl Kuizer {
                     Tab::Overview => return self.render_overview(cx),
                     Tab::Artifacts => self.render_artifacts(cx),
                     Tab::Caches => self.render_caches(cx),
+                    Tab::Repos => self.render_repos(cx),
                     Tab::Duplicates => self.render_duplicates(cx),
                     Tab::History => self.render_history(cx),
                     Tab::Issues => self.render_issues(cx),
@@ -2082,6 +2123,15 @@ impl Kuizer {
             )
             .child(
                 ui::option_row(
+                    "Git repositories",
+                    "Find loose git objects to pack and branches that are already merged",
+                )
+                .child(toggle("opt-repos", options.repos, |options| {
+                    options.repos = !options.repos;
+                })),
+            )
+            .child(
+                ui::option_row(
                     "Duplicate files",
                     "Hash files to find identical copies. Reads every file, so it is slower",
                 )
@@ -2257,6 +2307,31 @@ impl Kuizer {
                         )
                         .id("stat-caches")
                         .tip(tooltip::term(Term::GlobalCaches)),
+                    )
+                    .child(
+                        ui::stat(
+                            "Git repositories",
+                            theme::bytes(
+                                report
+                                    .repos
+                                    .iter()
+                                    .filter(|repository| {
+                                        repository.collectable(self.config.git.min_gain.0)
+                                    })
+                                    .map(|repository| repository.objects.gain())
+                                    .sum(),
+                            ),
+                            format!(
+                                "git gc, {} merged branches",
+                                report
+                                    .repos
+                                    .iter()
+                                    .map(|repository| repository.merged.len())
+                                    .sum::<usize>()
+                            ),
+                        )
+                        .id("stat-repos")
+                        .tip(tooltip::term(Term::GitRepositories)),
                     )
                     .child(
                         ui::stat(
@@ -3466,6 +3541,7 @@ impl Kuizer {
                             ),
                     )
             }
+            Dialog::Branches(scope) => self.render_branch_dialog(scope, panel, cx),
             Dialog::Running => panel
                 .child(
                     div()

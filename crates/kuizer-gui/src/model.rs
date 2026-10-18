@@ -15,6 +15,7 @@ use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
+use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
 
 use crate::start::ScanOptions;
@@ -28,6 +29,7 @@ pub enum Stage {
     Scanning(Progress),
     Duplicates(dupes::Stage),
     Caches,
+    Repos,
     History,
 }
 
@@ -49,6 +51,7 @@ impl Stage {
                 format!("Duplicates  comparing {groups} groups")
             }
             Self::Caches => "Measuring global caches".to_owned(),
+            Self::Repos => "Checking git repositories".to_owned(),
             Self::History => "Reading the cleanup history".to_owned(),
         }
     }
@@ -157,6 +160,7 @@ pub struct Report {
     pub issues: Vec<Issue>,
     pub summary: Summary,
     pub caches: Vec<(KnownCache, Candidate)>,
+    pub repos: Vec<Repository>,
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
     pub disks: Vec<Disk>,
@@ -222,6 +226,7 @@ impl Report {
         let gone = |path: &Path| paths.iter().any(|excluded| path.starts_with(excluded));
         self.candidates.retain(|candidate| !gone(&candidate.path));
         self.caches.retain(|(_, candidate)| !gone(&candidate.path));
+        self.repos.retain(|repository| !gone(&repository.root));
         self.issues.retain(|issue| !gone(&issue.path));
         if let Some(duplicates) = &mut self.duplicates {
             for group in &mut duplicates.groups {
@@ -299,10 +304,13 @@ pub fn load(
 ) -> Result<Report, String> {
     let config = options.apply(config);
     let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
-    let (handle, files) = dupes::start_scan(&config, roots, cancel.clone(), duplicate_options)
+    let (handle, walked) = repos::start_scan(&config, roots, cancel.clone(), duplicate_options)
         .map_err(|error| error.to_string())?;
     let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
-    let files = files.recv().ok().flatten();
+    let (files, found_repos) = walked
+        .recv()
+        .map(|walked| (walked.files, walked.repositories))
+        .unwrap_or_default();
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
@@ -340,6 +348,16 @@ pub fn load(
         Vec::new()
     };
 
+    let repos = if options.repos {
+        set(stage, Stage::Repos);
+        repos::inspect_all(found_repos, &config.git, cancel)
+    } else {
+        Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
     set(stage, Stage::History);
     let history = HistoryView::load();
     let disks = roots
@@ -357,6 +375,7 @@ pub fn load(
         issues: collected.issues,
         summary: collected.summary,
         caches,
+        repos,
         duplicates,
         history,
         disks,
@@ -717,6 +736,7 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            repos: Vec::new(),
             duplicates: Some(Duplicates {
                 groups: vec![
                     group(&["/p/a/node_modules/x", "/p/b/x"]),
@@ -772,6 +792,7 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            repos: Vec::new(),
             duplicates: None,
             history: Err(String::new()),
             disks: Vec::new(),

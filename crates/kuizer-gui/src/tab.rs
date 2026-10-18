@@ -10,16 +10,18 @@ pub enum Tab {
     Overview,
     Artifacts,
     Caches,
+    Repos,
     Duplicates,
     History,
     Issues,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
+        Self::Repos,
         Self::Duplicates,
         Self::History,
         Self::Issues,
@@ -42,6 +44,7 @@ impl Tab {
             Self::Overview => Term::Overview,
             Self::Artifacts => Term::ProjectArtifacts,
             Self::Caches => Term::GlobalCaches,
+            Self::Repos => Term::GitRepositories,
             Self::Duplicates => Term::DuplicateFiles,
             Self::History => Term::History,
             Self::Issues => Term::Issues,
@@ -53,6 +56,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Artifacts => "Project artifacts",
             Self::Caches => "Global caches",
+            Self::Repos => "Git repositories",
             Self::Duplicates => "Duplicates",
             Self::History => "History",
             Self::Issues => "Issues",
@@ -80,6 +84,13 @@ impl Tab {
                 Stage::Caches => "Measuring global caches",
                 Stage::History => "Caches measured, shown once the scan is done",
                 _ => "Measured after the folder scan",
+            },
+            Self::Repos if !options.repos => "Git repositories are off for this scan",
+            Self::Repos if walking => "Noting git repositories while scanning folders",
+            Self::Repos => match stage {
+                Stage::Repos => "Checking git repositories",
+                Stage::History => "Repositories checked, shown once the scan is done",
+                _ => "Checked after the folder scan",
             },
             Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",
             Self::History => "Read at the end of the scan",

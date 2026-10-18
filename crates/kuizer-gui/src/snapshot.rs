@@ -6,6 +6,7 @@ use kuizer::caches;
 use kuizer::detect::{Category, Kind, RuleInfo, Safety};
 use kuizer::dupes::{Duplicates, Group, Member};
 use kuizer::history::History;
+use kuizer::repos::Repository;
 use kuizer::scan::{Candidate, Issue, IssueKind, Progress, Summary, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +139,8 @@ struct Stored {
     issues: Vec<StoredIssue>,
     summary: StoredSummary,
     caches: Vec<(String, PathBuf, StoredCandidate)>,
+    #[serde(default)]
+    repos: Vec<Repository>,
     duplicates: Option<StoredDuplicates>,
     history: Result<StoredHistory, String>,
     disks: Vec<(Option<u64>, Option<u64>)>,
@@ -165,6 +168,7 @@ impl Stored {
                     )
                 })
                 .collect(),
+            repos: report.repos.clone(),
             duplicates: report.duplicates.as_ref().map(StoredDuplicates::new),
             history: report
                 .history
@@ -201,6 +205,7 @@ impl Stored {
                     Some((caches::known(&name, path)?, candidate.restore()))
                 })
                 .collect(),
+            repos: self.repos,
             duplicates: self.duplicates.map(StoredDuplicates::restore),
             history: self.history.map(|stored| HistoryView {
                 history: stored.history,
@@ -516,6 +521,22 @@ mod tests {
                 caches::known("npm", PathBuf::from("/h/.npm/_cacache")).unwrap(),
                 candidate(1, "/h/.npm/_cacache"),
             )],
+            repos: vec![Repository {
+                root: PathBuf::from("/p/kearn"),
+                git_dir: PathBuf::from("/p/kearn/.git"),
+                objects: kuizer::repos::Objects {
+                    loose: 900,
+                    loose_bytes: 4 << 20,
+                    ..Default::default()
+                },
+                default_branch: Some("main".to_owned()),
+                current_branch: Some("main".to_owned()),
+                merged: vec![kuizer::repos::Branch {
+                    name: "done".to_owned(),
+                    commit: "abc".to_owned(),
+                }],
+                busy: None,
+            }],
             duplicates: Some(Duplicates {
                 groups: vec![Group {
                     size: 5,
@@ -572,6 +593,7 @@ mod tests {
         assert_eq!(loaded.issues[0].kind, IssueKind::PermissionDenied);
         assert_eq!(loaded.summary, saved.summary);
         assert_eq!(loaded.caches[0].0, saved.caches[0].0);
+        assert_eq!(loaded.repos, saved.repos);
         let duplicates = loaded.duplicates.expect("duplicates");
         assert_eq!(
             duplicates.groups[0].members[1].links,
