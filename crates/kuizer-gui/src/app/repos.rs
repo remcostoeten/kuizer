@@ -537,10 +537,22 @@ impl Kuizer {
                 div()
                     .text_size(unit(15.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("Delete {}?", count(total, "merged branch", "merged branches"))),
+                    .child(format!(
+                        "Delete {} for good?",
+                        count(total, "merged branch", "merged branches")
+                    )),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "permanent-warning".to_owned())
+                    .text_color(theme::danger())
+                    .child(format!(
+                        "{} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.",
+                        count(total, "merged branch is", "merged branches are")
+                    )),
             )
             .child(div().text_color(theme::muted()).child(
-                "These local branches are already merged into their default branch. This does not go through the trash and Undo cannot bring them back, but their commits stay in the default branch, and git branch NAME COMMIT recreates one. Remote branches are not touched.",
+                "Their commits stay in the default branch, so git branch NAME COMMIT recreates one. Remote branches are not touched.",
             ))
             .child(
                 div()
@@ -587,7 +599,7 @@ impl Kuizer {
                             })),
                     )
                     .child(
-                        ui::button("confirm", "Delete branches", ButtonKind::Primary, total > 0)
+                        ui::button("confirm", "Delete for good", ButtonKind::Primary, total > 0)
                             .debug_selector(|| "confirm-branches".to_owned())
                             .tip(
                                 Tooltip::new("Delete these local branches")

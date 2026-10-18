@@ -80,9 +80,9 @@ impl<V: Visitor> Visitor for Option<V> {
 
 impl<A: Visitor, B: Visitor> Visitor for (A, B) {
     fn issue(&mut self, issue: Issue) -> Flow {
-        match self.0.issue(issue.clone()) {
-            Flow::Stop => Flow::Stop,
-            Flow::Continue => self.1.issue(issue),
+        match (self.0.issue(issue.clone()), self.1.issue(issue)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
         }
     }
 
@@ -92,9 +92,9 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
     }
 
     fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
-        match self.0.file(path, file_type) {
-            Flow::Stop => Flow::Stop,
-            Flow::Continue => self.1.file(path, file_type),
+        match (self.0.file(path, file_type), self.1.file(path, file_type)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
         }
     }
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::{Category, Detector, Listing, RuleError, RuleSpec, builtin_rules};
 use crate::platform;
+use crate::toolchains::Tool;
 use crate::units::ByteSize;
 
 pub use edit::{EditError, add_exclude, exclude_pattern};
@@ -25,6 +26,8 @@ pub struct Config {
     pub delete: DeleteConfig,
     pub git: GitConfig,
     pub appearance: AppearanceConfig,
+    pub toolchains: ToolchainConfig,
+    pub docker: DockerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +189,46 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self { motion: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolchainConfig {
+    pub tools: Vec<Tool>,
+    pub pins: bool,
+}
+
+impl Default for ToolchainConfig {
+    fn default() -> Self {
+        Self {
+            tools: Tool::ALL.to_vec(),
+            pins: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DockerConfig {
+    pub engines: Vec<String>,
+    pub timeout_secs: u64,
+    pub recent_hours: u64,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            engines: ["docker", "podman"].map(String::from).to_vec(),
+            timeout_secs: 10,
+            recent_hours: 24,
+        }
+    }
+}
+
+impl DockerConfig {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.max(1))
     }
 }
 
@@ -357,6 +400,34 @@ mod tests {
         assert_eq!(config.git.min_gain, ByteSize(1024 * 1024));
         assert!(!config.git.aggressive);
         assert!(config.appearance.motion);
+    }
+
+    #[test]
+    fn toolchain_tools_and_pins_are_configurable() {
+        let defaults = Config::default();
+        assert_eq!(defaults.toolchains.tools, Tool::ALL);
+        assert!(defaults.toolchains.pins);
+        let config =
+            parse("[toolchains]\ntools = [\"nvm\", \"go\"]\npins = false\n").expect("parses");
+        assert_eq!(config.toolchains.tools, [Tool::Nvm, Tool::Go]);
+        assert!(!config.toolchains.pins);
+        assert!(matches!(
+            parse("[toolchains]\ntools = [\"asdf\"]\n"),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn docker_engines_and_timeouts_are_configurable() {
+        let defaults = Config::default().docker;
+        assert_eq!(defaults.engines, ["docker", "podman"]);
+        assert_eq!(defaults.timeout(), std::time::Duration::from_secs(10));
+        let config =
+            parse("[docker]\nengines = [\"podman\"]\ntimeout_secs = 0\nrecent_hours = 2\n")
+                .expect("parses");
+        assert_eq!(config.docker.engines, ["podman"]);
+        assert_eq!(config.docker.timeout(), std::time::Duration::from_secs(1));
+        assert_eq!(config.docker.recent_hours, 2);
     }
 
     #[test]

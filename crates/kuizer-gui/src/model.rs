@@ -9,6 +9,7 @@ use kuizer::commands::{measure_caches, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, Safety};
+use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
 use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
 use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
@@ -17,6 +18,7 @@ use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
+use kuizer::toolchains::{self, Toolchain};
 
 use crate::start::ScanOptions;
 
@@ -29,6 +31,8 @@ pub enum Stage {
     Scanning(Progress),
     Duplicates(dupes::Stage),
     Caches,
+    Toolchains,
+    Docker,
     Repos,
     History,
 }
@@ -51,6 +55,8 @@ impl Stage {
                 format!("Duplicates  comparing {groups} groups")
             }
             Self::Caches => "Measuring global caches".to_owned(),
+            Self::Toolchains => "Measuring installed toolchains".to_owned(),
+            Self::Docker => "Asking Docker and Podman".to_owned(),
             Self::Repos => "Checking git repositories".to_owned(),
             Self::History => "Reading the cleanup history".to_owned(),
         }
@@ -160,6 +166,9 @@ pub struct Report {
     pub issues: Vec<Issue>,
     pub summary: Summary,
     pub caches: Vec<(KnownCache, Candidate)>,
+    pub toolchains: Vec<(Toolchain, Candidate)>,
+    pub docker: Vec<(docker::Item, Candidate)>,
+    pub docker_issues: Vec<String>,
     pub repos: Vec<Repository>,
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
@@ -184,6 +193,22 @@ impl Report {
 
     pub fn cache_total(&self, safety: Option<Safety>) -> u64 {
         self.caches
+            .iter()
+            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
+            .map(|(_, candidate)| candidate.usage.allocated)
+            .sum()
+    }
+
+    pub fn toolchain_total(&self, safety: Option<Safety>) -> u64 {
+        self.toolchains
+            .iter()
+            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
+            .map(|(_, candidate)| candidate.usage.allocated)
+            .sum()
+    }
+
+    pub fn docker_total(&self, safety: Option<Safety>) -> u64 {
+        self.docker
             .iter()
             .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
             .map(|(_, candidate)| candidate.usage.allocated)
@@ -226,6 +251,8 @@ impl Report {
         let gone = |path: &Path| paths.iter().any(|excluded| path.starts_with(excluded));
         self.candidates.retain(|candidate| !gone(&candidate.path));
         self.caches.retain(|(_, candidate)| !gone(&candidate.path));
+        self.toolchains
+            .retain(|(_, candidate)| !gone(&candidate.path));
         self.repos.retain(|repository| !gone(&repository.root));
         self.issues.retain(|issue| !gone(&issue.path));
         if let Some(duplicates) = &mut self.duplicates {
@@ -287,8 +314,9 @@ fn set(stage: &Mutex<Stage>, next: Stage) {
 }
 
 /// @name load
-/// @description Gathers everything the dashboard shows in one pass: project artifacts and
-/// duplicate files from a single walk, global caches, the cleanup history and free disk space.
+/// @description Gathers everything the dashboard shows in one pass: project artifacts, duplicate
+/// files and toolchain pins from a single walk, global caches, installed toolchains, the cleanup
+/// history and free disk space.
 /// The start screen's options decide which of these run. Reports progress through `stage` so the
 /// window can show it while this runs on a worker thread, and stops early once `cancel` is set.
 ///
@@ -304,12 +332,31 @@ pub fn load(
 ) -> Result<Report, String> {
     let config = options.apply(config);
     let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
-    let (handle, walked) = repos::start_scan(&config, roots, cancel.clone(), duplicate_options)
-        .map_err(|error| error.to_string())?;
+    let docker_config = config.docker.clone();
+    let containers = options.docker.then(|| {
+        std::thread::Builder::new()
+            .name("kuizer-gui-docker".to_owned())
+            .spawn(move || {
+                docker::list(
+                    &docker_config.engines,
+                    docker_config.timeout(),
+                    docker_config.recent_hours,
+                )
+            })
+    });
+    let pin_search = options.toolchains && config.toolchains.pins;
+    let (handle, walked) = repos::start_scan(
+        &config,
+        roots,
+        cancel.clone(),
+        duplicate_options,
+        pin_search,
+    )
+    .map_err(|error| error.to_string())?;
     let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
-    let (files, found_repos) = walked
+    let (files, pins, found_repos) = walked
         .recv()
-        .map(|walked| (walked.files, walked.repositories))
+        .map(|walked| (walked.files, walked.pins, walked.repositories))
         .unwrap_or_default();
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
@@ -348,11 +395,53 @@ pub fn load(
         Vec::new()
     };
 
+    let toolchains = if options.toolchains {
+        set(stage, Stage::Toolchains);
+        toolchains::Locations::for_user()
+            .map(|locations| {
+                let excludes = config.excludes().ok();
+                let mut found: Vec<Toolchain> =
+                    toolchains::find(&locations, &config.toolchains.tools)
+                        .into_iter()
+                        .filter(|toolchain| {
+                            excludes
+                                .as_ref()
+                                .is_none_or(|excludes| !excludes.path(&toolchain.path))
+                        })
+                        .collect();
+                if let Some(pins) = &pins {
+                    toolchains::apply_pins(&mut found, &pins.pins);
+                }
+                toolchains::measure(found)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
     let repos = if options.repos {
         set(stage, Stage::Repos);
         repos::inspect_all(found_repos, &config.git, cancel)
     } else {
         Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
+    let listing = match containers {
+        Some(Ok(handle)) => {
+            set(stage, Stage::Docker);
+            handle.join().unwrap_or_default()
+        }
+        Some(Err(error)) => docker::Listing {
+            items: Vec::new(),
+            issues: vec![format!("cannot ask Docker: {error}")],
+        },
+        None => docker::Listing::default(),
     };
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
@@ -375,6 +464,9 @@ pub fn load(
         issues: collected.issues,
         summary: collected.summary,
         caches,
+        toolchains,
+        docker: docker::entries(listing.items),
+        docker_issues: listing.issues,
         repos,
         duplicates,
         history,
@@ -387,6 +479,15 @@ pub fn load(
 pub enum Source {
     Artifact,
     Cache,
+    Toolchain,
+    Docker,
+}
+
+impl Source {
+    /// Toolchains and Docker objects are deleted for good; everything else goes to the trash.
+    pub fn permanent(self) -> bool {
+        matches!(self, Self::Toolchain | Self::Docker)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +560,13 @@ impl Outcome {
             .filter(|(_, removal)| removal.status == Status::Removed)
     }
 
+    /// Items that were deleted for good, which the undo bar cannot bring back.
+    pub fn deleted(&self) -> usize {
+        self.removed()
+            .filter(|(source, _)| source.permanent())
+            .count()
+    }
+
     pub fn failed(&self) -> impl Iterator<Item = &(Source, Removal)> {
         self.removals
             .iter()
@@ -466,32 +574,35 @@ impl Outcome {
     }
 }
 
-/// @name trash
-/// @description Moves every candidate to the trash. Each batch is checked against its own guard
-/// right before acting, exactly like the CLI, and everything that was moved is recorded as one
-/// run in the history file so `kuizer history` and `kuizer restore` see it.
-///
-/// @example
-/// let outcome = trash(vec![Batch { source: Source::Artifact, roots, candidates }]);
-pub fn trash(batches: Vec<Batch>) -> Outcome {
-    let mut all_roots: Vec<PathBuf> = batches
+fn run_batches(
+    batches: Vec<Batch>,
+    mode: Mode,
+    removals: &mut Vec<(Source, Removal)>,
+) -> (Option<u64>, Option<String>) {
+    let mut roots: Vec<PathBuf> = batches
         .iter()
         .flat_map(|batch| batch.roots.iter().cloned())
         .collect();
-    all_roots.sort();
-    all_roots.dedup();
-    let mut recorder = Recorder::for_user(history::now(), &all_roots);
-    let mut removals = Vec::new();
+    roots.sort();
+    roots.dedup();
+    let mut recorder = Recorder::for_user(history::now(), &roots);
     for batch in batches {
         let guard = Guard::new(&batch.roots);
         for candidate in batch.candidates {
-            let target = Target {
-                path: candidate.path.clone(),
-                identity: candidate.identity,
+            let result = match batch.source {
+                Source::Toolchain => toolchains::remove(&guard, &candidate, mode),
+                Source::Docker => docker::remove(&guard, &candidate, mode),
+                Source::Artifact | Source::Cache => {
+                    let target = Target {
+                        path: candidate.path.clone(),
+                        identity: candidate.identity,
+                    };
+                    delete::delete(&guard, &target, mode)
+                }
             };
-            let removal = match delete::delete(&guard, &target, Mode::Trash) {
+            let removal = match result {
                 Ok(()) => {
-                    recorder.add(Entry::new(&candidate, Mode::Trash));
+                    recorder.add(Entry::new(&candidate, mode));
                     Removal {
                         candidate,
                         status: Status::Removed,
@@ -507,10 +618,33 @@ pub fn trash(batches: Vec<Batch>) -> Outcome {
             removals.push((batch.source, removal));
         }
     }
+    let session = recorder.session();
+    (
+        session,
+        recorder.finish().err().map(|error| error.to_string()),
+    )
+}
+
+/// @name clean
+/// @description Moves artifacts and caches to the trash and deletes toolchains and Docker
+/// objects for good. Each
+/// batch is checked against its own guard right before acting, exactly like the CLI. Trashed
+/// items are recorded as one run in the history file, so `kuizer restore` and the undo bar see
+/// it; permanent removals are recorded as a separate run that nothing offers to undo.
+///
+/// @example
+/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }]);
+pub fn clean(batches: Vec<Batch>) -> Outcome {
+    let (permanent, trashed): (Vec<Batch>, Vec<Batch>) = batches
+        .into_iter()
+        .partition(|batch| batch.source.permanent());
+    let mut removals = Vec::new();
+    let (session, trash_error) = run_batches(trashed, Mode::Trash, &mut removals);
+    let (_, permanent_error) = run_batches(permanent, Mode::Permanent, &mut removals);
     Outcome {
         removals,
-        session: recorder.session(),
-        history_error: recorder.finish().err().map(|error| error.to_string()),
+        session,
+        history_error: trash_error.or(permanent_error),
     }
 }
 
@@ -736,6 +870,9 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
             repos: Vec::new(),
             duplicates: Some(Duplicates {
                 groups: vec![
@@ -792,6 +929,9 @@ mod tests {
                 cancelled: false,
             },
             caches: Vec::new(),
+            toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
             repos: Vec::new(),
             duplicates: None,
             history: Err(String::new()),

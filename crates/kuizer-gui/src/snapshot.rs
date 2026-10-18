@@ -4,16 +4,18 @@ use std::time::{Duration, SystemTime};
 
 use kuizer::caches;
 use kuizer::detect::{Category, Kind, RuleInfo, Safety};
+use kuizer::docker;
 use kuizer::dupes::{Duplicates, Group, Member};
 use kuizer::history::History;
 use kuizer::repos::Repository;
 use kuizer::scan::{Candidate, Issue, IssueKind, Progress, Summary, Usage};
+use kuizer::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Disk, HistoryView, Report};
 use crate::start::ScanOptions;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 3;
 const LIMIT: usize = 8;
 const EXTENSION: &str = "json";
 
@@ -139,6 +141,9 @@ struct Stored {
     issues: Vec<StoredIssue>,
     summary: StoredSummary,
     caches: Vec<(String, PathBuf, StoredCandidate)>,
+    toolchains: Vec<(Toolchain, StoredCandidate)>,
+    docker: Vec<docker::Item>,
+    docker_issues: Vec<String>,
     #[serde(default)]
     repos: Vec<Repository>,
     duplicates: Option<StoredDuplicates>,
@@ -168,6 +173,13 @@ impl Stored {
                     )
                 })
                 .collect(),
+            toolchains: report
+                .toolchains
+                .iter()
+                .map(|(toolchain, candidate)| (toolchain.clone(), StoredCandidate::new(candidate)))
+                .collect(),
+            docker: report.docker.iter().map(|(item, _)| item.clone()).collect(),
+            docker_issues: report.docker_issues.clone(),
             repos: report.repos.clone(),
             duplicates: report.duplicates.as_ref().map(StoredDuplicates::new),
             history: report
@@ -205,6 +217,13 @@ impl Stored {
                     Some((caches::known(&name, path)?, candidate.restore()))
                 })
                 .collect(),
+            toolchains: self
+                .toolchains
+                .into_iter()
+                .map(|(toolchain, candidate)| (toolchain, candidate.restore()))
+                .collect(),
+            docker: docker::entries(self.docker),
+            docker_issues: self.docker_issues,
             repos: self.repos,
             duplicates: self.duplicates.map(StoredDuplicates::restore),
             history: self.history.map(|stored| HistoryView {
@@ -521,6 +540,28 @@ mod tests {
                 caches::known("npm", PathBuf::from("/h/.npm/_cacache")).unwrap(),
                 candidate(1, "/h/.npm/_cacache"),
             )],
+            toolchains: vec![(
+                Toolchain {
+                    tool: kuizer::toolchains::Tool::Nvm,
+                    runtime: "node".to_owned(),
+                    version: "v18.17.0".to_owned(),
+                    path: PathBuf::from("/h/.nvm/versions/node/v18.17.0"),
+                    default: false,
+                    pins: vec![PathBuf::from("/p/a/.nvmrc")],
+                },
+                candidate(1, "/h/.nvm/versions/node/v18.17.0"),
+            )],
+            docker: docker::entries(vec![docker::Item {
+                engine: "docker".to_owned(),
+                program: "docker".to_owned(),
+                object: docker::Object::Image,
+                id: "abc".to_owned(),
+                label: "<none> abc".to_owned(),
+                bytes: 5,
+                safety: Safety::Safe,
+                note: String::new(),
+            }]),
+            docker_issues: vec!["podman is not running: down".to_owned()],
             repos: vec![Repository {
                 root: PathBuf::from("/p/kearn"),
                 git_dir: PathBuf::from("/p/kearn/.git"),
@@ -593,6 +634,10 @@ mod tests {
         assert_eq!(loaded.issues[0].kind, IssueKind::PermissionDenied);
         assert_eq!(loaded.summary, saved.summary);
         assert_eq!(loaded.caches[0].0, saved.caches[0].0);
+        assert_eq!(loaded.toolchains[0].0, saved.toolchains[0].0);
+        assert_eq!(loaded.docker[0].1.path, PathBuf::from("docker:image/abc"));
+        assert_eq!(loaded.docker_issues, saved.docker_issues);
+        assert_eq!(loaded.toolchains[0].1.path, saved.toolchains[0].1.path);
         assert_eq!(loaded.repos, saved.repos);
         let duplicates = loaded.duplicates.expect("duplicates");
         assert_eq!(

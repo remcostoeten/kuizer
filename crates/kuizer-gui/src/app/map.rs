@@ -468,6 +468,8 @@ impl Kuizer {
                     match item.source {
                         Source::Artifact => "project artifact",
                         Source::Cache => "global cache",
+                        Source::Toolchain => "toolchain",
+                        Source::Docker => "docker object",
                     },
                 ),
             Kind::Rest(count) => details.row("Items", count.to_string()).note(

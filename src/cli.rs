@@ -23,6 +23,8 @@ const RESET: &str = "\x1b[0m";
 const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
+const ABOUT_TOOLCHAIN: &str = "List and remove installed toolchain versions";
+const ABOUT_DOCKER: &str = "List and remove unused Docker and Podman objects";
 const ABOUT_GIT: &str = "Pack loose git objects and delete merged branches";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
 const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
@@ -38,6 +40,8 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("scan", ABOUT_SCAN),
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
+            ("toolchain", ABOUT_TOOLCHAIN),
+            ("docker", ABOUT_DOCKER),
             ("git", ABOUT_GIT),
             ("restore", ABOUT_RESTORE),
         ],
@@ -237,6 +241,53 @@ fn cache_examples() -> String {
     ])
 }
 
+fn toolchain_help() -> String {
+    format!(
+        "Lists rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions, SDKMAN candidates and Go SDKs in ~/sdk. A version that is a tool's default or that a project under PATH pins (rust-toolchain, .nvmrc, .python-version and similar) is marked review. Removal is always permanent: rustup and uv versions go through their own uninstall command, the rest is deleted. The tool downloads a version again when it is needed.\n\n{}",
+        examples(&[
+            (
+                "kuizer toolchain",
+                "",
+                "List versions, pins searched in the current directory"
+            ),
+            ("kuizer toolchain", "~/apps", "Search ~/apps for pin files"),
+            (
+                "kuizer toolchain",
+                "~/apps --clean --dry-run",
+                "Show which unused versions would be removed",
+            ),
+            (
+                "kuizer toolchain",
+                "~/apps --clean --select nvm",
+                "Remove every nvm Node version, after a confirmation",
+            ),
+        ])
+    )
+}
+
+fn docker_help() -> String {
+    format!(
+        "Lists dangling images, stopped containers, the build cache and volumes no container uses, for every engine in docker.engines. Only the engines' own CLIs run, so DOCKER_HOST and contexts apply. Removal is always permanent and goes through `image rm`, `container rm`, `builder prune` and `volume rm` without force, so the engine refuses anything still in use. Volumes and containers that stopped recently are marked review.\n\n{}",
+        examples(&[
+            (
+                "kuizer docker",
+                "",
+                "List what Docker and Podman could free"
+            ),
+            (
+                "kuizer docker",
+                "--clean --dry-run",
+                "Show which objects would be removed",
+            ),
+            (
+                "kuizer docker",
+                "--clean --select image --select build-cache",
+                "Remove dangling images and the build cache",
+            ),
+        ])
+    )
+}
+
 fn git_help() -> String {
     format!(
         "Neither action goes through the trash. Restore a deleted branch with the\n`git branch NAME COMMIT` line kuizer prints for it.\n\n{}",
@@ -421,6 +472,10 @@ pub enum Command {
     },
     #[command(about = ABOUT_CACHE, after_help = cache_examples())]
     Cache(CacheArgs),
+    #[command(about = ABOUT_TOOLCHAIN, visible_alias = "toolchains", after_help = toolchain_help())]
+    Toolchain(ToolchainArgs),
+    #[command(about = ABOUT_DOCKER, visible_alias = "podman", after_help = docker_help())]
+    Docker(DockerArgs),
     #[command(about = ABOUT_GIT, visible_alias = "repos", after_help = git_help())]
     Git(GitArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
@@ -646,6 +701,41 @@ pub struct CacheArgs {
     #[arg(
         long,
         help = "Remove the selected caches after a preview",
+        help_heading = "Removal"
+    )]
+    pub clean: bool,
+    #[command(flatten)]
+    pub removal: RemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct ToolchainArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to search for pin files [default: scan.roots or the current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Remove the selected versions after a preview, always permanently",
+        help_heading = "Removal"
+    )]
+    pub clean: bool,
+    #[command(flatten)]
+    pub removal: RemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct DockerArgs {
+    #[arg(
+        long,
+        help = "Remove the selected objects after a preview, always permanently",
         help_heading = "Removal"
     )]
     pub clean: bool,

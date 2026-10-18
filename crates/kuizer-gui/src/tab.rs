@@ -10,6 +10,8 @@ pub enum Tab {
     Overview,
     Artifacts,
     Caches,
+    Toolchains,
+    Docker,
     Repos,
     Duplicates,
     History,
@@ -17,10 +19,12 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 9] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
+        Self::Toolchains,
+        Self::Docker,
         Self::Repos,
         Self::Duplicates,
         Self::History,
@@ -39,11 +43,21 @@ impl Tab {
         Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
+    /// Whether rows in this section can be selected for removal.
+    pub fn selects(self) -> bool {
+        matches!(
+            self,
+            Self::Artifacts | Self::Caches | Self::Toolchains | Self::Docker
+        )
+    }
+
     pub fn term(self) -> Term {
         match self {
             Self::Overview => Term::Overview,
             Self::Artifacts => Term::ProjectArtifacts,
             Self::Caches => Term::GlobalCaches,
+            Self::Toolchains => Term::Toolchains,
+            Self::Docker => Term::Docker,
             Self::Repos => Term::GitRepositories,
             Self::Duplicates => Term::DuplicateFiles,
             Self::History => Term::History,
@@ -56,6 +70,8 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Artifacts => "Project artifacts",
             Self::Caches => "Global caches",
+            Self::Toolchains => "Toolchains",
+            Self::Docker => "Docker",
             Self::Repos => "Git repositories",
             Self::Duplicates => "Duplicates",
             Self::History => "History",
@@ -84,6 +100,18 @@ impl Tab {
                 Stage::Caches => "Measuring global caches",
                 Stage::History => "Caches measured, shown once the scan is done",
                 _ => "Measured after the folder scan",
+            },
+            Self::Toolchains if !options.toolchains => "Toolchains are off for this scan",
+            Self::Toolchains => match stage {
+                Stage::Toolchains => "Measuring installed toolchains",
+                Stage::History => "Toolchains measured, shown once the scan is done",
+                _ => "Measured after the folder scan",
+            },
+            Self::Docker if !options.docker => "Docker and Podman are off for this scan",
+            Self::Docker => match stage {
+                Stage::Docker => "Asking Docker and Podman",
+                Stage::History => "Docker objects listed, shown once the scan is done",
+                _ => "Asked while the folders are scanned",
             },
             Self::Repos if !options.repos => "Git repositories are off for this scan",
             Self::Repos if walking => "Noting git repositories while scanning folders",

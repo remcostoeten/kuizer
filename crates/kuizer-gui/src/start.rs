@@ -18,6 +18,10 @@ pub struct ScanOptions {
     pub max_depth: Option<usize>,
     pub caches: bool,
     #[serde(default = "enabled")]
+    pub toolchains: bool,
+    #[serde(default = "enabled")]
+    pub docker: bool,
+    #[serde(default = "enabled")]
     pub repos: bool,
     pub duplicates: bool,
     pub one_file_system: bool,
@@ -34,6 +38,8 @@ impl ScanOptions {
             min_size: config.scan.min_size.0,
             max_depth: config.scan.max_depth,
             caches: true,
+            toolchains: true,
+            docker: true,
             repos: true,
             duplicates: true,
             one_file_system: config.scan.one_file_system,

@@ -14,6 +14,7 @@ use crate::platform::MountTable;
 use crate::protect::Protected;
 use crate::scan::walk::{Flow, Visitor, Walker};
 use crate::scan::{self, Cancel, Issue, Scan};
+use crate::toolchains::PinFinder;
 
 const KIB: u64 = 1024;
 const STALE_GC: Duration = Duration::from_secs(12 * 60 * 60);
@@ -158,16 +159,18 @@ impl Visitor for Repositories {
 
 pub struct Walked {
     pub files: Option<Files>,
+    pub pins: Option<PinFinder>,
     pub repositories: Vec<PathBuf>,
 }
 
 /// @name start_scan
-/// @description Starts an artifact scan that also notes every git repository and, with
-/// `duplicates`, collects files for duplicate detection, all during one walk. The receiver
-/// yields what was collected once the walk ends.
+/// @description Starts an artifact scan that also notes every git repository during the same
+/// walk, and like `dupes::start_scan_with_pins` collects files for duplicate detection with
+/// `duplicates` and toolchain pin files with `pins`. The receiver yields what was collected once
+/// the walk ends.
 ///
 /// @example
-/// let (scan, walked) = repos::start_scan(&config, &roots, Cancel::new(), None)?;
+/// let (scan, walked) = repos::start_scan(&config, &roots, Cancel::new(), None, false)?;
 /// let collected = scan::collect(&scan, |_| {});
 /// let found = repos::inspect_all(walked.recv()?.repositories, &config.git, &Cancel::new());
 pub fn start_scan(
@@ -175,20 +178,25 @@ pub fn start_scan(
     roots: &[PathBuf],
     cancel: Cancel,
     duplicates: Option<Options>,
+    pins: bool,
 ) -> Result<(Scan, Receiver<Walked>), ConfigError> {
     let (scan, companion) = scan::start_with(
         config,
         roots,
         cancel,
-        (duplicates.map(Files::new), Repositories::default()),
+        (
+            (duplicates.map(Files::new), pins.then(PinFinder::new)),
+            Repositories::default(),
+        ),
     )?;
     let (sender, receiver) = crossbeam_channel::bounded(1);
     thread::Builder::new()
         .name("kuizer-repos".to_owned())
         .spawn(move || {
-            if let Ok((files, repositories)) = companion.recv() {
+            if let Ok(((files, pins), repositories)) = companion.recv() {
                 let _ = sender.send(Walked {
                     files,
+                    pins,
                     repositories: repositories.roots,
                 });
             }

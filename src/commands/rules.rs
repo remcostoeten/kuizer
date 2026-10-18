@@ -19,6 +19,7 @@ pub fn run(config: &Config, json: bool) -> Result<(), AppError> {
         let kind = match spec.kind {
             Kind::Dir => "dir",
             Kind::File => "file",
+            Kind::External => "external",
         };
         println!(
             "{:<22}  {:<4}  {:<14}  {:<12}  {:<6}  {:<28}  {}",

@@ -19,6 +19,8 @@ pub enum Term {
     Tool,
     ProjectArtifacts,
     GlobalCaches,
+    Toolchains,
+    Docker,
     DuplicateFiles,
     Reclaimable,
     Groups,
@@ -43,7 +45,7 @@ pub enum Term {
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 37] = [
+    pub const ALL: [Term; 39] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -61,6 +63,8 @@ impl Term {
         Self::Tool,
         Self::ProjectArtifacts,
         Self::GlobalCaches,
+        Self::Toolchains,
+        Self::Docker,
         Self::DuplicateFiles,
         Self::Reclaimable,
         Self::Groups,
@@ -118,6 +122,8 @@ impl Term {
             Self::Tool => "Tool",
             Self::ProjectArtifacts => "Project artifacts",
             Self::GlobalCaches => "Global caches",
+            Self::Toolchains => "Toolchains",
+            Self::Docker => "Docker",
             Self::DuplicateFiles => "Duplicate files",
             Self::Reclaimable => "Reclaimable",
             Self::Groups => "Groups",
@@ -191,6 +197,12 @@ impl Term {
             }
             Self::GlobalCaches => {
                 "Caches that package managers and tools keep in your home folder, shared by all projects. Safe caches fill up again on the next install or build."
+            }
+            Self::Toolchains => {
+                "Installed versions of rustup, nvm, fnm, volta, pyenv, uv, SDKMAN and Go. A default version or one a project under the scanned folder pins is marked review. Removing a version deletes it for good, it does not go to the trash, and the tool downloads it again when needed."
+            }
+            Self::Docker => {
+                "Dangling images, stopped containers, the build cache and volumes no container uses, from Docker and Podman. kuizer removes them through the engine, which refuses anything in use. Removal is permanent: nothing goes to the trash. Volumes can hold data and are always marked review."
             }
             Self::DuplicateFiles => {
                 "Files with exactly the same content in more than one place. Keeping one copy of each frees the rest."
