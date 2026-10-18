@@ -1,4 +1,4 @@
-//! The command palette, the shortcuts overlay, the list filter bar and the status bar hint.
+//! The command palette, the shortcuts overlay, the list filter bar and the titlebar search field.
 
 use super::*;
 use crate::commands::{Group, HINTS};
@@ -276,25 +276,52 @@ impl Kuizer {
     }
 
     /// Opens the palette from the status bar, and says which key does the same.
-    pub(super) fn render_palette_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let key = commands::shortcut(&Command::Palette).unwrap_or_default();
         div()
-            .id("palette-hint")
+            .id("search")
+            .debug_selector(|| "search".to_owned())
             .flex()
+            .flex_none()
             .items_center()
-            .gap(unit(space::S))
+            .gap(unit(space::M))
+            .w(unit(size::FILTER))
             .h(unit(size::CONTROL))
-            .px(unit(space::M))
-            .rounded(theme::radius_button())
+            .pl(unit(space::M))
+            .pr(unit(space::XS))
+            .rounded(theme::radius_control())
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::background())
             .cursor_pointer()
-            .text_size(unit(font::BODY))
-            .text_color(theme::muted())
-            .hover(|style| style.bg(theme::hover()))
-            .tip(tooltip::plain(
-                "Search every command, section and recent folder",
+            .text_size(unit(font::SMALL))
+            .text_color(theme::faint())
+            .hover(|style| {
+                style
+                    .border_color(theme::border_strong())
+                    .text_color(theme::muted())
+            })
+            .tip_hover(
+                tooltip::plain("Search every command, section and recent folder"),
+                cx.listener(|app, hovered: &bool, _, cx| {
+                    app.hover_icon(Icon::Search, *hovered, cx);
+                }),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(icon::view(
+                Icon::Search,
+                theme::faint(),
+                self.icon_epoch(Icon::Search),
+                self.zoom.rem_size(),
             ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child("Search or run a command"),
+            )
             .child(ui::kbd(key))
-            .child("Commands")
             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.open_palette(cx)))
     }
 }
