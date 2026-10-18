@@ -4,7 +4,7 @@ use gpui::{
     WindowDecorations, canvas, div, point, prelude::*, px,
 };
 
-use crate::theme::{self, unit};
+use crate::theme::{self, size, space, unit};
 
 pub const TITLEBAR: Pixels = px(40.);
 const SHADOW: Pixels = px(10.);
@@ -162,7 +162,9 @@ fn resize_cursor(tiling: Tiling) -> impl IntoElement {
         move |_, hitbox, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             let Some(edge) = resize_edge(window.mouse_position(), SHADOW, size, tiling) else {
-                cx.remove_global::<HoveredEdge>();
+                if cx.has_global::<HoveredEdge>() {
+                    cx.remove_global::<HoveredEdge>();
+                }
                 return;
             };
             cx.set_global(HoveredEdge(edge));
@@ -248,7 +250,7 @@ pub fn controls(window: &Window) -> Option<Div> {
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(2.))
+            .gap(unit(space::XXS))
             .when(offered.minimize, |this| {
                 this.child(control(Control::Minimize))
             })
@@ -269,7 +271,7 @@ fn control(kind: Control) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .size(unit(28.))
+        .size(unit(size::CONTROL))
         .rounded(theme::radius_button())
         .cursor_pointer()
         .hover(|style| style.bg(theme::hover()))
