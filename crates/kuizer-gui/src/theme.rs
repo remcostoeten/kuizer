@@ -37,6 +37,10 @@ pub fn selected() -> Rgba {
     rgb(0x002f_2f2f)
 }
 
+pub fn cursor() -> Rgba {
+    rgb(0x0090_9090)
+}
+
 pub fn border() -> Rgba {
     rgb(0x002a_2a2a)
 }
