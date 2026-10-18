@@ -49,6 +49,7 @@ impl Safety {
 pub enum Kind {
     Dir,
     File,
+    External,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

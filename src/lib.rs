@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod delete;
 pub mod detect;
+pub mod docker;
 pub mod dupes;
 pub mod git;
 pub mod history;

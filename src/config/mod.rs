@@ -26,6 +26,7 @@ pub struct Config {
     pub delete: DeleteConfig,
     pub appearance: AppearanceConfig,
     pub toolchains: ToolchainConfig,
+    pub docker: DockerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +182,30 @@ impl Default for ToolchainConfig {
             tools: Tool::ALL.to_vec(),
             pins: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DockerConfig {
+    pub engines: Vec<String>,
+    pub timeout_secs: u64,
+    pub recent_hours: u64,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            engines: ["docker", "podman"].map(String::from).to_vec(),
+            timeout_secs: 10,
+            recent_hours: 24,
+        }
+    }
+}
+
+impl DockerConfig {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.max(1))
     }
 }
 
@@ -365,6 +390,19 @@ mod tests {
             parse("[toolchains]\ntools = [\"asdf\"]\n"),
             Err(ConfigError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn docker_engines_and_timeouts_are_configurable() {
+        let defaults = Config::default().docker;
+        assert_eq!(defaults.engines, ["docker", "podman"]);
+        assert_eq!(defaults.timeout(), std::time::Duration::from_secs(10));
+        let config =
+            parse("[docker]\nengines = [\"podman\"]\ntimeout_secs = 0\nrecent_hours = 2\n")
+                .expect("parses");
+        assert_eq!(config.docker.engines, ["podman"]);
+        assert_eq!(config.docker.timeout(), std::time::Duration::from_secs(1));
+        assert_eq!(config.docker.recent_hours, 2);
     }
 
     #[test]

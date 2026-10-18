@@ -41,3 +41,8 @@ motion = true
 [toolchains]
 tools = ["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]
 pins = true
+
+[docker]
+engines = ["docker", "podman"]
+timeout_secs = 10
+recent_hours = 24

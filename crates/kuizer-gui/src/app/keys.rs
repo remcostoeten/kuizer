@@ -12,7 +12,7 @@ const START_FIRST: &str = "Start a scan first";
 const NEEDS_SCAN: &str = "Available once a scan is shown";
 const WAIT_FOR_SCAN: &str = "Available once the scan finishes";
 const WAIT_FOR_CLEANUP: &str = "Available once the cleanup finishes";
-const SELECT_LISTS: &str = "Available in Project artifacts, Global caches and Toolchains";
+const SELECT_LISTS: &str = "Available in Project artifacts, Global caches, Toolchains and Docker";
 const LISTS_ONLY: &str = "Available in a list section";
 const NO_ROWS: &str = "This list has no rows";
 
@@ -125,6 +125,19 @@ impl Kuizer {
                 toolchain.tool.name(),
                 toolchain.runtime.as_str(),
                 toolchain.version.as_str(),
+            ],
+        )
+    }
+
+    pub(super) fn shows_docker(&self, item: &kuizer::docker::Item, candidate: &Candidate) -> bool {
+        found(
+            self.needle(Tab::Docker).as_deref(),
+            &[
+                candidate.path.to_string_lossy().as_ref(),
+                item.engine.as_str(),
+                item.object.name(),
+                item.label.as_str(),
+                item.note.as_str(),
             ],
         )
     }
@@ -460,6 +473,11 @@ impl Kuizer {
                 .cursor_target()
                 .is_none()
                 .then_some("Focus an item tile first"),
+            Command::Reveal
+                if matches!(self.cursor_target(), Some(Target::Item(Source::Docker, ..))) =>
+            {
+                Some(NOT_ON_DISK)
+            }
             Command::Down
             | Command::Up
             | Command::First
@@ -601,7 +619,7 @@ impl Kuizer {
     }
 
     /// Every row of a list in the order it is drawn, after its filters.
-    fn targets(&self, tab: Tab) -> Vec<Target> {
+    pub(super) fn targets(&self, tab: Tab) -> Vec<Target> {
         let Some(report) = self.report() else {
             return Vec::new();
         };
@@ -631,6 +649,14 @@ impl Kuizer {
                 .filter(|(toolchain, candidate)| self.shows_toolchain(toolchain, candidate))
                 .map(|(_, candidate)| {
                     Target::Item(Source::Toolchain, candidate.id, candidate.path.clone())
+                })
+                .collect(),
+            Tab::Docker => report
+                .docker
+                .iter()
+                .filter(|(item, candidate)| self.shows_docker(item, candidate))
+                .map(|(_, candidate)| {
+                    Target::Item(Source::Docker, candidate.id, candidate.path.clone())
                 })
                 .collect(),
             Tab::Duplicates => report
@@ -776,6 +802,7 @@ impl Kuizer {
             Tab::Artifacts => report.candidates.len(),
             Tab::Caches => report.caches.len(),
             Tab::Toolchains => report.toolchains.len(),
+            Tab::Docker => report.docker.len(),
             Tab::Duplicates => report.duplicates.as_ref().map_or(0, |found| {
                 found
                     .groups

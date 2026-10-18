@@ -21,7 +21,7 @@ Every item comes from a source, and every source has the same verbs, filters, se
 | projects (default) | dependency folders, build output, project caches, temp files | yes |
 | `cache` | global tool caches: npm, pnpm, cargo, pip, uv and others | yes |
 | `toolchain` | rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions, SDKMAN candidates, Go SDKs in `~/sdk` | yes, always permanently |
-| `docker` | dangling images, build cache, stopped containers | yes, through the `docker` CLI |
+| `docker` | Docker and Podman dangling images, build cache, stopped containers, orphaned volumes | yes, through the engine's CLI, always permanently |
 | `duplicates` | groups of files with identical contents | no, report only |
 | `big` | large files and directories that match no artifact rule | no, report only |
 

@@ -9,6 +9,7 @@ use kuizer::commands::{measure_caches, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, Safety};
+use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
 use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
 use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
@@ -30,6 +31,7 @@ pub enum Stage {
     Duplicates(dupes::Stage),
     Caches,
     Toolchains,
+    Docker,
     History,
 }
 
@@ -52,6 +54,7 @@ impl Stage {
             }
             Self::Caches => "Measuring global caches".to_owned(),
             Self::Toolchains => "Measuring installed toolchains".to_owned(),
+            Self::Docker => "Asking Docker and Podman".to_owned(),
             Self::History => "Reading the cleanup history".to_owned(),
         }
     }
@@ -161,6 +164,8 @@ pub struct Report {
     pub summary: Summary,
     pub caches: Vec<(KnownCache, Candidate)>,
     pub toolchains: Vec<(Toolchain, Candidate)>,
+    pub docker: Vec<(docker::Item, Candidate)>,
+    pub docker_issues: Vec<String>,
     pub duplicates: Option<Duplicates>,
     pub history: Result<HistoryView, String>,
     pub disks: Vec<Disk>,
@@ -192,6 +197,14 @@ impl Report {
 
     pub fn toolchain_total(&self, safety: Option<Safety>) -> u64 {
         self.toolchains
+            .iter()
+            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
+            .map(|(_, candidate)| candidate.usage.allocated)
+            .sum()
+    }
+
+    pub fn docker_total(&self, safety: Option<Safety>) -> u64 {
+        self.docker
             .iter()
             .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
             .map(|(_, candidate)| candidate.usage.allocated)
@@ -314,6 +327,18 @@ pub fn load(
 ) -> Result<Report, String> {
     let config = options.apply(config);
     let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
+    let docker_config = config.docker.clone();
+    let containers = options.docker.then(|| {
+        std::thread::Builder::new()
+            .name("kuizer-gui-docker".to_owned())
+            .spawn(move || {
+                docker::list(
+                    &docker_config.engines,
+                    docker_config.timeout(),
+                    docker_config.recent_hours,
+                )
+            })
+    });
     let pin_search = options.toolchains && config.toolchains.pins;
     let (handle, found) = dupes::start_scan_with_pins(
         &config,
@@ -366,7 +391,16 @@ pub fn load(
         set(stage, Stage::Toolchains);
         toolchains::Locations::for_user()
             .map(|locations| {
-                let mut found = toolchains::find(&locations, &config.toolchains.tools);
+                let excludes = config.excludes().ok();
+                let mut found: Vec<Toolchain> =
+                    toolchains::find(&locations, &config.toolchains.tools)
+                        .into_iter()
+                        .filter(|toolchain| {
+                            excludes
+                                .as_ref()
+                                .is_none_or(|excludes| !excludes.path(&toolchain.path))
+                        })
+                        .collect();
                 if let Some(pins) = &pins {
                     toolchains::apply_pins(&mut found, &pins.pins);
                 }
@@ -375,6 +409,21 @@ pub fn load(
             .unwrap_or_default()
     } else {
         Vec::new()
+    };
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+
+    let listing = match containers {
+        Some(Ok(handle)) => {
+            set(stage, Stage::Docker);
+            handle.join().unwrap_or_default()
+        }
+        Some(Err(error)) => docker::Listing {
+            items: Vec::new(),
+            issues: vec![format!("cannot ask Docker: {error}")],
+        },
+        None => docker::Listing::default(),
     };
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
@@ -398,6 +447,8 @@ pub fn load(
         summary: collected.summary,
         caches,
         toolchains,
+        docker: docker::entries(listing.items),
+        docker_issues: listing.issues,
         duplicates,
         history,
         disks,
@@ -410,12 +461,13 @@ pub enum Source {
     Artifact,
     Cache,
     Toolchain,
+    Docker,
 }
 
 impl Source {
-    /// Toolchains are deleted for good; everything else goes to the trash.
+    /// Toolchains and Docker objects are deleted for good; everything else goes to the trash.
     pub fn permanent(self) -> bool {
-        self == Self::Toolchain
+        matches!(self, Self::Toolchain | Self::Docker)
     }
 }
 
@@ -518,14 +570,16 @@ fn run_batches(
     for batch in batches {
         let guard = Guard::new(&batch.roots);
         for candidate in batch.candidates {
-            let result = if batch.source.permanent() {
-                toolchains::remove(&guard, &candidate, mode)
-            } else {
-                let target = Target {
-                    path: candidate.path.clone(),
-                    identity: candidate.identity,
-                };
-                delete::delete(&guard, &target, mode)
+            let result = match batch.source {
+                Source::Toolchain => toolchains::remove(&guard, &candidate, mode),
+                Source::Docker => docker::remove(&guard, &candidate, mode),
+                Source::Artifact | Source::Cache => {
+                    let target = Target {
+                        path: candidate.path.clone(),
+                        identity: candidate.identity,
+                    };
+                    delete::delete(&guard, &target, mode)
+                }
             };
             let removal = match result {
                 Ok(()) => {
@@ -553,7 +607,8 @@ fn run_batches(
 }
 
 /// @name clean
-/// @description Moves artifacts and caches to the trash and deletes toolchains for good. Each
+/// @description Moves artifacts and caches to the trash and deletes toolchains and Docker
+/// objects for good. Each
 /// batch is checked against its own guard right before acting, exactly like the CLI. Trashed
 /// items are recorded as one run in the history file, so `kuizer restore` and the undo bar see
 /// it; permanent removals are recorded as a separate run that nothing offers to undo.
@@ -797,6 +852,8 @@ mod tests {
             },
             caches: Vec::new(),
             toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
             duplicates: Some(Duplicates {
                 groups: vec![
                     group(&["/p/a/node_modules/x", "/p/b/x"]),
@@ -853,6 +910,8 @@ mod tests {
             },
             caches: Vec::new(),
             toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
             duplicates: None,
             history: Err(String::new()),
             disks: Vec::new(),
