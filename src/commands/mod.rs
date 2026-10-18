@@ -20,7 +20,7 @@ use crate::config::{Config, ConfigError};
 use crate::history::HistoryError;
 use clap::CommandFactory;
 
-pub use cache::measure as measure_caches;
+pub use cache::{measure as measure_caches, measure_until as measure_caches_until};
 pub use scan::sort_candidates;
 
 #[derive(Debug, thiserror::Error)]

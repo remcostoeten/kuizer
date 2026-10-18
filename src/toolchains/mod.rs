@@ -420,13 +420,21 @@ pub fn apply_pins(toolchains: &mut [Toolchain], pins: &[Pin]) {
 /// @example
 /// let entries = toolchains::measure(toolchains::find(&locations, &Tool::ALL));
 pub fn measure(found: Vec<Toolchain>) -> Vec<(Toolchain, Candidate)> {
-    let cancel = Cancel::new();
+    measure_until(found, &Cancel::new())
+}
+
+/// @name measure_until
+/// @description Like `measure`, and every toolchain stops being walked once `cancel` is set, so a
+/// scan that was cancelled does not keep reading the disk. Toolchains cut short are marked partial.
+///
+/// @example
+/// let entries = toolchains::measure_until(found, &cancel);
+pub fn measure_until(found: Vec<Toolchain>, cancel: &Cancel) -> Vec<(Toolchain, Candidate)> {
     let mut entries: Vec<(Toolchain, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found
             .into_iter()
             .enumerate()
             .map(|(index, toolchain)| {
-                let cancel = &cancel;
                 scope.spawn(move || {
                     let measured = scan::measure(&toolchain.path, cancel);
                     let candidate = Candidate {

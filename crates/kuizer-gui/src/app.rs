@@ -30,8 +30,8 @@ use crate::frame;
 use crate::glossary::Term;
 use crate::icon::{self, Icon};
 use crate::model::{
-    self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, Stage,
-    TrashState,
+    self, Batch, Confirmation, HistoryView, Loaded, Outcome, Part, Report, Restored, Scope, Source,
+    Stage, TrashState,
 };
 use crate::motion;
 use crate::palette::Palette;
@@ -92,6 +92,7 @@ struct Finished {
 
 enum Update {
     Cached(Report),
+    Part(Loaded),
     Done(Result<Report, String>),
 }
 
@@ -265,6 +266,8 @@ pub struct Kuizer {
     moving: bool,
     cancel: Option<Cancel>,
     started: Instant,
+    stage: Stage,
+    pending: HashSet<Part>,
     font: SharedString,
     focus: FocusHandle,
     phase: Phase,
@@ -340,6 +343,8 @@ impl Kuizer {
             moving: false,
             cancel: None,
             started: Instant::now(),
+            stage: Stage::default(),
+            pending: HashSet::new(),
             font,
             focus,
             phase: Phase::Start,
@@ -526,7 +531,14 @@ impl Kuizer {
     }
 
     fn refreshing(&self) -> bool {
-        self.stale.is_some()
+        self.stale.is_some() || !self.pending.is_empty()
+    }
+
+    fn tab_pending(&self, tab: Tab) -> bool {
+        match tab.part() {
+            Some(part) => self.pending.contains(&part),
+            None => !self.pending.is_empty(),
+        }
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -540,6 +552,8 @@ impl Kuizer {
             self.rows.clear();
             false
         };
+        self.pending.clear();
+        self.stage = Stage::default();
         self.started = Instant::now();
         let cancel = Cancel::new();
         self.cancel = Some(cancel.clone());
@@ -557,7 +571,10 @@ impl Kuizer {
                     if !shown && let Some(report) = snapshots.load(&roots, &options) {
                         let _ = sender.send(Update::Cached(report));
                     }
-                    let result = model::load(&config, &roots, &options, &cancel, &stage);
+                    let result =
+                        model::load(&config, &roots, &options, &cancel, &stage, &|loaded| {
+                            let _ = sender.send(Update::Part(loaded));
+                        });
                     if let Ok(report) = &result {
                         snapshots.save(report);
                     }
@@ -568,37 +585,36 @@ impl Kuizer {
         self.task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                let update = match receiver.try_recv() {
-                    Ok(update) => Some(update),
-                    Err(TryRecvError::Empty) => None,
-                    Err(TryRecvError::Disconnected) => Some(Update::Done(Err(
-                        "the scan stopped unexpectedly".to_owned(),
-                    ))),
-                };
+                let mut updates = Vec::new();
+                let mut done = false;
+                while !done {
+                    match receiver.try_recv() {
+                        Ok(update) => {
+                            done = matches!(update, Update::Done(_));
+                            updates.push(update);
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            done = true;
+                            updates.push(Update::Done(Err(
+                                "the scan stopped unexpectedly".to_owned()
+                            )));
+                        }
+                    }
+                }
                 let current = stage.lock().map(|stage| *stage).unwrap_or_default();
-                let done = matches!(update, Some(Update::Done(_)));
                 let updated = this.update(cx, |app, cx| {
-                    match update {
-                        Some(Update::Cached(report)) => {
-                            if matches!(app.phase, Phase::Loading(_)) {
-                                app.stale = Some(report.scanned);
-                                app.adopt(report);
-                            }
-                        }
-                        Some(Update::Done(Ok(report))) => app.adopt(report),
-                        Some(Update::Done(Err(error))) if error == model::CANCELLED => {
-                            app.phase = Phase::Start;
-                        }
-                        Some(Update::Done(Err(error))) => app.phase = Phase::Failed(error),
-                        None => {
-                            if matches!(app.phase, Phase::Loading(_)) {
-                                app.phase = Phase::Loading(current);
-                            }
-                        }
+                    app.stage = current;
+                    for update in updates {
+                        app.apply(update);
+                    }
+                    if matches!(app.phase, Phase::Loading(_)) {
+                        app.phase = Phase::Loading(current);
                     }
                     if done {
                         app.cancel = None;
                         app.stale = None;
+                        app.pending.clear();
                     }
                     app.refresh_rows();
                     cx.notify();
@@ -608,6 +624,41 @@ impl Kuizer {
                 }
             }
         }));
+    }
+
+    fn apply(&mut self, update: Update) {
+        match update {
+            Update::Cached(report) => {
+                if matches!(self.phase, Phase::Loading(_)) {
+                    self.stale = Some(report.scanned);
+                    self.adopt(report);
+                }
+            }
+            Update::Part(loaded) => self.receive(loaded),
+            Update::Done(Ok(report)) => self.adopt(report),
+            Update::Done(Err(error)) if error == model::CANCELLED => {
+                self.phase = Phase::Start;
+            }
+            Update::Done(Err(error)) => self.phase = Phase::Failed(error),
+        }
+    }
+
+    fn receive(&mut self, loaded: Loaded) {
+        if self.stale.is_some() {
+            return;
+        }
+        let part = loaded.part();
+        match &mut self.phase {
+            Phase::Loading(_) => {
+                let mut report = Report::empty(&self.roots, &self.options);
+                report.apply(loaded);
+                self.pending = Part::expected(&self.options);
+                self.phase = Phase::Ready(Box::new(report));
+            }
+            Phase::Ready(report) => report.apply(loaded),
+            Phase::Start | Phase::Failed(_) => return,
+        }
+        self.pending.remove(&part);
     }
 
     fn adopt(&mut self, report: Report) {
@@ -643,6 +694,7 @@ impl Kuizer {
         };
         self.selection = selection;
         self.phase = Phase::Ready(Box::new(report));
+        self.pending.clear();
         self.menu = None;
         self.prune();
     }
@@ -681,6 +733,7 @@ impl Kuizer {
         }
         self.task = None;
         self.stale = None;
+        self.pending.clear();
         self.phase = Phase::Start;
         cx.notify();
     }
@@ -1143,10 +1196,12 @@ impl Kuizer {
     fn trash_lock(&self) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
-        } else if self.refreshing() {
+        } else if self.stale.is_some() {
             Some(
                 "Available once the fresh scan finishes. These results come from an earlier scan, so every item is checked again first",
             )
+        } else if self.refreshing() {
+            Some("Available once the scan finishes")
         } else {
             None
         }
@@ -1671,6 +1726,13 @@ impl Kuizer {
                         .tip(Tooltip::new("Stop the fresh scan").keys(&["Esc"]).build()),
                 )
         });
+        let streaming = (self.stale.is_none() && !self.pending.is_empty()).then(|| {
+            ui::tag("still-scanning", "Still scanning", ui::Tone::Neutral)
+                .debug_selector(|| "still-scanning".to_owned())
+                .tip(tooltip::plain(
+                    "Sections show up as they finish. Selecting and moving to the trash unlock when the whole scan is done",
+                ))
+        });
         let controls = frame::controls(window);
         let custom = controls.is_some();
         let aligned = !matches!(self.phase, Phase::Start)
@@ -1776,6 +1838,7 @@ impl Kuizer {
                     .justify_end()
                     .gap(unit(space::L))
                     .children(stale)
+                    .children(streaming)
                     .child(actions)
                     .children(controls),
             )
@@ -1802,7 +1865,7 @@ impl Kuizer {
     }
 
     fn tab_count(&self, tab: Tab) -> Option<usize> {
-        let report = self.report()?;
+        let report = self.report().filter(|_| !self.tab_pending(tab))?;
         match tab {
             Tab::Overview => None,
             Tab::Artifacts => Some(report.candidates.len()),
@@ -1822,7 +1885,7 @@ impl Kuizer {
 
     /// The space a section can free, shown next to it in the sidebar.
     fn tab_bytes(&self, tab: Tab) -> Option<u64> {
-        let report = self.report()?;
+        let report = self.report().filter(|_| !self.tab_pending(tab))?;
         let bytes = match tab {
             Tab::Overview | Tab::History | Tab::Issues => return None,
             Tab::Artifacts => report.total(None),
@@ -2122,6 +2185,7 @@ impl Kuizer {
         match &self.phase {
             Phase::Start => self.render_start(cx),
             Phase::Loading(stage) => self.render_loading(*stage),
+            Phase::Ready(_) if self.tab_pending(self.tab) => self.render_loading(self.stage),
             Phase::Failed(error) => centered(
                 div()
                     .flex()
@@ -5009,7 +5073,9 @@ mod tests {
         for _ in 0..1000 {
             cx.executor().advance_clock(POLL);
             cx.run_until_parked();
-            if view.read_with(cx, |app, _| !matches!(app.phase, Phase::Loading(_))) {
+            if view.read_with(cx, |app, _| {
+                !matches!(app.phase, Phase::Loading(_)) && !app.refreshing()
+            }) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -5021,10 +5087,10 @@ mod tests {
         for _ in 0..1000 {
             cx.executor().advance_clock(POLL);
             cx.run_until_parked();
-            if let Some(refreshing) = view.read_with(cx, |app, _| {
-                (!matches!(app.phase, Phase::Loading(_))).then(|| app.refreshing())
+            if let Some(stale) = view.read_with(cx, |app, _| {
+                (!matches!(app.phase, Phase::Loading(_))).then(|| app.stale.is_some())
             }) {
-                return refreshing;
+                return stale;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -5043,6 +5109,49 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("the refresh did not finish");
+    }
+
+    fn hold_docker(
+        view: &Entity<Kuizer>,
+        cx: &mut VisualTestContext,
+        dir: &Path,
+        held: bool,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let release = dir.join("release");
+        let engine = dir.join("docker");
+        std::fs::write(
+            &engine,
+            format!(
+                "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.02; done\n",
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !held {
+            std::fs::write(&release, "").unwrap();
+        }
+        view.update(cx, |app, _| {
+            app.config.docker.engines = vec![engine.display().to_string()];
+            app.config.docker.timeout_secs = 30;
+            app.options.docker = true;
+        });
+        release
+    }
+
+    fn wait_for_part(view: &Entity<Kuizer>, cx: &mut VisualTestContext, part: Part) {
+        for _ in 0..1000 {
+            cx.executor().advance_clock(POLL);
+            cx.run_until_parked();
+            if view.read_with(cx, |app, _| {
+                app.report().is_some() && !app.pending.contains(&part)
+            }) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the part did not arrive");
     }
 
     fn scan_again_from_the_start(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
@@ -5217,7 +5326,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         for (label, shown) in [
             ("Global caches", "Global caches are off for this scan"),
-            ("History", "Read at the end of the scan"),
+            ("History", "Reading the cleanup history"),
             ("Duplicates", "Collecting files while scanning folders"),
         ] {
             cx.update(|window, cx| window.draw(cx).clear());
@@ -5336,15 +5445,11 @@ mod tests {
         let walking = Stage::Starting;
         assert_eq!(
             Tab::Caches.status(walking, &options),
-            "Measured after the folder scan"
-        );
-        assert_eq!(
-            Tab::Caches.status(Stage::Caches, &options),
             "Measuring global caches"
         );
         assert_eq!(
-            Tab::Artifacts.status(Stage::Caches, &options),
-            "Artifacts found, shown once the scan is done"
+            Tab::Artifacts.status(Stage::Finishing, &options),
+            "Looking for project artifacts"
         );
         options.duplicates = false;
         assert_eq!(
@@ -5400,11 +5505,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = project(dir.path());
         let (view, cx) = open(cx, dir.path().join("recent"));
+        let release = hold_docker(&view, cx, dir.path(), false);
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         assert!(!wait_until_shown(&view, cx));
         wait_for_refresh(&view, cx);
 
+        std::fs::remove_file(&release).unwrap();
         scan_again_from_the_start(&view, cx);
         assert!(wait_until_shown(&view, cx), "the saved scan comes first");
         let id = view.read_with(cx, |app, _| {
@@ -5423,6 +5530,7 @@ mod tests {
             assert_eq!(app.selected().len(), 1);
         });
 
+        std::fs::write(&release, "").unwrap();
         wait_for_refresh(&view, cx);
         view.read_with(cx, |app, _| {
             assert!(matches!(app.phase, Phase::Ready(_)));
@@ -5431,6 +5539,44 @@ mod tests {
         });
         cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
         view.read_with(cx, |app, _| assert!(app.dialog.is_some()));
+    }
+
+    #[gpui::test]
+    fn finished_sections_show_while_the_rest_still_load(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        let release = hold_docker(&view, cx, dir.path(), true);
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        view.update(cx, |app, cx| app.go_to(Tab::Artifacts, cx));
+        wait_for_part(&view, cx, Part::Projects);
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.report().unwrap().candidates.len(), 1);
+            assert!(app.refreshing());
+            assert!(!app.tab_pending(Tab::Artifacts));
+            assert!(app.tab_pending(Tab::Docker));
+            assert!(app.tab_pending(Tab::Overview));
+            assert_eq!(app.tab_count(Tab::Artifacts), Some(1));
+            assert_eq!(app.tab_count(Tab::Docker), None);
+            assert_eq!(app.blocked(&Command::Toggle), Some(WAIT_FOR_REFRESH));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("artifact-row-0").is_some());
+        assert!(cx.debug_bounds("still-scanning").is_some());
+
+        view.update(cx, |app, cx| app.go_to(Tab::Docker, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("Asking Docker and Podman").is_some());
+
+        std::fs::write(&release, "").unwrap();
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(app.pending.is_empty());
+            assert!(!app.tab_pending(Tab::Docker));
+            assert_eq!(app.report().unwrap().candidates.len(), 1);
+            assert_eq!(app.blocked(&Command::Toggle), None);
+        });
     }
 
     #[gpui::test]

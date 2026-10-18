@@ -18,13 +18,21 @@ use crate::scan::{self, Cancel, Candidate};
 /// @example
 /// let entries = measure(caches::find(&locations, &Protected::for_user()));
 pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
-    let cancel = Cancel::new();
+    measure_until(found, &Cancel::new())
+}
+
+/// @name measure_until
+/// @description Like `measure`, and every cache stops being walked once `cancel` is set, so a
+/// scan that was cancelled does not keep reading the disk. Caches cut short are marked partial.
+///
+/// @example
+/// let entries = measure_until(caches::find(&locations, &Protected::for_user()), &cancel);
+pub fn measure_until(found: Vec<KnownCache>, cancel: &Cancel) -> Vec<(KnownCache, Candidate)> {
     let mut entries: Vec<(KnownCache, Candidate)> = std::thread::scope(|scope| {
         let handles: Vec<_> = found
             .into_iter()
             .enumerate()
             .map(|(index, cache)| {
-                let cancel = &cancel;
                 scope.spawn(move || {
                     let measured = scan::measure(&cache.path, cancel);
                     let candidate = Candidate {

@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread;
 use std::time::SystemTime;
 
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::cli::SortKey;
-use kuizer::commands::{measure_caches, sort_candidates};
+use kuizer::commands::{measure_caches_until, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, Safety};
@@ -18,7 +19,7 @@ use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
-use kuizer::toolchains::{self, Toolchain};
+use kuizer::toolchains::{self, PinFinder, Toolchain};
 
 use crate::start::ScanOptions;
 
@@ -30,11 +31,7 @@ pub enum Stage {
     Starting,
     Scanning(Progress),
     Duplicates(dupes::Stage),
-    Caches,
-    Toolchains,
-    Docker,
-    Repos,
-    History,
+    Finishing,
 }
 
 impl Stage {
@@ -54,20 +51,85 @@ impl Stage {
             Self::Duplicates(dupes::Stage::Verifying { groups }) => {
                 format!("Duplicates  comparing {groups} groups")
             }
-            Self::Caches => "Measuring global caches".to_owned(),
-            Self::Toolchains => "Measuring installed toolchains".to_owned(),
-            Self::Docker => "Asking Docker and Podman".to_owned(),
-            Self::Repos => "Checking git repositories".to_owned(),
-            Self::History => "Reading the cleanup history".to_owned(),
+            Self::Finishing => "Waiting for the remaining parts".to_owned(),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Part {
+    Projects,
+    Duplicates,
+    Caches,
+    Toolchains,
+    Docker,
+    Repos,
+    History,
+}
+
+impl Part {
+    /// @name Part::expected
+    /// @description The parts a scan with these options produces. Parts the options turn off are
+    /// never loaded, so a window waiting for a scan does not wait for them.
+    ///
+    /// @example
+    /// let pending = Part::expected(&options);
+    pub fn expected(options: &ScanOptions) -> HashSet<Part> {
+        [
+            (true, Self::Projects),
+            (options.duplicates, Self::Duplicates),
+            (options.caches, Self::Caches),
+            (options.toolchains, Self::Toolchains),
+            (options.docker, Self::Docker),
+            (options.repos, Self::Repos),
+            (true, Self::History),
+        ]
+        .into_iter()
+        .filter_map(|(on, part)| on.then_some(part))
+        .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Disk {
     pub available: Option<u64>,
     pub total: Option<u64>,
 }
 
+#[derive(Clone)]
+pub enum Loaded {
+    Projects {
+        candidates: Vec<Candidate>,
+        issues: Vec<Issue>,
+        summary: Summary,
+        disks: Vec<Disk>,
+    },
+    Duplicates(Option<Duplicates>),
+    Caches(Vec<(KnownCache, Candidate)>),
+    Toolchains(Vec<(Toolchain, Candidate)>),
+    Docker {
+        entries: Vec<(docker::Item, Candidate)>,
+        issues: Vec<String>,
+    },
+    Repos(Vec<Repository>),
+    History(Result<HistoryView, String>),
+}
+
+impl Loaded {
+    pub fn part(&self) -> Part {
+        match self {
+            Self::Projects { .. } => Part::Projects,
+            Self::Duplicates(_) => Part::Duplicates,
+            Self::Caches(_) => Part::Caches,
+            Self::Toolchains(_) => Part::Toolchains,
+            Self::Docker { .. } => Part::Docker,
+            Self::Repos(_) => Part::Repos,
+            Self::History(_) => Part::History,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct HistoryView {
     pub history: History,
     pub kept: HashSet<(usize, usize)>,
@@ -183,6 +245,66 @@ pub struct Bucket<K> {
 }
 
 impl Report {
+    /// @name Report::empty
+    /// @description A report with nothing in it yet, for parts to fill in as they finish. Every
+    /// list is empty and the history is unread until its part arrives.
+    ///
+    /// @example
+    /// let mut report = Report::empty(&roots, &options);
+    /// report.apply(loaded);
+    pub fn empty(roots: &[PathBuf], options: &ScanOptions) -> Self {
+        Self {
+            roots: roots.to_vec(),
+            options: options.clone(),
+            candidates: Vec::new(),
+            issues: Vec::new(),
+            summary: Summary {
+                progress: Progress::default(),
+                duration: std::time::Duration::ZERO,
+                cancelled: false,
+            },
+            caches: Vec::new(),
+            toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
+            repos: Vec::new(),
+            duplicates: None,
+            history: Err(String::new()),
+            disks: Vec::new(),
+            scanned: SystemTime::now(),
+        }
+    }
+
+    /// @name Report::apply
+    /// @description Stores one finished part, replacing what the report held for it.
+    ///
+    /// @example
+    /// report.apply(Loaded::Caches(caches));
+    pub fn apply(&mut self, loaded: Loaded) {
+        match loaded {
+            Loaded::Projects {
+                candidates,
+                issues,
+                summary,
+                disks,
+            } => {
+                self.candidates = candidates;
+                self.issues = issues;
+                self.summary = summary;
+                self.disks = disks;
+            }
+            Loaded::Duplicates(duplicates) => self.duplicates = duplicates,
+            Loaded::Caches(caches) => self.caches = caches,
+            Loaded::Toolchains(toolchains) => self.toolchains = toolchains,
+            Loaded::Docker { entries, issues } => {
+                self.docker = entries;
+                self.docker_issues = issues;
+            }
+            Loaded::Repos(repos) => self.repos = repos,
+            Loaded::History(history) => self.history = history,
+        }
+    }
+
     pub fn total(&self, safety: Option<Safety>) -> u64 {
         self.candidates
             .iter()
@@ -313,166 +435,210 @@ fn set(stage: &Mutex<Stage>, next: Stage) {
     }
 }
 
+fn disks(roots: &[PathBuf]) -> Vec<Disk> {
+    roots
+        .iter()
+        .map(|path| Disk {
+            available: platform::available_space(path),
+            total: platform::total_space(path),
+        })
+        .collect()
+}
+
+fn load_caches(config: &Config, cancel: &Cancel) -> Vec<(KnownCache, Candidate)> {
+    let excludes = config.excludes().ok();
+    Locations::for_user()
+        .map(|locations| {
+            let found = caches::find(&locations, &Protected::for_user())
+                .into_iter()
+                .filter(|cache| {
+                    excludes
+                        .as_ref()
+                        .is_none_or(|excludes| !excludes.path(&cache.path))
+                })
+                .collect();
+            measure_caches_until(found, cancel)
+        })
+        .unwrap_or_default()
+}
+
+fn load_toolchains(
+    config: &Config,
+    pins: Option<&PinFinder>,
+    cancel: &Cancel,
+) -> Vec<(Toolchain, Candidate)> {
+    toolchains::Locations::for_user()
+        .map(|locations| {
+            let excludes = config.excludes().ok();
+            let mut found: Vec<Toolchain> = toolchains::find(&locations, &config.toolchains.tools)
+                .into_iter()
+                .filter(|toolchain| {
+                    excludes
+                        .as_ref()
+                        .is_none_or(|excludes| !excludes.path(&toolchain.path))
+                })
+                .collect();
+            if let Some(pins) = pins {
+                toolchains::apply_pins(&mut found, &pins.pins);
+            }
+            toolchains::measure_until(found, cancel)
+        })
+        .unwrap_or_default()
+}
+
+fn load_docker(config: &Config) -> Loaded {
+    let listing = docker::list(
+        &config.docker.engines,
+        config.docker.timeout(),
+        config.docker.recent_hours,
+    );
+    Loaded::Docker {
+        entries: docker::entries(listing.items),
+        issues: listing.issues,
+    }
+}
+
+struct Collector<'a> {
+    report: Mutex<Report>,
+    emit: &'a (dyn Fn(Loaded) + Sync),
+}
+
+impl Collector<'_> {
+    fn deliver(&self, loaded: Loaded) {
+        (self.emit)(loaded.clone());
+        if let Ok(mut report) = self.report.lock() {
+            report.apply(loaded);
+        }
+    }
+
+    fn finish(self) -> Report {
+        let mut report = self
+            .report
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        report.scanned = SystemTime::now();
+        report
+    }
+}
+
+fn spawn_part<'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    work: impl FnOnce() + Send + 'scope,
+) {
+    thread::Builder::new()
+        .name(format!("kuizer-gui-{name}"))
+        .spawn_scoped(scope, work)
+        .expect("spawn load thread");
+}
+
 /// @name load
-/// @description Gathers everything the dashboard shows in one pass: project artifacts, duplicate
-/// files and toolchain pins from a single walk, global caches, installed toolchains, the cleanup
-/// history and free disk space.
-/// The start screen's options decide which of these run. Reports progress through `stage` so the
-/// window can show it while this runs on a worker thread, and stops early once `cancel` is set.
+/// @description Gathers everything the dashboard shows: project artifacts, duplicate files and
+/// toolchain pins from a single walk, global caches, installed toolchains, git repositories,
+/// Docker objects, the cleanup history and free disk space.
+/// The start screen's options decide which of these run. Parts that do not need the walk (caches,
+/// toolchains without pins, Docker, history) start with it and run beside it; the rest start the
+/// moment the walk ends. Every part goes to `emit` as soon as it is done, and the whole report is
+/// returned when the last one is. Progress goes through `stage` so the window can show it while
+/// this runs on a worker thread, and the work stops early once `cancel` is set.
 ///
 /// @example
 /// let stage = Mutex::new(Stage::default());
-/// let report = load(&config, &roots, &options, &Cancel::new(), &stage)?;
+/// let report = load(&config, &roots, &options, &Cancel::new(), &stage, &|part| show(part))?;
 pub fn load(
     config: &Config,
     roots: &[PathBuf],
     options: &ScanOptions,
     cancel: &Cancel,
     stage: &Mutex<Stage>,
+    emit: &(dyn Fn(Loaded) + Sync),
 ) -> Result<Report, String> {
     let config = options.apply(config);
-    let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
-    let docker_config = config.docker.clone();
-    let containers = options.docker.then(|| {
-        std::thread::Builder::new()
-            .name("kuizer-gui-docker".to_owned())
-            .spawn(move || {
-                docker::list(
-                    &docker_config.engines,
-                    docker_config.timeout(),
-                    docker_config.recent_hours,
-                )
-            })
-    });
+    let config = &config;
+    let duplicate_options = options.duplicates.then(|| Options::from_config(config));
     let pin_search = options.toolchains && config.toolchains.pins;
-    let (handle, walked) = repos::start_scan(
-        &config,
-        roots,
-        cancel.clone(),
-        duplicate_options,
-        pin_search,
-    )
-    .map_err(|error| error.to_string())?;
-    let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
-    let (files, pins, found_repos) = walked
-        .recv()
-        .map(|walked| (walked.files, walked.pins, walked.repositories))
-        .unwrap_or_default();
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-    let mut candidates = collected.candidates;
-    sort_candidates(&mut candidates, SortKey::Size);
+    let (handle, walked) =
+        repos::start_scan(config, roots, cancel.clone(), duplicate_options, pin_search)
+            .map_err(|error| error.to_string())?;
+    let collector = Collector {
+        report: Mutex::new(Report::empty(roots, options)),
+        emit,
+    };
+    let shared = &collector;
 
-    let duplicates = duplicate_options
-        .zip(files)
-        .map(|(duplicate_options, files)| {
-            dupes::group(files, duplicate_options, |progress| {
-                set(stage, Stage::Duplicates(progress));
-            })
+    thread::scope(|scope| {
+        spawn_part(scope, "history", || {
+            shared.deliver(Loaded::History(HistoryView::load()));
         });
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let caches = if options.caches {
-        set(stage, Stage::Caches);
-        let excludes = config.excludes().ok();
-        Locations::for_user()
-            .map(|locations| {
-                let found = caches::find(&locations, &Protected::for_user())
-                    .into_iter()
-                    .filter(|cache| {
-                        excludes
-                            .as_ref()
-                            .is_none_or(|excludes| !excludes.path(&cache.path))
-                    })
-                    .collect();
-                measure_caches(found)
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let toolchains = if options.toolchains {
-        set(stage, Stage::Toolchains);
-        toolchains::Locations::for_user()
-            .map(|locations| {
-                let excludes = config.excludes().ok();
-                let mut found: Vec<Toolchain> =
-                    toolchains::find(&locations, &config.toolchains.tools)
-                        .into_iter()
-                        .filter(|toolchain| {
-                            excludes
-                                .as_ref()
-                                .is_none_or(|excludes| !excludes.path(&toolchain.path))
-                        })
-                        .collect();
-                if let Some(pins) = &pins {
-                    toolchains::apply_pins(&mut found, &pins.pins);
-                }
-                toolchains::measure(found)
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let repos = if options.repos {
-        set(stage, Stage::Repos);
-        repos::inspect_all(found_repos, &config.git, cancel)
-    } else {
-        Vec::new()
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let listing = match containers {
-        Some(Ok(handle)) => {
-            set(stage, Stage::Docker);
-            handle.join().unwrap_or_default()
+        if options.caches {
+            spawn_part(scope, "caches", || {
+                shared.deliver(Loaded::Caches(load_caches(config, cancel)));
+            });
         }
-        Some(Err(error)) => docker::Listing {
-            items: Vec::new(),
-            issues: vec![format!("cannot ask Docker: {error}")],
-        },
-        None => docker::Listing::default(),
-    };
+        if options.docker {
+            spawn_part(scope, "docker", || shared.deliver(load_docker(config)));
+        }
+        if options.toolchains && !pin_search {
+            spawn_part(scope, "toolchains", || {
+                shared.deliver(Loaded::Toolchains(load_toolchains(config, None, cancel)));
+            });
+        }
+
+        let collected = scan::collect(&handle, |progress| set(stage, Stage::Scanning(progress)));
+        let (files, pins, found_repos) = walked
+            .recv()
+            .map(|walked| (walked.files, walked.pins, walked.repositories))
+            .unwrap_or_default();
+        if cancel.is_cancelled() {
+            return Err(CANCELLED.to_owned());
+        }
+        let mut candidates = collected.candidates;
+        sort_candidates(&mut candidates, SortKey::Size);
+        shared.deliver(Loaded::Projects {
+            candidates,
+            issues: collected.issues,
+            summary: collected.summary,
+            disks: disks(roots),
+        });
+        set(stage, Stage::Finishing);
+
+        if options.duplicates {
+            spawn_part(scope, "duplicates", move || {
+                let found = duplicate_options
+                    .zip(files)
+                    .map(|(duplicate_options, files)| {
+                        dupes::group(files, duplicate_options, |progress| {
+                            set(stage, Stage::Duplicates(progress));
+                        })
+                    });
+                set(stage, Stage::Finishing);
+                shared.deliver(Loaded::Duplicates(found));
+            });
+        }
+        if pin_search {
+            spawn_part(scope, "toolchains", move || {
+                shared.deliver(Loaded::Toolchains(load_toolchains(
+                    config,
+                    pins.as_ref(),
+                    cancel,
+                )));
+            });
+        }
+        if options.repos {
+            spawn_part(scope, "repos", move || {
+                shared.deliver(Loaded::Repos(repos::inspect_all(
+                    found_repos,
+                    &config.git,
+                    cancel,
+                )));
+            });
+        }
+        Ok(())
+    })?;
     if cancel.is_cancelled() {
         return Err(CANCELLED.to_owned());
     }
-
-    set(stage, Stage::History);
-    let history = HistoryView::load();
-    let disks = roots
-        .iter()
-        .map(|path| Disk {
-            available: platform::available_space(path),
-            total: platform::total_space(path),
-        })
-        .collect();
-
-    Ok(Report {
-        roots: roots.to_vec(),
-        options: options.clone(),
-        candidates,
-        issues: collected.issues,
-        summary: collected.summary,
-        caches,
-        toolchains,
-        docker: docker::entries(listing.items),
-        docker_issues: listing.issues,
-        repos,
-        duplicates,
-        history,
-        disks,
-        scanned: SystemTime::now(),
-    })
+    Ok(collector.finish())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -894,6 +1060,39 @@ mod tests {
         let groups = &report.duplicates.as_ref().unwrap().groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].members.len(), 2);
+    }
+
+    #[test]
+    fn every_enabled_part_is_delivered_once_and_the_report_holds_them_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let site = dir.path().join("site");
+        let modules = site.join("node_modules").join("left-pad");
+        std::fs::create_dir_all(&modules).expect("project");
+        std::fs::write(site.join("package.json"), "{}").expect("manifest");
+        std::fs::write(modules.join("index.js"), vec![b'x'; 4096]).expect("dependency");
+        let mut options = ScanOptions::from_config(&Config::default());
+        options.duplicates = true;
+        options.repos = true;
+        options.caches = false;
+        options.toolchains = false;
+        options.docker = false;
+        let delivered = Mutex::new(Vec::new());
+        let report = load(
+            &Config::default(),
+            &[dir.path().to_path_buf()],
+            &options,
+            &Cancel::new(),
+            &Mutex::new(Stage::default()),
+            &|loaded| delivered.lock().expect("lock").push(loaded.part()),
+        )
+        .expect("a finished scan");
+        let mut parts = delivered.into_inner().expect("lock");
+        parts.sort();
+        let mut expected: Vec<Part> = Part::expected(&options).into_iter().collect();
+        expected.sort();
+        assert_eq!(parts, expected);
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.duplicates.is_some());
     }
 
     #[test]

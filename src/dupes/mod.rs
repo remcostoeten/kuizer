@@ -39,7 +39,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Duplicates {
     pub groups: Vec<Group>,
     pub issues: Vec<Issue>,
