@@ -415,12 +415,43 @@ fn describe(engine: &str, failure: &Failure) -> String {
     }
 }
 
+fn joined<T>(handle: thread::ScopedJoinHandle<'_, Result<T, Failure>>) -> Result<T, Failure> {
+    handle.join().unwrap_or_else(|_| {
+        Err(Failure::Failed(
+            "the engine call stopped unexpectedly".to_owned(),
+        ))
+    })
+}
+
+fn engine_items(
+    program: &str,
+    engine: &str,
+    timeout: Duration,
+    recent_hours: u64,
+) -> Result<Vec<Item>, Failure> {
+    let (dangling, stopped, cache, unused) = thread::scope(|scope| {
+        let dangling = scope.spawn(|| images(program, engine, timeout));
+        let stopped = scope.spawn(|| containers(program, engine, timeout, recent_hours));
+        let cache =
+            (engine == "docker").then(|| scope.spawn(|| build_cache(program, engine, timeout)));
+        let unused = volumes(program, engine, timeout);
+        (joined(dangling), joined(stopped), cache.map(joined), unused)
+    });
+    let mut items = dangling?;
+    items.extend(stopped?);
+    if let Some(cache) = cache {
+        items.extend(cache.unwrap_or_default());
+    }
+    items.extend(unused?);
+    Ok(items)
+}
+
 /// @name list
 /// @description Asks each engine (`docker`, `podman` or a path to either) for dangling images,
 /// stopped containers, its build cache and volumes no container uses. Only the engines' own CLIs
-/// are run, so `DOCKER_HOST` and contexts apply. Each call stops after `timeout`. An engine
-/// that is not running gives one issue and no items; when no engine is installed at all, the
-/// listing has one issue saying so.
+/// are run, so `DOCKER_HOST` and contexts apply. An engine's calls run side by side, and each stops
+/// after `timeout`. An engine that is not running gives one issue and no items; when no engine is
+/// installed at all, the listing has one issue saying so.
 ///
 /// @example
 /// let listing = docker::list(&config.docker.engines, Duration::from_secs(10), 24);
@@ -429,15 +460,7 @@ pub fn list(engines: &[String], timeout: Duration, recent_hours: u64) -> Listing
     let mut missing = Vec::new();
     for program in engines {
         let engine = engine_name(program);
-        let found = images(program, engine, timeout).and_then(|mut items| {
-            items.extend(containers(program, engine, timeout, recent_hours)?);
-            if engine == "docker" {
-                items.extend(build_cache(program, engine, timeout).unwrap_or_default());
-            }
-            items.extend(volumes(program, engine, timeout)?);
-            Ok(items)
-        });
-        match found {
+        match engine_items(program, engine, timeout, recent_hours) {
             Ok(items) => listing.items.extend(items),
             Err(Failure::Missing) => missing.push(engine),
             Err(failure) => listing.issues.push(describe(engine, &failure)),
@@ -664,6 +687,25 @@ esac"#,
         let listing = list(&[program], Duration::from_millis(200), 24);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(listing.issues, ["podman did not answer in time"]);
+    }
+
+    #[test]
+    fn one_engine_answers_its_calls_side_by_side() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let program = script(
+            tmp.path(),
+            "docker",
+            r#"sleep 1
+case "$1 $2" in
+  "volume ls") echo pgdata ;;
+  "system df") if [ "$3" = "--verbose" ]; then echo '[{"Name":"pgdata","Size":"300MB","Links":0}]'; fi ;;
+esac"#,
+        );
+        let started = Instant::now();
+        let listing = list(&[program], TIMEOUT, 24);
+        assert!(listing.issues.is_empty(), "{:?}", listing.issues);
+        assert_eq!(listing.items.len(), 1);
+        assert!(started.elapsed() < Duration::from_millis(3500));
     }
 
     #[test]
