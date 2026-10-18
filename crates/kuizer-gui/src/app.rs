@@ -24,7 +24,10 @@ use kuizer::stats;
 use crate::chart::{self, Measure, Segment};
 use crate::frame;
 use crate::glossary::Term;
-use crate::model::{self, Batch, Confirmation, HistoryView, Outcome, Report, Source, Stage};
+use crate::model::{
+    self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, Stage,
+    TrashState,
+};
 use crate::motion;
 use crate::snapshot::{self, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
@@ -40,7 +43,15 @@ const ISSUE_LIMIT: usize = 500;
 const HISTORY_BARS: usize = 24;
 const WHEEL_NOTCH: Pixels = px(20.);
 
-actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom]);
+const TOAST_TIME: Duration = Duration::from_secs(10);
+const TOAST_PROBLEMS: usize = 3;
+const UNDO_KEY: &str = if cfg!(target_os = "macos") {
+    "Cmd+Z"
+} else {
+    "Ctrl+Z"
+};
+
+actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom, Undo]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -49,6 +60,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-=", ZoomIn, None),
         KeyBinding::new("secondary--", ZoomOut, None),
         KeyBinding::new("secondary-0", ResetZoom, None),
+        KeyBinding::new("secondary-z", Undo, None),
     ]);
 }
 
@@ -141,6 +153,36 @@ enum Update {
     Done(Result<Report, String>),
 }
 
+enum Notice {
+    Trashed {
+        session: u64,
+        items: usize,
+        bytes: u64,
+    },
+    Restoring {
+        session: u64,
+    },
+    Restored(Restored),
+    Failed(String),
+}
+
+impl Notice {
+    fn lingers(&self) -> bool {
+        match self {
+            Self::Trashed { .. } => true,
+            Self::Restored(restored) => {
+                restored.problems.is_empty() && restored.history_error.is_none()
+            }
+            Self::Restoring { .. } | Self::Failed(_) => false,
+        }
+    }
+}
+
+struct Toast {
+    notice: Notice,
+    shown: Duration,
+}
+
 enum Dialog {
     Confirm { rule: Confirmation, typed: String },
     Running,
@@ -172,6 +214,9 @@ pub struct Kuizer {
     selection: HashSet<(Source, u64)>,
     dialog: Option<Dialog>,
     task: Option<Task<()>>,
+    toast: Option<Toast>,
+    toast_task: Option<Task<()>>,
+    restore_task: Option<Task<()>>,
 }
 
 impl Kuizer {
@@ -225,6 +270,9 @@ impl Kuizer {
             selection: HashSet::new(),
             dialog: None,
             task: None,
+            toast: None,
+            toast_task: None,
+            restore_task: None,
         };
         if !app.roots.is_empty() {
             app.recent.remember(&app.roots);
@@ -241,7 +289,127 @@ impl Kuizer {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Loading(_)) || matches!(self.dialog, Some(Dialog::Running))
+        matches!(self.phase, Phase::Loading(_))
+            || matches!(self.dialog, Some(Dialog::Running))
+            || self.restoring()
+    }
+
+    fn restoring(&self) -> bool {
+        matches!(
+            self.toast,
+            Some(Toast {
+                notice: Notice::Restoring { .. },
+                ..
+            })
+        )
+    }
+
+    fn can_restore(&self) -> bool {
+        self.report().is_some() && !self.busy() && !self.refreshing() && self.dialog.is_none()
+    }
+
+    fn show_toast(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        self.toast = Some(Toast {
+            notice,
+            shown: Duration::ZERO,
+        });
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let open = this.update(cx, |app, cx| {
+                    let paused = app.dialog.is_some();
+                    let Some(toast) = &mut app.toast else {
+                        return false;
+                    };
+                    if !toast.notice.lingers() || paused {
+                        return true;
+                    }
+                    toast.shown += POLL;
+                    if toast.shown < TOAST_TIME {
+                        return true;
+                    }
+                    app.toast = None;
+                    cx.notify();
+                    false
+                });
+                if !matches!(open, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        if self.toast.is_some() && !self.restoring() {
+            self.toast = None;
+            cx.notify();
+        }
+    }
+
+    fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Toast {
+            notice: Notice::Trashed { session, .. },
+            ..
+        }) = self.toast
+        {
+            self.restore(session, Scope::Undo, cx);
+        }
+    }
+
+    fn restore(&mut self, session: u64, scope: Scope, cx: &mut Context<Self>) {
+        if !self.can_restore() {
+            return;
+        }
+        self.show_toast(Notice::Restoring { session }, cx);
+        let (sender, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("kuizer-gui-restore".to_owned())
+            .spawn(move || {
+                let restored = model::restore(session, scope);
+                let history = HistoryView::load();
+                let _ = sender.send((restored, history));
+            })
+            .expect("spawn restore thread");
+        self.restore_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let message = match receiver.try_recv() {
+                    Ok(message) => Some(message),
+                    Err(TryRecvError::Empty) => continue,
+                    Err(TryRecvError::Disconnected) => None,
+                };
+                let _ = this.update(cx, |app, cx| app.restored(message, cx));
+                break;
+            }
+        }));
+    }
+
+    fn restored(
+        &mut self,
+        message: Option<(Result<Restored, String>, Result<HistoryView, String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((restored, history)) = message else {
+            self.show_toast(
+                Notice::Failed("the restore stopped unexpectedly".to_owned()),
+                cx,
+            );
+            return;
+        };
+        if let Phase::Ready(report) = &mut self.phase {
+            report.history = history;
+        }
+        let notice = match restored {
+            Ok(restored) => {
+                if restored.items > 0 && matches!(self.phase, Phase::Ready(_)) {
+                    self.rescan(cx);
+                }
+                Notice::Restored(restored)
+            }
+            Err(error) => Notice::Failed(error),
+        };
+        self.show_toast(notice, cx);
     }
 
     fn refreshing(&self) -> bool {
@@ -399,6 +567,7 @@ impl Kuizer {
         }
         self.selection.clear();
         self.rows.clear();
+        self.toast = None;
         self.phase = Phase::Start;
         cx.notify();
     }
@@ -689,7 +858,18 @@ impl Kuizer {
             }
         }
         self.refresh_rows();
-        self.dialog = Some(Dialog::Finished(finished));
+        let clean = finished.failures.is_empty() && finished.history_error.is_none();
+        if let Some(session) = outcome.session.filter(|_| finished.removed > 0) {
+            self.show_toast(
+                Notice::Trashed {
+                    session,
+                    items: finished.removed,
+                    bytes: finished.removed_bytes,
+                },
+                cx,
+            );
+        }
+        self.dialog = (!clean || outcome.session.is_none()).then_some(Dialog::Finished(finished));
         cx.notify();
     }
 
@@ -734,6 +914,7 @@ impl Kuizer {
                 Phase::Start => self.type_folder(event, cx),
                 Phase::Loading(_) if key == "escape" => self.cancel_scan(cx),
                 Phase::Ready(_) if key == "escape" && self.refreshing() => self.cancel_scan(cx),
+                Phase::Ready(_) if key == "escape" => self.dismiss_toast(cx),
                 _ => {}
             }
             return;
@@ -764,10 +945,7 @@ impl Kuizer {
     }
 
     fn dialog_path(&self, candidate: &Candidate) -> String {
-        match self.report() {
-            Some(report) => model::short_path(&candidate.path, &report.roots),
-            None => display_path(&candidate.path),
-        }
+        self.shown_path(&candidate.path)
     }
 
     fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
@@ -1081,7 +1259,7 @@ impl Kuizer {
                 Tab::Artifacts => self.render_artifacts(cx),
                 Tab::Caches => self.render_caches(cx),
                 Tab::Duplicates => self.render_duplicates(),
-                Tab::History => self.render_history(),
+                Tab::History => self.render_history(cx),
                 Tab::Issues => self.render_issues(),
             },
         }
@@ -2080,7 +2258,7 @@ impl Kuizer {
             .into_any_element()
     }
 
-    fn render_history(&self) -> AnyElement {
+    fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
@@ -2095,9 +2273,22 @@ impl Kuizer {
             }
         };
         let cumulative = &view.history.cumulative;
-        let runs: Vec<&kuizer::history::Run> = view.delete_runs().rev().collect();
-        let recent: Vec<&kuizer::history::Run> =
-            runs.iter().take(HISTORY_BARS).rev().copied().collect();
+        let runs: Vec<(usize, &kuizer::history::Run)> = view
+            .history
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| run.action == Action::Delete)
+            .rev()
+            .collect();
+        let recent: Vec<&kuizer::history::Run> = runs
+            .iter()
+            .take(HISTORY_BARS)
+            .rev()
+            .map(|(_, run)| *run)
+            .collect();
+        let can_restore = self.can_restore();
+        let refreshing = self.refreshing();
         let tallest = recent.iter().map(|run| run.total.bytes).max().unwrap_or(0);
         let chart = div()
             .flex()
@@ -2129,6 +2320,7 @@ impl Kuizer {
             .child(column(70.).text_right().child("Items"))
             .child(head(90., "Size", Term::Size).text_right())
             .child(head(80., "Mode", Term::Mode))
+            .child(head(110., "Trash", Term::Restore))
             .child(
                 div()
                     .id("Command")
@@ -2181,7 +2373,7 @@ impl Kuizer {
                             } else {
                                 "unknown".to_owned()
                             },
-                            "restore with kuizer restore",
+                            "restore from the table below",
                         )
                         .id("stat-trash")
                         .tip(tooltip::term(Term::InTrash)),
@@ -2202,7 +2394,7 @@ impl Kuizer {
                     .border_1()
                     .border_color(theme::border())
                     .child(header)
-                    .children(runs.iter().enumerate().map(|(index, run)| {
+                    .children(runs.iter().map(|&(index, run)| {
                         let mode = run.deleted.first().map_or("", |entry| match entry.mode {
                             kuizer::delete::Mode::Trash => "trash",
                             kuizer::delete::Mode::Permanent => "permanent",
@@ -2231,6 +2423,13 @@ impl Kuizer {
                                     .child(theme::bytes(run.total.bytes)),
                             )
                             .child(column(80.).text_color(theme::muted()).child(mode))
+                            .child(column(110.).flex().child(self.restore_cell(
+                                view.trash_state(index),
+                                run,
+                                can_restore,
+                                refreshing,
+                                cx,
+                            )))
                             .child(
                                 div()
                                     .id(("command", index))
@@ -2256,6 +2455,55 @@ impl Kuizer {
                     }),
             )
             .into_any_element()
+    }
+
+    fn restore_cell(
+        &self,
+        state: TrashState,
+        run: &kuizer::history::Run,
+        enabled: bool,
+        refreshing: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let session = run.id;
+        let tag = |label: &'static str, tip: &'static str| {
+            ui::tag(("trash-state", session), label, ui::Tone::Neutral)
+                .tip(tooltip::plain(tip))
+                .into_any_element()
+        };
+        match state {
+            TrashState::Restorable { items, bytes } => {
+                let selector = format!("restore-{}", run.session());
+                ui::button(("restore", session), "Restore", ButtonKind::Secondary, enabled)
+                    .debug_selector(move || selector.clone())
+                    .when(refreshing, |this| {
+                        this.tip(tooltip::plain("Available once the fresh scan finishes"))
+                    })
+                    .when(!refreshing, |this| {
+                        this.tip(
+                            Tooltip::details(format!("Restore {}", run.session()))
+                                .row("Items", items.to_string())
+                                .row("Size", theme::bytes(bytes))
+                                .note("Puts what is still in the trash back where it was. A path that is taken again is skipped, never overwritten.")
+                                .build(),
+                        )
+                    })
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        app.restore(session, Scope::StillInTrash, cx);
+                    }))
+                    .into_any_element()
+            }
+            TrashState::Restored => tag("restored", "Everything from this cleanup was put back"),
+            TrashState::Emptied => tag(
+                "not in trash",
+                "Nothing from this cleanup is left in the trash to restore",
+            ),
+            TrashState::Unknown => tag("unknown", "The trash cannot be read on this system"),
+            TrashState::NotTrashed => div()
+                .text_color(theme::faint())
+                .child("-")
+                .into_any_element(),
+        }
     }
 
     fn render_issues(&self) -> AnyElement {
@@ -2306,6 +2554,160 @@ impl Kuizer {
                     }),
             )
             .into_any_element()
+    }
+
+    fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let toast = self.toast.as_ref()?;
+        let dismiss = || {
+            ui::button("dismiss-toast", "Dismiss", ButtonKind::Ghost, true)
+                .debug_selector(|| "dismiss-toast".to_owned())
+                .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
+                .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.dismiss_toast(cx)))
+        };
+        let line = div().flex().items_center().gap(unit(10.));
+        let panel = div()
+            .id("toast")
+            .debug_selector(|| "toast".to_owned())
+            .flex()
+            .flex_col()
+            .gap(unit(6.))
+            .max_w(unit(560.))
+            .py(unit(8.))
+            .px(unit(12.))
+            .rounded(theme::radius_panel())
+            .bg(theme::elevated())
+            .border_1()
+            .border_color(theme::border_strong())
+            .shadow_lg()
+            .occlude();
+        let panel = match &toast.notice {
+            Notice::Trashed {
+                session,
+                items,
+                bytes,
+            } => {
+                let session = *session;
+                let enabled = self.can_restore();
+                let refreshing = self.refreshing();
+                panel.child(
+                    line.child(div().flex_1().child(format!(
+                        "{}, {} moved to trash",
+                        plural(*items, "item"),
+                        theme::bytes(*bytes)
+                    )))
+                    .child(
+                        ui::button("undo", "Undo", ButtonKind::Secondary, enabled)
+                            .debug_selector(|| "undo".to_owned())
+                            .when(refreshing, |this| {
+                                this.tip(tooltip::plain("Available once the fresh scan finishes"))
+                            })
+                            .when(!refreshing, |this| {
+                                this.tip(
+                                    Tooltip::new(format!(
+                                        "Put cleanup s{session} back from the trash"
+                                    ))
+                                    .keys(&[UNDO_KEY])
+                                    .build(),
+                                )
+                            })
+                            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                                app.restore(session, Scope::Undo, cx);
+                            })),
+                    )
+                    .child(ui::kbd(UNDO_KEY))
+                    .child(dismiss()),
+                )
+            }
+            Notice::Restoring { session } => panel.child(
+                line.child(
+                    div()
+                        .text_color(theme::muted())
+                        .child(format!("Restoring cleanup s{session} from the trash")),
+                ),
+            ),
+            Notice::Restored(restored) => {
+                let failed = restored.problems.len();
+                panel
+                    .child(
+                        line.child(div().flex_1().child(if restored.items > 0 {
+                            format!(
+                                "{}, {} restored",
+                                plural(restored.items, "item"),
+                                theme::bytes(restored.bytes)
+                            )
+                        } else {
+                            "Nothing was restored".to_owned()
+                        }))
+                        .child(dismiss()),
+                    )
+                    .when(failed > 0, |this| {
+                        this.child(
+                            div()
+                                .debug_selector(|| "toast-error".to_owned())
+                                .text_color(theme::danger())
+                                .child(format!("{} could not be restored", plural(failed, "item"))),
+                        )
+                        .children(
+                            restored
+                                .problems
+                                .iter()
+                                .take(TOAST_PROBLEMS)
+                                .enumerate()
+                                .map(|(index, (path, reason))| {
+                                    div()
+                                        .id(("toast-problem", index))
+                                        .truncate()
+                                        .text_size(unit(12.))
+                                        .text_color(theme::faint())
+                                        .tip(tooltip::path(path))
+                                        .child(format!("{} {reason}", self.shown_path(path)))
+                                }),
+                        )
+                        .when(failed > TOAST_PROBLEMS, |this| {
+                            this.child(div().text_size(unit(12.)).text_color(theme::faint()).child(
+                                format!(
+                                    "and {} more, kuizer history show lists them",
+                                    failed - TOAST_PROBLEMS
+                                ),
+                            ))
+                        })
+                    })
+                    .children(restored.history_error.as_ref().map(|error| {
+                        div()
+                            .text_color(theme::danger())
+                            .child(format!("The history could not be saved: {error}"))
+                    }))
+            }
+            Notice::Failed(error) => panel.child(
+                line.child(
+                    div()
+                        .flex_1()
+                        .debug_selector(|| "toast-error".to_owned())
+                        .text_color(theme::danger())
+                        .child(format!("Could not restore: {error}")),
+                )
+                .child(dismiss()),
+            ),
+        };
+        Some(
+            div()
+                .absolute()
+                .bottom(unit(12.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .px(unit(16.))
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn shown_path(&self, path: &Path) -> String {
+        match self.report() {
+            Some(report) => model::short_path(path, &report.roots),
+            None => display_path(path),
+        }
     }
 
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2542,6 +2944,7 @@ impl Render for Kuizer {
         .size_full();
         let content = self.render_content(cx);
         let dialog = self.render_dialog(cx);
+        let toast = self.render_toast(cx);
         let start = matches!(self.phase, Phase::Start);
         let titlebar = self.render_titlebar(window, cx);
         let root = div()
@@ -2558,6 +2961,7 @@ impl Render for Kuizer {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
+            .on_action(cx.listener(Self::undo))
             .child(wheel)
             .child(titlebar)
             .child(
@@ -2577,7 +2981,8 @@ impl Render for Kuizer {
                                 .right_0()
                                 .child(chart::loader()),
                         )
-                    }),
+                    })
+                    .children(toast),
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
             .children(dialog)
@@ -3465,6 +3870,264 @@ mod tests {
             assert!(kept.path.ends_with("site/node_modules"));
             assert_eq!(app.selection, HashSet::from([(Source::Artifact, kept.id)]));
         });
+    }
+
+    const ISOLATED: &str = "KUIZER_GUI_TEST_BASE";
+
+    /// Runs one ignored test in a child process whose HOME and XDG folders point into a temporary
+    /// folder, like the CLI tests in tests/restore.rs, so the trash and the history it touches
+    /// belong to that test alone.
+    fn isolated(name: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join(".local/share")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("app::tests::{name}"),
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env(ISOLATED, &base)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn isolated_base() -> Option<PathBuf> {
+        std::env::var_os(ISOLATED).map(PathBuf::from)
+    }
+
+    fn wait_until(
+        view: &Entity<Kuizer>,
+        cx: &mut VisualTestContext,
+        what: &str,
+        done: impl Fn(&Kuizer) -> bool,
+    ) {
+        for _ in 0..1000 {
+            cx.executor().advance_clock(POLL);
+            cx.run_until_parked();
+            if view.read_with(cx, |app, _| done(app)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("{what} did not happen");
+    }
+
+    fn toast_is(view: &Entity<Kuizer>, cx: &mut VisualTestContext, check: fn(&Notice) -> bool) {
+        let shown = view.read_with(cx, |app, _| {
+            app.toast.as_ref().is_some_and(|toast| check(&toast.notice))
+        });
+        assert!(shown, "unexpected toast");
+    }
+
+    fn trash_the_project<'a>(
+        base: &Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Kuizer>, &'a mut VisualTestContext, PathBuf) {
+        cx.update(bind_keys);
+        let root = project(&base.join("work"));
+        let modules = std::fs::canonicalize(root.join("site").join("node_modules")).unwrap();
+        let (view, cx) = open(cx, base.join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        let id = view.read_with(cx, |app, _| app.report().unwrap().candidates[0].id);
+        view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
+        cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
+        cx.simulate_keystrokes("enter");
+        wait_until(&view, cx, "the trash", |app| {
+            matches!(
+                &app.toast,
+                Some(Toast {
+                    notice: Notice::Trashed { .. },
+                    ..
+                })
+            )
+        });
+        assert!(!modules.exists());
+        view.read_with(cx, |app, _| {
+            assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
+            assert!(app.report().unwrap().candidates.is_empty());
+        });
+        (view, cx, modules)
+    }
+
+    fn restore_runs() -> Vec<kuizer::history::Run> {
+        let path = kuizer::history::default_path().unwrap();
+        kuizer::history::load(&path)
+            .unwrap()
+            .runs
+            .into_iter()
+            .filter(|run| run.action == Action::Restore)
+            .collect()
+    }
+
+    #[test]
+    fn undo_puts_the_trashed_items_back() {
+        isolated("undo_puts_the_trashed_items_back_inside");
+    }
+
+    #[gpui::test]
+    #[ignore = "runs in its own process through undo_puts_the_trashed_items_back"]
+    fn undo_puts_the_trashed_items_back_inside(cx: &mut TestAppContext) {
+        let Some(base) = isolated_base() else {
+            return;
+        };
+        let (view, cx, modules) = trash_the_project(&base, cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("toast").is_some());
+        let undo = cx.debug_bounds("undo").expect("an Undo button");
+        cx.simulate_click(undo.center(), Modifiers::default());
+        toast_is(&view, cx, |notice| {
+            matches!(notice, Notice::Restoring { session: 1 })
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("loader").is_some());
+
+        wait_until(&view, cx, "the restore", |app| !app.restoring());
+        toast_is(
+            &view,
+            cx,
+            |notice| matches!(notice, Notice::Restored(restored) if restored.items == 1 && restored.problems.is_empty()),
+        );
+        assert!(modules.join("left-pad").join("index.js").is_file());
+        let runs = restore_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].deleted[0].restores.as_deref(), Some("s1.1"));
+
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            let report = app.report().unwrap();
+            assert_eq!(report.candidates.len(), 1, "the item is back in the list");
+            let history = report.history.as_ref().unwrap();
+            assert_eq!(history.history.cumulative.restored_items, 1);
+            assert_eq!(history.trash_state(0), TrashState::Restored);
+        });
+    }
+
+    #[test]
+    fn restore_in_history_puts_a_run_back() {
+        isolated("restore_in_history_puts_a_run_back_inside");
+    }
+
+    #[gpui::test]
+    #[ignore = "runs in its own process through restore_in_history_puts_a_run_back"]
+    fn restore_in_history_puts_a_run_back_inside(cx: &mut TestAppContext) {
+        let Some(base) = isolated_base() else {
+            return;
+        };
+        let (view, cx, modules) = trash_the_project(&base, cx);
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(app.toast.is_none()));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let history = cx.debug_bounds("History").expect("a sidebar item");
+        cx.simulate_click(history.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let restore = cx.debug_bounds("restore-s1").expect("a Restore button");
+        cx.simulate_click(restore.center(), Modifiers::default());
+        wait_until(&view, cx, "the restore", |app| !app.restoring());
+        toast_is(
+            &view,
+            cx,
+            |notice| matches!(notice, Notice::Restored(restored) if restored.items == 1 && restored.problems.is_empty()),
+        );
+        assert!(modules.is_dir());
+        assert_eq!(restore_runs().len(), 1);
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            let report = app.report().unwrap();
+            assert_eq!(report.candidates.len(), 1);
+            let history = report.history.as_ref().unwrap();
+            assert_eq!(
+                history.trash_state(0),
+                TrashState::Restored,
+                "nothing is left to restore"
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_undo_explains_why() {
+        isolated("a_failed_undo_explains_why_inside");
+    }
+
+    #[gpui::test]
+    #[ignore = "runs in its own process through a_failed_undo_explains_why"]
+    fn a_failed_undo_explains_why_inside(cx: &mut TestAppContext) {
+        let Some(base) = isolated_base() else {
+            return;
+        };
+        let (view, cx, modules) = trash_the_project(&base, cx);
+        std::fs::create_dir_all(&modules).unwrap();
+        cx.simulate_keystrokes("ctrl-z");
+        wait_until(&view, cx, "the restore", |app| !app.restoring());
+        toast_is(&view, cx, |notice| {
+            matches!(notice, Notice::Restored(restored) if restored.items == 0
+                && restored.problems.len() == 1
+                && restored.problems[0].1.ends_with("exists, not overwriting"))
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("toast-error").is_some());
+        assert!(
+            !modules.join("left-pad").exists(),
+            "nothing was overwritten"
+        );
+        assert!(restore_runs().is_empty());
+        let trashed = kuizer::history::trashed_paths().unwrap();
+        assert!(trashed.contains(&modules), "the item stays in the trash");
+
+        cx.executor().advance_clock(TOAST_TIME * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(app.toast.is_some(), "an error stays until it is dismissed");
+            assert!(!app.refreshing());
+        });
+    }
+
+    #[gpui::test]
+    fn the_undo_toast_hides_itself_and_waits_for_a_refresh(cx: &mut TestAppContext) {
+        cx.update(bind_keys);
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        let trashed = || Notice::Trashed {
+            session: 1,
+            items: 2,
+            bytes: 2048,
+        };
+        view.update(cx, |app, cx| app.show_toast(trashed(), cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("toast").is_some());
+        cx.executor().advance_clock(TOAST_TIME - POLL * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.toast.is_some()));
+        cx.executor().advance_clock(POLL * 3);
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.toast.is_none()));
+
+        view.update(cx, |app, cx| {
+            app.show_toast(trashed(), cx);
+            app.rescan(cx);
+            assert!(app.refreshing());
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        toast_is(&view, cx, |notice| matches!(notice, Notice::Trashed { .. }));
+        view.update(cx, |app, cx| app.cancel_scan(cx));
     }
 
     #[gpui::test]
