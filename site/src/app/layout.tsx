@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
-import { IBM_Plex_Mono, Inter } from 'next/font/google'
+import { IBM_Plex_Mono, Inter, Space_Grotesk } from 'next/font/google'
 import { description, siteUrl, tagline } from '@/content/site'
 import './globals.css'
 
@@ -8,6 +8,13 @@ const inter = Inter({
   subsets: ['latin'],
   axes: ['opsz'],
   variable: '--font-inter',
+  display: 'swap',
+})
+
+const spaceGrotesk = Space_Grotesk({
+  subsets: ['latin'],
+  weight: ['500'],
+  variable: '--font-space-grotesk',
   display: 'swap',
 })
 
@@ -27,6 +34,22 @@ export const metadata: Metadata = {
     template: `%s | ${title}`,
   },
   description,
+  manifest: '/manifest.webmanifest',
+  icons: {
+    icon: [
+      {
+        url: '/brand/sweep/favicons/favicon-light.svg',
+        type: 'image/svg+xml',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: '/brand/sweep/favicons/favicon-dark.svg',
+        type: 'image/svg+xml',
+        media: '(prefers-color-scheme: dark)',
+      },
+    ],
+    other: [{ rel: 'mask-icon', url: '/brand/sweep/marks/mono-black.svg', color: '#f97844' }],
+  },
   openGraph: {
     type: 'website',
     siteName: title,
@@ -38,6 +61,7 @@ export const metadata: Metadata = {
     card: 'summary_large_image',
     title: `${title}: ${tagline}`,
     description,
+    images: ['/brand/sweep/social/opengraph-dark.png'],
   },
 }
 
@@ -49,7 +73,11 @@ type Props = {
 
 export default function RootLayout({ children }: Props) {
   return (
-    <html lang="en" className={`${inter.variable} ${plexMono.variable}`} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${inter.variable} ${spaceGrotesk.variable} ${plexMono.variable}`}
+      suppressHydrationWarning
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

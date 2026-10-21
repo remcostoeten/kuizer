@@ -1,3 +1,4 @@
+import Image from 'next/image'
 import type { Feature } from '@/content/features'
 
 type IconProps = {
@@ -23,20 +24,13 @@ function Svg({ size = 16, children }: IconProps & { children: React.ReactNode })
 }
 
 export function Logo({ size = 22 }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 128 128" aria-hidden="true">
-      <rect x="8" y="8" width="112" height="112" rx="22" fill="var(--brand)" />
-      <rect x="32" y="38" width="64" height="10" rx="2" fill="#fafafa" />
-      <rect x="32" y="59" width="44" height="10" rx="2" fill="#fafafa" opacity="0.7" />
-      <rect x="32" y="80" width="24" height="10" rx="2" fill="#fafafa" opacity="0.4" />
-    </svg>
-  )
+  return <Image src="/brand/kuizer.webp" alt="" width={size} height={size} className="shrink-0" />
 }
 
 export function Wordmark() {
   return (
     <span className="inline-flex items-center gap-2.5">
-      <Logo size={18} />
+      <Logo size={40} />
       <span className="font-mono text-label font-semibold uppercase tracking-brand">kuizer</span>
     </span>
   )

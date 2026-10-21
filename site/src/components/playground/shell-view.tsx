@@ -66,7 +66,7 @@ export function ShellView({ state, dispatch }: Props) {
   }
 
   return (
-    <div ref={containerRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+    <div ref={containerRef} className="screen-in min-h-0 flex-1 overflow-y-auto px-3 py-2">
       {state.shell.map((line, index) => (
         <div
           key={`${index}:${line.text}`}
@@ -77,12 +77,12 @@ export function ShellView({ state, dispatch }: Props) {
       ))}
       {state.screen === 'boot' ? (
         <div className="mt-2">
-          <span className="text-muted">$ </span>
+          <span className="text-brand-light">$ </span>
           <span className="caret">{demoCommand.slice(0, state.typed)}</span>
         </div>
       ) : (
         <label className="mt-2 flex items-center">
-          <span className="text-muted shrink-0">$&nbsp;</span>
+          <span className="text-brand-light shrink-0">$&nbsp;</span>
           <span className="sr-only">Command</span>
           <input
             ref={inputRef}

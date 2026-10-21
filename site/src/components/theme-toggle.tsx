@@ -13,7 +13,7 @@ export function ThemeToggle() {
       onClick={() => writeTheme(theme === 'light' ? 'dark' : 'light')}
       aria-label={label}
       title={label}
-      className="press inline-flex size-9 items-center justify-center text-faint hover:bg-inset hover:text-fg"
+      className="press inline-flex size-9 items-center justify-center text-faint hover:bg-inset hover:text-fg focus-visible:bg-inset focus-visible:text-brand focus-visible:transition-none"
     >
       <span key={theme} className="animate-pop-icon inline-flex">
         {theme === 'light' ? <MoonIcon /> : <SunIcon />}

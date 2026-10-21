@@ -1,20 +1,13 @@
 .term {
-  --t-green: light-dark(#1f7a3f, #00bb7f);
-  --t-yellow: light-dark(#946200, #f99c00);
-  --t-red: light-dark(#b3261e, #fb2c36);
-  --t-cyan: light-dark(#0b7285, #5ccfe6);
-  --t-blue: light-dark(#1c5fbf, #7aa7ff);
-  --t-magenta: light-dark(#9b2e9e, #ac4bff);
-  --t-tan: light-dark(#8a6d3b, #d7af87);
-  --t-cursor: color-mix(in srgb, var(--fg) 8%, transparent);
-  --t-selected: light-dark(
-    color-mix(in srgb, var(--t-green) 16%, transparent),
-    color-mix(in srgb, var(--t-green) 22%, transparent)
-  );
-  --t-chip: light-dark(
-    color-mix(in srgb, var(--fg) 10%, transparent),
-    color-mix(in srgb, var(--fg) 12%, transparent)
-  );
+  --t-green: light-dark(#1f7a3f, color-mix(in srgb, #00d294 85%, transparent));
+  --t-yellow: light-dark(#946200, color-mix(in srgb, #ffd236 90%, transparent));
+  --t-red: light-dark(#b3261e, color-mix(in srgb, #ff667f 75%, transparent));
+  --t-orange: light-dark(#c84f0e, #e8804a);
+  --t-periwinkle: light-dark(#4f5bd5, #b1b9f9);
+  --t-teal: light-dark(#2f7a71, #48968c);
+  --t-cursor: color-mix(in srgb, var(--fg) 6%, transparent);
+  --t-selected: color-mix(in srgb, var(--brand) 12%, transparent);
+  --t-chip: color-mix(in srgb, var(--fg) 7%, transparent);
 
   & input:focus-visible {
     outline: none;
@@ -32,7 +25,8 @@
   white-space: nowrap;
   transition:
     opacity 260ms var(--ease-out),
-    color 260ms ease;
+    color 260ms var(--ease-out),
+    background-color 180ms var(--ease-out);
 
   & > * {
     min-width: 0;
@@ -41,6 +35,12 @@
 
   @media (min-width: 768px) {
     grid-template-columns: 3ch 10ch 8ch 7ch 12ch 20ch 6ch minmax(0, 1fr);
+  }
+
+  &:focus-visible {
+    color: var(--fg);
+    background: var(--t-cursor);
+    transition: none;
   }
 }
 
@@ -91,4 +91,47 @@
   vertical-align: text-bottom;
   background: var(--fg);
   animation: blink 1s steps(2, start) infinite;
+}
+
+.tui-cursor {
+  position: absolute;
+  inset-inline: 6px;
+  top: 0;
+  height: var(--cursor-h, 0);
+  border-radius: 3px;
+  background: var(--t-cursor);
+  box-shadow: inset 2px 0 0 var(--brand);
+  opacity: 0;
+  pointer-events: none;
+  translate: 0 var(--cursor-y, 0);
+  transition:
+    translate 220ms var(--ease-out),
+    height 220ms var(--ease-out),
+    opacity 160ms var(--ease-out);
+
+  [data-cursor] > & {
+    opacity: 1;
+  }
+}
+
+.screen-in {
+  animation: screen-in 360ms var(--ease-out) both;
+}
+
+@keyframes screen-in {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tui-cursor {
+    transition: none;
+  }
+
+  .screen-in {
+    animation: none;
+  }
 }

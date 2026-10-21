@@ -14,10 +14,10 @@ const ordered = [...demoItems].sort((left, right) => right.bytes - left.bytes)
 const total = demoItems.reduce((sum, item) => sum + item.bytes, 0)
 
 const segColor: Record<Category, string> = {
-  dependencies: 'bg-t-cyan',
-  build: 'bg-t-blue',
-  cache: 'bg-t-magenta',
-  temp: 'bg-t-tan',
+  dependencies: 'bg-t-orange',
+  build: 'bg-t-periwinkle',
+  cache: 'bg-t-teal',
+  temp: 'bg-faint',
 }
 
 const segStatus = {
@@ -59,7 +59,7 @@ export function DiskBar({ state, dispatch }: Props) {
               aria-label={`${item.path}, ${formatBytes(item.bytes)}`}
               onClick={() => dispatch({ type: 'focusItem', id: item.id })}
               style={{ flex: `${item.bytes} 1 3px` }}
-              className={`seg min-w-[3px] rounded-[1px] pointer-fine:hover:scale-y-175 ${status === 'freed' ? '' : segColor[item.category]} ${segStatus[status]} ${current === item.id ? 'outline-2 outline-offset-1 outline-fg' : ''}`}
+              className={`seg min-w-[3px] rounded-[1px] pointer-fine:hover:scale-y-175 ${status === 'freed' ? '' : segColor[item.category]} ${segStatus[status]} ${current === item.id ? 'scale-y-175' : ''}`}
             />
           )
         })}

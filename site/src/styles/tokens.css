@@ -10,27 +10,29 @@
   --color-accent: var(--accent);
   --color-accent-fg: var(--accent-fg);
   --color-brand: var(--brand);
+  --color-brand-light: var(--brand-light);
+  --color-brand-fg: var(--brand-fg);
   --color-warn: var(--warn);
   --color-ok: var(--ok);
   --color-t-green: var(--t-green);
   --color-t-yellow: var(--t-yellow);
   --color-t-red: var(--t-red);
-  --color-t-cyan: var(--t-cyan);
-  --color-t-blue: var(--t-blue);
-  --color-t-magenta: var(--t-magenta);
-  --color-t-tan: var(--t-tan);
+  --color-t-orange: var(--t-orange);
+  --color-t-periwinkle: var(--t-periwinkle);
+  --color-t-teal: var(--t-teal);
   --color-traffic-red: #ff5f57;
   --color-traffic-yellow: #febc2e;
   --color-traffic-green: #28c840;
   --color-nav: color-mix(in srgb, var(--bg) 82%, transparent);
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-space-grotesk), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, 'SFMono-Regular', Menlo, monospace;
   --shadow-card: var(--shadow-card);
   --shadow-card-hover: var(--shadow-card-hover);
   --shadow-frame: var(--shadow-frame);
   --ease-out: var(--ease-out);
   --ease-in-out: var(--ease-in-out);
+  --ease-swap: var(--ease-swap);
   --animate-fade: fade 200ms ease both;
   --animate-fade-slow: fade 1200ms ease-out both;
   --animate-rise-fast: rise 240ms var(--ease-out) both;
@@ -117,8 +119,10 @@
   --accent: light-dark(#171717, #e5e5e5);
   --accent-fg: light-dark(#fafafa, #171717);
   --brand: light-dark(#c84f0e, #d25611);
+  --brand-light: light-dark(#b0450c, #e8804a);
+  --brand-fg: #ffffff;
   --warn: light-dark(#946200, #fcbb00);
-  --ok: light-dark(#1f7a3f, #00bb7f);
+  --ok: light-dark(#1f7a3f, #00d294);
   --tile: color-mix(in srgb, var(--fg) 4%, transparent);
   --shadow-card: 0 0 0 1px var(--line);
   --shadow-card-hover:
@@ -131,6 +135,7 @@
       light-dark(color-mix(in srgb, black 12%, transparent), color-mix(in srgb, black 55%, transparent));
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-swap: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :root[data-theme='light'] {
