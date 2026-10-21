@@ -305,7 +305,7 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | `enter` | delete selection when something is selected |
 | `D` | toggle permanent deletion for the next dialog |
 | `p` | pause or resume the scan |
-| `ctrl-c` / `q` | cancel the scan, then quit |
+| `ctrl-c` / `ctrl-q` / `q` | cancel the scan, then quit |
 | `?` | help |
 
 By default `d` and `enter` move the selection to the trash straight away, unless it holds a `review` item or a project with uncommitted changes: then the dialog always shows. With `delete.confirm = true` in the config or `kuizer --confirm`, a dialog first lists every selected path with size and safety, shows the mode (trash or permanent), and needs `y` or `enter`. Permanent deletion always shows the dialog because it cannot be undone. Nothing is preselected for deletion.

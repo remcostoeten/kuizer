@@ -559,7 +559,7 @@ fn help(frame: &mut Frame) {
                 (&["enter"], "delete selection"),
                 (&["s"], "cycle sort: size, path, category"),
                 (&["p"], "group by rule or by project"),
-                (&["q", "esc", "ctrl-c"], "quit and stop the scan"),
+                (&["q", "esc", "ctrl-c", "ctrl-q"], "quit and stop the scan"),
             ],
         ),
     ];

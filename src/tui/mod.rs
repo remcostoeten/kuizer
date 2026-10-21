@@ -63,7 +63,8 @@ fn handle_filter(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
+    {
         app.quit = true;
         return;
     }

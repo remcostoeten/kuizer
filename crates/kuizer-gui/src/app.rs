@@ -27,7 +27,7 @@ use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::activity::{self, Activity, State, Step, Tracker, plural};
 use crate::chart::{self, Measure, Segment};
-use crate::commands::{self, Command, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
+use crate::commands::{self, Command, Quit, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
 use crate::field;
 use crate::frame;
 use crate::glossary::Term;
@@ -550,6 +550,10 @@ impl Kuizer {
             self.toast = None;
             cx.notify();
         }
+    }
+
+    fn quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.quit();
     }
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4956,6 +4960,7 @@ impl Render for Kuizer {
             .on_action(cx.listener(Self::reset_zoom))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::quit))
             .child(wheel)
             .child(titlebar)
             .child(
