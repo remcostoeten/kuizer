@@ -1,35 +1,42 @@
-import { CopyButton } from '@/components/copy-button'
 import { DownloadButton } from '@/components/download-button'
 import { Faq } from '@/components/faq'
 import { Footer } from '@/components/footer'
 import { HeroField } from '@/components/hero-field'
-import { ArrowDownIcon, ArrowRightIcon, FeatureIcon, GithubIcon, StarIcon } from '@/components/icons'
+import { Highlights } from '@/components/highlights'
+import { ArrowDownIcon, ArrowRightIcon, FeatureIcon, GithubIcon, Logo, StarIcon } from '@/components/icons'
 import { InstallBox } from '@/components/install-box'
 import { Nav } from '@/components/nav'
 import { Playground } from '@/components/playground/playground'
+import { RunLine } from '@/components/run-line'
+import { RotatingWord } from '@/components/swap'
 import { Window } from '@/components/window'
 import { safeguards, showcases } from '@/content/features'
-import { headline, releasesUrl, repoUrl, subtitle, version } from '@/content/site'
+import { headline, headlineTargets, releasesUrl, repoUrl, subtitle, version } from '@/content/site'
 
 export default function HomePage() {
   return (
     <>
       <Nav />
       <main>
-        <section className="relative isolate overflow-hidden">
+        <section className="relative isolate overflow-x-clip">
           <HeroField />
-          <div className="wrap flex flex-col items-center pt-16 text-center md:pt-24">
+          <div className="wrap flex flex-col items-center pt-10 text-center md:pt-14">
+            <div className="mb-5">
+              <Logo size={104} />
+            </div>
             <a href={releasesUrl} className="enter pill" style={{ '--delay': '0ms' } as React.CSSProperties}>
               <span className="size-1.5 rounded-dot bg-brand" />v{version} is on npm and crates.io
               <ArrowRightIcon />
             </a>
             <h1
-              className="enter mt-10 text-hero font-medium sm:text-hero-wide md:text-hero-xl"
+              className="enter mt-10 font-display text-hero font-medium sm:text-hero-wide md:text-hero-xl"
               style={{ '--delay': '120ms' } as React.CSSProperties}
             >
               {headline[0]}
               <br />
-              <span className="bracket relative inline-block px-[0.18em]">{headline[1]}</span>
+              <span className="bracket relative inline-block px-[0.18em]">
+                {headline[1]} <RotatingWord items={headlineTargets} interval={3400} />
+              </span>
             </h1>
             <p
               className="enter mt-6 max-w-lead text-lead font-light text-muted md:text-lead-lg"
@@ -46,14 +53,8 @@ export default function HomePage() {
                 <GithubIcon size={18} />
               </a>
             </div>
-            <div
-              className="enter mt-5 inline-flex items-center gap-2 font-mono text-ui text-faint"
-              style={{ '--delay': '300ms' } as React.CSSProperties}
-            >
-              <span>
-                or run <span className="text-fg">npx kuizer</span>
-              </span>
-              <CopyButton text="npx kuizer" iconOnly />
+            <div className="enter mt-5" style={{ '--delay': '300ms' } as React.CSSProperties}>
+              <RunLine />
             </div>
           </div>
           <div className="wrap mt-16 md:mt-20">
@@ -74,6 +75,8 @@ export default function HomePage() {
             </p>
           </div>
         </section>
+
+        <Highlights />
 
         <section className="wrap flex flex-col items-center pt-28 text-center md:pt-36">
           <span className="text-faint">

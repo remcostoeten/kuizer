@@ -33,7 +33,7 @@ export function CopyButton({ text, label = 'Copy', iconOnly = false, className =
 
   const base = iconOnly
     ? 'icon-btn'
-    : 'press inline-flex h-8 shrink-0 items-center gap-1.5 border border-line px-2.5 text-caption-plain font-medium text-muted hover:border-line-strong hover:text-fg'
+    : 'press inline-flex h-8 shrink-0 items-center gap-1.5 border border-line px-2.5 text-caption-plain font-medium text-muted hover:border-line-strong hover:text-fg focus-visible:border-fg focus-visible:text-fg focus-visible:transition-none'
 
   return (
     <button

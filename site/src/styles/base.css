@@ -35,8 +35,7 @@ samp {
 }
 
 :where(:focus-visible) {
-  outline: 2px solid var(--fg);
-  outline-offset: 2px;
+  outline: none;
 }
 
 @utility wrap {
@@ -81,6 +80,12 @@ samp {
       opacity: 0.88;
     }
   }
+
+  &:focus-visible {
+    background: var(--brand);
+    color: var(--brand-fg);
+    transition: none;
+  }
 }
 
 @utility btn-secondary {
@@ -93,6 +98,11 @@ samp {
       background: var(--tile);
       border-color: var(--line-strong);
     }
+  }
+
+  &:focus-visible {
+    border-color: var(--fg);
+    transition: none;
   }
 }
 
@@ -145,6 +155,21 @@ samp {
   overflow: hidden;
 }
 
+@utility swap-item {
+  transition:
+    opacity 220ms var(--ease-out),
+    filter 220ms var(--ease-out),
+    translate 480ms var(--ease-swap);
+
+  &[aria-hidden='false'] {
+    transition-delay: 70ms, 70ms, 0ms;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+}
+
 @utility pill {
   display: inline-flex;
   align-items: center;
@@ -166,6 +191,12 @@ samp {
       border-color: var(--line-strong);
     }
   }
+
+  &:focus-visible {
+    color: var(--fg);
+    border-color: var(--brand);
+    transition: none;
+  }
 }
 
 @utility icon-btn {
@@ -186,6 +217,12 @@ samp {
       color: var(--fg);
       background: var(--tile);
     }
+  }
+
+  &:focus-visible {
+    color: var(--brand);
+    background: var(--tile);
+    transition: none;
   }
 
   &:active {
@@ -212,6 +249,11 @@ samp {
   &[aria-selected='true'] {
     color: var(--fg);
     box-shadow: inset 0 -1px 0 var(--brand);
+  }
+
+  &:focus-visible {
+    color: var(--brand);
+    transition: none;
   }
 }
 

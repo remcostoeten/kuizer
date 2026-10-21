@@ -1,12 +1,21 @@
 'use client'
 
-import { useEffect, useReducer, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type KeyboardEvent } from 'react'
 import { demoCommand, discoveryOrder, scanTotals } from '@/content/demo'
 import { DiskBar } from './disk-bar'
 import { initialState, onDiskIds } from './model'
 import { reduce } from './reducer'
 import { ShellView } from './shell-view'
 import { Tui, type Flash } from './tui'
+
+function placeCursor(root: HTMLElement, position: number) {
+  const table = root.querySelector<HTMLElement>('[data-table]')
+  if (!table) return
+  const row = table.querySelector<HTMLElement>(`[data-position="${position}"]`)
+  table.style.setProperty('--cursor-y', `${row?.offsetTop ?? 0}px`)
+  table.style.setProperty('--cursor-h', `${row?.offsetHeight ?? 0}px`)
+  table.toggleAttribute('data-cursor', row !== null)
+}
 
 function scrollRowIntoView(root: HTMLElement, position: number) {
   const table = root.querySelector<HTMLElement>('[data-table]')
@@ -89,6 +98,10 @@ export function Playground() {
     if (state.screen === 'tui' && rootRef.current) scrollRowIntoView(rootRef.current, state.cursor)
   }, [state.cursor, state.screen])
 
+  useLayoutEffect(() => {
+    if (state.screen === 'tui' && rootRef.current) placeCursor(rootRef.current, state.cursor)
+  })
+
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.metaKey || event.ctrlKey || event.altKey) return
     if (state.screen === 'boot') {
@@ -118,7 +131,7 @@ export function Playground() {
       aria-label="kuizer demo. A terminal you can drive with the keyboard."
       onKeyDown={onKeyDown}
       onClick={onClick}
-      className="frame term flex min-h-0 flex-1 flex-col font-mono text-terminal outline-none transition-colors duration-200 ease-out focus-visible:border-fg md:text-terminal-wide"
+      className="frame term flex min-h-0 flex-1 flex-col font-mono text-terminal outline-none transition-colors duration-200 ease-out focus-visible:border-fg focus-visible:transition-none md:text-terminal-wide"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
         <span className="flex gap-1.5">

@@ -1,0 +1,29 @@
+{
+  "selected": {
+    "concept": "Sweep",
+    "round": "01",
+    "source": "../../../logos/sweep.png",
+    "preservedAs": "app-icon.png"
+  },
+  "derivatives": [
+    {
+      "asset": "mark.png",
+      "tool": "Built-in image_gen",
+      "prompt": "Edit the attached selected Sweep logo for kuizer into a standalone transparent brand MARK. Preserve its identity and exact composition: the same broad open crescent-shaped sweeping ribbon, with a pointed upper tip, an inward-curling pointed right tip, a large circular empty center, and EXACTLY THREE detached rounded square blocks ascending above the right tip. The ribbon sweeps from pale golden ivory at upper left through golden orange at lower left into coral-red at lower right; the detached blocks go amber, orange, coral. Retain the existing sculpted 3D satin-glass-and-porcelain treatment, edge highlights and subtle depth. REMOVE ONLY the entire rounded-square backing tile, its rim, and shadows from that tile. The ribbon, three blocks, their relative sizes, direction, positions, overall silhouette and distinctive inner opening must be preserved. All negative space including the large empty center must be genuinely transparent alpha, no gray disk, square backing, matte, checkerboard drawing, glow halo or backdrop. One isolated mark, centered on 1024x1024 with 8% transparent margin. No text, no wordmark, no new geometry, no stars, no extra fragments, no angle or view change. This is a faithful background-removal and standalone-mark derivative of the chosen reference, not a redesign."
+    },
+    {
+      "asset": "mono.png",
+      "tool": "Built-in image_gen",
+      "prompt": "Create the flat SINGLE-COLOR reproduction of the attached chosen Sweep logo for kuizer, for use as a monochrome logo. Faithfully reproduce the ribbon's silhouette and the placement and proportions of EXACTLY THREE detached rounded square blocks. The reference has a broad open crescent-shaped sweeping ribbon: pointed tapering upper end at approximately 1 o'clock, open upper-right gap, inward-curling pointed right end approximately 3 o'clock, large circular empty center, broad curved lower-left body. Three separate softly rounded squares ascend diagonally in that upper-right gap, largest at the top, medium middle, smallest lower-right. REMOVE the rounded-square backing tile entirely. Render ONLY ribbon and three blocks as crisp solid PURE BLACK shapes with genuinely transparent alpha negative spaces. The crescent's inner opening must be transparent too. No gradients, no color, no grayscale shading, no bevels, no 3D, no textures, no highlights, no outlines, no glow, no shadows, no lettering, no extra fragments. Preserve the selected logo's characteristic sweeping geometry and open center, not a generic circle, C, recycle arrow or browser logo. Match the attached silhouette rather than inventing a new design. Center on square 1024x1024 with about 8% transparent margin. A clean filled production logo mask, isolated on actual transparent background."
+    }
+  ],
+  "typography": {
+    "family": "IBM Plex Mono",
+    "weight": 600,
+    "text": "KUIZER",
+    "tracking": "0.12em",
+    "format": "Outlined paths in wordmark.svg",
+    "license": "FONT-LICENSE.txt"
+  },
+  "exportCommand": "bun scripts/build-brand.mjs"
+}

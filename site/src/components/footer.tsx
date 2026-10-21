@@ -28,6 +28,7 @@ const columns = [
       { label: 'README', href: docsUrl },
       { label: 'Config keys', href: configDocsUrl },
       { label: 'Design notes', href: designDocsUrl },
+      { label: 'Brand assets', href: '/brand' },
     ],
   },
   {
@@ -43,8 +44,8 @@ export function Footer() {
         <div className="max-w-footer">
           <Wordmark />
           <p className="mt-4 text-copy-sm text-faint">
-            A terminal tool that finds build output, development caches and duplicate files, and removes the
-            ones you select.
+            Finds build output, development caches and duplicate files, and removes the ones you select. Runs
+            in the terminal and as a desktop app.
           </p>
           <a href={repoUrl} aria-label="kuizer on GitHub" className="icon-btn mt-5 -ml-1.5 inline-flex">
             <GithubIcon size={16} />
@@ -57,7 +58,10 @@ export function Footer() {
               <ul className="mt-3 space-y-2">
                 {column.links.map((link) => (
                   <li key={link.href}>
-                    <a href={link.href} className="text-ui text-faint transition-colors hover:text-fg">
+                    <a
+                      href={link.href}
+                      className="text-ui text-faint transition-colors hover:text-fg focus-visible:text-fg focus-visible:transition-none"
+                    >
                       {link.label}
                     </a>
                   </li>
@@ -70,7 +74,10 @@ export function Footer() {
       <div className="wrap flex flex-wrap items-center justify-between gap-3 border-t border-line py-5 font-mono text-micro text-faint">
         <span>
           xxx,{' '}
-          <a href={authorUrl} className="transition-colors hover:text-fg">
+          <a
+            href={authorUrl}
+            className="transition-colors hover:text-fg focus-visible:text-fg focus-visible:transition-none"
+          >
             Remco Stoeten
           </a>
         </span>

@@ -40,10 +40,10 @@ type StateProps = {
 }
 
 const categoryClass: Record<Category, string> = {
-  dependencies: 'text-t-cyan',
-  build: 'text-t-blue',
-  cache: 'text-t-magenta',
-  temp: 'text-t-tan',
+  dependencies: 'text-t-orange',
+  build: 'text-t-periwinkle',
+  cache: 'text-t-teal',
+  temp: 'text-muted',
 }
 
 const filterChip = 'animate-pop-icon rounded-[3px] px-1.5 inset-ring inset-ring-current'
@@ -87,7 +87,7 @@ function plural(count: number, word: string): string {
 
 export function Tui({ state, dispatch, flash }: Props) {
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div className="screen-in relative flex min-h-0 flex-1 flex-col">
       <Header state={state} />
       <Table state={state} dispatch={dispatch} />
       <Detail state={state} />
@@ -149,7 +149,8 @@ function Table({ state, dispatch }: Omit<Props, 'flash'>) {
   const items = visibleItems(state)
   const largest = items.reduce((max, item) => Math.max(max, item.bytes), 0)
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3" data-table>
+    <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3" data-table>
+      <span className="tui-cursor" aria-hidden="true" />
       <div className="tui-row text-muted sticky top-0 z-10 bg-raised">
         <span />
         <span className="text-right">SIZE</span>
@@ -213,11 +214,7 @@ function Row({ row, state, largest, dispatch }: RowProps) {
       ? 'relative text-faint row-deleted'
       : 'text-muted opacity-45'
   const highlight =
-    entry.selected && ready
-      ? `bg-(--t-selected) ${cursor ? 'inset-ring inset-ring-line-strong' : ''}`
-      : cursor
-        ? 'bg-(--t-cursor)'
-        : ''
+    entry.selected && ready ? `bg-(--t-selected) ${cursor ? 'inset-ring inset-ring-line-strong' : ''}` : ''
   function dim(name: string) {
     return ready ? name : 'text-muted'
   }
@@ -289,11 +286,11 @@ function Key({ keyName, label, dispatch, flash }: KeyProps) {
     <button
       type="button"
       onClick={() => dispatch({ type: 'key', key: keyName })}
-      className="group text-muted inline-flex items-center gap-1.5 rounded-sm transition-colors duration-150 hover:text-fg"
+      className="group text-muted inline-flex items-center gap-1.5 rounded-sm transition-colors duration-150 hover:text-fg focus-visible:text-fg focus-visible:transition-none"
     >
       <kbd
         key={flashed ? flash.at : 'idle'}
-        className={`key-chip group-active:scale-96 pointer-fine:group-hover:bg-fg pointer-fine:group-hover:text-bg ${flashed ? 'animate-key-flash' : ''}`}
+        className={`key-chip group-active:scale-96 pointer-fine:group-hover:bg-fg pointer-fine:group-hover:text-bg group-focus-visible:bg-fg group-focus-visible:text-bg group-focus-visible:transition-none ${flashed ? 'animate-key-flash' : ''}`}
       >
         {keyName === ' ' ? 'space' : keyName === 'Enter' ? 'enter' : keyName}
       </kbd>
@@ -485,7 +482,7 @@ function Help({ dispatch }: { dispatch: Dispatch }) {
     <Overlay title="Keys" rounded>
       <button
         type="button"
-        className="block w-full text-left"
+        className="block w-full text-left focus-visible:text-fg"
         onClick={() => dispatch({ type: 'key', key: 'Escape' })}
       >
         <div className="grid gap-x-8 gap-y-3 sm:grid-cols-2">

@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bun --bun next dev",
+    "brand:build": "bun scripts/build-brand.mjs",
+    "dev": "bun scripts/serve.ts dev",
     "build": "bun --bun next build",
-    "start": "bun --bun next start",
+    "start": "bun scripts/serve.ts start",
     "lint": "oxlint",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
