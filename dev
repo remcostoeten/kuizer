@@ -3,6 +3,7 @@
 import curses
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -148,6 +149,52 @@ def open_repository(_: list[str]) -> None:
     print(REPOSITORY_URL)
 
 
+def git(*args: str) -> str:
+    result = subprocess.run(("git", *args), cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise OSError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def next_version(current: str, requested: str) -> str:
+    major, minor, patch = (int(part) for part in current.split("."))
+    bumps = {"patch": (major, minor, patch + 1), "minor": (major, minor + 1, 0), "major": (major + 1, 0, 0)}
+    if requested in bumps:
+        return ".".join(str(part) for part in bumps[requested])
+    if not re.fullmatch(r"\d+\.\d+\.\d+", requested):
+        raise OSError(f"expected patch, minor, major or x.y.z, got {requested}")
+    return requested
+
+
+def publish_version(extra: list[str]) -> None:
+    if git("status", "--porcelain", "--untracked-files=no"):
+        raise OSError("commit or stash your changes first")
+    manifest = ROOT / "Cargo.toml"
+    gui_manifest = ROOT / "crates/kuizer-gui/Cargo.toml"
+    text = manifest.read_text()
+    # the version line that follows the [workspace.package] header
+    workspace_version = re.compile(r'(\[workspace\.package\]\s*\nversion = ")([^"]+)(")')
+    match = workspace_version.search(text)
+    if match is None:
+        raise OSError("no version under [workspace.package] in Cargo.toml")
+    current = match.group(2)
+    version = next_version(current, extra[0] if extra else "patch")
+    tag = f"v{version}"
+    if git("tag", "--list", tag):
+        raise OSError(f"{tag} already exists")
+    manifest.write_text(workspace_version.sub(rf"\g<1>{version}\g<3>", text))
+    gui_text = gui_manifest.read_text()
+    gui_manifest.write_text(gui_text.replace(f'kuizer = {{ path = "../..", version = "{current}" }}', f'kuizer = {{ path = "../..", version = "{version}" }}'))
+    if subprocess.call(("cargo", "update", "--workspace"), cwd=ROOT) != 0:
+        raise OSError("cargo update --workspace failed")
+    git("commit", "-am", f"chore: release {version}")
+    git("tag", tag)
+    git("push", "origin", "HEAD")
+    git("push", "origin", tag)
+    print(f"released {current} → {version}, CI publishes {tag} to GitHub, npm and crates.io")
+    print(f"{REPOSITORY_URL}/actions")
+
+
 def run_appimage(extra: list[str]) -> None:
     images = sorted(PACKAGES.glob("*.AppImage"), key=lambda path: path.stat().st_mtime)
     if not images:
@@ -228,6 +275,7 @@ def build_tree() -> Item:
         Item("release", "Release", "cargo-dist", children=[
             leaf("plan", "Plan", Step(("dist", "plan"))),
             leaf("build", "Build artifacts", Step(("dist", "build"))),
+            leaf("publish", "Publish version", Step(action=publish_version, label="bump, commit, tag and push"), prompt=Prompt("patch, minor, major or x.y.z", "patch"), confirm=True),
         ]),
         group("clean", "Clean", "remove build output", clean_cargo, clean_site, clean_packages),
         leaf("repo", "Open GitHub", Step(action=open_repository, label=REPOSITORY_URL)),
