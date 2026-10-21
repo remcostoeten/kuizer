@@ -28,7 +28,7 @@ impl Palette {
 /// scores keep the table order, and an empty query keeps every spec in table order.
 ///
 /// @example
-/// let shown = rank("resc", commands::table());
+/// let shown = rank("resc", commands::table().to_vec());
 pub fn rank(query: &str, specs: Vec<Spec>) -> Vec<Spec> {
     let mut scored: Vec<(i32, usize, Spec)> = specs
         .into_iter()
@@ -144,17 +144,17 @@ mod tests {
 
     #[test]
     fn rank_puts_the_best_match_first_and_drops_the_rest() {
-        let ranked = rank("trash", table());
+        let ranked = rank("trash", table().to_vec());
         assert_eq!(ranked[0].command, Command::Trash);
         assert!(
             ranked
                 .iter()
                 .all(|spec| score("trash", &spec.label).is_some())
         );
-        let all = rank("", table());
+        let all = rank("", table().to_vec());
         assert_eq!(all.len(), table().len());
         assert_eq!(all[0].command, table()[0].command);
-        assert!(rank("qqqq", table()).is_empty());
+        assert!(rank("qqqq", table().to_vec()).is_empty());
     }
 
     #[test]

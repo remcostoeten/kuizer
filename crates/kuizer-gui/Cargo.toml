@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = "7.0.0"
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
 gpui = "=0.2.2"
 kuizer = { path = "../..", version = "0.1.1" }
 serde = { version = "1.0.229", features = ["derive"] }

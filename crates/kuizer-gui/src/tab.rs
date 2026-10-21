@@ -1,8 +1,7 @@
-use kuizer::dupes;
-
+use crate::activity::{Activity, State, Step};
 use crate::glossary::Term;
 use crate::icon::Icon;
-use crate::model::Stage;
+use crate::model::Part;
 use crate::start::ScanOptions;
 
 /// One section of the sidebar.
@@ -119,49 +118,52 @@ impl Tab {
         }
     }
 
-    pub fn status(self, stage: Stage, options: &ScanOptions) -> &'static str {
-        let walking = matches!(stage, Stage::Starting | Stage::Scanning(_));
+    /// The part of a scan that fills this section, for the ones a scan delivers.
+    pub fn part(self) -> Option<Part> {
         match self {
-            Self::Overview => "Shown once every part of the scan is done",
-            Self::Artifacts if walking => "Looking for project artifacts",
-            Self::Artifacts => "Artifacts found, shown once the scan is done",
-            Self::Issues if walking => "Collecting issues while scanning folders",
-            Self::Issues => "Issues collected, shown once the scan is done",
-            Self::Duplicates if !options.duplicates => "Duplicate search is off for this scan",
-            Self::Duplicates if walking => "Collecting files while scanning folders",
-            Self::Duplicates => match stage {
-                Stage::Duplicates(dupes::Stage::Walking { .. }) => "Collecting files",
-                Stage::Duplicates(dupes::Stage::Hashing { .. }) => "Hashing files",
-                Stage::Duplicates(dupes::Stage::Verifying { .. }) => "Comparing files",
-                _ => "Duplicates found, shown once the scan is done",
+            Self::Overview | Self::Duplicates => None,
+            Self::Artifacts | Self::Issues => Some(Part::Artifacts),
+            Self::Caches => Some(Part::Caches),
+            Self::Toolchains => Some(Part::Toolchains),
+            Self::Docker => Some(Part::Docker),
+            Self::Repos => Some(Part::Repos),
+            Self::History => Some(Part::History),
+        }
+    }
+
+    pub fn status(self, activity: &Activity, options: &ScanOptions) -> &'static str {
+        let step = match self {
+            Self::Overview => return "Shown once every part of the scan is done",
+            Self::Duplicates if options.duplicates => {
+                return "Searched once the rest of the scan is on screen";
+            }
+            Self::Duplicates => return "Searched on request once the scan is done",
+            Self::Artifacts | Self::Issues => Step::Folders,
+            Self::Caches => Step::Caches,
+            Self::Toolchains => Step::Toolchains,
+            Self::Docker => Step::Docker,
+            Self::Repos => Step::Repos,
+            Self::History => Step::History,
+        };
+        let state = activity.state(step, options);
+        match self {
+            _ if matches!(state, State::Done(_)) => "Done, shown with the first project artifacts",
+            _ if state == State::Off => match self {
+                Self::Caches => "Global caches are off for this scan",
+                Self::Toolchains => "Toolchains are off for this scan",
+                Self::Docker => "Docker and Podman are off for this scan",
+                _ => "Git repositories are off for this scan",
             },
-            Self::Caches if !options.caches => "Global caches are off for this scan",
-            Self::Caches => match stage {
-                Stage::Caches => "Measuring global caches",
-                Stage::History => "Caches measured, shown once the scan is done",
-                _ => "Measured after the folder scan",
-            },
-            Self::Toolchains if !options.toolchains => "Toolchains are off for this scan",
-            Self::Toolchains => match stage {
-                Stage::Toolchains => "Measuring installed toolchains",
-                Stage::History => "Toolchains measured, shown once the scan is done",
-                _ => "Measured after the folder scan",
-            },
-            Self::Docker if !options.docker => "Docker and Podman are off for this scan",
-            Self::Docker => match stage {
-                Stage::Docker => "Asking Docker and Podman",
-                Stage::History => "Docker objects listed, shown once the scan is done",
-                _ => "Asked while the folders are scanned",
-            },
-            Self::Repos if !options.repos => "Git repositories are off for this scan",
-            Self::Repos if walking => "Noting git repositories while scanning folders",
-            Self::Repos => match stage {
-                Stage::Repos => "Checking git repositories",
-                Stage::History => "Repositories checked, shown once the scan is done",
-                _ => "Checked after the folder scan",
-            },
-            Self::History if matches!(stage, Stage::History) => "Reading the cleanup history",
-            Self::History => "Read at the end of the scan",
+            Self::Artifacts => "Looking for project artifacts",
+            Self::Issues => "Collecting issues while scanning folders",
+            Self::Caches => "Measuring global caches",
+            Self::Toolchains => "Measuring installed toolchains",
+            Self::Docker => "Asking Docker and Podman",
+            Self::Repos if state == State::Pending => {
+                "Noting git repositories while scanning folders"
+            }
+            Self::Repos => "Checking git repositories",
+            _ => "Reading the cleanup history",
         }
     }
 }

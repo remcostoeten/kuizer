@@ -1,6 +1,10 @@
+#[cfg(unix)]
+pub mod dir;
 #[cfg(target_os = "linux")]
 mod linux;
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -12,7 +16,11 @@ pub struct Mount {
 
 pub struct MountTable {
     mounts: Vec<Mount>,
+    points: HashSet<PathBuf>,
+    names: HashSet<OsString>,
 }
+
+const SPLIT_DEVICE_FS_TYPES: &[&str] = &["btrfs", "bcachefs"];
 
 impl MountTable {
     pub fn load() -> Self {
@@ -25,7 +33,43 @@ impl MountTable {
 
     pub fn from_mounts(mut mounts: Vec<Mount>) -> Self {
         mounts.sort_by_key(|mount| std::cmp::Reverse(mount.point.components().count()));
-        Self { mounts }
+        let points: HashSet<PathBuf> = mounts.iter().map(|mount| mount.point.clone()).collect();
+        let names = points
+            .iter()
+            .filter_map(|point| point.file_name().map(OsString::from))
+            .collect();
+        Self {
+            mounts,
+            points,
+            names,
+        }
+    }
+
+    /// @name MountTable::is_mount_point
+    /// @description Returns whether something is mounted exactly at `path`, bind mounts
+    /// included.
+    ///
+    /// @example
+    /// if mounts.is_mount_point(&child) { check_device(&child); }
+    pub fn is_mount_point(&self, path: &Path) -> bool {
+        path.file_name()
+            .is_some_and(|name| self.names.contains(name))
+            && self.points.contains(path)
+    }
+
+    /// @name MountTable::device_may_change_below
+    /// @description Returns whether a directory under `path` can sit on another device without
+    /// being a mount point, as btrfs and bcachefs subvolumes do, or whether the table is too
+    /// empty to tell. Walkers then compare devices on every directory instead of only at mount
+    /// points.
+    ///
+    /// @example
+    /// let check_every_dir = mounts.device_may_change_below(&root);
+    pub fn device_may_change_below(&self, path: &Path) -> bool {
+        self.mounts.is_empty()
+            || self
+                .fs_type(path)
+                .is_some_and(|fs_type| SPLIT_DEVICE_FS_TYPES.contains(&fs_type))
     }
 
     pub fn fs_type(&self, path: &Path) -> Option<&str> {
@@ -46,6 +90,23 @@ pub fn home_dir() -> Option<PathBuf> {
     static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
     HOME.get_or_init(|| dirs::home_dir().map(|home| std::fs::canonicalize(&home).unwrap_or(home)))
         .clone()
+}
+
+/// @name rotational
+/// @description Returns whether `device` is a spinning disk, read from sysfs on Linux, so a
+/// scan can stay sequential where parallel reads would only add seeks. Unknown devices, such
+/// as btrfs subvolumes or other platforms, count as not rotational.
+///
+/// @example
+/// let threads = if platform::rotational(device) { 2 } else { 16 };
+#[cfg(target_os = "linux")]
+pub fn rotational(device: u64) -> bool {
+    linux::rotational(device)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn rotational(_device: u64) -> bool {
+    false
 }
 
 #[cfg(unix)]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ pub fn annotate(
     cutoff: Option<SystemTime>,
     threads: usize,
 ) {
-    let artifacts: BTreeSet<PathBuf> = candidates.iter().map(|c| c.path.clone()).collect();
+    let artifacts: HashSet<PathBuf> = candidates.iter().map(|c| c.path.clone()).collect();
     let projects: Vec<PathBuf> = candidates
         .iter()
         .filter_map(|c| c.project.clone())
@@ -42,18 +42,20 @@ pub fn annotate(
     thread::scope(|scope| {
         for _ in 0..threads.clamp(1, projects.len().max(1)) {
             scope.spawn(|| {
-                while let Some(project) = projects.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let nested: BTreeSet<&Path> = projects
-                        .iter()
-                        .filter(|other| *other != project && other.starts_with(project))
-                        .map(PathBuf::as_path)
-                        .collect();
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(project) = projects.get(index) else {
+                        break;
+                    };
+                    let after = &projects[index + 1..];
+                    let nested =
+                        &after[..after.partition_point(|other| other.starts_with(project))];
                     let last = project_activity(
                         project,
                         &Skip {
                             detector,
                             artifacts: &artifacts,
-                            nested: &nested,
+                            nested,
                             names: skip_dirs,
                         },
                         cutoff,
@@ -78,15 +80,18 @@ pub fn annotate(
 
 struct Skip<'a> {
     detector: &'a Detector,
-    artifacts: &'a BTreeSet<PathBuf>,
-    nested: &'a BTreeSet<&'a Path>,
+    artifacts: &'a HashSet<PathBuf>,
+    nested: &'a [PathBuf],
     names: &'a [String],
 }
 
 impl Skip<'_> {
     fn contains(&self, path: &Path) -> bool {
         self.artifacts.contains(path)
-            || self.nested.contains(path)
+            || self
+                .nested
+                .binary_search_by(|other| other.as_path().cmp(path))
+                .is_ok()
             || path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -129,7 +134,7 @@ fn newest_file(project: &Path, skip: &Skip, cutoff: Option<SystemTime>) -> Optio
             .flatten()
             .filter_map(|entry| Some((entry.file_name(), entry.file_type().ok()?)))
             .collect();
-        let own = Listing::new(children.iter().map(|(name, _)| name.clone()).collect());
+        let own = skip.detector.listing(children.iter().map(|(name, _)| name));
         if let Some(parent) = parent
             && skip.detector.classify_dir(&dir, &parent, &own).is_some()
         {

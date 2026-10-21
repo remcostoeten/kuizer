@@ -1,10 +1,10 @@
 use std::collections::HashSet;
-use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::detect::Listing;
+use crate::detect::{Detector, Listing};
 
-const MARKER_SETS: &[&[&str]] = &[
+pub(crate) const APP_DATA_MARKERS: &[&[&str]] = &[
     &["Local State"],
     &["profiles.ini"],
     &["Cookies", "Preferences"],
@@ -95,17 +95,17 @@ const TOOL_DIRS: &[&str] = &[
 /// single Chromium or Firefox profile with its cookie store.
 ///
 /// @example
-/// if protect::holds_app_data(&listing) {
+/// if protect::holds_app_data(&detector, &listing) {
 ///     return;
 /// }
-pub fn holds_app_data(listing: &Listing) -> bool {
-    MARKER_SETS
+pub fn holds_app_data(detector: &Detector, listing: &Listing) -> bool {
+    APP_DATA_MARKERS
         .iter()
-        .any(|set| set.iter().all(|name| listing.has(OsStr::new(name))))
+        .any(|set| set.iter().all(|name| detector.lists(listing, name)))
 }
 
 fn marked_on_disk(dir: &Path) -> bool {
-    MARKER_SETS.iter().any(|set| {
+    APP_DATA_MARKERS.iter().any(|set| {
         set.iter()
             .all(|name| std::fs::symlink_metadata(dir.join(name)).is_ok())
     })
@@ -114,6 +114,7 @@ fn marked_on_disk(dir: &Path) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Protected {
     dirs: HashSet<PathBuf>,
+    names: HashSet<OsString>,
     homes: Vec<PathBuf>,
 }
 
@@ -135,7 +136,11 @@ impl Protected {
                 dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
             }
         }
-        Self { dirs, homes }
+        let names = dirs
+            .iter()
+            .filter_map(|dir| dir.file_name().map(OsString::from))
+            .collect();
+        Self { dirs, names, homes }
     }
 
     pub fn for_user() -> Self {
@@ -152,7 +157,9 @@ impl Protected {
     ///     continue;
     /// }
     pub fn is_known(&self, path: &Path) -> bool {
-        self.dirs.contains(path)
+        path.file_name()
+            .is_some_and(|name| self.names.contains(name))
+            && self.dirs.contains(path)
     }
 
     /// @name covers
@@ -189,31 +196,21 @@ impl Protected {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::fs;
 
     use super::*;
-
-    fn listing(names: &[&str]) -> Listing {
-        Listing::new(names.iter().map(OsString::from).collect())
-    }
+    use crate::detect::builtin_rules;
 
     #[test]
     fn recognizes_profile_listings() {
-        assert!(holds_app_data(&listing(&["Default", "Local State"])));
-        assert!(holds_app_data(&listing(&["profiles.ini", "abc.default"])));
-        assert!(holds_app_data(&listing(&[
-            "Cookies",
-            "Preferences",
-            "History"
-        ])));
-        assert!(holds_app_data(&listing(&["cookies.sqlite", "prefs.js"])));
-        assert!(!holds_app_data(&listing(&[
-            "Cookies",
-            "src",
-            "package.json"
-        ])));
-        assert!(!holds_app_data(&listing(&["node_modules", "package.json"])));
+        let detector = Detector::new(&builtin_rules()).expect("builtin rules");
+        let holds = |names: &[&str]| holds_app_data(&detector, &detector.listing(names));
+        assert!(holds(&["Default", "Local State"]));
+        assert!(holds(&["profiles.ini", "abc.default"]));
+        assert!(holds(&["Cookies", "Preferences", "History"]));
+        assert!(holds(&["cookies.sqlite", "prefs.js"]));
+        assert!(!holds(&["Cookies", "src", "package.json"]));
+        assert!(!holds(&["node_modules", "package.json"]));
     }
 
     #[test]

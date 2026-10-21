@@ -135,7 +135,7 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `scan.one_file_system` | `true` | Never cross into another mount |
 | `scan.excluded_fs_types` | proc, sysfs, devtmpfs, cgroup, nfs, cifs, fuse.sshfs and others | Mounts of these types are never entered |
 | `scan.excluded_mounts` | `/proc /sys /dev /run` | Paths never entered |
-| `scan.size_threads` | `0` (cores, max 8) | Sizing workers |
+| `scan.size_threads` | `0` (twice the cores, max 16; 2 on a spinning disk) | Threads that walk and size a scan; idle-activity checks use cores, max 8 |
 | `detect.categories` | all | `dependencies`, `build`, `cache`, `temp` |
 | `detect.builtin_rules` | `true` | Turn off to use only custom rules |
 | `detect.disabled_rules` | `[]` | Built-in or custom rule names to skip; unknown names are an error |
@@ -143,6 +143,7 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `duplicates.min_size` | `4KiB` | Phase 5 |
 | `duplicates.threads` | `0` | Phase 5 |
 | `duplicates.verify` | `false` | Byte compare after hash match, phase 5 |
+| `duplicates.include_hidden` | `false` | Look inside hidden home folders and tool-managed cache and toolchain folders |
 | `delete.mode` | `trash` | `trash` or `permanent`, phase 4 |
 | `delete.confirm` | `false` | Ask before moving to the trash in the TUI. Permanent deletion, `review` items and projects with uncommitted changes always ask |
 | `appearance.motion` | `true` | Animations in the GUI: tooltips, loaders and skeletons. Off, or the desktop asking for reduced motion, shows them without movement |

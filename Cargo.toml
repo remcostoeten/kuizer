@@ -28,7 +28,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 crossbeam-channel = "0.5.17"
 dirs = "7.0.0"
 globset = "0.4.20"
-jiff = { version = "0.2.38", features = ["serde"] }
+jiff = "0.2.38"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -54,7 +54,7 @@ strip = true
 
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }

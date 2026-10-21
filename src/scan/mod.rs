@@ -1,5 +1,6 @@
 mod activity;
 mod cancel;
+mod pool;
 mod size;
 mod types;
 pub(crate) mod walk;
@@ -14,18 +15,23 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 pub use activity::annotate;
 pub use cancel::Cancel;
-pub use size::{Measured, measure};
+pub use size::{Measured, measure, measure_parallel};
 pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary, Usage};
 
 use crate::config::{Config, ConfigError};
-use crate::platform::MountTable;
+use crate::platform::dir::EntryKind;
+use crate::platform::{self, MountTable};
 use crate::protect::Protected;
-use walk::{Flow, Found, Visitor, Walker};
+use pool::Queue;
+use size::{SizeScratch, SizeTask, Start, run_size_task, start_measure};
+use walk::{Companion, Context, Flow, Found, Pending, Scratch, Visitor};
 
-const FOUND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1024;
 const TICK: Duration = Duration::from_millis(100);
 const CURRENT_EVERY: u64 = 32;
+const FLUSH_EVERY: u64 = 256;
+const MAX_SCAN_THREADS: usize = 16;
+const ROTATIONAL_THREADS: usize = 2;
 
 pub struct Scan {
     pub events: Receiver<Event>,
@@ -86,44 +92,107 @@ pub fn normalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     kept
 }
 
+struct Shared {
+    cancel: Cancel,
+    counters: Arc<Counters>,
+    current: Arc<Mutex<Option<PathBuf>>>,
+    events: Sender<Event>,
+    next_id: AtomicU64,
+    min_size: u64,
+}
+
+impl Shared {
+    fn deliver(&self, found: &Found, measured: Measured) -> Flow {
+        if self.cancel.is_cancelled() || measured.usage.allocated < self.min_size {
+            return Flow::Continue;
+        }
+        Counters::add(&self.counters.candidates, 1);
+        Counters::add(&self.counters.bytes, measured.usage.allocated);
+        let candidate = Candidate {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            project: parent_project(&found.path),
+            path: found.path.clone(),
+            kind: found.kind,
+            rule: Arc::clone(&found.rule),
+            usage: measured.usage,
+            newest: measured.newest,
+            identity: measured.identity,
+            project_last_active: None,
+        };
+        match self.events.send(Event::Candidate(candidate)) {
+            Ok(()) => Flow::Continue,
+            Err(_) => {
+                self.cancel.cancel();
+                Flow::Stop
+            }
+        }
+    }
+}
+
 struct Sink<'a, C> {
-    cancel: &'a Cancel,
-    counters: &'a Counters,
-    current: &'a Mutex<Option<PathBuf>>,
-    found: &'a Sender<Found>,
-    events: &'a Sender<Event>,
+    shared: &'a Shared,
+    found: Vec<Found>,
+    entered: u64,
+    dirs: u64,
+    files: u64,
     companion: C,
+}
+
+impl<'a, C> Sink<'a, C> {
+    fn new(shared: &'a Shared, companion: C) -> Self {
+        Self {
+            shared,
+            found: Vec::new(),
+            entered: 0,
+            dirs: 0,
+            files: 0,
+            companion,
+        }
+    }
+
+    fn flush(&mut self) {
+        Counters::add(&self.shared.counters.dirs, std::mem::take(&mut self.dirs));
+        Counters::add(&self.shared.counters.files, std::mem::take(&mut self.files));
+    }
 }
 
 impl<C: Visitor> Visitor for Sink<'_, C> {
     fn cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.shared.cancel.is_cancelled()
+    }
+
+    fn wants_files(&self) -> bool {
+        self.companion.wants_files()
     }
 
     fn issue(&mut self, issue: Issue) -> Flow {
-        Counters::add(&self.counters.issues, 1);
-        match self.events.send(Event::Issue(issue)) {
+        Counters::add(&self.shared.counters.issues, 1);
+        match self.shared.events.send(Event::Issue(issue)) {
             Ok(()) => Flow::Continue,
             Err(_) => Flow::Stop,
         }
     }
 
     fn entered(&mut self, path: &Path) {
-        let entered = self.counters.dirs.fetch_add(1, Ordering::Relaxed);
-        if entered.is_multiple_of(CURRENT_EVERY)
-            && let Ok(mut current) = self.current.lock()
+        if self.entered.is_multiple_of(CURRENT_EVERY)
+            && let Ok(mut current) = self.shared.current.lock()
         {
             *current = Some(path.to_path_buf());
         }
+        self.entered += 1;
+        self.dirs += 1;
+        if self.dirs >= FLUSH_EVERY {
+            self.flush();
+        }
     }
 
-    fn counted(&mut self, file_type: std::fs::FileType) {
-        Counters::add(&self.counters.files, 1);
-        self.companion.counted(file_type);
+    fn counted(&mut self, kind: EntryKind) {
+        self.files += 1;
+        self.companion.counted(kind);
     }
 
-    fn file(&mut self, path: &Path, file_type: std::fs::FileType) -> Flow {
-        self.companion.file(path, file_type)
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
+        self.companion.file(path, kind)
     }
 
     fn repository(&mut self, root: &Path) {
@@ -131,10 +200,8 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
     }
 
     fn artifact(&mut self, found: Found) -> Flow {
-        match self.found.send(found) {
-            Ok(()) => Flow::Continue,
-            Err(_) => Flow::Stop,
-        }
+        self.found.push(found);
+        Flow::Continue
     }
 }
 
@@ -145,6 +212,28 @@ pub fn size_threads(config: &Config) -> usize {
     }
 }
 
+/// @name scan_threads
+/// @description Returns how many threads walk and size a scan of `roots`. Listing directories
+/// waits on the disk more than on the CPU, so the default runs about twice as many threads as
+/// cores, and only a couple on a spinning disk where more would add seeks. `scan.size_threads`
+/// overrides it.
+///
+/// @example
+/// let threads = scan::scan_threads(&config, &roots);
+pub fn scan_threads(config: &Config, roots: &[PathBuf]) -> usize {
+    if config.scan.size_threads > 0 {
+        return config.scan.size_threads;
+    }
+    let spinning = roots.first().is_some_and(|root| {
+        std::fs::metadata(root)
+            .is_ok_and(|metadata| platform::rotational(platform::device(&metadata)))
+    });
+    if spinning {
+        return ROTATIONAL_THREADS;
+    }
+    thread::available_parallelism().map_or(8, |n| (n.get() * 2).min(MAX_SCAN_THREADS))
+}
+
 fn parent_project(path: &Path) -> Option<PathBuf> {
     path.parent().map(Path::to_path_buf)
 }
@@ -153,126 +242,138 @@ pub fn start(config: &Config, roots: &[PathBuf], cancel: Cancel) -> Result<Scan,
     start_with(config, roots, cancel, ()).map(|(scan, _)| scan)
 }
 
-pub(crate) fn start_with<C: Visitor + Send + 'static>(
+enum Task {
+    Walk(Pending),
+    Size(SizeTask<Found>),
+}
+
+fn work<C: Companion>(
+    shared: &Shared,
+    context: &Context<'_>,
+    queue: &Queue<Task>,
+    companion: C,
+) -> C {
+    let mut local = queue.local();
+    let mut sink = Sink::new(shared, companion);
+    let mut scratch = Scratch::default();
+    let mut sizing = SizeScratch::default();
+    let mut children = Vec::new();
+    while let Some(task) = local.next() {
+        if shared.cancel.is_cancelled() {
+            queue.stop();
+            break;
+        }
+        let flow = match task {
+            Task::Walk(pending) => {
+                let flow = context.visit(&mut sink, pending, &mut scratch, &mut children);
+                for child in children.drain(..) {
+                    local.push(Task::Walk(child));
+                }
+                let mut flow = flow;
+                for found in std::mem::take(&mut sink.found) {
+                    let path = found.path.clone();
+                    match start_measure(found, &path) {
+                        Start::Done(found, measured) => {
+                            if let Flow::Stop = shared.deliver(&found, measured) {
+                                flow = Flow::Stop;
+                            }
+                        }
+                        Start::Tree(total, path) => {
+                            local.push(Task::Size(SizeTask::dir(total, path)));
+                        }
+                    }
+                }
+                flow
+            }
+            Task::Size(task) => {
+                match run_size_task(task, &mut sizing, &shared.cancel, &mut local, Task::Size) {
+                    Some(total) => shared.deliver(&total.item, total.measured()),
+                    None => Flow::Continue,
+                }
+            }
+        };
+        local.done();
+        if let Flow::Stop = flow {
+            queue.stop();
+            break;
+        }
+    }
+    sink.flush();
+    sink.companion
+}
+
+pub(crate) fn start_with<C: Companion>(
     config: &Config,
     roots: &[PathBuf],
     cancel: Cancel,
     companion: C,
 ) -> Result<(Scan, Receiver<C>), ConfigError> {
-    let detector = Arc::new(config.detector()?);
-    let excludes = Arc::new(config.excludes()?);
-    let scan_config = Arc::new(config.scan.clone());
+    let detector = config.detector()?;
+    let excludes = config.excludes()?;
+    let scan_config = config.scan.clone();
     let roots = normalize_roots(roots);
+    let threads = scan_threads(config, &roots);
     let counters = Arc::new(Counters::default());
     let current = Arc::new(Mutex::new(None));
-    let (found_tx, found_rx) = bounded::<Found>(FOUND_CAPACITY);
     let (event_tx, event_rx) = bounded::<Event>(EVENT_CAPACITY);
-    let workers = size_threads(config);
-    let next_id = Arc::new(AtomicU64::new(1));
-    let min_size = config.scan.min_size.0;
     let started = Instant::now();
     let (companion_tx, companion_rx) = bounded::<C>(1);
+    let shared = Shared {
+        cancel: cancel.clone(),
+        counters: Arc::clone(&counters),
+        current: Arc::clone(&current),
+        events: event_tx,
+        next_id: AtomicU64::new(1),
+        min_size: config.scan.min_size.0,
+    };
 
-    let walker = {
-        let counters = Arc::clone(&counters);
-        let current = Arc::clone(&current);
-        let cancel = cancel.clone();
-        let events = event_tx.clone();
-        thread::Builder::new()
-            .name("kuizer-walk".to_owned())
-            .spawn(move || {
-                let mounts = MountTable::load();
-                let protected = Protected::for_user();
-                let mut walker = Walker {
-                    scan: &scan_config,
-                    detector: &detector,
-                    excludes: &excludes,
-                    mounts: &mounts,
-                    protected: &protected,
-                    visitor: Sink {
-                        cancel: &cancel,
-                        counters: &counters,
-                        current: &current,
-                        found: &found_tx,
-                        events: &events,
-                        companion,
-                    },
-                };
+    let coordinator = thread::Builder::new()
+        .name("kuizer-scan".to_owned())
+        .spawn(move || {
+            let mounts = MountTable::load();
+            let protected = Protected::for_user();
+            let context = Context::new(&scan_config, &detector, &excludes, &mounts, &protected);
+            let mut companion = companion;
+            let mut seeds = Vec::new();
+            {
+                let mut sink = Sink::new(&shared, ());
                 for root in &roots {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    walker.walk_root(root);
+                    seeds.extend(context.root(&mut sink, root).map(Task::Walk));
                 }
-                let _ = companion_tx.send(walker.visitor.companion);
-            })
-            .expect("spawn walker thread")
-    };
-
-    let sizers: Vec<JoinHandle<()>> = (0..workers)
-        .map(|index| {
-            let found_rx = found_rx.clone();
-            let events = event_tx.clone();
-            let counters = Arc::clone(&counters);
-            let cancel = cancel.clone();
-            let next_id = Arc::clone(&next_id);
-            thread::Builder::new()
-                .name(format!("kuizer-size-{index}"))
-                .spawn(move || {
-                    for found in found_rx {
-                        if cancel.is_cancelled() {
-                            continue;
-                        }
-                        let Measured {
-                            usage,
-                            newest,
-                            identity,
-                        } = measure(&found.path, &cancel);
-                        if usage.allocated < min_size {
-                            continue;
-                        }
-                        Counters::add(&counters.candidates, 1);
-                        Counters::add(&counters.bytes, usage.allocated);
-                        let candidate = Candidate {
-                            id: next_id.fetch_add(1, Ordering::Relaxed),
-                            project: parent_project(&found.path),
-                            path: found.path,
-                            kind: found.kind,
-                            rule: found.rule,
-                            usage,
-                            newest,
-                            identity,
-                            project_last_active: None,
-                        };
-                        if events.send(Event::Candidate(candidate)).is_err() {
-                            cancel.cancel();
-                        }
-                    }
-                })
-                .expect("spawn sizing thread")
+            }
+            if !seeds.is_empty() && !shared.cancel.is_cancelled() {
+                let queue = Queue::new(seeds);
+                let forks: Vec<C> = (0..threads).map(|_| companion.fork()).collect();
+                let done: Vec<C> = thread::scope(|scope| {
+                    let workers: Vec<_> = forks
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, fork)| {
+                            let (shared, context, queue) = (&shared, &context, &queue);
+                            thread::Builder::new()
+                                .name(format!("kuizer-scan-{index}"))
+                                .spawn_scoped(scope, move || work(shared, context, queue, fork))
+                                .expect("spawn scan thread")
+                        })
+                        .collect();
+                    workers
+                        .into_iter()
+                        .filter_map(|worker| worker.join().ok())
+                        .collect()
+                });
+                for fork in done {
+                    companion.merge(fork);
+                }
+            }
+            let _ = companion_tx.send(companion);
+            let summary = Summary {
+                progress: shared.counters.snapshot(),
+                duration: started.elapsed(),
+                cancelled: shared.cancel.is_cancelled(),
+            };
+            let _ = shared.events.send(Event::Finished(summary));
         })
-        .collect();
-    drop(found_rx);
-
-    let coordinator = {
-        let counters = Arc::clone(&counters);
-        let cancel = cancel.clone();
-        thread::Builder::new()
-            .name("kuizer-scan".to_owned())
-            .spawn(move || {
-                let _ = walker.join();
-                for sizer in sizers {
-                    let _ = sizer.join();
-                }
-                let summary = Summary {
-                    progress: counters.snapshot(),
-                    duration: started.elapsed(),
-                    cancelled: cancel.is_cancelled(),
-                };
-                let _ = event_tx.send(Event::Finished(summary));
-            })
-            .expect("spawn coordinator thread")
-    };
+        .expect("spawn scan thread");
 
     Ok((
         Scan {
@@ -344,5 +445,156 @@ pub fn collect_with(
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+    use crate::detect::Kind;
+    use walk::Walker;
+
+    struct Serial(Vec<Found>);
+
+    impl Visitor for Serial {
+        fn issue(&mut self, _issue: Issue) -> Flow {
+            Flow::Continue
+        }
+
+        fn artifact(&mut self, found: Found) -> Flow {
+            self.0.push(found);
+            Flow::Continue
+        }
+    }
+
+    type Row = (PathBuf, String, Kind, Usage, Option<std::time::SystemTime>);
+
+    fn serial(config: &Config, root: &Path) -> Vec<Row> {
+        let detector = config.detector().unwrap();
+        let excludes = config.excludes().unwrap();
+        let mounts = MountTable::load();
+        let protected = Protected::for_user();
+        let mut walker = Walker {
+            scan: &config.scan,
+            detector: &detector,
+            excludes: &excludes,
+            mounts: &mounts,
+            protected: &protected,
+            visitor: Serial(Vec::new()),
+        };
+        walker.walk_root(root);
+        let mut rows: Vec<Row> = walker
+            .visitor
+            .0
+            .into_iter()
+            .map(|found| {
+                let measured = measure(&found.path, &Cancel::new());
+                (
+                    found.path,
+                    found.rule.name.clone(),
+                    found.kind,
+                    measured.usage,
+                    measured.newest,
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    fn parallel(config: &Config, root: &Path) -> Vec<Row> {
+        let handle = start(config, &[root.to_path_buf()], Cancel::new()).unwrap();
+        let mut rows: Vec<Row> = collect(&handle, |_| {})
+            .candidates
+            .into_iter()
+            .map(|c| (c.path, c.rule.name.clone(), c.kind, c.usage, c.newest))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    fn write(path: &Path, bytes: usize) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![b'x'; bytes]).unwrap();
+    }
+
+    fn tree(root: &Path) {
+        write(&root.join("web/package.json"), 2);
+        write(&root.join("web/node_modules/a/index.js"), 300);
+        for index in 0..2500 {
+            write(
+                &root.join(format!("web/node_modules/flat/{index}.js")),
+                index % 7,
+            );
+        }
+        fs::hard_link(
+            root.join("web/node_modules/a/index.js"),
+            root.join("web/node_modules/flat/linked.js"),
+        )
+        .unwrap();
+        symlink(root.join("web"), root.join("web/node_modules/loop")).unwrap();
+        write(&root.join("web/packages/ui/package.json"), 2);
+        write(&root.join("web/packages/ui/node_modules/b/index.js"), 40);
+        write(&root.join("web/tsconfig.json"), 2);
+        write(&root.join("web/tsconfig.tsbuildinfo"), 9);
+        write(&root.join("rust/Cargo.toml"), 2);
+        write(&root.join("rust/target/debug/app"), 1000);
+        write(&root.join("rust/target/.rustc_info.json"), 2);
+        write(&root.join("skipped/package.json"), 2);
+        write(&root.join("skipped/node_modules/c.js"), 5);
+        write(&root.join("quiet/.kuizerignore"), 0);
+        write(&root.join("quiet/app/package.json"), 2);
+        write(&root.join("quiet/app/node_modules/d.js"), 5);
+        for index in 0..60 {
+            write(&root.join(format!("deep/{index}/package.json")), 2);
+            write(
+                &root.join(format!("deep/{index}/node_modules/e/{index}.js")),
+                index,
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_scan_matches_a_serial_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        tree(&root);
+        for one_file_system in [true, false] {
+            let mut config = Config::default();
+            config.scan.size_threads = 4;
+            config.scan.one_file_system = one_file_system;
+            config.scan.exclude = vec!["skipped".to_owned()];
+            let expected = serial(&config, &root);
+            assert_eq!(expected.len(), 64, "{expected:?}");
+            assert_eq!(parallel(&config, &root), expected);
+        }
+    }
+
+    #[test]
+    fn parallel_measure_matches_serial_measure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        tree(&root);
+        let serial = measure(&root, &Cancel::new());
+        let parallel = measure_parallel(&root, &Cancel::new(), 4);
+        assert_eq!(parallel.usage, serial.usage);
+        assert_eq!(parallel.newest, serial.newest);
+        assert_eq!(parallel.identity, serial.identity);
+    }
+
+    #[test]
+    fn cancelled_scan_finishes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        tree(&root);
+        let mut config = Config::default();
+        config.scan.size_threads = 4;
+        let handle = start(&config, &[root], Cancel::new()).unwrap();
+        handle.cancel();
+        let collected = collect(&handle, |_| {});
+        assert!(collected.summary.cancelled);
     }
 }

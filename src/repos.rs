@@ -1,7 +1,9 @@
-use std::fs;
+use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -10,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConfigError, GitConfig};
 use crate::dupes::{Files, Options};
-use crate::platform::MountTable;
+use crate::platform::{self, MountTable};
 use crate::protect::Protected;
-use crate::scan::walk::{Flow, Visitor, Walker};
+use crate::scan::walk::{Companion, Flow, Visitor, Walker};
 use crate::scan::{self, Cancel, Issue, Scan};
 use crate::toolchains::PinFinder;
 
@@ -157,6 +159,16 @@ impl Visitor for Repositories {
     }
 }
 
+impl Companion for Repositories {
+    fn fork(&self) -> Self {
+        Self::default()
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.roots.extend(other.roots);
+    }
+}
+
 pub struct Walked {
     pub files: Option<Files>,
     pub pins: Option<PinFinder>,
@@ -185,7 +197,10 @@ pub fn start_scan(
         roots,
         cancel,
         (
-            (duplicates.map(Files::new), pins.then(PinFinder::new)),
+            (
+                duplicates.map(|options| Files::for_roots(options, roots)),
+                pins.then(PinFinder::new),
+            ),
             Repositories::default(),
         ),
     )?;
@@ -297,10 +312,12 @@ pub fn inspect_all_with(
 }
 
 /// @name inspect
-/// @description Reads one repository: its object counts from `git count-objects`, its default
-/// and current branch, the local branches already merged into the default branch that may be
-/// removed, and whether another git operation is in progress. Kept branches, the default branch
-/// and branches checked out in any worktree are never listed as merged.
+/// @description Reads one repository: its object counts, its default and current branch, the
+/// local branches already merged into the default branch that may be removed, and whether
+/// another git operation is in progress. Refs and object counts are read from the git folder
+/// directly; repositories with a layout this does not understand (reftable, SHA-256, linked
+/// worktrees) are asked through `git` instead. Kept branches, the default branch and branches
+/// checked out in any worktree are never listed as merged.
 ///
 /// @example
 /// let repository = repos::inspect(Path::new("/home/me/apps/kearn"), &config.git)?;
@@ -310,11 +327,28 @@ pub fn inspect(root: &Path, config: &GitConfig) -> Result<Repository, RepoError>
     if !git_dir.is_dir() {
         return Err(RepoError::NotRepository(root.to_path_buf()));
     }
-    let objects = count_objects(root)?;
-    let current_branch = read(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    let default_branch = default_branch(root, config);
+    let on_disk = OnDisk::read(&git_dir);
+    inspect_with(root, git_dir, on_disk.as_ref(), config)
+}
+
+fn inspect_with(
+    root: &Path,
+    git_dir: PathBuf,
+    on_disk: Option<&OnDisk>,
+    config: &GitConfig,
+) -> Result<Repository, RepoError> {
+    let objects = match on_disk {
+        Some(on_disk) => on_disk.objects,
+        None => count_objects(root)?,
+    };
+    let refs = on_disk.map(|on_disk| &on_disk.refs);
+    let current_branch = match refs {
+        Some(refs) => refs.current.clone(),
+        None => read(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    };
+    let default_branch = default_branch(root, refs, config);
     let merged = match &default_branch {
-        Some(base) => merged_branches(root, base, current_branch.as_deref(), config),
+        Some(base) => merged_branches(root, refs, base, current_branch.as_deref(), config),
         None => Vec::new(),
     };
     Ok(Repository {
@@ -428,7 +462,7 @@ pub fn delete_branches(
     }
     let root = &repository.root;
     let current = read(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    let base = default_branch(root, config);
+    let base = default_branch(root, None, config);
     let checked_out = worktree_branches(root);
     branches
         .iter()
@@ -461,7 +495,7 @@ fn delete_branch(
     let reference = format!("refs/heads/{name}");
     let at = read(root, &["rev-parse", "--verify", "--quiet", &reference]);
     let merged = base.is_some_and(|base| {
-        bases(root, base)
+        bases(root, None, base)
             .iter()
             .any(|base| succeeds(root, &["merge-base", "--is-ancestor", &branch.commit, base]))
     });
@@ -519,70 +553,93 @@ fn parse_count(text: &str) -> Objects {
     objects
 }
 
-fn default_branch(root: &Path, config: &GitConfig) -> Option<String> {
-    if let Some(remote) = read(
-        root,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    ) && let Some(name) = remote.strip_prefix("origin/")
+fn default_branch(root: &Path, refs: Option<&Refs>, config: &GitConfig) -> Option<String> {
+    let remote = match refs {
+        Some(refs) => refs.origin_head.clone(),
+        None => read(
+            root,
+            &[
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+        ),
+    };
+    if let Some(name) = remote
+        .as_deref()
+        .and_then(|remote| remote.strip_prefix("origin/"))
     {
         return Some(name.to_owned());
     }
     ["main", "master"]
         .into_iter()
         .chain(config.keep_branches.iter().map(String::as_str))
-        .find(|name| has_ref(root, &format!("refs/heads/{name}")))
+        .find(|name| has_ref(root, refs, &format!("refs/heads/{name}")))
         .map(str::to_owned)
 }
 
-fn bases(root: &Path, base: &str) -> Vec<String> {
+fn bases(root: &Path, refs: Option<&Refs>, base: &str) -> Vec<String> {
     [
         format!("refs/heads/{base}"),
         format!("refs/remotes/origin/{base}"),
     ]
     .into_iter()
-    .filter(|reference| has_ref(root, reference))
+    .filter(|reference| has_ref(root, refs, reference))
     .collect()
 }
 
 fn merged_branches(
     root: &Path,
+    refs: Option<&Refs>,
     base: &str,
     current: Option<&str>,
     config: &GitConfig,
 ) -> Vec<Branch> {
-    let checked_out = worktree_branches(root);
+    let checked_out = match refs {
+        Some(refs) if !refs.worktrees => current.map(str::to_owned).into_iter().collect(),
+        _ => worktree_branches(root),
+    };
+    if let Some(refs) = refs
+        && refs
+            .heads
+            .iter()
+            .all(|name| kept(name, Some(base), current, &checked_out, config))
+    {
+        return Vec::new();
+    }
+    let bases = bases(root, refs, base);
+    if bases.is_empty() {
+        return Vec::new();
+    }
+    let mut args = vec![
+        "for-each-ref".to_owned(),
+        "--format=%(refname:lstrip=2)%09%(objectname)".to_owned(),
+    ];
+    args.extend(
+        bases
+            .iter()
+            .map(|reference| format!("--merged={reference}")),
+    );
+    args.push("refs/heads/".to_owned());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Some(listed) = read(root, &args) else {
+        return Vec::new();
+    };
     let mut merged: Vec<Branch> = Vec::new();
-    for reference in bases(root, base) {
-        let Some(listed) = read(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname:lstrip=2)%09%(objectname)",
-                &format!("--merged={reference}"),
-                "refs/heads/",
-            ],
-        ) else {
+    for line in listed.lines() {
+        let Some((name, commit)) = line.split_once('\t') else {
             continue;
         };
-        for line in listed.lines() {
-            let Some((name, commit)) = line.split_once('\t') else {
-                continue;
-            };
-            if kept(name, Some(base), current, &checked_out, config)
-                || merged.iter().any(|branch| branch.name == name)
-            {
-                continue;
-            }
-            merged.push(Branch {
-                name: name.to_owned(),
-                commit: commit.to_owned(),
-            });
+        if kept(name, Some(base), current, &checked_out, config)
+            || merged.iter().any(|branch| branch.name == name)
+        {
+            continue;
         }
+        merged.push(Branch {
+            name: name.to_owned(),
+            commit: commit.to_owned(),
+        });
     }
     merged.sort_by(|a, b| a.name.cmp(&b.name));
     merged
@@ -599,8 +656,11 @@ fn worktree_branches(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn has_ref(root: &Path, reference: &str) -> bool {
-    succeeds(root, &["show-ref", "--verify", "--quiet", reference])
+fn has_ref(root: &Path, refs: Option<&Refs>, reference: &str) -> bool {
+    match refs {
+        Some(refs) => refs.names.contains(reference),
+        None => succeeds(root, &["show-ref", "--verify", "--quiet", reference]),
+    }
 }
 
 fn succeeds(root: &Path, args: &[&str]) -> bool {
@@ -627,8 +687,33 @@ fn stderr(output: &Output) -> String {
     }
 }
 
+fn git_binary() -> &'static Path {
+    static GIT: OnceLock<PathBuf> = OnceLock::new();
+    GIT.get_or_init(|| {
+        std::env::var_os("PATH")
+            .and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join("git"))
+                    .find(|candidate| is_executable(candidate))
+            })
+            .unwrap_or_else(|| PathBuf::from("git"))
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    Command::new(git_binary())
         .arg("-C")
         .arg(root)
         .args([
@@ -645,6 +730,287 @@ fn git(root: &Path, args: &[&str]) -> Result<Output, String> {
         .stderr(Stdio::piped())
         .output()
         .map_err(|error| error.to_string())
+}
+
+const PACK_INDEX_HEADER: u64 = 8 + 256 * 4;
+const PACK_EXTENSIONS: [&str; 7] = ["idx", "pack", "rev", "bitmap", "keep", "promisor", "mtimes"];
+
+struct Refs {
+    current: Option<String>,
+    origin_head: Option<String>,
+    heads: Vec<String>,
+    names: HashSet<String>,
+    worktrees: bool,
+}
+
+struct OnDisk {
+    refs: Refs,
+    objects: Objects,
+}
+
+impl OnDisk {
+    fn read(git_dir: &Path) -> Option<Self> {
+        let unusual = ["commondir", "reftable", "objects/info/alternates"]
+            .iter()
+            .any(|name| git_dir.join(name).exists());
+        if unusual || !git_dir.join("refs").is_dir() || !git_dir.join("objects").is_dir() {
+            return None;
+        }
+        let config = fs::read_to_string(git_dir.join("config"))
+            .ok()?
+            .to_ascii_lowercase();
+        if config.contains("refstorage") || config.contains("objectformat") {
+            return None;
+        }
+        Some(Self {
+            refs: Refs::read(git_dir)?,
+            objects: objects_on_disk(&git_dir.join("objects"))?,
+        })
+    }
+}
+
+impl Refs {
+    fn read(git_dir: &Path) -> Option<Self> {
+        let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        let head = head.trim_end();
+        let current = match head.strip_prefix("ref: ") {
+            Some(target) => Some(target.strip_prefix("refs/heads/")?.to_owned()),
+            None if is_object_id(head) => None,
+            None => return None,
+        };
+        let mut names = HashSet::new();
+        let mut origin_head = None;
+        for top in ["refs/heads", "refs/remotes/origin"] {
+            loose_refs(git_dir, top, &mut names, &mut origin_head)?;
+        }
+        if let Ok(packed) = fs::read_to_string(git_dir.join("packed-refs")) {
+            for line in packed.lines() {
+                if line.starts_with('#') || line.starts_with('^') || line.is_empty() {
+                    continue;
+                }
+                let (id, name) = line.split_once(' ')?;
+                if !is_object_id(id) {
+                    return None;
+                }
+                if name.starts_with("refs/heads/") || name.starts_with("refs/remotes/origin/") {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+        let mut heads: Vec<String> = names
+            .iter()
+            .filter_map(|name| name.strip_prefix("refs/heads/"))
+            .map(str::to_owned)
+            .collect();
+        heads.sort();
+        let worktrees = fs::read_dir(git_dir.join("worktrees"))
+            .is_ok_and(|mut entries| entries.next().is_some());
+        Some(Self {
+            current,
+            origin_head,
+            heads,
+            names,
+            worktrees,
+        })
+    }
+}
+
+fn loose_refs(
+    git_dir: &Path,
+    name: &str,
+    names: &mut HashSet<String>,
+    origin_head: &mut Option<String>,
+) -> Option<()> {
+    let path = git_dir.join(name);
+    let Ok(entries) = fs::read_dir(&path) else {
+        return Some(());
+    };
+    for entry in entries {
+        let entry = entry.ok()?;
+        let child = format!("{name}/{}", entry.file_name().to_str()?);
+        if child.ends_with(".lock") {
+            continue;
+        }
+        if entry.file_type().ok()?.is_dir() {
+            loose_refs(git_dir, &child, names, origin_head)?;
+            continue;
+        }
+        let text = fs::read_to_string(entry.path()).ok()?;
+        let text = text.trim_end();
+        if child == "refs/remotes/origin/HEAD"
+            && let Some(target) = text.strip_prefix("ref: ")
+        {
+            *origin_head = target.strip_prefix("refs/remotes/").map(str::to_owned);
+            continue;
+        }
+        if !is_object_id(text) {
+            return None;
+        }
+        names.insert(child);
+    }
+    Some(())
+}
+
+fn is_object_id(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_id(hex: &str) -> Option<[u8; 20]> {
+    let mut id = [0; 20];
+    for (index, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(id)
+}
+
+fn kib_floor(bytes: u64) -> u64 {
+    bytes / KIB * KIB
+}
+
+fn stat_size(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
+}
+
+fn objects_on_disk(dir: &Path) -> Option<Objects> {
+    let mut objects = Objects::default();
+    let mut loose_bytes = 0;
+    let mut garbage_bytes = 0;
+    let mut loose_ids = Vec::new();
+    for fan in 0..=255u8 {
+        let prefix = format!("{fan:02x}");
+        let Ok(entries) = fs::read_dir(dir.join(&prefix)) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let id = name
+                .to_str()
+                .filter(|name| name.len() == 38)
+                .and_then(|name| parse_id(&format!("{prefix}{name}")));
+            match (id, fs::symlink_metadata(&path)) {
+                (Some(id), Ok(metadata)) if metadata.is_file() => {
+                    objects.loose += 1;
+                    loose_bytes += platform::allocated(&metadata);
+                    loose_ids.push(id);
+                }
+                _ => garbage_bytes += stat_size(&path),
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<String, Vec<(PathBuf, String)>> = BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(dir.join("pack")) {
+        for entry in entries {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let name = entry.file_name().to_str()?.to_owned();
+            if name.starts_with("multi-pack-index") {
+                continue;
+            }
+            match name.rsplit_once('.') {
+                Some((stem, extension)) if PACK_EXTENSIONS.contains(&extension) => {
+                    groups
+                        .entry(stem.to_owned())
+                        .or_default()
+                        .push((path, extension.to_owned()));
+                }
+                _ => garbage_bytes += stat_size(&path),
+            }
+        }
+    }
+    let mut indexes = Vec::new();
+    let mut packed_bytes = 0;
+    for files in groups.values() {
+        let find = |wanted: &str| {
+            files
+                .iter()
+                .find(|(_, extension)| extension == wanted)
+                .map(|(path, _)| path)
+        };
+        let (Some(pack), Some(index)) = (find("pack"), find("idx")) else {
+            garbage_bytes += files.iter().map(|(path, _)| stat_size(path)).sum::<u64>();
+            continue;
+        };
+        indexes.push(PackIndex::open(index)?);
+        objects.packs += 1;
+        packed_bytes += stat_size(pack) + stat_size(index);
+    }
+
+    let mut pending = loose_ids;
+    for index in &mut indexes {
+        let mut block: Option<(u8, Vec<u8>)> = None;
+        let mut missing = Vec::new();
+        for id in pending {
+            if block.as_ref().is_none_or(|(first, _)| *first != id[0]) {
+                block = Some((id[0], index.block(id[0]).ok()?));
+            }
+            let names = block
+                .as_ref()
+                .map_or(&[][..], |(_, names)| names.as_slice());
+            if sorted_contains(names, &id) {
+                objects.prunable += 1;
+            } else {
+                missing.push(id);
+            }
+        }
+        pending = missing;
+    }
+    objects.loose_bytes = kib_floor(loose_bytes);
+    objects.packed_bytes = kib_floor(packed_bytes);
+    objects.garbage_bytes = kib_floor(garbage_bytes);
+    Some(objects)
+}
+
+struct PackIndex {
+    file: File,
+    fanout: Vec<u32>,
+}
+
+impl PackIndex {
+    fn open(path: &Path) -> Option<Self> {
+        let mut file = File::open(path).ok()?;
+        let mut header = [0; PACK_INDEX_HEADER as usize];
+        file.read_exact(&mut header).ok()?;
+        if header[..8] != [0xff, b't', b'O', b'c', 0, 0, 0, 2] {
+            return None;
+        }
+        let fanout = header[8..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_be_bytes(*bytes))
+            .collect();
+        Some(Self { file, fanout })
+    }
+
+    fn block(&mut self, first: u8) -> std::io::Result<Vec<u8>> {
+        let first = usize::from(first);
+        let low = match first {
+            0 => 0,
+            _ => self.fanout[first - 1],
+        };
+        let high = self.fanout[first].max(low);
+        let mut names = vec![0; (high - low) as usize * 20];
+        self.file
+            .seek(SeekFrom::Start(PACK_INDEX_HEADER + u64::from(low) * 20))?;
+        self.file.read_exact(&mut names)?;
+        Ok(names)
+    }
+}
+
+fn sorted_contains(names: &[u8], id: &[u8; 20]) -> bool {
+    let (mut low, mut high) = (0, names.len() / 20);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match names[middle * 20..middle * 20 + 20].cmp(id) {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -767,8 +1133,8 @@ mod tests {
                 ("main", &Err(RepoError::Kept("main".to_owned()))),
             ]
         );
-        assert!(!has_ref(root, "refs/heads/done"));
-        assert!(has_ref(root, "refs/heads/moved"));
+        assert!(!has_ref(root, None, "refs/heads/done"));
+        assert!(has_ref(root, None, "refs/heads/moved"));
     }
 
     #[test]
@@ -789,7 +1155,7 @@ mod tests {
         );
         let pruned = delete_branches(&found, &found.merged, &config);
         assert_eq!(pruned[0].result, Err(RepoError::Busy(Busy::Locked)));
-        assert!(has_ref(root, "refs/heads/done"));
+        assert!(has_ref(root, None, "refs/heads/done"));
         fs::remove_file(root.join(".git/index.lock")).expect("unlock");
         fs::create_dir(root.join(".git/rebase-merge")).expect("rebase");
         assert_eq!(busy(&found.git_dir), Some(Busy::Rebase));
@@ -848,5 +1214,49 @@ mod tests {
         seen.sort();
         assert!(found.is_empty());
         assert_eq!(seen, [other, plain]);
+    }
+    #[test]
+    fn reads_the_git_folder_like_git_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        if !repository(root) {
+            return;
+        }
+        for index in 0..5 {
+            assert!(commit(root, &format!("{index}.txt")));
+        }
+        assert!(run(root, &["branch", "done"]));
+        assert!(run(root, &["branch", "develop"]));
+        assert!(run(root, &["checkout", "-q", "-b", "open"]));
+        assert!(commit(root, "b.txt"));
+        assert!(run(root, &["checkout", "-q", "-b", "current", "main"]));
+        assert!(run(root, &["repack", "-q"]));
+        assert!(commit(root, "late.txt"));
+        assert!(run(root, &["pack-refs", "--all"]));
+        assert!(run(root, &["branch", "fresh", "main"]));
+        assert!(run(
+            root,
+            &["update-ref", "refs/remotes/origin/main", "main"]
+        ));
+        assert!(run(
+            root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main"
+            ]
+        ));
+        let git_dir = root.join(".git");
+        fs::write(git_dir.join("objects/pack/tmp_pack_x"), [0; 3000]).expect("garbage");
+
+        let config = GitConfig::default();
+        let on_disk = OnDisk::read(&git_dir).expect("plain layout");
+        let fast = inspect_with(root, git_dir.clone(), Some(&on_disk), &config).expect("fs");
+        let slow = inspect_with(root, git_dir, None, &config).expect("git");
+        assert_eq!(fast, slow);
+        assert!(fast.objects.prunable > 0, "{:?}", fast.objects);
+        assert!(fast.objects.packs > 0 && fast.objects.garbage_bytes > 0);
+        assert_eq!(fast.default_branch.as_deref(), Some("main"));
+        assert!(fast.merged.iter().any(|branch| branch.name == "fresh"));
     }
 }

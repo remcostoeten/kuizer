@@ -397,7 +397,7 @@ impl Kuizer {
         let probe = canvas(
             move |area, window, _| {
                 if bounds.get().map(|known| known.size) != Some(area.size) {
-                    window.on_next_frame(|window, _| window.refresh());
+                    window.request_animation_frame();
                 }
                 bounds.set(Some(area));
             },

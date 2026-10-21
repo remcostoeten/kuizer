@@ -5,6 +5,7 @@ use kuizer::repos::{self, Collected, Pruned, RepoError, Repository};
 
 use gpui::AnyView;
 
+use super::keys::contains;
 use super::*;
 
 pub(super) const GIT_RUNNING: &str = "Available once the running git command finishes";
@@ -45,15 +46,13 @@ impl Kuizer {
     }
 
     pub(super) fn shows_repo(&self, repository: &Repository) -> bool {
-        let names: Vec<&str> = repository
-            .merged
-            .iter()
-            .map(|branch| branch.name.as_str())
-            .collect();
-        let mut fields = vec![repository.root.to_string_lossy().into_owned()];
-        fields.extend(names.iter().map(|name| (*name).to_owned()));
-        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-        found(self.needle(Tab::Repos).as_deref(), &fields)
+        self.needle(Tab::Repos).is_none_or(|needle| {
+            contains(&repository.root.to_string_lossy(), &needle)
+                || repository
+                    .merged
+                    .iter()
+                    .any(|branch| contains(&branch.name, &needle))
+        })
     }
 
     fn min_gain(&self) -> u64 {
@@ -197,7 +196,7 @@ impl Kuizer {
             .map(|repository| repository.root.clone())
             .collect();
         cx.notify();
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = oneshot::channel();
         std::thread::Builder::new()
             .name("kuizer-gui-git".to_owned())
             .spawn(move || {
@@ -206,16 +205,8 @@ impl Kuizer {
             })
             .expect("spawn git thread");
         self.git_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                let done = match receiver.try_recv() {
-                    Ok(done) => Some(done),
-                    Err(TryRecvError::Empty) => continue,
-                    Err(TryRecvError::Disconnected) => None,
-                };
-                let _ = this.update(cx, |app, cx| app.git_done(done, cx));
-                break;
-            }
+            let done = receiver.await.ok();
+            let _ = this.update(cx, |app, cx| app.git_done(done, cx));
         }));
     }
 

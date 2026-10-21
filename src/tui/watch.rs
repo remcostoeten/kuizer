@@ -60,8 +60,10 @@ impl Scroll {
 }
 
 struct Watch {
-    rows: Vec<Candidate>,
+    rows: Vec<usize>,
     candidates: Vec<Candidate>,
+    total: u64,
+    safe: u64,
     issues: Vec<Issue>,
     summary: Option<Summary>,
     safe_only: bool,
@@ -72,8 +74,13 @@ impl Watch {
     fn take(&mut self, event: Event) {
         match event {
             Event::Candidate(candidate) => {
-                if !self.safe_only || candidate.rule.safety == Safety::Safe {
-                    self.rows.push(candidate.clone());
+                let is_safe = candidate.rule.safety == Safety::Safe;
+                if !self.safe_only || is_safe {
+                    self.rows.push(self.candidates.len());
+                    self.total += candidate.usage.allocated;
+                    if is_safe {
+                        self.safe += candidate.usage.allocated;
+                    }
                 }
                 self.candidates.push(candidate);
             }
@@ -139,20 +146,13 @@ fn header(watch: &Watch, scan: &Scan) -> Line<'static> {
 }
 
 fn footer(watch: &Watch) -> Line<'static> {
-    let total: u64 = watch.rows.iter().map(|c| c.usage.allocated).sum();
-    let safe: u64 = watch
-        .rows
-        .iter()
-        .filter(|c| c.rule.safety == Safety::Safe)
-        .map(|c| c.usage.allocated)
-        .sum();
     Line::from(vec![
         Span::styled(
             format!(
                 " {} found  {}  {} safe ",
                 watch.rows.len(),
-                ByteSize(total),
-                ByteSize(safe)
+                ByteSize(watch.total),
+                ByteSize(watch.safe)
             ),
             Style::new().add_modifier(Modifier::BOLD),
         ),
@@ -192,7 +192,7 @@ fn draw(frame: &mut Frame, watch: &mut Watch, scan: &Scan) {
         .iter()
         .skip(watch.scroll.offset)
         .take(watch.scroll.height)
-        .map(|candidate| row(candidate, path_width))
+        .map(|&index| row(&watch.candidates[index], path_width))
         .collect();
     let widths = [
         Constraint::Length(10),
@@ -278,6 +278,8 @@ pub fn watch(scan: &Scan, safe_only: bool) -> io::Result<Collected> {
     let mut watch = Watch {
         rows: Vec::new(),
         candidates: Vec::new(),
+        total: 0,
+        safe: 0,
         issues: Vec::new(),
         summary: None,
         safe_only,

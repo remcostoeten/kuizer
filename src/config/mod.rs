@@ -52,11 +52,11 @@ impl ScanConfig {
     /// legacy `.sweepignore` marker, so markers written before the rename keep working.
     ///
     /// @example
-    /// if config.scan.ignores(&listing) {
+    /// if config.scan.ignores(&detector, &listing) {
     ///     return;
     /// }
-    pub fn ignores(&self, listing: &Listing) -> bool {
-        listing.has(self.ignore_file.as_ref()) || listing.has(LEGACY_IGNORE_FILE.as_ref())
+    pub fn ignores(&self, detector: &Detector, listing: &Listing) -> bool {
+        detector.lists(listing, &self.ignore_file) || detector.lists(listing, LEGACY_IGNORE_FILE)
     }
 }
 
@@ -128,17 +128,21 @@ impl Default for DetectConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DuplicateConfig {
+    pub enabled: bool,
     pub min_size: ByteSize,
     pub threads: usize,
     pub verify: bool,
+    pub include_hidden: bool,
 }
 
 impl Default for DuplicateConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             min_size: ByteSize(4096),
             threads: 0,
             verify: false,
+            include_hidden: false,
         }
     }
 }
@@ -364,7 +368,9 @@ impl Config {
     }
 
     pub fn detector(&self) -> Result<Detector, ConfigError> {
-        Ok(Detector::new(&self.enabled_rules()?)?.reporting(self.detect.categories.clone()))
+        Ok(Detector::new(&self.enabled_rules()?)?
+            .watching([self.scan.ignore_file.as_str(), LEGACY_IGNORE_FILE])
+            .reporting(self.detect.categories.clone()))
     }
 
     pub fn excludes(&self) -> Result<Excludes, ConfigError> {
@@ -413,6 +419,7 @@ mod tests {
         assert_eq!(config.git.min_gain, ByteSize(1024 * 1024));
         assert!(!config.git.aggressive);
         assert!(config.appearance.motion);
+        assert!(!config.duplicates.enabled);
     }
 
     #[test]

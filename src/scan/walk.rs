@@ -1,11 +1,14 @@
-use std::ffi::OsString;
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::types::{Issue, IssueKind};
 use crate::config::{Excludes, ScanConfig};
 use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
+use crate::platform::dir::{Buffer, Dir, EntryKind};
 use crate::platform::{self, MountTable};
 use crate::protect::{self, Protected};
 
@@ -27,21 +30,35 @@ pub trait Visitor {
         false
     }
 
+    /// Whether [`Visitor::file`] wants to be called. Walkers skip building a path per file
+    /// when nothing asks for it.
+    fn wants_files(&self) -> bool {
+        false
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow;
 
     fn entered(&mut self, _path: &Path) {}
 
-    fn counted(&mut self, _file_type: fs::FileType) {}
+    fn counted(&mut self, _kind: EntryKind) {}
 
     fn artifact(&mut self, _found: Found) -> Flow {
         Flow::Continue
     }
 
-    fn file(&mut self, _path: &Path, _file_type: fs::FileType) -> Flow {
+    fn file(&mut self, _path: &Path, _kind: EntryKind) -> Flow {
         Flow::Continue
     }
 
     fn repository(&mut self, _root: &Path) {}
+}
+
+/// A visitor that rides along a parallel scan. Every scan worker gets its own `fork`, and the
+/// forks are merged back into one when the walk ends.
+pub trait Companion: Visitor + Send + Sized + 'static {
+    fn fork(&self) -> Self;
+
+    fn merge(&mut self, other: Self);
 }
 
 impl Visitor for () {
@@ -50,7 +67,17 @@ impl Visitor for () {
     }
 }
 
+impl Companion for () {
+    fn fork(&self) -> Self {}
+
+    fn merge(&mut self, _other: Self) {}
+}
+
 impl<V: Visitor> Visitor for Option<V> {
+    fn wants_files(&self) -> bool {
+        self.as_ref().is_some_and(V::wants_files)
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         match self {
             Some(visitor) => visitor.issue(issue),
@@ -58,15 +85,15 @@ impl<V: Visitor> Visitor for Option<V> {
         }
     }
 
-    fn counted(&mut self, file_type: fs::FileType) {
+    fn counted(&mut self, kind: EntryKind) {
         if let Some(visitor) = self {
-            visitor.counted(file_type);
+            visitor.counted(kind);
         }
     }
 
-    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
         match self {
-            Some(visitor) => visitor.file(path, file_type),
+            Some(visitor) => visitor.file(path, kind),
             None => Flow::Continue,
         }
     }
@@ -78,7 +105,23 @@ impl<V: Visitor> Visitor for Option<V> {
     }
 }
 
+impl<V: Companion> Companion for Option<V> {
+    fn fork(&self) -> Self {
+        self.as_ref().map(V::fork)
+    }
+
+    fn merge(&mut self, other: Self) {
+        if let (Some(visitor), Some(other)) = (self, other) {
+            visitor.merge(other);
+        }
+    }
+}
+
 impl<A: Visitor, B: Visitor> Visitor for (A, B) {
+    fn wants_files(&self) -> bool {
+        self.0.wants_files() || self.1.wants_files()
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         match (self.0.issue(issue.clone()), self.1.issue(issue)) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
@@ -86,13 +129,13 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
         }
     }
 
-    fn counted(&mut self, file_type: fs::FileType) {
-        self.0.counted(file_type);
-        self.1.counted(file_type);
+    fn counted(&mut self, kind: EntryKind) {
+        self.0.counted(kind);
+        self.1.counted(kind);
     }
 
-    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
-        match (self.0.file(path, file_type), self.1.file(path, file_type)) {
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
+        match (self.0.file(path, kind), self.1.file(path, kind)) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
             _ => Flow::Stop,
         }
@@ -101,6 +144,17 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
     fn repository(&mut self, root: &Path) {
         self.0.repository(root);
         self.1.repository(root);
+    }
+}
+
+impl<A: Companion, B: Companion> Companion for (A, B) {
+    fn fork(&self) -> Self {
+        (self.0.fork(), self.1.fork())
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.0.merge(other.0);
+        self.1.merge(other.1);
     }
 }
 
@@ -113,22 +167,96 @@ pub struct Walker<'a, V> {
     pub visitor: V,
 }
 
-struct Pending {
-    path: PathBuf,
+impl<V: Visitor> Walker<'_, V> {
+    pub fn walk_root(&mut self, root: &Path) {
+        let context = Context::new(
+            self.scan,
+            self.detector,
+            self.excludes,
+            self.mounts,
+            self.protected,
+        );
+        let Some(first) = context.root(&mut self.visitor, root) else {
+            return;
+        };
+        let mut scratch = Scratch::default();
+        let mut stack = vec![first];
+        while let Some(pending) = stack.pop() {
+            if self.visitor.cancelled() {
+                return;
+            }
+            if let Flow::Stop = context.visit(&mut self.visitor, pending, &mut scratch, &mut stack)
+            {
+                return;
+            }
+        }
+    }
+}
+
+pub(crate) struct Pending {
+    pub path: PathBuf,
     parent: Arc<Listing>,
     depth: usize,
     device: u64,
+    probe: bool,
+    splits: bool,
+    inode: u64,
 }
 
-impl<V: Visitor> Walker<'_, V> {
-    fn emit(&mut self, mut found: Found) -> Flow {
+struct Entry {
+    start: usize,
+    end: usize,
+    kind: EntryKind,
+    inode: u64,
+}
+
+/// Per-thread buffers a walk reuses from one directory to the next.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    buffer: Buffer,
+    names: Vec<u8>,
+    entries: Vec<Entry>,
+}
+
+pub(crate) struct Context<'a> {
+    scan: &'a ScanConfig,
+    detector: &'a Detector,
+    excludes: &'a Excludes,
+    mounts: &'a MountTable,
+    protected: &'a Protected,
+    excluded_mounts: HashSet<&'a Path>,
+}
+
+fn name_of<'n>(names: &'n [u8], entry: &Entry) -> &'n OsStr {
+    OsStr::from_bytes(&names[entry.start..entry.end])
+}
+
+impl<'a> Context<'a> {
+    pub fn new(
+        scan: &'a ScanConfig,
+        detector: &'a Detector,
+        excludes: &'a Excludes,
+        mounts: &'a MountTable,
+        protected: &'a Protected,
+    ) -> Self {
+        Self {
+            scan,
+            detector,
+            excludes,
+            mounts,
+            protected,
+            excluded_mounts: scan.excluded_mounts.iter().map(PathBuf::as_path).collect(),
+        }
+    }
+
+    fn emit<V: Visitor>(&self, visitor: &mut V, mut found: Found) -> Flow {
         if found.rule.safety == Safety::Safe && self.protected.in_hidden_home_dir(&found.path) {
             found.rule = Arc::new(RuleInfo {
                 safety: Safety::Review,
                 ..RuleInfo::clone(&found.rule)
             });
         }
-        self.visitor.artifact(found)
+        visitor.artifact(found)
     }
 
     fn excluded_mount(&self, path: &Path) -> bool {
@@ -144,78 +272,131 @@ impl<V: Visitor> Walker<'_, V> {
             })
     }
 
-    pub fn walk_root(&mut self, root: &Path) {
+    /// @name Context::root
+    /// @description Checks a scan root and returns it as the first directory to visit, or
+    /// reports why it is skipped.
+    ///
+    /// @example
+    /// let first = context.root(&mut visitor, &root);
+    pub fn root<V: Visitor>(&self, visitor: &mut V, root: &Path) -> Option<Pending> {
         let metadata = match fs::metadata(root) {
             Ok(metadata) if metadata.is_dir() => metadata,
             Ok(_) => {
-                self.visitor.issue(Issue {
+                visitor.issue(Issue {
                     path: root.to_path_buf(),
                     kind: IssueKind::InvalidRoot,
                     message: "not a directory".to_owned(),
                 });
-                return;
+                return None;
             }
             Err(error) => {
-                self.visitor
-                    .issue(Issue::from_io(root.to_path_buf(), &error));
-                return;
+                visitor.issue(Issue::from_io(root.to_path_buf(), &error));
+                return None;
             }
         };
         if self.excluded_mount(root) {
-            self.visitor.issue(Issue {
+            visitor.issue(Issue {
                 path: root.to_path_buf(),
                 kind: IssueKind::SkippedMount,
                 message: "root is on an excluded mount or filesystem type".to_owned(),
             });
-            return;
+            return None;
         }
         if self.protected.covers(root) {
-            self.visitor.issue(Issue {
+            visitor.issue(Issue {
                 path: root.to_path_buf(),
                 kind: IssueKind::Protected,
                 message: "root holds browser or application data".to_owned(),
             });
-            return;
+            return None;
         }
-        let mut stack = vec![Pending {
+        Some(Pending {
             path: root.to_path_buf(),
-            parent: Arc::new(Listing::new(Vec::new())),
+            parent: Arc::new(Listing::default()),
             depth: 0,
             device: platform::device(&metadata),
-        }];
-        while let Some(pending) = stack.pop() {
-            if self.visitor.cancelled() {
-                return;
-            }
-            if let Flow::Stop = self.visit(pending, &mut stack) {
-                return;
-            }
-        }
+            probe: false,
+            splits: self.mounts.device_may_change_below(root),
+            inode: 0,
+        })
     }
 
-    fn visit(&mut self, pending: Pending, stack: &mut Vec<Pending>) -> Flow {
-        self.visitor.entered(&pending.path);
-        let entries = match fs::read_dir(&pending.path) {
-            Ok(entries) => entries,
-            Err(error) => return self.visitor.issue(Issue::from_io(pending.path, &error)),
+    /// @name Context::visit
+    /// @description Lists one directory, reports what it finds to `visitor` and appends the
+    /// subdirectories still to walk to `out`, lowest inode last so a stack pops it first.
+    ///
+    /// @example
+    /// while let Some(pending) = stack.pop() { context.visit(&mut visitor, pending, &mut scratch, &mut stack); }
+    pub fn visit<V: Visitor>(
+        &self,
+        visitor: &mut V,
+        pending: Pending,
+        scratch: &mut Scratch,
+        out: &mut Vec<Pending>,
+    ) -> Flow {
+        let dir = match Dir::open(&pending.path, pending.depth == 0) {
+            Ok(dir) => dir,
+            Err(error) => return visitor.issue(Issue::from_io(pending.path, &error)),
         };
-        let mut children: Vec<(OsString, fs::FileType)> = Vec::new();
-        for entry in entries {
-            match entry.and_then(|entry| Ok((entry.file_name(), entry.file_type()?))) {
-                Ok(child) => children.push(child),
-                Err(error) => {
-                    if let Flow::Stop = self
-                        .visitor
-                        .issue(Issue::from_io(pending.path.clone(), &error))
-                    {
-                        return Flow::Stop;
+        let mut device = pending.device;
+        if pending.probe {
+            match dir.stat() {
+                Ok(stat) if stat.device != pending.device => {
+                    if self.scan.one_file_system || self.excluded_mount(&pending.path) {
+                        return Flow::Continue;
+                    }
+                    device = stat.device;
+                }
+                Ok(_) => {}
+                Err(error) => return visitor.issue(Issue::from_io(pending.path, &error)),
+            }
+        }
+        visitor.entered(&pending.path);
+
+        let Scratch {
+            buffer,
+            names,
+            entries,
+        } = scratch;
+        names.clear();
+        entries.clear();
+        let read = dir.read(buffer, |name, kind, inode| {
+            let start = names.len();
+            names.extend_from_slice(name.as_encoded_bytes());
+            entries.push(Entry {
+                start,
+                end: names.len(),
+                kind,
+                inode,
+            });
+        });
+        if let Err(error) = read
+            && let Flow::Stop = visitor.issue(Issue::from_io(pending.path.clone(), &error))
+        {
+            return Flow::Stop;
+        }
+
+        let mut own = Listing::default();
+        for entry in entries.iter_mut() {
+            let name = name_of(names, entry);
+            if entry.kind == EntryKind::Unknown {
+                match dir.kind_at(name) {
+                    Ok(kind) => entry.kind = kind,
+                    Err(error) => {
+                        if let Flow::Stop =
+                            visitor.issue(Issue::from_io(pending.path.join(name), &error))
+                        {
+                            return Flow::Stop;
+                        }
+                        continue;
                     }
                 }
             }
+            self.detector.note(&mut own, name);
         }
-        let own = Listing::new(children.iter().map(|(name, _)| name.clone()).collect());
+        drop(dir);
 
-        if self.scan.ignores(&own) || protect::holds_app_data(&own) {
+        if self.scan.ignores(self.detector, &own) || protect::holds_app_data(self.detector, &own) {
             return Flow::Continue;
         }
         if pending.depth > 0
@@ -226,81 +407,90 @@ impl<V: Visitor> Walker<'_, V> {
             if !self.detector.reports(&rule) {
                 return Flow::Continue;
             }
-            return self.emit(Found {
-                path: pending.path,
-                kind: Kind::Dir,
-                rule,
-            });
+            return self.emit(
+                visitor,
+                Found {
+                    path: pending.path,
+                    kind: Kind::Dir,
+                    rule,
+                },
+            );
         }
         if self.scan.max_depth.is_some_and(|max| pending.depth >= max) {
             return Flow::Continue;
         }
 
         let own = Arc::new(own);
-        for (name, file_type) in children {
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = pending.path.join(&name);
-            if file_type.is_dir() {
-                if name == GIT_DIR {
-                    self.visitor.repository(&pending.path);
-                }
-                if self.scan.skip_dirs.iter().any(|skip| name == skip.as_str())
-                    || self.excludes.path(&path)
-                    || self.protected.is_known(&path)
-                {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        if let Flow::Stop = self.visitor.issue(Issue::from_io(path, &error)) {
-                            return Flow::Stop;
-                        }
+        let wants_files = visitor.wants_files();
+        let file_paths = wants_files || self.excludes.matches_paths();
+        let first_child = out.len();
+        for entry in entries.iter() {
+            let name = name_of(names, entry);
+            match entry.kind {
+                EntryKind::Symlink | EntryKind::Unknown => {}
+                EntryKind::Dir => {
+                    if name == GIT_DIR {
+                        visitor.repository(&pending.path);
+                    }
+                    if self.scan.skip_dirs.iter().any(|skip| name == skip.as_str())
+                        || self.excludes.name(name)
+                    {
                         continue;
                     }
-                };
-                let device = platform::device(&metadata);
-                if device != pending.device
-                    && (self.scan.one_file_system || self.excluded_mount(&path))
-                {
-                    continue;
-                }
-                if self
-                    .scan
-                    .excluded_mounts
-                    .iter()
-                    .any(|m| path.starts_with(m))
-                {
-                    continue;
-                }
-                stack.push(Pending {
-                    path,
-                    parent: Arc::clone(&own),
-                    depth: pending.depth + 1,
-                    device,
-                });
-            } else {
-                self.visitor.counted(file_type);
-                if self.excludes.extension(&name) || self.excludes.path(&path) {
-                    continue;
-                }
-                if let Flow::Stop = self.visitor.file(&path, file_type) {
-                    return Flow::Stop;
-                }
-                if let Some(rule) = self.detector.classify_file(&name, &own)
-                    && self.detector.reports(&rule)
-                    && let Flow::Stop = self.emit(Found {
+                    let path = pending.path.join(name);
+                    if self.excludes.full_path(&path)
+                        || self.protected.is_known(&path)
+                        || self.excluded_mounts.contains(path.as_path())
+                    {
+                        continue;
+                    }
+                    let mount = self.mounts.is_mount_point(&path);
+                    let splits = if mount {
+                        self.mounts.device_may_change_below(&path)
+                    } else {
+                        pending.splits
+                    };
+                    out.push(Pending {
                         path,
-                        kind: Kind::File,
-                        rule,
-                    })
-                {
-                    return Flow::Stop;
+                        parent: Arc::clone(&own),
+                        depth: pending.depth + 1,
+                        device,
+                        probe: mount || pending.splits,
+                        splits,
+                        inode: entry.inode,
+                    });
+                }
+                EntryKind::File | EntryKind::Other => {
+                    visitor.counted(entry.kind);
+                    if self.excludes.extension(name) || self.excludes.name(name) {
+                        continue;
+                    }
+                    let path = file_paths.then(|| pending.path.join(name));
+                    if let Some(path) = &path {
+                        if self.excludes.full_path(path) {
+                            continue;
+                        }
+                        if wants_files && let Flow::Stop = visitor.file(path, entry.kind) {
+                            return Flow::Stop;
+                        }
+                    }
+                    if let Some(rule) = self.detector.classify_file(name, &own)
+                        && self.detector.reports(&rule)
+                        && let Flow::Stop = self.emit(
+                            visitor,
+                            Found {
+                                path: path.unwrap_or_else(|| pending.path.join(name)),
+                                kind: Kind::File,
+                                rule,
+                            },
+                        )
+                    {
+                        return Flow::Stop;
+                    }
                 }
             }
         }
+        out[first_child..].sort_unstable_by_key(|child| std::cmp::Reverse(child.inode));
         Flow::Continue
     }
 }

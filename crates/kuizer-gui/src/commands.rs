@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use gpui::{App, KeyBinding, Keystroke, SharedString, actions};
 use kuizer::output::display_path;
@@ -50,6 +51,7 @@ pub enum Command {
     GcAll,
     Branches,
     BranchesAll,
+    FindDuplicates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +149,13 @@ impl Spec {
 /// shortcuts overlay are all generated from it, so they cannot drift apart.
 ///
 /// @example
-/// let spec = table().into_iter().find(|spec| spec.answers(&keystroke));
-pub fn table() -> Vec<Spec> {
+/// let spec = table().iter().find(|spec| spec.answers(&keystroke));
+pub fn table() -> &'static [Spec] {
+    static TABLE: OnceLock<Vec<Spec>> = OnceLock::new();
+    TABLE.get_or_init(build_table)
+}
+
+fn build_table() -> Vec<Spec> {
     use Group::{General, Git, Lists, Map, Sections, View};
     let mut specs = vec![
         Spec::new(Command::Palette, "Command palette", General)
@@ -159,6 +166,7 @@ pub fn table() -> Vec<Spec> {
         Spec::new(Command::Shortcuts, "Keyboard shortcuts", General).keys(&["?"]),
         Spec::new(Command::Rescan, "Rescan", General).keys(&["secondary-r"]),
         Spec::new(Command::NewScan, "New scan", General).keys(&["secondary-n"]),
+        Spec::new(Command::FindDuplicates, "Find duplicate files", General).keys(&["D"]),
         Spec::new(Command::Undo, "Undo last cleanup", General)
             .keys(&["secondary-z"])
             .global(),
@@ -325,7 +333,7 @@ pub fn scans(paths: &[PathBuf]) -> Vec<Spec> {
 /// let key = shortcut(&Command::Palette); // Some("Ctrl+K")
 pub fn shortcut(command: &Command) -> Option<String> {
     table()
-        .into_iter()
+        .iter()
         .find(|spec| spec.command == *command)
         .and_then(|spec| spec.keys.first().map(|key| label(key)))
 }
@@ -338,7 +346,7 @@ pub fn shortcut(command: &Command) -> Option<String> {
 /// app::bind_keys(cx);
 pub fn bind_keys(cx: &mut App) {
     let mut bindings = Vec::new();
-    for spec in table().into_iter().filter(|spec| spec.global) {
+    for spec in table().iter().filter(|spec| spec.global) {
         for key in spec.keys.iter().chain(spec.extra) {
             bindings.push(match spec.command {
                 Command::ZoomIn => KeyBinding::new(key, ZoomIn, None),
@@ -482,7 +490,7 @@ mod tests {
         let specs = table();
         let mut seen: Vec<&str> = Vec::new();
         let mut map: Vec<&str> = Vec::new();
-        for spec in &specs {
+        for spec in specs {
             let seen = if spec.group == Group::Map {
                 &mut map
             } else {

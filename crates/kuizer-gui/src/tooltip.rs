@@ -266,33 +266,29 @@ impl Render for Layer {
                     return;
                 }
                 let moved = this.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         moved
                             .update(cx, |layer, cx| layer.track(event.position, cx))
                             .ok();
-                        window.refresh();
                     }
                 });
                 let pressed = this.clone();
-                window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         pressed.update(cx, |layer, cx| layer.dismiss(cx)).ok();
-                        window.refresh();
                     }
                 });
                 let scrolled = this.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, cx| {
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         scrolled.update(cx, |layer, cx| layer.dismiss(cx)).ok();
-                        window.refresh();
                     }
                 });
                 let typed = this;
-                window.on_key_event(move |_: &KeyDownEvent, phase, window, cx| {
+                window.on_key_event(move |_: &KeyDownEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
                         typed.update(cx, |layer, cx| layer.dismiss(cx)).ok();
-                        window.refresh();
                     }
                 });
             },
@@ -404,13 +400,6 @@ pub fn path(path: &Path) -> impl Fn(&mut Window, &mut App) -> AnyView + use<> {
 
 pub fn term(term: Term) -> impl Fn(&mut Window, &mut App) -> AnyView {
     Tooltip::new(term.text()).title(term.title()).build()
-}
-
-pub fn titled(
-    title: impl Into<SharedString>,
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    Tooltip::new(text).title(title).build()
 }
 
 #[cfg(test)]
