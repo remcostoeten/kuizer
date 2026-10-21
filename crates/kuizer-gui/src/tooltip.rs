@@ -16,7 +16,7 @@ use crate::motion;
 use crate::theme::{self, font, size, space, unit};
 use crate::ui;
 
-const DELAY: Duration = Duration::from_millis(500);
+const DELAY: Duration = Duration::from_millis(250);
 const ENTER: Duration = Duration::from_millis(125);
 const WARM: Duration = Duration::from_millis(300);
 const RISE: f32 = 3.;
@@ -471,10 +471,10 @@ mod tests {
     fn a_tooltip_waits_then_opens_below_its_trigger(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
-        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.executor().advance_clock(DELAY / 2);
         cx.run_until_parked();
         assert!(!visible(cx));
-        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.executor().advance_clock(DELAY);
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         assert!(bounds.origin.y >= px(40.));

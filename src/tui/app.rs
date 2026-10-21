@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::SortKey;
@@ -37,6 +37,13 @@ pub struct Item {
     pub status: Status,
 }
 
+/// A Shift+motion selection: the item it started on and the items it selected that were not
+/// selected before, so moving back toward the anchor deselects only those.
+struct Span {
+    anchor: u64,
+    added: HashSet<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
@@ -67,6 +74,7 @@ pub struct App {
     pub free: Option<u64>,
     pub message: Option<String>,
     pub quit: bool,
+    range: Option<Span>,
     dirty: bool,
 }
 
@@ -95,6 +103,7 @@ impl App {
             free: None,
             message: None,
             quit: false,
+            range: None,
             dirty: false,
         }
     }
@@ -194,6 +203,54 @@ impl App {
         }
         let last = self.view.len() - 1;
         self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+    }
+
+    /// Moves the cursor and grows or shrinks the Shift selection to span the anchor and the
+    /// cursor. Only the rows between the old and the new cursor change.
+    pub fn extend(&mut self, delta: isize) {
+        if self.view.is_empty() {
+            return;
+        }
+        let current = self.cursor;
+        let mut range = self
+            .range
+            .take()
+            .filter(|range| self.position(range.anchor).is_some())
+            .unwrap_or_else(|| Span {
+                anchor: self.items[self.view[current]].candidate.id,
+                added: HashSet::new(),
+            });
+        let anchor = self.position(range.anchor).unwrap_or(current);
+        self.move_by(delta);
+        let next = self.cursor;
+        let spans = |end: usize, row: usize| anchor.min(end) <= row && row <= anchor.max(end);
+        for row in current.min(next)..=current.max(next) {
+            let item = &mut self.items[self.view[row]];
+            if item.status != Status::Ready {
+                continue;
+            }
+            let id = item.candidate.id;
+            if spans(next, row) {
+                if !item.selected {
+                    item.selected = true;
+                    range.added.insert(id);
+                }
+            } else if spans(current, row) && range.added.remove(&id) {
+                item.selected = false;
+            }
+        }
+        self.range = Some(range);
+    }
+
+    /// Ends the Shift selection, so the next Shift motion starts a new one at the cursor.
+    pub fn end_range(&mut self) {
+        self.range = None;
+    }
+
+    fn position(&self, id: u64) -> Option<usize> {
+        self.view
+            .iter()
+            .position(|&index| self.items[index].candidate.id == id)
     }
 
     pub fn move_to(&mut self, index: usize) {
@@ -503,6 +560,37 @@ mod tests {
         let ids: Vec<u64> = app.selected().map(|item| item.candidate.id).collect();
         assert_eq!(ids, [2, 3]);
         assert_eq!(app.selected_bytes(), 50);
+    }
+
+    #[test]
+    fn shift_motions_select_from_the_anchor_to_the_cursor() {
+        let mut app = app();
+        app.push(candidate(4, "/p/d/node_modules", 5, Safety::Safe));
+        app.refresh();
+        app.move_by(1);
+        app.toggle();
+        app.extend(-1);
+        app.extend(-1);
+        let ids = |app: &App| -> Vec<u64> {
+            app.view
+                .iter()
+                .map(|&index| &app.items[index])
+                .filter(|item| item.selected)
+                .map(|item| item.candidate.id)
+                .collect()
+        };
+        assert_eq!(ids(&app), [2, 3, 1]);
+        app.extend(1);
+        app.extend(1);
+        assert_eq!(app.cursor, 2);
+        assert_eq!(
+            ids(&app),
+            [3, 1],
+            "moving back keeps only what was selected before"
+        );
+        app.end_range();
+        app.extend(1);
+        assert_eq!(ids(&app), [3, 1, 4]);
     }
 
     #[test]

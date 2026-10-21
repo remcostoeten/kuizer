@@ -174,6 +174,15 @@ impl Target {
     }
 }
 
+/// A Shift+motion selection: the row it started on and the items it selected that were not
+/// selected before, so moving back toward the anchor deselects only those.
+#[derive(Debug)]
+struct Span {
+    tab: Tab,
+    anchor: Target,
+    added: HashSet<(Source, u64)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Choice {
     Reveal,
@@ -273,6 +282,7 @@ pub struct Kuizer {
     hidden: HashSet<Category>,
     rows: Vec<usize>,
     selection: HashSet<(Source, u64)>,
+    range: Option<Span>,
     dialog: Option<Dialog>,
     task: Option<Task<()>>,
     toast: Option<Toast>,
@@ -349,6 +359,7 @@ impl Kuizer {
             hidden: HashSet::new(),
             rows: Vec::new(),
             selection: HashSet::new(),
+            range: None,
             dialog: None,
             task: None,
             toast: None,
@@ -813,6 +824,7 @@ impl Kuizer {
     }
 
     fn toggle(&mut self, source: Source, id: u64, cx: &mut Context<Self>) {
+        self.range = None;
         if !self.selection.remove(&(source, id)) {
             self.selection.insert((source, id));
         }
@@ -1529,6 +1541,7 @@ impl Kuizer {
             MouseButton::Left,
             cx.listener(move |app, _: &MouseDownEvent, _, cx| {
                 app.cursors.insert(tab, clicked.clone());
+                app.range = None;
                 app.filtering = false;
                 cx.notify();
             }),
@@ -1680,6 +1693,7 @@ impl Kuizer {
             && !self.collapsed
             && frame::inset(window).is_none();
         let actions = div()
+            .debug_selector(|| "titlebar-actions".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -1747,26 +1761,30 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_1()
-                    .min_w_0()
-                    .items_center()
                     .gap(unit(space::L))
                     .child(
                         div()
-                            .flex_none()
+                            .debug_selector(|| "brand".to_owned())
                             .font_weight(FontWeight::SEMIBOLD)
-                            .when(aligned, |this| this.w(unit(size::SIDEBAR - space::L)))
+                            .when(aligned, |this| {
+                                this.flex_basis(unit(size::SIDEBAR - space::L))
+                            })
                             .child("kuizer"),
                     )
+                    // Absolute, so the path never sets how narrow this side can get.
                     .child(
-                        div()
-                            .id("roots")
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme::muted())
-                            .when(!matches!(self.phase, Phase::Start), |this| {
-                                this.tip(tooltip::plain(roots.clone()))
-                            })
-                            .child(roots),
+                        div().relative().flex_1().child(
+                            div()
+                                .id("roots")
+                                .absolute()
+                                .inset_0()
+                                .truncate()
+                                .text_color(theme::muted())
+                                .when(!matches!(self.phase, Phase::Start), |this| {
+                                    this.tip(tooltip::plain(roots.clone()))
+                                })
+                                .child(roots),
+                        ),
                     ),
             )
             .child(self.render_search(cx))
@@ -1774,7 +1792,6 @@ impl Kuizer {
                 div()
                     .flex()
                     .flex_1()
-                    .min_w_0()
                     .items_center()
                     .justify_end()
                     .gap(unit(space::L))
@@ -5503,6 +5520,33 @@ mod tests {
         });
         cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
         view.read_with(cx, |app, _| assert!(app.dialog.is_some()));
+    }
+
+    #[gpui::test]
+    fn a_narrow_titlebar_never_overlaps_while_refreshing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        scan_again_from_the_start(&view, cx);
+        assert!(wait_until_shown(&view, cx));
+
+        cx.simulate_resize(gpui::size(px(860.), px(520.)));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mut bounds = |selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is painted"))
+        };
+        let brand = bounds("brand");
+        let search = bounds("search");
+        let stale = bounds("stale");
+        let actions = bounds("titlebar-actions");
+        let titlebar = bounds("titlebar");
+        assert!(brand.right() <= search.left());
+        assert!(search.right() <= stale.left());
+        assert!(actions.right() <= titlebar.right());
     }
 
     #[gpui::test]

@@ -320,19 +320,13 @@ pub fn figure(value: impl Into<SharedString>) -> Div {
 }
 
 /// @name marker
-/// @description The bar on the left edge of the row that has the keyboard or the section that is
-/// open.
+/// @description The faint tint laid over the row that has the keyboard, on top of its own
+/// background so it shows on selected rows too.
 ///
 /// @example
 /// row.child(ui::marker())
 pub fn marker() -> Div {
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .left_0()
-        .w(unit(size::MARKER))
-        .bg(theme::focus())
+    div().absolute().inset_0().bg(theme::cursor())
 }
 
 /// @name toolbar

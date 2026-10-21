@@ -96,6 +96,12 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         return;
     }
     app.message = None;
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let extending = matches!(key.code, KeyCode::Char('J' | 'K'))
+        || (shift && matches!(key.code, KeyCode::Up | KeyCode::Down));
+    if !extending || app.filtering {
+        app.end_range();
+    }
     if app.filtering {
         handle_filter(app, key);
         return;
@@ -110,6 +116,10 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         (Overlay::Confirm { .. }, _) => app.overlay = Overlay::None,
         (Overlay::Help, _) => app.overlay = Overlay::None,
         (Overlay::None, code) => match code {
+            KeyCode::Char('J') => app.extend(1),
+            KeyCode::Char('K') => app.extend(-1),
+            KeyCode::Down if shift => app.extend(1),
+            KeyCode::Up if shift => app.extend(-1),
             KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
             KeyCode::Char('j') | KeyCode::Down => app.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => app.move_by(-1),

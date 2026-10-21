@@ -289,6 +289,7 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | --- | --- |
 | `j` `k` / arrows | move |
 | `g` `G` | top, bottom |
+| `J` `K` / shift ↑ ↓ | move and select the rows passed |
 | `space` | toggle selection |
 | `a` | select all `safe` in the current view |
 | `A` | select everything in the current view, after a confirmation |

@@ -65,6 +65,8 @@ pub mod size {
     pub const LABEL: f32 = 240.;
     pub const KEYS: f32 = 250.;
     pub const FILTER: f32 = 300.;
+    /// The narrowest the titlebar search shrinks to when the window runs out of room.
+    pub const SEARCH: f32 = 160.;
     pub const LIST: f32 = 340.;
     pub const MENU: f32 = 220.;
     pub const DIALOG: f32 = 520.;
@@ -87,7 +89,7 @@ pub mod col {
 }
 
 pub fn background() -> Rgba {
-    rgb(0x0018_1818)
+    rgb(0x0011_1111)
 }
 
 pub fn transparent() -> Rgba {
@@ -99,49 +101,53 @@ pub fn scrim() -> Rgba {
 }
 
 pub fn panel() -> Rgba {
-    rgb(0x001d_1d1d)
+    rgb(0x0017_1717)
 }
 
 pub fn elevated() -> Rgba {
-    rgb(0x0023_2323)
+    rgb(0x001c_1c1c)
 }
 
 pub fn hover() -> Rgba {
-    rgb(0x0029_2929)
+    rgb(0x0022_2222)
 }
 
 pub fn selected() -> Rgba {
-    rgb(0x002f_2f2f)
+    rgb(0x002d_1f16)
 }
 
-/// The marker and outline of whatever has the keyboard: the cursor row, the open section, a
-/// focused field.
+/// The outline of whatever has the keyboard: the open section, a focused field.
 pub fn focus() -> Rgba {
     rgb(0x00a8_a8a8)
 }
 
+/// The tint over the row that has the keyboard.
+pub fn cursor() -> Rgba {
+    rgba(0xffff_ff0a)
+}
+
 pub fn border() -> Rgba {
-    rgb(0x002a_2a2a)
+    rgb(0x0029_2929)
 }
 
 pub fn border_strong() -> Rgba {
-    rgb(0x003a_3a3a)
+    rgb(0x0038_3838)
 }
 
 pub fn text() -> Rgba {
-    rgb(0x00d8_d8d8)
+    rgb(0x00fa_fafa)
 }
 
 pub fn muted() -> Rgba {
-    rgb(0x0090_9090)
+    rgb(0x00a1_a1a1)
 }
 
 pub fn faint() -> Rgba {
-    rgb(0x0060_6060)
+    rgb(0x0073_7373)
 }
 
 pub fn bar() -> Rgba {
-    rgb(0x008c_8c8c)
+    rgb(0x00d9_7757)
 }
 
 pub fn bar_strong() -> Rgba {
@@ -165,7 +171,7 @@ pub fn track() -> Rgba {
 }
 
 pub fn review() -> Rgba {
-    rgb(0x00c2_a36e)
+    rgba(0xffd2_36e6)
 }
 
 pub fn review_soft() -> Rgba {
@@ -173,15 +179,15 @@ pub fn review_soft() -> Rgba {
 }
 
 pub fn danger() -> Rgba {
-    rgb(0x00d0_7f7f)
+    rgba(0xff66_7fbf)
 }
 
 pub fn primary() -> Rgba {
-    rgb(0x00e6_e6e6)
+    rgb(0x00fa_fafa)
 }
 
 pub fn on_primary() -> Rgba {
-    rgb(0x0016_1616)
+    rgb(0x0011_1111)
 }
 
 /// A folder tile of the space map: darker than the items it holds.
