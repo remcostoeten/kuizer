@@ -3,27 +3,29 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
+
+use futures::StreamExt;
+use futures::channel::{mpsc, oneshot};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
-    ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
-    Stateful, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div, point,
-    prelude::*, px, uniform_list,
+    ElementId, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div,
+    point, prelude::*, px, uniform_list,
 };
 use kuizer::config::{Config, Sidebar};
 use kuizer::delete::{Removal, Status};
 use kuizer::detect::{Category, Safety};
+use kuizer::dupes::{self, Duplicates};
 use kuizer::history::Action;
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
-use kuizer::stats;
 
-use crate::activity::{self, Activity, State, Step, plural};
+use crate::activity::{self, Activity, State, Step, Tracker, plural};
 use crate::chart::{self, Measure, Segment};
 use crate::commands::{self, Command, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
 use crate::field;
@@ -31,13 +33,15 @@ use crate::frame;
 use crate::glossary::Term;
 use crate::icon::{self, Icon};
 use crate::model::{
-    self, Batch, Confirmation, HistoryView, Outcome, Report, Restored, Scope, Source, TrashState,
+    self, Batch, Confirmation, HistoryView, Loaded, Outcome, Part, Report, Restored, Scope, Source,
+    TrashState,
 };
 use crate::motion;
 use crate::palette::Palette;
 use crate::reveal;
-use crate::snapshot::{self, Snapshots};
+use crate::snapshot::{self, Recorder, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
+use crate::stats::{Charts, Index, ReportStats, Selection, SelectionStats, Tally};
 use crate::tab::Tab;
 use crate::theme::{self, col, font, size, space, unit};
 use crate::tooltip::{self, Tip, Tooltip};
@@ -67,10 +71,12 @@ const SIDEBAR_KEY: &str = if cfg!(target_os = "macos") {
 mod keys;
 mod map;
 mod overlay;
+mod pane;
 mod repos;
 
 use keys::{found, found_path, keep_visible, shows_run};
 use map::SpaceMap;
+use pane::Pane;
 use repos::{GitJob, GitScope};
 
 pub use crate::commands::bind_keys;
@@ -91,8 +97,23 @@ struct Finished {
 }
 
 enum Update {
-    Cached(Report),
-    Done(Result<Report, String>),
+    Cached(Box<Report>),
+    Activity(Box<Activity>),
+    Loaded(Loaded),
+    Done(Result<SystemTime, String>),
+}
+
+enum Searched {
+    Stage(dupes::Stage),
+    Done(Result<Duplicates, String>),
+}
+
+/// A duplicate search running beside the results: how far it got and the task that hears
+/// from it. Dropping it stops listening.
+struct Search {
+    roots: Vec<PathBuf>,
+    stage: Option<dupes::Stage>,
+    _task: Task<()>,
 }
 
 enum Notice {
@@ -131,6 +152,8 @@ enum Dialog {
         rule: Confirmation,
         typed: String,
         only: Option<(Source, u64)>,
+        stats: SelectionStats,
+        preview: Vec<(Source, u64)>,
     },
     Running {
         permanent: bool,
@@ -180,7 +203,17 @@ impl Target {
 struct Span {
     tab: Tab,
     anchor: Target,
+    anchor_row: Cell<usize>,
     added: HashSet<(Source, u64)>,
+}
+
+/// The filters the artifact rows were last built with, so a filter that only narrows can start
+/// from those rows instead of the whole report.
+struct RowsFilter {
+    report: u64,
+    needle: Option<String>,
+    safety: Option<Safety>,
+    hidden: HashSet<Category>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,9 +299,16 @@ pub struct Kuizer {
     collapsed: bool,
     icon_hovers: HashMap<&'static str, u64>,
     folder_error: Option<String>,
+    folder_check: Option<Task<()>>,
     recent: Recent,
     snapshots: Snapshots,
     stale: Option<SystemTime>,
+    pending: HashSet<Part>,
+    early: Vec<Loaded>,
+    streamed: bool,
+    progress: Activity,
+    search: Option<Search>,
+    search_error: Option<String>,
     zoom: Zoom,
     wheel: Pixels,
     moving: bool,
@@ -281,7 +321,15 @@ pub struct Kuizer {
     safety: Option<Safety>,
     hidden: HashSet<Category>,
     rows: Vec<usize>,
-    selection: HashSet<(Source, u64)>,
+    rows_bytes: u64,
+    rows_filter: Option<RowsFilter>,
+    rows_generation: u64,
+    all_checked: Cell<Option<(u64, u64, bool)>>,
+    artifact_row: Cell<usize>,
+    selection: Selection,
+    index: Index,
+    report_stats: ReportStats,
+    report_generation: u64,
     range: Option<Span>,
     dialog: Option<Dialog>,
     task: Option<Task<()>>,
@@ -304,6 +352,9 @@ pub struct Kuizer {
     map: SpaceMap,
     git: GitJob,
     git_task: Option<Task<()>>,
+    content: Option<Entity<Pane>>,
+    cache_content: bool,
+    loader: Option<Entity<chart::Loader>>,
 }
 
 impl Kuizer {
@@ -323,14 +374,15 @@ impl Kuizer {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
-        let folder = recent
-            .paths
-            .iter()
-            .find(|path| path.is_dir())
-            .or(config.scan.roots.first())
-            .or(roots.first())
-            .map(|path| display_path(path))
-            .unwrap_or_default();
+        let folder = recent.default_folder(&config, &roots);
+        let unchecked = recent.paths.clone();
+        let probed = cx.background_spawn(async move { Recent::probe(&unchecked) });
+        cx.spawn(async move |this, cx| {
+            let gone = probed.await;
+            this.update(cx, |app, cx| app.mark_recent_gone(gone, cx))
+                .ok();
+        })
+        .detach();
         cx.set_global(tooltip::Typeface(font.clone()));
         motion::configure(config.appearance.motion);
         let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
@@ -343,9 +395,16 @@ impl Kuizer {
             collapsed,
             icon_hovers: HashMap::new(),
             folder_error: None,
+            folder_check: None,
             recent,
             snapshots,
             stale: None,
+            pending: HashSet::new(),
+            early: Vec::new(),
+            streamed: false,
+            progress: Activity::default(),
+            search: None,
+            search_error: None,
             zoom,
             wheel: px(0.),
             moving: false,
@@ -358,7 +417,15 @@ impl Kuizer {
             safety: None,
             hidden: HashSet::new(),
             rows: Vec::new(),
-            selection: HashSet::new(),
+            rows_bytes: 0,
+            rows_filter: None,
+            rows_generation: 0,
+            all_checked: Cell::new(None),
+            artifact_row: Cell::new(0),
+            selection: Selection::default(),
+            index: Index::default(),
+            report_stats: ReportStats::default(),
+            report_generation: 0,
             range: None,
             dialog: None,
             task: None,
@@ -392,12 +459,28 @@ impl Kuizer {
             map: SpaceMap::default(),
             git: GitJob::default(),
             git_task: None,
+            content: None,
+            cache_content: cfg!(not(test)),
+            loader: None,
         };
         if !app.roots.is_empty() {
             app.recent.remember(&app.roots);
-            app.rescan(cx);
+            app.phase = Phase::Loading(Box::default());
+            let view = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |app, cx| app.rescan(cx)).ok();
+            });
         }
         app
+    }
+
+    fn mark_recent_gone(&mut self, gone: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let before = self.recent.default_folder(&self.config, &self.roots);
+        self.recent.mark_gone(gone);
+        if self.folder == before {
+            self.folder = self.recent.default_folder(&self.config, &self.roots);
+        }
+        cx.notify();
     }
 
     fn report(&self) -> Option<&Report> {
@@ -433,26 +516,29 @@ impl Kuizer {
             shown: Duration::ZERO,
         });
         self.toast_task = Some(cx.spawn(async move |this, cx| {
+            let mut wait = TOAST_TIME;
             loop {
-                cx.background_executor().timer(POLL).await;
-                let open = this.update(cx, |app, cx| {
+                cx.background_executor().timer(wait).await;
+                let next = this.update(cx, |app, cx| {
                     let paused = app.dialog.is_some();
-                    let Some(toast) = &mut app.toast else {
-                        return false;
-                    };
-                    if !toast.notice.lingers() || paused {
-                        return true;
+                    let toast = app.toast.as_mut()?;
+                    if !toast.notice.lingers() {
+                        return None;
                     }
-                    toast.shown += POLL;
+                    if paused {
+                        return Some(POLL);
+                    }
+                    toast.shown += wait;
                     if toast.shown < TOAST_TIME {
-                        return true;
+                        return Some(TOAST_TIME - toast.shown);
                     }
                     app.toast = None;
                     cx.notify();
-                    false
+                    None
                 });
-                if !matches!(open, Ok(true)) {
-                    break;
+                match next {
+                    Ok(Some(next)) => wait = next,
+                    _ => break,
                 }
             }
         }));
@@ -487,7 +573,7 @@ impl Kuizer {
             return;
         }
         self.show_toast(Notice::Restoring { session }, cx);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = oneshot::channel();
         std::thread::Builder::new()
             .name("kuizer-gui-restore".to_owned())
             .spawn(move || {
@@ -497,16 +583,8 @@ impl Kuizer {
             })
             .expect("spawn restore thread");
         self.restore_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                let message = match receiver.try_recv() {
-                    Ok(message) => Some(message),
-                    Err(TryRecvError::Empty) => continue,
-                    Err(TryRecvError::Disconnected) => None,
-                };
-                let _ = this.update(cx, |app, cx| app.restored(message, cx));
-                break;
-            }
+            let message = receiver.await.ok();
+            let _ = this.update(cx, |app, cx| app.restored(message, cx));
         }));
     }
 
@@ -525,6 +603,7 @@ impl Kuizer {
         if let Phase::Ready(report) = &mut self.phase {
             report.history = history;
         }
+        self.refresh_stats();
         let notice = match restored {
             Ok(restored) => {
                 if restored.items > 0 && matches!(self.phase, Phase::Ready(_)) {
@@ -537,8 +616,10 @@ impl Kuizer {
         self.show_toast(notice, cx);
     }
 
+    /// Whether the results on screen are still being replaced by a running scan, so nothing in
+    /// them may be removed yet: some sections come from an earlier scan or are not in yet.
     fn refreshing(&self) -> bool {
-        self.stale.is_some()
+        self.stale.is_some() || (self.cancel.is_some() && matches!(self.phase, Phase::Ready(_)))
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -546,82 +627,271 @@ impl Kuizer {
             self.stale = Some(report.scanned);
             true
         } else {
-            self.phase = Phase::Loading(Box::default());
+            self.set_phase(Phase::Loading(Box::default()), cx);
             self.stale = None;
             self.selection.clear();
             self.rows.clear();
             false
         };
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.pending = Part::expected(&self.options);
+        self.early.clear();
+        self.streamed = false;
+        self.progress = Activity::default();
         self.started = Instant::now();
         let cancel = Cancel::new();
         self.cancel = Some(cancel.clone());
-        let stage = Arc::new(Mutex::new(Activity::default()));
-        let (sender, receiver) = mpsc::channel();
+        let (sender, mut receiver) = mpsc::unbounded();
         {
             let config = self.config.clone();
             let roots = self.roots.clone();
             let options = self.options.clone();
-            let stage = Arc::clone(&stage);
             let snapshots = self.snapshots.clone();
             std::thread::Builder::new()
                 .name("kuizer-gui-scan".to_owned())
                 .spawn(move || {
-                    if !shown && let Some(report) = snapshots.load(&roots, &options) {
-                        let _ = sender.send(Update::Cached(report));
-                    }
-                    let result = model::load(&config, &roots, &options, &cancel, &stage);
-                    if let Ok(report) = &result {
-                        snapshots.save(report);
-                    }
-                    let _ = sender.send(Update::Done(result));
+                    scan_parts(
+                        &config, &roots, &options, &cancel, &snapshots, &sender, shown,
+                    )
                 })
                 .expect("spawn scan thread");
         }
         self.task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                let update = match receiver.try_recv() {
-                    Ok(update) => Some(update),
-                    Err(TryRecvError::Empty) => None,
-                    Err(TryRecvError::Disconnected) => Some(Update::Done(Err(
-                        "the scan stopped unexpectedly".to_owned(),
-                    ))),
-                };
-                let current = stage.lock().map(|stage| stage.clone()).unwrap_or_default();
-                let done = matches!(update, Some(Update::Done(_)));
-                let updated = this.update(cx, |app, cx| {
-                    match update {
-                        Some(Update::Cached(report)) => {
-                            if matches!(app.phase, Phase::Loading(_)) {
-                                app.stale = Some(report.scanned);
-                                app.adopt(report);
-                            }
-                        }
-                        Some(Update::Done(Ok(report))) => app.adopt(report),
-                        Some(Update::Done(Err(error))) if error == model::CANCELLED => {
-                            app.phase = Phase::Start;
-                        }
-                        Some(Update::Done(Err(error))) => app.phase = Phase::Failed(error),
-                        None => {
-                            if let Phase::Loading(shown) = &mut app.phase
-                                && **shown != current
-                            {
-                                **shown = current;
-                            }
-                        }
-                    }
-                    if done {
-                        app.cancel = None;
-                        app.stale = None;
-                    }
-                    app.refresh_rows();
-                    cx.notify();
-                });
+            while let Some(first) = receiver.next().await {
+                let mut updates = vec![first];
+                while let Ok(update) = receiver.try_recv() {
+                    updates.push(update);
+                }
+                let done = updates
+                    .iter()
+                    .any(|update| matches!(update, Update::Done(_)));
+                let updated = this.update(cx, |app, cx| app.take(updates, cx));
                 if done || updated.is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = this.update(cx, |app, cx| {
+                app.take(
+                    vec![Update::Done(
+                        Err("the scan stopped unexpectedly".to_owned()),
+                    )],
+                    cx,
+                );
+            });
         }));
+    }
+
+    /// Applies everything a running scan sent since the window last heard from it, then
+    /// refreshes what depends on the sections that changed, once.
+    fn take(&mut self, updates: Vec<Update>, cx: &mut Context<Self>) {
+        let mut dropped = Vec::new();
+        let (mut rows, mut map, mut sections) = (false, false, false);
+        for update in updates {
+            match update {
+                Update::Activity(activity) => match &mut self.phase {
+                    Phase::Loading(shown) => *shown = activity,
+                    _ => self.progress = *activity,
+                },
+                Update::Cached(report) => {
+                    if self.cancel.is_some() {
+                        self.cached(*report, &mut dropped);
+                        rows = true;
+                        map = true;
+                    }
+                }
+                Update::Loaded(loaded) => {
+                    match &loaded {
+                        Loaded::Found(_) => rows = true,
+                        Loaded::Artifacts { .. } | Loaded::Caches(_) => {
+                            rows = true;
+                            map = true;
+                        }
+                        _ => sections = true,
+                    }
+                    self.loaded(loaded, &mut dropped);
+                }
+                Update::Done(Ok(scanned)) => {
+                    if matches!(self.phase, Phase::Loading(_)) {
+                        self.show_parts(&mut dropped);
+                    }
+                    if let Phase::Ready(report) = &mut self.phase {
+                        report.scanned = scanned;
+                    }
+                    self.scan_over();
+                    rows = true;
+                    map = true;
+                    if self.options.duplicates && self.search.is_none() {
+                        self.find_duplicates(cx);
+                    } else if self.tab == Tab::Duplicates {
+                        self.load_duplicates(cx);
+                    }
+                }
+                Update::Done(Err(error)) => {
+                    self.scan_over();
+                    let phase = if error == model::CANCELLED {
+                        Phase::Start
+                    } else {
+                        Phase::Failed(error)
+                    };
+                    self.set_phase(phase, cx);
+                }
+            }
+        }
+        if rows || map || sections {
+            if let Phase::Ready(report) = &mut self.phase {
+                report.drop_paths(&self.excluded);
+            }
+            self.refresh_stats();
+            if rows {
+                self.refresh_rows();
+            }
+            if map || (rows && self.map.shown) {
+                self.rebuild_map();
+            }
+            if self
+                .menu
+                .as_ref()
+                .is_some_and(|menu| !self.known(&menu.target))
+            {
+                self.menu = None;
+            }
+        }
+        if !dropped.is_empty() {
+            cx.background_spawn(async move { drop(dropped) }).detach();
+        }
+        cx.notify();
+    }
+
+    fn scan_over(&mut self) {
+        self.cancel = None;
+        self.stale = None;
+        self.pending.clear();
+        self.early.clear();
+        self.streamed = false;
+    }
+
+    /// Shows the saved scan of these folders while the fresh one runs. Before anything fresh
+    /// is in, it is the whole report; after that it only fills the sections still pending.
+    fn cached(&mut self, report: Report, dropped: &mut Vec<Loaded>) {
+        if matches!(self.phase, Phase::Loading(_)) {
+            if let Phase::Loading(activity) = &mut self.phase {
+                self.progress = std::mem::take(&mut **activity);
+            }
+            self.stale = Some(report.scanned);
+            self.adopt(report);
+            self.apply_early(dropped);
+            return;
+        }
+        let scanned = report.scanned;
+        for part in report.into_parts() {
+            let Some(kind) = part.part() else {
+                continue;
+            };
+            let streaming = kind == Part::Artifacts
+                && self.streamed
+                && self
+                    .report()
+                    .is_some_and(|shown| !shown.candidates.is_empty());
+            if !self.pending.contains(&kind) || streaming {
+                dropped.push(part);
+                continue;
+            }
+            if kind == Part::Artifacts {
+                self.streamed = false;
+            }
+            self.stale = Some(scanned);
+            self.replace(part, dropped);
+        }
+    }
+
+    fn loaded(&mut self, loaded: Loaded, dropped: &mut Vec<Loaded>) {
+        if matches!(self.phase, Phase::Loading(_)) {
+            if !matches!(loaded, Loaded::Found(_) | Loaded::Artifacts { .. }) {
+                self.early.push(loaded);
+                return;
+            }
+            self.show_parts(dropped);
+        }
+        if let Loaded::Found(batch) = loaded {
+            if let (true, Phase::Ready(report)) = (self.streamed, &mut self.phase) {
+                dropped.push(report.apply(Loaded::Found(batch)));
+            }
+            return;
+        }
+        if let Some(part) = loaded.part() {
+            self.pending.remove(&part);
+            if part == Part::Artifacts {
+                self.streamed = false;
+            }
+        }
+        self.replace(loaded, dropped);
+    }
+
+    /// Leaves the activity view for the results once the first artifacts are in, with every
+    /// part that arrived before them.
+    fn show_parts(&mut self, dropped: &mut Vec<Loaded>) {
+        if let Phase::Loading(activity) = &mut self.phase {
+            self.progress = std::mem::take(&mut **activity);
+        }
+        self.phase = Phase::Ready(Box::new(Report::empty(&self.roots, &self.options)));
+        self.streamed = true;
+        self.apply_early(dropped);
+    }
+
+    fn apply_early(&mut self, dropped: &mut Vec<Loaded>) {
+        for part in std::mem::take(&mut self.early) {
+            if let Some(kind) = part.part() {
+                self.pending.remove(&kind);
+            }
+            self.replace(part, dropped);
+        }
+    }
+
+    /// Puts a part into its section of the report on screen and keeps the selection of that
+    /// section on the same paths.
+    fn replace(&mut self, loaded: Loaded, dropped: &mut Vec<Loaded>) {
+        let Phase::Ready(report) = &mut self.phase else {
+            dropped.push(loaded);
+            return;
+        };
+        let source = loaded.part().and_then(Part::source);
+        let kept: HashSet<PathBuf> = source.map_or_else(HashSet::new, |source| {
+            report
+                .section(source)
+                .filter(|candidate| self.selection.contains(&(source, candidate.id)))
+                .map(|candidate| candidate.path.clone())
+                .collect()
+        });
+        dropped.push(report.apply(loaded));
+        if let Some(source) = source {
+            let stale: Vec<(Source, u64)> = self
+                .selection
+                .keys()
+                .filter(|(selected, _)| *selected == source)
+                .copied()
+                .collect();
+            for key in &stale {
+                self.selection.remove(key);
+            }
+            for candidate in report
+                .section(source)
+                .filter(|candidate| kept.contains(&candidate.path))
+            {
+                self.selection.insert((source, candidate.id), candidate);
+            }
+        }
+    }
+
+    /// Changes the phase and drops the report it replaces off the UI thread.
+    fn set_phase(&mut self, phase: Phase, cx: &mut Context<Self>) {
+        if let Phase::Ready(report) = std::mem::replace(&mut self.phase, phase) {
+            cx.background_spawn(async move { drop(report) }).detach();
+        }
+        if !matches!(self.phase, Phase::Ready(_)) {
+            self.search = None;
+        }
     }
 
     fn adopt(&mut self, report: Report) {
@@ -631,34 +901,157 @@ impl Kuizer {
                 .into_iter()
                 .map(|(source, candidate)| (source, candidate.path.as_path()))
                 .collect();
-            let artifacts = report
-                .candidates
-                .iter()
-                .map(|candidate| (Source::Artifact, candidate));
-            let caches = report
-                .caches
-                .iter()
-                .map(|(_, candidate)| (Source::Cache, candidate));
-            let toolchains = report
-                .toolchains
-                .iter()
-                .map(|(_, candidate)| (Source::Toolchain, candidate));
-            let docker = report
-                .docker
-                .iter()
-                .map(|(_, candidate)| (Source::Docker, candidate));
-            artifacts
-                .chain(caches)
-                .chain(toolchains)
-                .chain(docker)
+            Source::ALL
+                .into_iter()
+                .flat_map(|source| {
+                    report
+                        .section(source)
+                        .map(move |candidate| (source, candidate))
+                })
                 .filter(|(source, candidate)| kept.contains(&(*source, candidate.path.as_path())))
                 .map(|(source, candidate)| (source, candidate.id))
                 .collect()
         };
-        self.selection = selection;
+        self.selection = Selection::pending(selection);
         self.phase = Phase::Ready(Box::new(report));
         self.menu = None;
         self.prune();
+    }
+
+    /// @name Kuizer::find_duplicates
+    /// @description Starts a duplicate search over the scanned folders beside the results on
+    /// screen, and puts what it finds into the Duplicates section when it is done. Running it
+    /// while a search is going stops listening to that search.
+    ///
+    /// @example
+    /// app.find_duplicates(cx);
+    fn find_duplicates(&mut self, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.report().is_none() {
+            return;
+        }
+        self.search_error = None;
+        let (sender, mut receiver) = mpsc::unbounded();
+        let config = self.config.clone();
+        let roots = self.roots.clone();
+        let options = self.options.clone();
+        let snapshots = self.snapshots.clone();
+        std::thread::Builder::new()
+            .name("kuizer-gui-duplicates".to_owned())
+            .spawn(move || {
+                let mut told: Option<Instant> = None;
+                let found = model::find_duplicates(&config, &roots, &options, |stage| {
+                    let quiet = matches!(stage, dupes::Stage::Walking { .. })
+                        && told.is_some_and(|told| told.elapsed() < POLL);
+                    if !quiet {
+                        told = Some(Instant::now());
+                        let _ = sender.unbounded_send(Searched::Stage(stage));
+                    }
+                });
+                let staged = found.as_ref().ok().map(|found| {
+                    let duplicate_options = dupes::Options::from_config(&options.apply(&config));
+                    snapshots.stage_duplicates(&roots, duplicate_options, found)
+                });
+                let _ = sender.unbounded_send(Searched::Done(found));
+                if let Some(staged) = staged {
+                    staged.save();
+                }
+            })
+            .expect("spawn duplicate search thread");
+        let task = cx.spawn(async move |this, cx| {
+            while let Some(first) = receiver.next().await {
+                let mut last = first;
+                while let Ok(next) = receiver.try_recv() {
+                    last = next;
+                }
+                let done = matches!(last, Searched::Done(_));
+                let updated = this.update(cx, |app, cx| app.searched(last, cx));
+                if done || updated.is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |app, cx| {
+                app.searched(
+                    Searched::Done(Err("the duplicate search stopped unexpectedly".to_owned())),
+                    cx,
+                );
+            });
+        });
+        self.search = Some(Search {
+            roots: self.roots.clone(),
+            stage: None,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    fn searched(&mut self, searched: Searched, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        match searched {
+            Searched::Stage(stage) => search.stage = Some(stage),
+            Searched::Done(found) => {
+                let roots = std::mem::take(&mut search.roots);
+                self.search = None;
+                match found {
+                    Ok(found) => self.show_duplicates(&roots, found, cx),
+                    Err(error) => self.search_error = Some(error),
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_duplicates(&mut self, roots: &[PathBuf], found: Duplicates, cx: &mut Context<Self>) {
+        if let Phase::Ready(report) = &mut self.phase
+            && report.roots == roots
+        {
+            if let Some(old) = report.duplicates.replace(found) {
+                cx.background_spawn(async move { drop(old) }).detach();
+            }
+            report.drop_paths(&self.excluded);
+        }
+    }
+
+    /// Reads the duplicates the last search under these folders found, off the UI thread, when
+    /// the Duplicates section is opened and the report on screen has none yet.
+    fn load_duplicates(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.report() else {
+            return;
+        };
+        if report.duplicates.is_some() || self.search.is_some() {
+            return;
+        }
+        let roots = report.roots.clone();
+        let snapshots = self.snapshots.clone();
+        let options = dupes::Options::from_config(&self.options.apply(&self.config));
+        let (sender, receiver) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("kuizer-gui-saved-duplicates".to_owned())
+            .spawn(move || {
+                let _ = sender.send(snapshots.load_duplicates(&roots, options));
+            })
+            .expect("spawn saved duplicates thread");
+        let roots = self.roots.clone();
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(found)) = receiver.await {
+                let _ = this.update(cx, |app, cx| {
+                    if app.search.is_none()
+                        && app
+                            .report()
+                            .is_some_and(|report| report.duplicates.is_none())
+                    {
+                        app.show_duplicates(&roots, found, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     fn start_scan(&mut self, cx: &mut Context<Self>) {
@@ -675,18 +1068,23 @@ impl Kuizer {
             cx.notify();
             return;
         };
-        match start::check_folder(&path) {
-            Ok(root) => {
-                self.folder_error = None;
-                self.roots = scan::normalize_roots(&[root]);
-                self.recent.remember(&self.roots);
-                self.rescan(cx);
-            }
-            Err(error) => {
-                self.folder_error = Some(error);
-                cx.notify();
-            }
-        }
+        let checked = cx.background_spawn(async move { start::check_folder(&path) });
+        self.folder_check = Some(cx.spawn(async move |this, cx| {
+            let result = checked.await;
+            this.update(cx, |app, cx| match result {
+                Ok(root) => {
+                    app.folder_error = None;
+                    app.roots = scan::normalize_roots(&[root]);
+                    app.recent.remember(&app.roots);
+                    app.rescan(cx);
+                }
+                Err(error) => {
+                    app.folder_error = Some(error);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     fn cancel_scan(&mut self, cx: &mut Context<Self>) {
@@ -694,8 +1092,8 @@ impl Kuizer {
             cancel.cancel();
         }
         self.task = None;
-        self.stale = None;
-        self.phase = Phase::Start;
+        self.scan_over();
+        self.set_phase(Phase::Start, cx);
         cx.notify();
     }
 
@@ -706,7 +1104,7 @@ impl Kuizer {
         self.selection.clear();
         self.rows.clear();
         self.toast = None;
-        self.phase = Phase::Start;
+        self.set_phase(Phase::Start, cx);
         cx.notify();
     }
 
@@ -763,70 +1161,135 @@ impl Kuizer {
     }
 
     fn refresh_rows(&mut self) {
+        self.rows_generation += 1;
         let Phase::Ready(report) = &self.phase else {
             self.rows.clear();
+            self.rows_bytes = 0;
+            self.rows_filter = None;
             return;
         };
-        let needle = self.needle(Tab::Artifacts);
-        self.rows = report
-            .candidates
+        let filter = RowsFilter {
+            report: self.report_generation,
+            needle: self.needle(Tab::Artifacts),
+            safety: self.safety,
+            hidden: self.hidden.clone(),
+        };
+        let shows = |candidate: &Candidate| {
+            filter
+                .safety
+                .is_none_or(|safety| candidate.rule.safety == safety)
+                && !filter.hidden.contains(&candidate.rule.category)
+                && found(
+                    filter.needle.as_deref(),
+                    &[
+                        candidate.path.to_string_lossy().as_ref(),
+                        candidate.rule.name.as_str(),
+                        candidate.rule.category.as_str(),
+                    ],
+                )
+        };
+        let narrows = self.rows_filter.as_ref().is_some_and(|last| {
+            last.report == filter.report
+                && last.safety == filter.safety
+                && last.hidden == filter.hidden
+                && match (&last.needle, &filter.needle) {
+                    (None, _) => true,
+                    (Some(last), Some(next)) => next.contains(last.as_str()),
+                    (Some(_), None) => false,
+                }
+        });
+        if narrows {
+            self.rows.retain(|&index| shows(&report.candidates[index]));
+        } else {
+            self.rows = report
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| shows(candidate))
+                .map(|(index, _)| index)
+                .collect();
+        }
+        self.rows_bytes = self
+            .rows
             .iter()
-            .enumerate()
-            .filter(|(_, candidate)| {
-                self.safety
-                    .is_none_or(|safety| candidate.rule.safety == safety)
-                    && !self.hidden.contains(&candidate.rule.category)
-                    && found(
-                        needle.as_deref(),
-                        &[
-                            candidate.path.to_string_lossy().as_ref(),
-                            candidate.rule.name.as_str(),
-                            candidate.rule.category.as_str(),
-                        ],
-                    )
-            })
-            .map(|(index, _)| index)
-            .collect();
+            .map(|&index| report.candidates[index].usage.allocated)
+            .sum();
+        self.rows_filter = Some(filter);
     }
 
+    /// Recomputes what the views add up from the report and weighs the selection again. Runs
+    /// whenever the report changes.
+    fn refresh_stats(&mut self) {
+        self.report_generation += 1;
+        let Phase::Ready(report) = &self.phase else {
+            self.index = Index::default();
+            self.report_stats = ReportStats::default();
+            return;
+        };
+        self.index = Index::default();
+        self.report_stats = ReportStats::new(report);
+        if !self.selection.is_empty() {
+            let index = &self.index;
+            self.selection.reweigh(|key| index.find(report, key));
+        }
+    }
+
+    /// Every selected item, in the order the lists show them.
     fn selected(&self) -> Vec<(Source, &Candidate)> {
         let Some(report) = self.report() else {
             return Vec::new();
         };
-        let artifacts = report
-            .candidates
-            .iter()
-            .filter(|candidate| self.selection.contains(&(Source::Artifact, candidate.id)))
-            .map(|candidate| (Source::Artifact, candidate));
-        let caches = report
-            .caches
-            .iter()
-            .map(|(_, candidate)| candidate)
-            .filter(|candidate| self.selection.contains(&(Source::Cache, candidate.id)))
-            .map(|candidate| (Source::Cache, candidate));
-        let toolchains = report
-            .toolchains
-            .iter()
-            .map(|(_, candidate)| candidate)
-            .filter(|candidate| self.selection.contains(&(Source::Toolchain, candidate.id)))
-            .map(|candidate| (Source::Toolchain, candidate));
-        let docker = report
-            .docker
-            .iter()
-            .map(|(_, candidate)| candidate)
-            .filter(|candidate| self.selection.contains(&(Source::Docker, candidate.id)))
-            .map(|candidate| (Source::Docker, candidate));
-        artifacts
-            .chain(caches)
-            .chain(toolchains)
-            .chain(docker)
+        let mut items: Vec<(Source, usize, &Candidate)> = self
+            .selection
+            .keys()
+            .filter_map(|&key| {
+                let (position, candidate) = self.index.locate(report, key)?;
+                Some((key.0, position, candidate))
+            })
+            .collect();
+        items.sort_unstable_by_key(|&(source, position, _)| (source, position));
+        items
+            .into_iter()
+            .map(|(source, _, candidate)| (source, candidate))
             .collect()
+    }
+
+    /// Selects an item of the report, and says whether it was not selected before.
+    fn select(&mut self, key: (Source, u64)) -> bool {
+        let Phase::Ready(report) = &self.phase else {
+            return false;
+        };
+        self.index
+            .find(report, key)
+            .is_some_and(|candidate| self.selection.insert(key, candidate))
+    }
+
+    /// Whether every artifact row on screen is selected, cached until the rows or the selection
+    /// change.
+    fn all_rows_checked(&self) -> bool {
+        let generation = (self.rows_generation, self.selection.generation());
+        if let Some((rows, selection, checked)) = self.all_checked.get()
+            && (rows, selection) == generation
+        {
+            return checked;
+        }
+        let checked = self.report().is_some_and(|report| {
+            !self.rows.is_empty()
+                && self.selection.stats().source(Source::Artifact).all.count >= self.rows.len()
+                && self.rows.iter().all(|&index| {
+                    self.selection
+                        .contains(&(Source::Artifact, report.candidates[index].id))
+                })
+        });
+        self.all_checked
+            .set(Some((generation.0, generation.1, checked)));
+        checked
     }
 
     fn toggle(&mut self, source: Source, id: u64, cx: &mut Context<Self>) {
         self.range = None;
         if !self.selection.remove(&(source, id)) {
-            self.selection.insert((source, id));
+            self.select((source, id));
         }
         cx.notify();
     }
@@ -865,7 +1328,9 @@ impl Kuizer {
                 .map(|candidate| (Source::Artifact, candidate.id))
                 .collect(),
         };
-        self.selection.extend(keys);
+        for key in keys {
+            self.select(key);
+        }
         cx.notify();
     }
 
@@ -878,12 +1343,14 @@ impl Kuizer {
             .iter()
             .map(|&index| (Source::Artifact, report.candidates[index].id))
             .collect();
-        if keys.iter().all(|key| self.selection.contains(key)) {
+        if self.all_rows_checked() {
             for key in &keys {
                 self.selection.remove(key);
             }
         } else {
-            self.selection.extend(keys);
+            for key in keys {
+                self.select(key);
+            }
         }
         cx.notify();
     }
@@ -907,36 +1374,26 @@ impl Kuizer {
             return;
         }
         let rule = Confirmation::for_items(items.iter().map(|(_, candidate)| *candidate));
+        let stats = SelectionStats::of(items.iter().copied());
+        let preview = items
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|(source, candidate)| (*source, candidate.id))
+            .collect();
         self.dialog = Some(Dialog::Confirm {
             rule,
             typed: String::new(),
             only,
+            stats,
+            preview,
         });
         window.focus(&self.focus);
         cx.notify();
     }
 
-    fn item(&self, (source, id): (Source, u64)) -> Option<(Source, &Candidate)> {
+    fn item(&self, key: (Source, u64)) -> Option<(Source, &Candidate)> {
         let report = self.report()?;
-        let candidate = match source {
-            Source::Artifact => report.candidates.iter().find(|c| c.id == id),
-            Source::Cache => report
-                .caches
-                .iter()
-                .map(|(_, candidate)| candidate)
-                .find(|c| c.id == id),
-            Source::Toolchain => report
-                .toolchains
-                .iter()
-                .map(|(_, candidate)| candidate)
-                .find(|c| c.id == id),
-            Source::Docker => report
-                .docker
-                .iter()
-                .map(|(_, candidate)| candidate)
-                .find(|c| c.id == id),
-        }?;
-        Some((source, candidate))
+        Some((key.0, self.index.find(report, key)?))
     }
 
     /// What the open confirmation acts on: one item from a context menu, or the selection.
@@ -1004,7 +1461,7 @@ impl Kuizer {
         self.dialog = Some(Dialog::Running { permanent });
         cx.notify();
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = oneshot::channel();
         std::thread::Builder::new()
             .name("kuizer-gui-clean".to_owned())
             .spawn(move || {
@@ -1014,18 +1471,8 @@ impl Kuizer {
             })
             .expect("spawn trash thread");
         self.task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                let message = match receiver.try_recv() {
-                    Ok(message) => Some(message),
-                    Err(TryRecvError::Empty) => continue,
-                    Err(TryRecvError::Disconnected) => None,
-                };
-                let _ = this.update(cx, |app, cx| {
-                    app.finish(message, cx);
-                });
-                break;
-            }
+            let message = receiver.await.ok();
+            let _ = this.update(cx, |app, cx| app.finish(message, cx));
         }));
     }
 
@@ -1087,6 +1534,7 @@ impl Kuizer {
                 self.selection.remove(&(*source, removal.candidate.id));
             }
         }
+        self.refresh_stats();
         self.refresh_rows();
         self.rebuild_map();
         let clean = finished.failures.is_empty()
@@ -1223,7 +1671,10 @@ impl Kuizer {
                             .iter()
                             .position(|run| run.id == *session)
                             .is_some_and(|index| {
-                                matches!(view.trash_state(index), TrashState::Restorable { .. })
+                                matches!(
+                                    self.report_stats.trash_state(report, index),
+                                    TrashState::Restorable { .. }
+                                )
                             })
                     })
                 });
@@ -1457,32 +1908,7 @@ impl Kuizer {
         if let Phase::Ready(report) = &mut self.phase {
             report.drop_paths(&self.excluded);
         }
-        if let Some(report) = self.report() {
-            let known: HashSet<(Source, u64)> = report
-                .candidates
-                .iter()
-                .map(|candidate| (Source::Artifact, candidate.id))
-                .chain(
-                    report
-                        .caches
-                        .iter()
-                        .map(|(_, candidate)| (Source::Cache, candidate.id)),
-                )
-                .chain(
-                    report
-                        .toolchains
-                        .iter()
-                        .map(|(_, candidate)| (Source::Toolchain, candidate.id)),
-                )
-                .chain(
-                    report
-                        .docker
-                        .iter()
-                        .map(|(_, candidate)| (Source::Docker, candidate.id)),
-                )
-                .collect();
-            self.selection.retain(|key| known.contains(key));
-        }
+        self.refresh_stats();
         self.refresh_rows();
         self.rebuild_map();
         if self
@@ -1845,10 +2271,10 @@ impl Kuizer {
         let report = self.report()?;
         let bytes = match tab {
             Tab::Overview | Tab::History | Tab::Issues => return None,
-            Tab::Artifacts => report.total(None),
-            Tab::Caches => report.cache_total(None),
-            Tab::Toolchains => report.toolchain_total(None),
-            Tab::Docker => report.docker_total(None),
+            Tab::Artifacts => self.report_stats.artifacts.all.bytes,
+            Tab::Caches => self.report_stats.caches.all.bytes,
+            Tab::Toolchains => self.report_stats.toolchains.all.bytes,
+            Tab::Docker => self.report_stats.docker.all.bytes,
             Tab::Repos => report
                 .repos
                 .iter()
@@ -2044,24 +2470,23 @@ impl Kuizer {
     }
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> Div {
-        let selected = self.selected();
-        let bytes: u64 = selected
-            .iter()
-            .map(|(_, candidate)| candidate.usage.allocated)
-            .sum();
-        let review = selected
-            .iter()
-            .filter(|(_, candidate)| candidate.rule.safety == Safety::Review)
-            .count();
-        let summary = if selected.is_empty() {
+        let stats = self.selection.stats();
+        let total = stats.total();
+        let empty = total.all.count == 0;
+        let review = total.review.count;
+        let summary = if empty {
             "Nothing selected".to_owned()
         } else {
-            format!("{} selected, {}", selected.len(), theme::bytes(bytes))
+            format!(
+                "{} selected, {}",
+                total.all.count,
+                theme::bytes(total.all.bytes)
+            )
         };
         let ready = self.report().is_some() && !self.busy();
         let refreshing = self.refreshing();
         let can_select = ready && self.tab.selects();
-        let permanent = selected.iter().any(|(source, _)| source.permanent());
+        let permanent = stats.permanent() > 0;
         div()
             .flex()
             .flex_none()
@@ -2075,9 +2500,7 @@ impl Kuizer {
             .child(
                 div()
                     .id("selection")
-                    .when(!selected.is_empty(), |this| {
-                        this.tip(selection_details(&selected))
-                    })
+                    .when(!empty, |this| this.tip(selection_details(stats)))
                     .child(summary),
             )
             .when(review > 0, |this| {
@@ -2100,12 +2523,7 @@ impl Kuizer {
                     })),
             )
             .child(
-                ui::button(
-                    "clear",
-                    "Clear",
-                    ButtonKind::Ghost,
-                    ready && !selected.is_empty(),
-                )
+                ui::button("clear", "Clear", ButtonKind::Ghost, ready && !empty)
                 .tip(tooltip::plain("Clear the selection in every tab"))
                 .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                     if !app.busy() {
@@ -2119,7 +2537,7 @@ impl Kuizer {
                     "trash",
                     if permanent { "Remove" } else { "Move to trash" },
                     ButtonKind::Primary,
-                    ready && !refreshing && !selected.is_empty(),
+                    ready && !refreshing && !empty,
                 )
                 .when(refreshing, |this| {
                     this.tip(tooltip::plain(
@@ -2156,6 +2574,28 @@ impl Kuizer {
                     .child(div().text_color(theme::danger()).child(error.clone())),
             ),
             Phase::Ready(_) => {
+                let pending = self
+                    .tab
+                    .part()
+                    .filter(|part| self.pending.contains(part))
+                    .map(|_| {
+                        let status = self.tab.status(&self.progress, &self.options);
+                        div()
+                            .debug_selector(|| "section-pending".to_owned())
+                            .flex()
+                            .items_center()
+                            .gap(unit(space::S))
+                            .px(unit(space::GUTTER))
+                            .pt(unit(space::S))
+                            .text_size(unit(font::SMALL))
+                            .text_color(theme::muted())
+                            .child(ui::tag(
+                                "section-scanning",
+                                "Still scanning",
+                                ui::Tone::Neutral,
+                            ))
+                            .child(status)
+                    });
                 let list = match self.tab {
                     Tab::Overview => return self.render_overview(cx),
                     Tab::Artifacts => self.render_artifacts(cx),
@@ -2172,6 +2612,7 @@ impl Kuizer {
                     .flex_col()
                     .size_full()
                     .child(self.render_filter(cx))
+                    .children(pending)
                     .child(div().flex().flex_col().flex_1().min_h_0().child(list))
                     .into_any_element()
             }
@@ -2319,7 +2760,7 @@ impl Kuizer {
                 self.recent.paths.iter().enumerate().map(|(index, path)| {
                     let path = path.clone();
                     let label = display_path(&path);
-                    let missing = !path.is_dir();
+                    let missing = self.recent.is_gone(&path);
                     let full = tooltip::path(&path);
                     div()
                         .id(("recent", index))
@@ -2498,7 +2939,7 @@ impl Kuizer {
             .child(
                 ui::option_row(
                     "Duplicate files",
-                    "Hash files to find identical copies. Reads every file, so it is slower",
+                    "After the scan, hash files to find identical copies. Reads every file, so it is slower",
                 )
                 .child(toggle("opt-duplicates", options.duplicates, |options| {
                     options.duplicates = !options.duplicates;
@@ -2552,7 +2993,7 @@ impl Kuizer {
     }
 
     fn render_loading(&self, activity: &Activity) -> AnyElement {
-        let status = self.tab.status(activity.stage, &self.options);
+        let status = self.tab.status(activity, &self.options);
         let header = div()
             .flex()
             .items_end()
@@ -2624,13 +3065,14 @@ impl Kuizer {
         if self.map.shown {
             return self.render_map(cx);
         }
-        let total = report.total(None);
-        let safe = report.total(Some(Safety::Safe));
-        let review = report.total(Some(Safety::Review));
-        let caches = report.cache_total(None);
-        let toolchains = report.toolchain_total(None);
-        let containers = report.docker_total(None);
-        let space = total + caches + toolchains + containers;
+        let figures = &self.report_stats;
+        let total = figures.artifacts.all.bytes;
+        let safe = figures.artifacts.safe.bytes;
+        let review = figures.artifacts.review.bytes;
+        let caches = figures.caches.all.bytes;
+        let toolchains = figures.toolchains.all.bytes;
+        let containers = figures.docker.all.bytes;
+        let space = figures.space();
         let duplicates = report
             .duplicates
             .as_ref()
@@ -2640,8 +3082,9 @@ impl Kuizer {
             .first()
             .and_then(|disk| Some((disk.available?, disk.total?)));
 
-        let categories = report.by_category();
-        let projects = report.by_project();
+        let charts = figures.charts(report);
+        let categories = &charts.categories;
+        let projects = &charts.projects;
         let largest_project = projects.first().map_or(0, |bucket| bucket.bytes);
         let largest_cache = report
             .caches
@@ -2755,7 +3198,7 @@ impl Kuizer {
                         .tip(tooltip::term(Term::DiskFree)),
                     ),
             )
-            .child(overview_disk(report))
+            .child(overview_disk(report, figures))
             .child(
                 div()
                     .flex()
@@ -2844,7 +3287,7 @@ impl Kuizer {
                             }),
                     ),
             )
-            .child(overview_trends(report))
+            .child(overview_trends(figures, charts))
             .child(
                 div()
                     .text_size(unit(font::SMALL))
@@ -2864,20 +3307,30 @@ impl Kuizer {
             .into_any_element()
     }
 
-    fn render_artifacts(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(report) = self.report() else {
-            return div().into_any_element();
-        };
-        let shown_bytes: u64 = self
-            .rows
-            .iter()
-            .map(|&index| report.candidates[index].usage.allocated)
-            .sum();
-        let all_checked = !self.rows.is_empty()
-            && self.rows.iter().all(|&index| {
-                self.selection
-                    .contains(&(Source::Artifact, report.candidates[index].id))
+    /// A tooltip about an item that is built from the report only when it shows, so a row on
+    /// screen holds just the item key.
+    fn item_tip(
+        key: (Source, u64),
+        cx: &Context<Self>,
+        describe: fn(&Candidate, &Report) -> Tooltip,
+    ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
+        let app = cx.weak_entity();
+        move |window, cx| {
+            let tooltip = app.upgrade().and_then(|app| {
+                let app = app.read(cx);
+                let (_, candidate) = app.item(key)?;
+                Some(describe(candidate, app.report()?))
             });
+            tooltip.unwrap_or_else(|| Tooltip::new("")).build()(window, cx)
+        }
+    }
+
+    fn render_artifacts(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.report().is_none() {
+            return div().into_any_element();
+        }
+        let shown_bytes = self.rows_bytes;
+        let all_checked = self.all_rows_checked();
         let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
             ui::segment(id, label, self.safety == value)
                 .when_some(value, |this, safety| {
@@ -2963,7 +3416,8 @@ impl Kuizer {
                     .filter_map(|row| {
                         let candidate = &report.candidates[*app.rows.get(row)?];
                         let id = candidate.id;
-                        let checked = app.selection.contains(&(Source::Artifact, id));
+                        let key = (Source::Artifact, id);
+                        let checked = app.selection.contains(&key);
                         let review = candidate.rule.safety == Safety::Review;
                         let target = Target::Item(Source::Artifact, id, candidate.path.clone());
                         let row = table_row(("artifact", id), checked)
@@ -2975,7 +3429,9 @@ impl Kuizer {
                                     column(col::M)
                                         .id(("artifact-size", id))
                                         .text_right()
-                                        .tip(size_details(candidate, &report.roots))
+                                        .tip(Self::item_tip(key, cx, |candidate, report| {
+                                            size_tooltip(candidate, &report.roots)
+                                        }))
                                         .font_weight(FontWeight::MEDIUM)
                                         .child(theme::bytes(candidate.usage.allocated)),
                                 )
@@ -2995,14 +3451,14 @@ impl Kuizer {
                                     column(col::XL)
                                         .id(("artifact-rule", id))
                                         .truncate()
-                                        .tip(tooltip::titled(
-                                            candidate.rule.name.clone(),
-                                            format!(
+                                        .tip(Self::item_tip(key, cx, |candidate, _| {
+                                            Tooltip::new(format!(
                                                 "{} Ecosystem: {}.",
                                                 Term::Rule.text(),
                                                 candidate.rule.ecosystem
-                                            ),
-                                        ))
+                                            ))
+                                            .title(candidate.rule.name.clone())
+                                        }))
                                         .child(candidate.rule.name.clone()),
                                 )
                                 .child(
@@ -3018,7 +3474,9 @@ impl Kuizer {
                                         .min_w_0()
                                         .truncate()
                                         .text_color(theme::muted())
-                                        .tip(tooltip::path(&candidate.path))
+                                        .tip(Self::item_tip(key, cx, |candidate, _| {
+                                            Tooltip::new(display_path(&candidate.path))
+                                        }))
                                         .child(model::short_path(&candidate.path, &report.roots)),
                                 )
                                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
@@ -3483,14 +3941,64 @@ impl Kuizer {
             .into_any_element()
     }
 
+    fn render_duplicate_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (text, label) = match (&self.search, &self.search_error) {
+            (Some(search), _) => (
+                match search.stage {
+                    None => "Starting the duplicate search".to_owned(),
+                    Some(dupes::Stage::Walking { files }) => {
+                        format!("Collecting files, {} so far", activity::grouped(files))
+                    }
+                    Some(dupes::Stage::Hashing { files }) => {
+                        format!(
+                            "Hashing {} files of equal size",
+                            activity::grouped(files as u64)
+                        )
+                    }
+                    Some(dupes::Stage::Verifying { groups }) => format!(
+                        "Comparing {} groups byte by byte",
+                        activity::grouped(groups as u64)
+                    ),
+                },
+                "Stop the search",
+            ),
+            (None, Some(error)) => (
+                format!("The duplicate search failed: {error}"),
+                "Find duplicates",
+            ),
+            (None, None) => (
+                "Duplicate files are found on request. It reads every file, so it takes a while"
+                    .to_owned(),
+                "Find duplicates",
+            ),
+        };
+        let tip = Tooltip::new("Hash files under the scanned folders to find identical copies")
+            .keys(&["D"])
+            .build();
+        centered(
+            div()
+                .debug_selector(|| "duplicate-search".to_owned())
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(unit(space::L))
+                .child(ui::empty(text))
+                .child(
+                    ui::button("find-duplicates", label, ButtonKind::Secondary, true)
+                        .tip(tip)
+                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                            app.find_duplicates(cx);
+                        })),
+                ),
+        )
+    }
+
     fn render_duplicates(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
         let Some(found) = &report.duplicates else {
-            return centered(ui::empty(
-                "The duplicate search was turned off for this scan",
-            ));
+            return self.render_duplicate_search(cx);
         };
         let wasted = found.reclaimable();
         let copies: usize = found.groups.iter().map(|group| group.members.len()).sum();
@@ -3745,7 +4253,11 @@ impl Kuizer {
                     .child(
                         ui::stat(
                             "Freed",
-                            theme::bytes(view.freed()),
+                            theme::bytes(
+                                self.report_stats
+                                    .history(report)
+                                    .map_or(0, |history| history.freed),
+                            ),
                             "removed or emptied from the trash",
                         )
                         .id("stat-freed")
@@ -3755,7 +4267,11 @@ impl Kuizer {
                         ui::stat(
                             "Still in the trash",
                             if view.trash_known {
-                                theme::bytes(view.in_trash())
+                                theme::bytes(
+                                    self.report_stats
+                                        .history(report)
+                                        .map_or(0, |history| history.in_trash),
+                                )
                             } else {
                                 "unknown".to_owned()
                             },
@@ -3819,7 +4335,7 @@ impl Kuizer {
                             )
                             .child(column(col::M).text_color(theme::muted()).child(mode))
                             .child(column(col::L).flex().child(self.restore_cell(
-                                view.trash_state(index),
+                                self.report_stats.trash_state(report, index),
                                 run,
                                 can_restore,
                                 refreshing,
@@ -4139,22 +4655,22 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong());
         let body = match dialog {
-            Dialog::Confirm { rule, typed, .. } => {
-                let selected = self.confirming();
-                let bytes: u64 = selected
-                    .iter()
-                    .map(|(_, candidate)| candidate.usage.allocated)
-                    .sum();
-                let review = selected
-                    .iter()
-                    .filter(|(_, candidate)| candidate.rule.safety == Safety::Review)
-                    .count();
+            Dialog::Confirm {
+                rule,
+                typed,
+                stats,
+                preview,
+                ..
+            } => {
+                let total = stats.total();
+                let count = total.all.count;
+                let bytes = total.all.bytes;
+                let review = total.review.count;
                 let accepted = rule.accepts(typed);
-                let permanent = selected
-                    .iter()
-                    .filter(|(source, _)| source.permanent())
-                    .count();
-                let trashed = selected.len() - permanent;
+                let permanent = stats.permanent();
+                let trashed = count - permanent;
+                let selected: Vec<(Source, &Candidate)> =
+                    preview.iter().filter_map(|&key| self.item(key)).collect();
                 let (title, verb, button) = match (permanent, trashed) {
                     (0, count) => (
                         format!("Move {count} items to the trash?"),
@@ -4167,7 +4683,7 @@ impl Kuizer {
                         "Delete for good",
                     ),
                     _ => (
-                        format!("Remove {} items?", selected.len()),
+                        format!("Remove {count} items?"),
                         "remove",
                         "Remove",
                     ),
@@ -4192,8 +4708,8 @@ impl Kuizer {
                                 .text_color(theme::danger())
                                 .child(format!(
                                     "{permanent} {} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.{}",
-                                    permanent_kinds(&selected),
-                                    if selected.iter().any(|(source, _)| *source == Source::Toolchain) {
+                                    permanent_kinds(stats),
+                                    if stats.source(Source::Toolchain).all.count > 0 {
                                         " The tool downloads a toolchain version again when it is needed."
                                     } else {
                                         ""
@@ -4243,10 +4759,10 @@ impl Kuizer {
 .child(theme::bytes(candidate.usage.allocated)),
                                     )
                             }))
-                            .when(selected.len() > LIST_LIMIT, |this| {
+                            .when(count > LIST_LIMIT, |this| {
                                 this.child(div().text_color(theme::faint()).child(format!(
                                     "and {} more",
-                                    selected.len() - LIST_LIMIT
+                                    count - LIST_LIMIT
                                 )))
                             }),
                     )
@@ -4416,13 +4932,12 @@ impl Render for Kuizer {
         )
         .absolute()
         .size_full();
-        let content = self.render_content(cx);
+        let content = self.content_pane(cx);
         let dialog = self.render_dialog(cx);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(cx);
         let palette = self.render_palette(cx);
         let shortcuts = self.render_shortcuts(cx);
-        self.cursor_bounds.set(None);
         let start = matches!(self.phase, Phase::Start);
         let titlebar = self.render_titlebar(window, cx);
         let root = div()
@@ -4453,12 +4968,11 @@ impl Render for Kuizer {
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content))
                     .when(self.busy() || self.refreshing(), |this| {
                         this.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .child(chart::loader()),
+                            div().absolute().top_0().left_0().right_0().child(
+                                self.loader
+                                    .get_or_insert_with(|| cx.new(|_| chart::Loader))
+                                    .clone(),
+                            ),
                         )
                     })
                     .children(toast),
@@ -4473,12 +4987,12 @@ impl Render for Kuizer {
     }
 }
 
-fn overview_disk(report: &Report) -> Div {
-    let safe = report.total(Some(Safety::Safe));
-    let review = report.total(Some(Safety::Review));
-    let caches = report.cache_total(None);
-    let toolchains = report.toolchain_total(Some(Safety::Safe));
-    let containers = report.docker_total(Some(Safety::Safe));
+fn overview_disk(report: &Report, figures: &ReportStats) -> Div {
+    let safe = figures.artifacts.safe.bytes;
+    let review = figures.artifacts.review.bytes;
+    let caches = figures.caches.all.bytes;
+    let toolchains = figures.toolchains.safe.bytes;
+    let containers = figures.docker.safe.bytes;
     let duplicates = report
         .duplicates
         .as_ref()
@@ -4549,18 +5063,14 @@ fn overview_disk(report: &Report) -> Div {
     ui::card(title).child(chart::composition("disk", &segments, whole))
 }
 
-fn overview_trends(report: &Report) -> Div {
-    let ages = stats::by_age(&report.candidates, SystemTime::now());
-    let sizes = stats::by_size(&report.candidates);
-    let ecosystems = stats::by_ecosystem(&report.candidates);
+fn overview_trends(figures: &ReportStats, charts: &Charts) -> Div {
+    let ages = &charts.ages;
+    let sizes = &charts.sizes;
+    let ecosystems = &charts.ecosystems;
     let largest = ecosystems.first().map_or(0, |bucket| bucket.bytes);
-    let total = report.total(None);
-    let empty = report.candidates.is_empty();
-    let removed = report
-        .history
-        .as_ref()
-        .ok()
-        .map(|view| stats::removed_by_month(&view.history, &kuizer::history::now(), 12));
+    let total = figures.artifacts.all.bytes;
+    let empty = figures.artifacts.all.count == 0;
+    let removed = charts.removed.as_ref();
     div()
         .flex()
         .flex_col()
@@ -4575,7 +5085,7 @@ fn overview_trends(report: &Report) -> Div {
                         .flex_1()
                         .debug_selector(|| "chart-ages".to_owned())
                         .when(!empty, |this| {
-                            this.child(chart::columns("age", &ages, Measure::Bytes, "Items"))
+                            this.child(chart::columns("age", ages, Measure::Bytes, "Items"))
                         })
                         .when(empty, |this| {
                             this.child(ui::empty("No project artifacts found"))
@@ -4585,7 +5095,7 @@ fn overview_trends(report: &Report) -> Div {
                     ui::card("Artifact sizes")
                         .flex_1()
                         .when(!empty, |this| {
-                            this.child(chart::columns("size", &sizes, Measure::Count, "Items"))
+                            this.child(chart::columns("size", sizes, Measure::Count, "Items"))
                         })
                         .when(empty, |this| {
                             this.child(ui::empty("No project artifacts found"))
@@ -4634,17 +5144,75 @@ fn overview_trends(report: &Report) -> Div {
                 "Removed in the last 12 months  {}",
                 theme::bytes(total)
             ))
-            .child(chart::columns("removed", &months, Measure::Bytes, "Items"))
+            .child(chart::columns("removed", months, Measure::Bytes, "Items"))
         }))
+}
+
+fn scan_parts(
+    config: &Config,
+    roots: &[PathBuf],
+    options: &ScanOptions,
+    cancel: &Cancel,
+    snapshots: &Snapshots,
+    sender: &mpsc::UnboundedSender<Update>,
+    shown: bool,
+) {
+    let saved = (!shown)
+        .then(|| {
+            let (snapshots, roots, options, sender) = (
+                snapshots.clone(),
+                roots.to_vec(),
+                options.clone(),
+                sender.clone(),
+            );
+            std::thread::Builder::new()
+                .name("kuizer-gui-snapshot".to_owned())
+                .spawn(move || {
+                    if let Some(report) = snapshots.load(&roots, &options) {
+                        let _ = sender.unbounded_send(Update::Cached(Box::new(report)));
+                    }
+                })
+                .ok()
+        })
+        .flatten();
+    let saved = Mutex::new(saved);
+    let shown_first = || {
+        if let Some(loading) = saved.lock().ok().and_then(|mut saved| saved.take()) {
+            let _ = loading.join();
+        }
+    };
+    let tracker = {
+        let sender = sender.clone();
+        Tracker::new(move |activity| {
+            let _ = sender.unbounded_send(Update::Activity(Box::new(activity)));
+        })
+    };
+    let recorder = Recorder::new(roots, options);
+    let result = model::load(config, roots, options, cancel, &tracker, &|loaded| {
+        recorder.record(&loaded);
+        shown_first();
+        let _ = sender.unbounded_send(Update::Loaded(loaded));
+    });
+    shown_first();
+    let scanned = SystemTime::now();
+    let finished = result.is_ok();
+    let _ = sender.unbounded_send(Update::Done(result.map(|()| scanned)));
+    if finished {
+        recorder.save(snapshots, scanned);
+    }
 }
 
 fn step_row(step: Step, activity: &Activity, options: &ScanOptions, roots: &[PathBuf]) -> Div {
     let state = activity.state(step, options);
-    let active = state == State::Active;
+    let running = match state {
+        State::Active(running) => Some(running),
+        _ => None,
+    };
+    let active = running.is_some();
     let (detail, took) = match &state {
         State::Off => ("Off".to_owned(), String::new()),
         State::Pending => (String::new(), String::new()),
-        State::Active => (activity.detail(), String::new()),
+        State::Active(running) => (activity.detail(running), String::new()),
         State::Done(done) => (done.result.clone(), activity::took(done.took)),
     };
     let quiet = matches!(state, State::Off | State::Pending);
@@ -4688,9 +5256,9 @@ fn step_row(step: Step, activity: &Activity, options: &ScanOptions, roots: &[Pat
         .flex()
         .flex_col()
         .child(line);
-    if active {
+    if let Some(running) = running {
         let indent = unit(size::DOT + space::L);
-        if let Some((done, total)) = activity.count
+        if let Some((done, total)) = running.count
             && total > 0
         {
             row = row.child(
@@ -4708,7 +5276,7 @@ fn step_row(step: Step, activity: &Activity, options: &ScanOptions, roots: &[Pat
                 ),
             );
         }
-        if let Some(current) = &activity.current {
+        if let Some(current) = &running.current {
             row = row.child(
                 div()
                     .debug_selector(|| "current".to_owned())
@@ -4731,7 +5299,7 @@ fn step_dot(step: Step, state: &State) -> AnyElement {
         .rounded(theme::radius_dot());
     match state {
         State::Done(_) => dot.bg(theme::faint()).into_any_element(),
-        State::Active => chart::breathe(
+        State::Active(_) => chart::breathe(
             ElementId::Name(format!("step-dot-{step:?}").into()),
             dot.bg(theme::primary()),
         ),
@@ -4885,6 +5453,10 @@ fn size_details(
     candidate: &Candidate,
     roots: &[PathBuf],
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
+    size_tooltip(candidate, roots).build()
+}
+
+fn size_tooltip(candidate: &Candidate, roots: &[PathBuf]) -> Tooltip {
     let usage = candidate.usage;
     let mut details = Tooltip::details(theme::bytes(usage.allocated))
         .row("On disk", theme::bytes(usage.allocated))
@@ -4909,35 +5481,27 @@ fn size_details(
         details =
             details.note("Some folders inside could not be read, so the real size is larger.");
     }
-    details.build()
+    details
 }
 
 fn selection_details(
-    selected: &[(Source, &Candidate)],
+    stats: SelectionStats,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
-    let total = |keep: &dyn Fn(&(Source, &Candidate)) -> bool| {
-        selected
-            .iter()
-            .filter(|item| keep(item))
-            .fold((0, 0), |(count, bytes), (_, candidate)| {
-                (count + 1, bytes + candidate.usage.allocated)
-            })
-    };
-    let line = |(count, bytes): (usize, u64)| format!("{count}, {}", theme::bytes(bytes));
-    Tooltip::details("Selection")
-        .row("safe", line(total(&|(_, c)| c.rule.safety == Safety::Safe)))
-        .row(
-            "review",
-            line(total(&|(_, c)| c.rule.safety == Safety::Review)),
-        )
-        .row(
-            "Project artifacts",
-            line(total(&|(s, _)| *s == Source::Artifact)),
-        )
-        .row("Global caches", line(total(&|(s, _)| *s == Source::Cache)))
-        .row("Toolchains", line(total(&|(s, _)| *s == Source::Toolchain)))
-        .row("Docker", line(total(&|(s, _)| *s == Source::Docker)))
-        .build()
+    move |window, cx| {
+        let line = |tally: Tally| format!("{}, {}", tally.count, theme::bytes(tally.bytes));
+        let total = stats.total();
+        Tooltip::details("Selection")
+            .row("safe", line(total.safe))
+            .row("review", line(total.review))
+            .row(
+                "Project artifacts",
+                line(stats.source(Source::Artifact).all),
+            )
+            .row("Global caches", line(stats.source(Source::Cache).all))
+            .row("Toolchains", line(stats.source(Source::Toolchain).all))
+            .row("Docker", line(stats.source(Source::Docker).all))
+            .build()(window, cx)
+    }
 }
 
 fn group_details(
@@ -4954,11 +5518,9 @@ fn group_details(
     }
 }
 
-fn permanent_kinds(selected: &[(Source, &Candidate)]) -> &'static str {
-    let toolchains = selected
-        .iter()
-        .any(|(source, _)| *source == Source::Toolchain);
-    let docker = selected.iter().any(|(source, _)| *source == Source::Docker);
+fn permanent_kinds(stats: &SelectionStats) -> &'static str {
+    let toolchains = stats.source(Source::Toolchain).all.count > 0;
+    let docker = stats.source(Source::Docker).all.count > 0;
     match (toolchains, docker) {
         (true, true) => "toolchain versions and Docker objects are",
         (true, false) => "toolchain versions are",
@@ -4993,10 +5555,7 @@ mod tests {
         point,
     };
 
-    use kuizer::dupes;
-
     use super::*;
-    use crate::model::Stage;
 
     pub(super) fn open(
         cx: &mut TestAppContext,
@@ -5040,7 +5599,9 @@ mod tests {
         for _ in 0..1000 {
             cx.executor().advance_clock(POLL);
             cx.run_until_parked();
-            if view.read_with(cx, |app, _| !matches!(app.phase, Phase::Loading(_))) {
+            if view.read_with(cx, |app, _| {
+                !matches!(app.phase, Phase::Loading(_)) && app.cancel.is_none()
+            }) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -5053,7 +5614,7 @@ mod tests {
             cx.executor().advance_clock(POLL);
             cx.run_until_parked();
             if let Some(refreshing) = view.read_with(cx, |app, _| {
-                (!matches!(app.phase, Phase::Loading(_))).then(|| app.refreshing())
+                (!matches!(app.phase, Phase::Loading(_))).then(|| app.stale.is_some())
             }) {
                 return refreshing;
             }
@@ -5074,6 +5635,35 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("the refresh did not finish");
+    }
+
+    pub(super) fn wait_for_duplicates(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if view.read_with(cx, |app, _| app.search.is_none()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the duplicate search did not finish");
+    }
+
+    /// Waits until the finished scan is written, which happens once its results are shown.
+    pub(super) fn wait_for_saved(dir: &Path) {
+        for _ in 0..1000 {
+            let saved = std::fs::read_dir(dir.join("scans")).is_ok_and(|mut entries| {
+                entries.any(|entry| {
+                    entry.is_ok_and(|entry| {
+                        entry.path().extension().is_some_and(|ext| ext == "json")
+                    })
+                })
+            });
+            if saved {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the scan was not saved");
     }
 
     fn scan_again_from_the_start(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
@@ -5145,6 +5735,7 @@ mod tests {
             assert_eq!(report.candidates.len(), 1);
             assert!(report.caches.is_empty());
         });
+        crate::persist::flush();
         let saved = std::fs::read_to_string(&recent).unwrap();
         assert_eq!(saved.trim(), canonical.display().to_string());
 
@@ -5180,6 +5771,7 @@ mod tests {
             app.options.duplicates = false;
             app.start_scan(cx);
         });
+        cx.run_until_parked();
         view.update(cx, |app, cx| {
             assert!(matches!(app.phase, Phase::Loading(_)));
             assert_eq!(
@@ -5203,8 +5795,8 @@ mod tests {
                 Duration::from_millis(1_500),
                 "1 item found".to_owned(),
             );
-            activity.begin(Stage::Caches, Some(4));
-            activity.advance(Path::new("/home/me/.cargo/registry"));
+            activity.begin(Step::Caches, Some(4));
+            activity.advance(Step::Caches, Path::new("/home/me/.cargo/registry"));
             app.phase = Phase::Loading(Box::new(activity));
             cx.notify();
         });
@@ -5243,6 +5835,7 @@ mod tests {
         )
         .unwrap();
         let (view, cx) = open(cx, recent);
+        cx.run_until_parked();
         view.read_with(cx, |app, _| {
             assert_eq!(app.folder, display_path(&kept));
         });
@@ -5300,14 +5893,19 @@ mod tests {
     #[gpui::test]
     fn the_sidebar_switches_sections_during_a_scan(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        let root = project(dir.path());
         let (view, cx) = open(cx, dir.path().join("recent"));
-        type_text(cx, &root.display().to_string());
-        cx.simulate_keystrokes("enter");
+        view.update(cx, |app, cx| {
+            app.roots = vec![dir.path().to_path_buf()];
+            let mut activity = Activity::default();
+            activity.begin(Step::Folders, None);
+            activity.begin(Step::History, None);
+            app.phase = Phase::Loading(Box::new(activity));
+            cx.notify();
+        });
         for (label, shown) in [
             ("Global caches", "Global caches are off for this scan"),
-            ("History", "Read at the end of the scan"),
-            ("Duplicates", "Collecting files while scanning folders"),
+            ("History", "Reading the cleanup history"),
+            ("Duplicates", "Searched on request once the scan is done"),
         ] {
             cx.update(|window, cx| window.draw(cx).clear());
             let bounds = cx.debug_bounds(label).expect("a sidebar item");
@@ -5317,13 +5915,114 @@ mod tests {
                 assert_eq!(app.tab.label(), label);
             });
             cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds(shown).is_some());
+            assert!(cx.debug_bounds(shown).is_some(), "{shown} is not shown");
         }
-        wait_for_scan(&view, cx);
-        view.read_with(cx, |app, _| {
-            assert!(matches!(app.phase, Phase::Ready(_)));
-            assert_eq!(app.tab, Tab::Duplicates);
+    }
+
+    fn artifact(id: u64, path: &Path) -> Candidate {
+        Candidate {
+            id,
+            path: path.to_path_buf(),
+            kind: kuizer::detect::Kind::Dir,
+            rule: std::sync::Arc::new(kuizer::detect::RuleInfo {
+                name: "node_modules".to_owned(),
+                category: Category::Dependencies,
+                safety: Safety::Safe,
+                ecosystem: "node".to_owned(),
+            }),
+            project: path.parent().map(Path::to_path_buf),
+            usage: kuizer::scan::Usage {
+                allocated: id * 4096,
+                apparent: id * 4096,
+                entries: 1,
+                partial: false,
+            },
+            newest: None,
+            identity: None,
+            project_last_active: None,
+        }
+    }
+
+    #[gpui::test]
+    fn parts_fill_the_shown_scan_while_deletion_waits(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        let (a, b) = (
+            Path::new("/p/a/node_modules"),
+            Path::new("/p/b/node_modules"),
+        );
+        view.update(cx, |app, cx| {
+            app.roots = vec![PathBuf::from("/p")];
+            app.cancel = Some(Cancel::new());
+            app.pending = Part::expected(&app.options);
+            app.phase = Phase::Loading(Box::default());
+            let history = Loaded::History(Err("unreadable".to_owned()));
+            app.take(
+                vec![
+                    Update::Loaded(history),
+                    Update::Loaded(Loaded::Found(vec![artifact(2, b)])),
+                ],
+                cx,
+            );
+            let report = app.report().expect("the first artifacts are shown");
+            assert_eq!(report.candidates.len(), 1);
+            assert!(report.history.is_err(), "an earlier part is kept");
+            assert!(app.refreshing());
+            assert!(!app.pending.contains(&Part::History));
+
+            app.select((Source::Artifact, 2));
+            app.take(
+                vec![Update::Loaded(Loaded::Found(vec![artifact(5, a)]))],
+                cx,
+            );
+            let paths: Vec<&Path> = app
+                .report()
+                .unwrap()
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.as_path())
+                .collect();
+            assert_eq!(paths, [a, b], "largest first");
+
+            let mut saved = Report::empty(&app.roots, &app.options);
+            saved.candidates = vec![artifact(9, Path::new("/p/old/node_modules"))];
+            saved.history = Ok(HistoryView {
+                history: kuizer::history::History::default(),
+                kept: HashSet::new(),
+                trash_known: true,
+            });
+            app.take(vec![Update::Cached(Box::new(saved))], cx);
+            let report = app.report().unwrap();
+            assert_eq!(report.candidates.len(), 2, "streamed artifacts win");
+            assert!(report.history.is_err(), "a fresh part is never replaced");
         });
+        cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
+        view.read_with(cx, |app, _| {
+            assert!(app.dialog.is_none(), "nothing is removed mid scan");
+        });
+
+        view.update(cx, |app, cx| {
+            let summary = app.report().unwrap().summary;
+            let artifacts = Loaded::Artifacts {
+                candidates: vec![artifact(5, a), artifact(2, b)],
+                issues: Vec::new(),
+                summary,
+                disks: Vec::new(),
+            };
+            app.take(
+                vec![
+                    Update::Loaded(artifacts),
+                    Update::Loaded(Loaded::Repos(Vec::new())),
+                    Update::Done(Ok(SystemTime::UNIX_EPOCH)),
+                ],
+                cx,
+            );
+            assert!(!app.refreshing());
+            assert_eq!(app.selection, HashSet::from([(Source::Artifact, 2)]));
+            assert_eq!(app.report().unwrap().scanned, SystemTime::UNIX_EPOCH);
+        });
+        cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
+        view.read_with(cx, |app, _| assert!(app.dialog.is_some()));
     }
 
     #[gpui::test]
@@ -5417,34 +6116,6 @@ mod tests {
         assert!(next.origin.y >= issues.bottom());
     }
 
-    #[test]
-    fn each_section_describes_its_own_progress() {
-        let mut options = ScanOptions::from_config(&Config::default());
-        options.caches = true;
-        options.duplicates = true;
-        let walking = Stage::Starting;
-        assert_eq!(
-            Tab::Caches.status(walking, &options),
-            "Measured after the folder scan"
-        );
-        assert_eq!(
-            Tab::Caches.status(Stage::Caches, &options),
-            "Measuring global caches"
-        );
-        assert_eq!(
-            Tab::Artifacts.status(Stage::Caches, &options),
-            "Artifacts found, shown once the scan is done"
-        );
-        options.duplicates = false;
-        assert_eq!(
-            Tab::Duplicates.status(walking, &options),
-            "Duplicate search is off for this scan"
-        );
-        options.duplicates = true;
-        let hashing = Stage::Duplicates(dupes::Stage::Hashing { files: 3 });
-        assert_eq!(Tab::Duplicates.status(hashing, &options), "Hashing files");
-    }
-
     fn scroll(cx: &mut VisualTestContext, lines: f32, modifiers: Modifiers) {
         cx.simulate_event(ScrollWheelEvent {
             position: point(px(400.), px(300.)),
@@ -5493,11 +6164,19 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert!(!wait_until_shown(&view, cx));
         wait_for_refresh(&view, cx);
+        wait_for_saved(dir.path());
 
-        scan_again_from_the_start(&view, cx);
-        assert!(wait_until_shown(&view, cx), "the saved scan comes first");
-        let id = view.read_with(cx, |app, _| {
-            let report = app.report().expect("the saved scan");
+        let id = view.update(cx, |app, cx| {
+            let report = app.report().unwrap();
+            let saved = app
+                .snapshots
+                .load(&report.roots, &report.options)
+                .expect("the saved scan");
+            app.set_phase(Phase::Loading(Box::default()), cx);
+            app.cancel = Some(Cancel::new());
+            app.pending = Part::expected(&app.options);
+            app.take(vec![Update::Cached(Box::new(saved))], cx);
+            let report = app.report().expect("the saved scan comes first");
             assert_eq!(report.candidates.len(), 1);
             report.candidates[0].id
         });
@@ -5512,6 +6191,7 @@ mod tests {
             assert_eq!(app.selected().len(), 1);
         });
 
+        view.update(cx, |app, cx| app.rescan(cx));
         wait_for_refresh(&view, cx);
         view.read_with(cx, |app, _| {
             assert!(matches!(app.phase, Phase::Ready(_)));
@@ -5530,8 +6210,10 @@ mod tests {
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         wait_for_refresh(&view, cx);
-        scan_again_from_the_start(&view, cx);
-        assert!(wait_until_shown(&view, cx));
+        view.update(cx, |app, cx| {
+            app.stale = Some(SystemTime::now());
+            cx.notify();
+        });
 
         cx.simulate_resize(gpui::size(px(860.), px(520.)));
         cx.update(|window, cx| window.draw(cx).clear());
@@ -5569,11 +6251,15 @@ mod tests {
             for candidate in &mut report.candidates {
                 candidate.id += 100;
             }
-            app.selection = report
+            let keys: Vec<(Source, u64)> = report
                 .candidates
                 .iter()
                 .map(|candidate| (Source::Artifact, candidate.id))
                 .collect();
+            app.refresh_stats();
+            for key in keys {
+                app.select(key);
+            }
             app.refresh_rows();
             cx.notify();
         });
@@ -5722,10 +6408,11 @@ mod tests {
         let undo = cx.debug_bounds("undo").expect("an Undo button");
         cx.simulate_click(undo.center(), Modifiers::default());
         toast_is(&view, cx, |notice| {
-            matches!(notice, Notice::Restoring { session: 1 })
+            matches!(
+                notice,
+                Notice::Restoring { session: 1 } | Notice::Restored(_)
+            )
         });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("loader").is_some());
 
         wait_until(&view, cx, "the restore", |app| !app.restoring());
         toast_is(
@@ -6288,9 +6975,11 @@ esac
             std::fs::write(folder.join("same.bin"), vec![b'z'; 16 * 1024]).unwrap();
         }
         let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, _| app.options.duplicates = true);
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         wait_for_refresh(&view, cx);
+        wait_for_duplicates(&view, cx);
         view.update(cx, |app, cx| {
             app.tab = Tab::Duplicates;
             cx.notify();
@@ -6331,6 +7020,7 @@ esac
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         wait_for_refresh(&view, cx);
+        wait_for_saved(dir.path());
         let scans = dir.path().join("scans");
         let files: Vec<PathBuf> = std::fs::read_dir(&scans)
             .unwrap()
@@ -6344,11 +7034,19 @@ esac
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("activity").is_some());
         assert!(!wait_until_shown(&view, cx), "no saved scan is shown");
+        wait_for_refresh(&view, cx);
         let (roots, options) = view.read_with(cx, |app, _| {
             let report = app.report().expect("the fresh scan");
             assert_eq!(report.candidates.len(), 1);
             (report.roots.clone(), report.options.clone())
         });
-        assert!(Snapshots::new(Some(scans)).load(&roots, &options).is_some());
+        let saved = (0..1000).any(|_| {
+            let saved = Snapshots::new(Some(scans.clone())).load(&roots, &options);
+            saved.is_some() || {
+                std::thread::sleep(Duration::from_millis(5));
+                false
+            }
+        });
+        assert!(saved, "the fresh scan replaces the broken file");
     }
 }

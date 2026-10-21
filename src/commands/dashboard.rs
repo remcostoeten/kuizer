@@ -29,7 +29,12 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
         }
         options
     });
-    let (handle, files) = scan::start_with(config, &roots, Cancel::new(), options.map(Files::new))?;
+    let (handle, files) = scan::start_with(
+        config,
+        &roots,
+        Cancel::new(),
+        options.map(|options| Files::for_roots(options, &roots)),
+    )?;
     let collected = scan::collect(&handle, |progress| {
         if show_progress {
             output::print_progress(progress);

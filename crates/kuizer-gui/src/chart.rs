@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Div, ElementId, IntoElement, ParentElement, Rgba,
-    SharedString, Styled, div, prelude::*, relative,
+    Animation, AnimationExt, AnyElement, Context, Div, ElementId, IntoElement, ParentElement,
+    Render, Rgba, SharedString, Styled, Window, div, prelude::*, relative,
 };
 use kuizer::stats::Bucket;
 
@@ -242,6 +242,20 @@ pub fn loader() -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+/// @name Loader
+/// @description The global loader as a view of its own, so each frame of the sweep redraws the
+/// loader alone and the cached views around it stay as they are.
+///
+/// @example
+/// let loader = cx.new(|_| Loader);
+pub struct Loader;
+
+impl Render for Loader {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        loader()
+    }
 }
 
 pub fn percent(share: f32) -> String {

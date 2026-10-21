@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -296,7 +299,7 @@ fn parse_id(id: &str) -> Option<(u64, Option<usize>)> {
 /// let kept = history::still_in_trash(&history, &trashed);
 /// let freed = history::freed_bytes(&history, Some(&kept));
 pub fn freed_bytes(history: &History, kept: Option<&HashSet<(usize, usize)>>) -> u64 {
-    let restored = history.restored_ids();
+    let restored = restored_items(history);
     history
         .runs
         .iter()
@@ -306,16 +309,27 @@ pub fn freed_bytes(history: &History, kept: Option<&HashSet<(usize, usize)>>) ->
             run.deleted
                 .iter()
                 .enumerate()
-                .map(move |(entry_index, entry)| (run_index, entry_index, entry))
+                .map(move |(entry_index, entry)| (run_index, run.id, entry_index, entry))
         })
-        .filter(|&(run, entry, _)| !restored.contains(history.item_id(run, entry).as_str()))
-        .filter(|&(run, entry, item)| match item.mode {
+        .filter(|&(_, session, entry, _)| !restored.contains(&(session, entry + 1)))
+        .filter(|&(run, _, entry, item)| match item.mode {
             Mode::Permanent => true,
             Mode::Trash => kept.is_some_and(|kept| !kept.contains(&(run, entry))),
             Mode::DryRun => false,
         })
-        .map(|(_, _, entry)| entry.bytes)
+        .map(|(_, _, _, entry)| entry.bytes)
         .sum()
+}
+
+fn restored_items(history: &History) -> HashSet<(u64, usize)> {
+    history
+        .restored_ids()
+        .into_iter()
+        .filter_map(|id| match parse_id(id)? {
+            (session, Some(item)) => Some((session, item)),
+            (_, None) => None,
+        })
+        .collect()
 }
 
 /// @name trashed_paths
@@ -349,6 +363,33 @@ pub fn trashed_paths() -> Option<Vec<PathBuf>> {
 )))]
 pub fn trashed_paths() -> Option<Vec<PathBuf>> {
     None
+}
+
+/// @name TrashListing
+/// @description Runs `trashed_paths` on its own thread so a frontend can start listing the trash
+/// at launch and pick the result up once it needs it, instead of waiting for it while loading.
+///
+/// @example
+/// let listing = history::TrashListing::start();
+/// let trashed = listing.wait();
+pub struct TrashListing(Option<thread::JoinHandle<Option<Vec<PathBuf>>>>);
+
+impl TrashListing {
+    pub fn start() -> Self {
+        Self(
+            thread::Builder::new()
+                .name("kuizer-trash".to_owned())
+                .spawn(trashed_paths)
+                .ok(),
+        )
+    }
+
+    pub fn wait(self) -> Option<Vec<PathBuf>> {
+        match self.0 {
+            Some(handle) => handle.join().ok().flatten(),
+            None => trashed_paths(),
+        }
+    }
 }
 
 /// @name still_in_trash
@@ -425,11 +466,23 @@ pub fn item_state(
     run: usize,
     entry: usize,
 ) -> ItemState {
+    let is_restored = history.runs[run].action != Action::Restore
+        && restored.contains(history.item_id(run, entry).as_str());
+    state_of(history, is_restored, kept, run, entry)
+}
+
+fn state_of(
+    history: &History,
+    is_restored: bool,
+    kept: Option<&HashSet<(usize, usize)>>,
+    run: usize,
+    entry: usize,
+) -> ItemState {
     let item = &history.runs[run].deleted[entry];
     if history.runs[run].action == Action::Restore {
         return ItemState::RestoredHere;
     }
-    if restored.contains(history.item_id(run, entry).as_str()) {
+    if is_restored {
         return ItemState::Restored;
     }
     match (item.mode, kept) {
@@ -453,10 +506,12 @@ pub fn restorable(
     kept: &HashSet<(usize, usize)>,
     run: usize,
 ) -> Vec<(usize, usize)> {
-    let restored = history.restored_ids();
+    let restored = restored_items(history);
+    let session = history.runs.get(run).map_or(0, |run| run.id);
     (0..history.runs.get(run).map_or(0, |run| run.deleted.len()))
         .filter(|&entry| {
-            item_state(history, &restored, Some(kept), run, entry) == ItemState::InTrash
+            let is_restored = restored.contains(&(session, entry + 1));
+            state_of(history, is_restored, Some(kept), run, entry) == ItemState::InTrash
         })
         .map(|entry| (run, entry))
         .collect()
@@ -503,6 +558,13 @@ pub fn match_trash(
     trash: &[TrashRecord],
 ) -> Vec<Option<usize>> {
     let mut used = vec![false; trash.len()];
+    let mut by_path: HashMap<&Path, Vec<usize>> = HashMap::new();
+    for (index, record) in trash.iter().enumerate() {
+        by_path
+            .entry(record.path.as_path())
+            .or_default()
+            .push(index);
+    }
     targets
         .iter()
         .map(|&(run, entry)| {
@@ -511,9 +573,11 @@ pub fn match_trash(
                 return None;
             }
             let deleted = entry.deleted_at.parse::<jiff::civil::DateTime>().ok();
-            let same_path = |index: &usize| !used[*index] && trash[*index].path == entry.path;
-            let timed = (0..trash.len())
-                .filter(same_path)
+            let same_path = by_path.get(entry.path.as_path())?;
+            let timed = same_path
+                .iter()
+                .copied()
+                .filter(|&index| !used[index])
                 .filter_map(|index| {
                     let gap = trash[index]
                         .deleted_at?
@@ -525,9 +589,10 @@ pub fn match_trash(
                 .min()
                 .map(|(_, index)| index);
             let found = timed.or_else(|| {
-                (0..trash.len())
-                    .filter(same_path)
-                    .find(|&index| trash[index].deleted_at.is_none())
+                same_path
+                    .iter()
+                    .copied()
+                    .find(|&index| !used[index] && trash[index].deleted_at.is_none())
             });
             if let Some(index) = found {
                 used[index] = true;
@@ -622,13 +687,16 @@ fn update<T>(
     history.assign_ids();
     let result = change(&mut history);
     history.recompute();
-    let text = serde_json::to_string_pretty(&history)
-        .map_err(io::Error::other)
-        .map_err(write_error)?;
-    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(&temporary, text + "\n").map_err(write_error)?;
-    fs::rename(&temporary, path).map_err(write_error)?;
+    write(path, &history).map_err(write_error)?;
     Ok(result)
+}
+
+fn write(path: &Path, history: &History) -> io::Result<()> {
+    let mut text = serde_json::to_string(history).map_err(io::Error::other)?;
+    text.push('\n');
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&temporary, text)?;
+    fs::rename(&temporary, path)
 }
 
 struct Lock {
@@ -648,13 +716,148 @@ impl Lock {
     }
 }
 
-pub struct Recorder {
+const FLUSH_ENTRIES: usize = 64;
+const FLUSH_AFTER: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    identity: u64,
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let identity = std::os::unix::fs::MetadataExt::ino(&metadata);
+        #[cfg(not(unix))]
+        let identity = 0;
+        Some(Self {
+            identity,
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+struct State {
     source: PathBuf,
     target: PathBuf,
     started_at: String,
     roots: Vec<PathBuf>,
     session: Option<u64>,
     error: Option<HistoryError>,
+    pending: Vec<Entry>,
+    oldest: Option<Instant>,
+    written: Option<(History, Stamp)>,
+    closed: bool,
+}
+
+impl State {
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let entries = std::mem::take(&mut self.pending);
+        self.oldest = None;
+        if let Err(error) = self.write(entries) {
+            self.written = None;
+            self.error.get_or_insert(error);
+        }
+    }
+
+    fn write(&mut self, entries: Vec<Entry>) -> Result<(), HistoryError> {
+        let write_error = |source| HistoryError::Write {
+            path: self.target.clone(),
+            source,
+        };
+        let _lock = Lock::acquire(&self.target).map_err(write_error)?;
+        let current = Stamp::of(&self.target);
+        let reusable = self
+            .written
+            .take()
+            .filter(|(_, stamp)| Some(*stamp) == current)
+            .map(|(history, _)| history);
+        let mut history = match reusable {
+            Some(history) => history,
+            None => {
+                let source = if self.session.is_some() {
+                    &self.target
+                } else {
+                    &self.source
+                };
+                let mut history = load(source)?;
+                history.assign_ids();
+                history
+            }
+        };
+        let open = self
+            .session
+            .and_then(|session| history.runs.iter_mut().rev().find(|run| run.id == session));
+        let session = match open {
+            Some(run) => {
+                run.deleted.extend(entries);
+                run.total = Total::of(&run.deleted);
+                run.finished_at = now();
+                run.id
+            }
+            None => {
+                let mut run = Run::new(self.started_at.clone(), &self.roots, entries);
+                run.id = history.next_session;
+                history.next_session += 1;
+                history.runs.push(run);
+                history.next_session - 1
+            }
+        };
+        history.recompute();
+        write(&self.target, &history).map_err(write_error)?;
+        self.session = Some(session);
+        self.written = Stamp::of(&self.target).map(|stamp| (history, stamp));
+        Ok(())
+    }
+}
+
+struct Shared {
+    state: Mutex<State>,
+    wake: Condvar,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn flush_when_due(&self) {
+        let mut state = self.lock();
+        loop {
+            if state.closed {
+                return;
+            }
+            let Some(oldest) = state.oldest else {
+                state = self
+                    .wake
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let remaining = FLUSH_AFTER.saturating_sub(oldest.elapsed());
+            if remaining.is_zero() {
+                state.flush();
+            } else {
+                state = self
+                    .wake
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+        }
+    }
+}
+
+pub struct Recorder {
+    shared: Arc<Shared>,
+    flusher: Option<thread::JoinHandle<()>>,
 }
 
 impl Recorder {
@@ -666,71 +869,80 @@ impl Recorder {
     /// let mut recorder = Recorder::for_user(history::now(), &roots);
     pub fn for_user(started_at: String, roots: &[PathBuf]) -> Self {
         let home = dirs::home_dir();
-        let mut recorder = Self::at(
+        let recorder = Self::at(
             home.as_deref().map(readable_path_in).unwrap_or_default(),
             home.map(|home| home.join(FILE_NAME)).unwrap_or_default(),
             started_at,
             roots,
         );
-        if recorder.target.as_os_str().is_empty() {
-            recorder.error = Some(HistoryError::NoHome);
+        {
+            let mut state = recorder.shared.lock();
+            if state.target.as_os_str().is_empty() {
+                state.error = Some(HistoryError::NoHome);
+            }
         }
         recorder
     }
 
     pub fn at(source: PathBuf, target: PathBuf, started_at: String, roots: &[PathBuf]) -> Self {
         Self {
-            source,
-            target,
-            started_at,
-            roots: roots.to_vec(),
-            session: None,
-            error: None,
+            shared: Arc::new(Shared {
+                state: Mutex::new(State {
+                    source,
+                    target,
+                    started_at,
+                    roots: roots.to_vec(),
+                    session: None,
+                    error: None,
+                    pending: Vec::new(),
+                    oldest: None,
+                    written: None,
+                    closed: false,
+                }),
+                wake: Condvar::new(),
+            }),
+            flusher: None,
         }
     }
 
     /// @name add
-    /// @description Writes one removed entry to the history file straight away, so an interrupted
-    /// or crashed run still leaves a record that `kuizer restore` can use. The first entry opens
-    /// the run; later entries are added to it. The first write error is kept for `finish`.
+    /// @description Queues one removed entry for the history file. The first entry opens the run
+    /// and is written straight away. Later entries are written together once 64 are waiting or the
+    /// oldest has waited 100 ms, and always by `flush`, `finish` and drop, so an interrupted run
+    /// leaves a record that `kuizer restore` can use. The first write error is kept for `finish`.
     ///
     /// @example
     /// recorder.add(Entry::new(&candidate, mode));
     pub fn add(&mut self, entry: Entry) {
-        if matches!(self.error, Some(HistoryError::NoHome)) {
+        let mut state = self.shared.lock();
+        if matches!(state.error, Some(HistoryError::NoHome)) {
             return;
         }
-        let source = if self.session.is_some() {
-            &self.target
-        } else {
-            &self.source
-        };
-        let result = update(source, &self.target, |history| {
-            let open = self
-                .session
-                .and_then(|session| history.runs.iter_mut().find(|run| run.id == session));
-            match open {
-                Some(run) => {
-                    run.deleted.push(entry);
-                    run.total = Total::of(&run.deleted);
-                    run.finished_at = now();
-                    run.id
-                }
-                None => {
-                    let mut run = Run::new(self.started_at.clone(), &self.roots, vec![entry]);
-                    run.id = history.next_session;
-                    history.next_session += 1;
-                    history.runs.push(run);
-                    history.next_session - 1
-                }
-            }
-        });
-        match result {
-            Ok(session) => self.session = Some(session),
-            Err(error) => {
-                self.error.get_or_insert(error);
-            }
+        state.pending.push(entry);
+        state.oldest.get_or_insert_with(Instant::now);
+        if state.session.is_none() || state.pending.len() >= FLUSH_ENTRIES {
+            state.flush();
+            return;
         }
+        drop(state);
+        self.shared.wake.notify_one();
+        if self.flusher.is_none() {
+            let shared = Arc::clone(&self.shared);
+            self.flusher = thread::Builder::new()
+                .name("kuizer-history".to_owned())
+                .spawn(move || shared.flush_when_due())
+                .ok();
+        }
+    }
+
+    /// @name flush
+    /// @description Writes every queued entry to the history file now. Call it after a batch
+    /// of removals so nothing recorded waits on the timer.
+    ///
+    /// @example
+    /// recorder.flush();
+    pub fn flush(&self) {
+        self.shared.lock().flush();
     }
 
     /// @name session
@@ -740,11 +952,26 @@ impl Recorder {
     /// @example
     /// let undo = recorder.session().map(|id| format!("s{id}"));
     pub fn session(&self) -> Option<u64> {
-        self.session
+        self.shared.lock().session
     }
 
     pub fn finish(self) -> Result<(), HistoryError> {
-        self.error.map_or(Ok(()), Err)
+        let mut state = self.shared.lock();
+        state.flush();
+        let error = state.error.take();
+        drop(state);
+        error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.wake.notify_all();
+        if let Some(flusher) = self.flusher.take() {
+            let _ = flusher.join();
+        }
+        self.shared.lock().flush();
     }
 }
 
@@ -821,6 +1048,7 @@ mod tests {
         let mut fresh = Recorder::at(path.clone(), path.clone(), now(), &[]);
         fresh.add(entry(7));
         fresh.add(entry(0));
+        fresh.flush();
         assert_eq!(load(&path).expect("fresh").runs[0].total.items, 2);
         let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
 
@@ -847,6 +1075,53 @@ mod tests {
         assert_eq!(recorder.session(), None);
         recorder.finish().expect("no errors");
         assert!(!path.exists());
+    }
+
+    fn recorded_items(path: &Path) -> usize {
+        load(path).map_or(0, |history| history.cumulative.items)
+    }
+
+    #[test]
+    fn queued_entries_reach_the_file_without_finish() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        recorder.add(entry(1));
+        assert_eq!(recorded_items(&path), 1);
+        recorder.add(entry(2));
+        recorder.add(entry(3));
+        drop(recorder);
+        assert_eq!(recorded_items(&path), 3);
+
+        let other = dir.path().join("interrupted.json");
+        let mut abandoned = Recorder::at(other.clone(), other.clone(), now(), &[]);
+        abandoned.add(entry(1));
+        abandoned.add(entry(2));
+        abandoned.add(entry(3));
+        std::mem::forget(abandoned);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while recorded_items(&other) < 3 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(recorded_items(&other), 3);
+    }
+
+    #[test]
+    fn many_queued_entries_land_in_one_run_and_keep_other_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        recorder.add(entry(1));
+        append(&path, &path, Run::new(now(), &[], vec![entry(10)])).expect("other process");
+        for _ in 0..(FLUSH_ENTRIES * 2) {
+            recorder.add(entry(1));
+        }
+        recorder.finish().expect("no errors");
+        let history = load(&path).expect("load");
+        assert_eq!(history.runs.len(), 2);
+        assert_eq!(history.runs[0].deleted.len(), 1 + FLUSH_ENTRIES * 2);
+        assert_eq!(history.runs[0].total.items, 1 + FLUSH_ENTRIES * 2);
+        assert_eq!(history.cumulative.items, 2 + FLUSH_ENTRIES * 2);
     }
 
     #[test]

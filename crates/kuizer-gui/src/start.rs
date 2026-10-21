@@ -1,10 +1,14 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use kuizer::config::Config;
 use kuizer::detect::Category;
+use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::units::ByteSize;
 use serde::{Deserialize, Serialize};
+
+use crate::persist;
 
 const RECENT_LIMIT: usize = 8;
 
@@ -41,7 +45,7 @@ impl ScanOptions {
             toolchains: true,
             docker: true,
             repos: true,
-            duplicates: true,
+            duplicates: config.duplicates.enabled,
             one_file_system: config.scan.one_file_system,
         }
     }
@@ -121,6 +125,7 @@ pub fn check_folder(path: &Path) -> Result<PathBuf, String> {
 pub struct Recent {
     file: Option<PathBuf>,
     pub paths: Vec<PathBuf>,
+    gone: HashSet<PathBuf>,
 }
 
 impl Recent {
@@ -138,7 +143,11 @@ impl Recent {
             .and_then(|file| std::fs::read_to_string(file).ok())
             .map(|text| parse_recent(&text))
             .unwrap_or_default();
-        Self { file, paths }
+        Self {
+            file,
+            paths,
+            gone: HashSet::new(),
+        }
     }
 
     pub fn remember(&mut self, roots: &[PathBuf]) {
@@ -150,20 +159,45 @@ impl Recent {
         let Some(file) = &self.file else {
             return;
         };
-        if let Some(parent) = file.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return;
-        }
         let text: String = self
             .paths
             .iter()
             .filter_map(|path| path.to_str())
             .map(|path| format!("{path}\n"))
             .collect();
-        if let Err(error) = std::fs::write(file, text) {
-            eprintln!("kuizer-gui: cannot save recent folders: {error}");
-        }
+        persist::save(file.clone(), text);
+    }
+
+    /// @name Recent::probe
+    /// @description Returns the folders among `paths` that no longer exist. It touches the disk,
+    /// so run it off the interface thread: a stale network mount can block for a long time.
+    ///
+    /// @example
+    /// let gone = Recent::probe(&recent.paths);
+    pub fn probe(paths: &[PathBuf]) -> Vec<PathBuf> {
+        paths
+            .iter()
+            .filter(|path| !path.is_dir())
+            .cloned()
+            .collect()
+    }
+
+    pub fn mark_gone(&mut self, gone: Vec<PathBuf>) {
+        self.gone = gone.into_iter().collect();
+    }
+
+    pub fn is_gone(&self, path: &Path) -> bool {
+        self.gone.contains(path)
+    }
+
+    pub fn default_folder(&self, config: &Config, roots: &[PathBuf]) -> String {
+        self.paths
+            .iter()
+            .find(|path| !self.is_gone(path))
+            .or(config.scan.roots.first())
+            .or(roots.first())
+            .map(|path| display_path(path))
+            .unwrap_or_default()
     }
 }
 

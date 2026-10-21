@@ -1,14 +1,12 @@
-use std::collections::BTreeMap;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, TableState,
 };
 
-use super::app::{App, GroupKey, Grouping, Overlay, Status, project_of};
+use super::app::{App, ConfirmStats, Group, Grouping, Item, Overlay, Row, Status, project_of};
 use crate::cli::SortKey;
 use crate::delete::Mode;
 use crate::detect::{Category, Safety};
@@ -126,12 +124,7 @@ fn header(app: &App) -> Line<'static> {
         Some(summary) => format!("done in {:.1}s", summary.duration.as_secs_f64()),
         None => "scanning".to_owned(),
     };
-    let total: u64 = app
-        .items
-        .iter()
-        .filter(|item| item.status != Status::Deleted)
-        .map(|item| item.candidate.usage.allocated)
-        .sum();
+    let total = app.total_bytes();
     let mut spans = vec![
         Span::styled(" kuizer ", Style::new().add_modifier(Modifier::BOLD)),
         Span::styled(
@@ -181,99 +174,87 @@ fn disk(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
+fn group_row(app: &App, group: &Group, path_width: usize) -> TableRow<'static> {
+    let count = group.count;
+    let summary = format!(
+        "  · {count} item{}  · {}",
+        if count == 1 { "" } else { "s" },
+        ByteSize(group.bytes),
+    );
+    let candidate = &app.items[group.first].candidate;
+    let warning = app
+        .changes_in(candidate)
+        .filter(|_| app.grouping == Grouping::Project)
+        .map(|changes| format!("  · {}", uncommitted(changes)));
+    let reserved = summary.chars().count() + warning.as_ref().map_or(0, |w| w.chars().count());
+    let name = match group.category {
+        Some(category) => format!("{} / {}", category.as_str(), group.name),
+        None => shorten(
+            &display_path(project_of(candidate)),
+            path_width.saturating_sub(reserved),
+        ),
+    };
+    let mut title = vec![Span::raw(format!("{name}{summary}"))];
+    if let Some(warning) = warning {
+        title.push(Span::styled(warning, Style::new().fg(WARNING)));
+    }
+    let mut cells = vec![Cell::from(""); 7];
+    cells.push(Cell::from(Line::from(title)));
+    TableRow::new(cells).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD))
+}
+
+fn item_row(item: &Item, largest: u64, path_width: usize) -> TableRow<'static> {
+    let candidate = &item.candidate;
+    let mark = match (&item.status, item.selected) {
+        (Status::Deleted, _) => "  ✓",
+        (Status::Deleting, _) => "  …",
+        (Status::Failed(_), _) => "  !",
+        (Status::Ready, true) => "[x]",
+        (Status::Ready, false) => "[ ]",
+    };
+    let style = match (&item.status, candidate.rule.safety) {
+        (Status::Deleted, _) => Style::new().fg(FAINT).add_modifier(Modifier::CROSSED_OUT),
+        (Status::Deleting | Status::Failed(_), _) => Style::new().fg(MUTED),
+        (Status::Ready, _) if item.selected => Style::new().bg(SELECTED),
+        (Status::Ready, _) => Style::new(),
+    };
+    let ready = item.status == Status::Ready;
+    let dim_if = |color: Color| if ready { color } else { MUTED };
+    let (badge, badge_color) = match candidate.rule.safety {
+        Safety::Safe => ("● safe", SAFE),
+        Safety::Review => ("▲ check", WARNING),
+    };
+    let bytes = candidate.usage.allocated;
+    TableRow::new(vec![
+        Cell::from(mark),
+        Cell::from(format!("{:>10}", ByteSize(bytes).to_string()))
+            .style(Style::new().fg(dim_if(size_color(bytes)))),
+        Cell::from(size_bar(bytes, largest)).style(Style::new().fg(FAINT)),
+        Cell::from(badge).style(Style::new().fg(dim_if(badge_color))),
+        Cell::from(candidate.rule.category.as_str())
+            .style(Style::new().fg(dim_if(category_color(candidate.rule.category)))),
+        Cell::from(candidate.rule.name.clone()),
+        Cell::from(age(candidate.newest)).style(Style::new().fg(MUTED)),
+        Cell::from(shorten(&display_path(&candidate.path), path_width)),
+    ])
+    .style(style)
+}
+
 fn table(frame: &mut Frame, app: &App, area: Rect) {
     let path_width = usize::from(area.width.saturating_sub(FIXED_COLUMNS + 8));
-    let keys: Vec<GroupKey> = app
-        .view
+    let height = usize::from(area.height.saturating_sub(1));
+    let cursor_row = app.view_row.get(app.cursor).copied();
+    let start = cursor_row.map_or(0, |row| (row + 1).saturating_sub(height));
+    let stop = (start + height).min(app.rows.len());
+    let rows: Vec<TableRow> = app.rows[start.min(stop)..stop]
         .iter()
-        .map(|&index| app.group_key(&app.items[index].candidate))
-        .collect();
-    let mut groups: BTreeMap<&GroupKey, (usize, u64)> = BTreeMap::new();
-    for (key, &index) in keys.iter().zip(&app.view) {
-        let entry = groups.entry(key).or_default();
-        entry.0 += 1;
-        entry.1 += app.items[index].candidate.usage.allocated;
-    }
-    let largest = app
-        .view
-        .iter()
-        .map(|&index| app.items[index].candidate.usage.allocated)
-        .max()
-        .unwrap_or(0);
-    let mut rows = Vec::with_capacity(app.view.len() + groups.len());
-    let mut previous_group = None;
-    let mut selected_row = None;
-    for (position, (group, &index)) in keys.iter().zip(&app.view).enumerate() {
-        let item = &app.items[index];
-        let candidate = &item.candidate;
-        if previous_group != Some(group) {
-            let (count, bytes) = groups[group];
-            let summary = format!(
-                "  · {count} item{}  · {}",
-                if count == 1 { "" } else { "s" },
-                ByteSize(bytes),
-            );
-            let warning = app
-                .changes_in(candidate)
-                .filter(|_| app.grouping == Grouping::Project)
-                .map(|changes| format!("  · {}", uncommitted(changes)));
-            let reserved =
-                summary.chars().count() + warning.as_ref().map_or(0, |w| w.chars().count());
-            let name = match group {
-                (Some(category), rule) => format!("{} / {rule}", category.as_str()),
-                (None, _) => shorten(
-                    &display_path(project_of(candidate)),
-                    path_width.saturating_sub(reserved),
-                ),
-            };
-            let mut title = vec![Span::raw(format!("{name}{summary}"))];
-            if let Some(warning) = warning {
-                title.push(Span::styled(warning, Style::new().fg(WARNING)));
+        .map(|row| match *row {
+            Row::Group(group) => group_row(app, &app.groups[group], path_width),
+            Row::Item(position) => {
+                item_row(&app.items[app.view[position]], app.largest, path_width)
             }
-            let mut cells = vec![Cell::from(""); 7];
-            cells.push(Cell::from(Line::from(title)));
-            rows.push(Row::new(cells).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
-            previous_group = Some(group);
-        }
-        if position == app.cursor {
-            selected_row = Some(rows.len());
-        }
-        let mark = match (&item.status, item.selected) {
-            (Status::Deleted, _) => "  ✓",
-            (Status::Deleting, _) => "  …",
-            (Status::Failed(_), _) => "  !",
-            (Status::Ready, true) => "[x]",
-            (Status::Ready, false) => "[ ]",
-        };
-        let style = match (&item.status, candidate.rule.safety) {
-            (Status::Deleted, _) => Style::new().fg(FAINT).add_modifier(Modifier::CROSSED_OUT),
-            (Status::Deleting | Status::Failed(_), _) => Style::new().fg(MUTED),
-            (Status::Ready, _) if item.selected => Style::new().bg(SELECTED),
-            (Status::Ready, _) => Style::new(),
-        };
-        let ready = item.status == Status::Ready;
-        let dim_if = |color: Color| if ready { color } else { MUTED };
-        let (badge, badge_color) = match candidate.rule.safety {
-            Safety::Safe => ("● safe", SAFE),
-            Safety::Review => ("▲ check", WARNING),
-        };
-        let bytes = candidate.usage.allocated;
-        rows.push(
-            Row::new(vec![
-                Cell::from(mark.to_owned()),
-                Cell::from(format!("{:>10}", ByteSize(bytes).to_string()))
-                    .style(Style::new().fg(dim_if(size_color(bytes)))),
-                Cell::from(size_bar(bytes, largest)).style(Style::new().fg(FAINT)),
-                Cell::from(badge).style(Style::new().fg(dim_if(badge_color))),
-                Cell::from(candidate.rule.category.as_str().to_owned())
-                    .style(Style::new().fg(dim_if(category_color(candidate.rule.category)))),
-                Cell::from(candidate.rule.name.clone()),
-                Cell::from(age(candidate.newest)).style(Style::new().fg(MUTED)),
-                Cell::from(shorten(&display_path(&candidate.path), path_width)),
-            ])
-            .style(style),
-        );
-    }
+        })
+        .collect();
     let widths = [
         Constraint::Length(3),
         Constraint::Length(10),
@@ -286,7 +267,7 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new([
+            TableRow::new([
                 "",
                 "      SIZE",
                 "",
@@ -300,7 +281,7 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
         )
         .row_highlight_style(Style::new().bg(CURSOR))
         .column_spacing(1);
-    let mut state = TableState::default().with_selected(selected_row);
+    let mut state = TableState::default().with_selected(cursor_row.map(|row| row - start));
     frame.render_stateful_widget(table, area, &mut state);
 }
 
@@ -385,7 +366,7 @@ fn footer(app: &App) -> Line<'static> {
         spans.extend(key_hints(&[("enter", "apply"), ("esc", "clear")]));
         return Line::from(spans);
     }
-    let selected = app.selected().count();
+    let selected = app.selected_count();
     let mut spans = vec![Span::raw(" ")];
     let delete_hint = if selected > 0 {
         ("enter", "delete selected")
@@ -445,44 +426,28 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn confirm(frame: &mut Frame, app: &App, ids: &[u64], mode: crate::delete::Mode) {
-    const SHOWN: usize = 8;
+fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::delete::Mode) {
     const DIRTY_SHOWN: usize = 3;
-    let items: Vec<_> = ids.iter().filter_map(|&id| app.item(id)).collect();
-    let bytes: u64 = items
-        .iter()
-        .map(|item| item.candidate.usage.allocated)
-        .sum();
-    let review = items
-        .iter()
-        .filter(|item| item.candidate.rule.safety == Safety::Review)
-        .count();
-    let dirty_lines = items
-        .iter()
-        .filter_map(|item| {
-            app.changes_in(&item.candidate)
-                .map(|_| project_of(&item.candidate))
-        })
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        .min(DIRTY_SHOWN + 1);
+    let checking_lines = usize::from(stats.checking > 0);
+    let dirty_lines = stats.dirty.len().min(DIRTY_SHOWN + 1);
     let area = centered(
         frame.area(),
         90,
-        cells(items.len().min(SHOWN) + 10 + dirty_lines),
+        cells(stats.shown.len() + 10 + dirty_lines + checking_lines),
     );
     let inner_width = usize::from(area.width.saturating_sub(16));
     let mut lines = vec![Line::raw("")];
-    for item in items.iter().take(SHOWN) {
+    for &index in &stats.shown {
+        let candidate = &app.items[index].candidate;
         lines.push(Line::raw(format!(
             "  {:>10}  {}",
-            ByteSize(item.candidate.usage.allocated).to_string(),
-            shorten(&display_path(&item.candidate.path), inner_width)
+            ByteSize(candidate.usage.allocated).to_string(),
+            shorten(&display_path(&candidate.path), inner_width)
         )));
     }
-    if items.len() > SHOWN {
+    if stats.count > stats.shown.len() {
         lines.push(Line::styled(
-            format!("  and {} more", items.len() - SHOWN),
+            format!("  and {} more", stats.count - stats.shown.len()),
             Style::new().fg(MUTED),
         ));
     }
@@ -496,40 +461,42 @@ fn confirm(frame: &mut Frame, app: &App, ids: &[u64], mode: crate::delete::Mode)
         format!("  {action}"),
         Style::new().add_modifier(Modifier::BOLD),
     ));
-    if let (Some(free), Some(after)) = (app.free, app.free_after(bytes, mode)) {
+    if let (Some(free), Some(after)) = (app.free, app.free_after(stats.bytes, mode)) {
         lines.push(Line::raw(format!(
             "  {} free now, {} free afterwards.",
             ByteSize(free),
             ByteSize(after)
         )));
     }
-    if review > 0 {
+    if stats.review > 0 {
         lines.push(Line::raw(format!(
-            "  {review} of these are marked review: check they are generated before deleting."
+            "  {} of these are marked review: check they are generated before deleting.",
+            stats.review
         )));
     }
-    let mut dirty: Vec<(String, usize)> = Vec::new();
-    for item in &items {
-        let project = display_path(project_of(&item.candidate));
-        if let Some(changes) = app.changes_in(&item.candidate)
-            && !dirty.iter().any(|(seen, _)| *seen == project)
-        {
-            dirty.push((project, changes));
-        }
-    }
-    for (project, changes) in dirty.iter().take(DIRTY_SHOWN) {
+    for (project, changes) in stats.dirty.iter().take(DIRTY_SHOWN) {
         let note = format!(" has {}.", uncommitted(*changes));
         let width = inner_width.saturating_sub(note.chars().count());
         lines.push(Line::styled(
-            format!("  {}{note}", shorten(project, width)),
+            format!("  {}{note}", shorten(&display_path(project), width)),
             Style::new().fg(WARNING),
         ));
     }
-    if dirty.len() > DIRTY_SHOWN {
+    if stats.dirty.len() > DIRTY_SHOWN {
         lines.push(Line::styled(
             format!(
                 "  and {} more projects with uncommitted changes.",
-                dirty.len() - DIRTY_SHOWN
+                stats.dirty.len() - DIRTY_SHOWN
+            ),
+            Style::new().fg(WARNING),
+        ));
+    }
+    if stats.checking > 0 {
+        lines.push(Line::styled(
+            format!(
+                "  Still checking {} project{} for uncommitted changes.",
+                stats.checking,
+                if stats.checking == 1 { "" } else { "s" }
             ),
             Style::new().fg(WARNING),
         ));
@@ -541,9 +508,9 @@ fn confirm(frame: &mut Frame, app: &App, ids: &[u64], mode: crate::delete::Mode)
     ));
     let title = format!(
         " Delete {} item{} · {} ",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" },
-        ByteSize(bytes)
+        stats.count,
+        if stats.count == 1 { "" } else { "s" },
+        ByteSize(stats.bytes)
     );
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -663,7 +630,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(detail(app)), info);
     frame.render_widget(Paragraph::new(footer(app)), bottom);
     match &app.overlay {
-        Overlay::Confirm { ids, mode } => confirm(frame, app, ids, *mode),
+        Overlay::Confirm { mode, .. } => {
+            if let Some(stats) = &app.confirm_stats {
+                confirm(frame, app, stats, *mode);
+            }
+        }
         Overlay::Help => help(frame),
         Overlay::None => {}
     }

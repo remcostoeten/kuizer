@@ -362,6 +362,22 @@ pub fn known(name: &str, path: PathBuf) -> Option<KnownCache> {
         })
 }
 
+/// @name roots
+/// @description Resolves every known global cache location against `locations` without checking
+/// that it exists, for callers that want to stay out of tool-managed folders.
+///
+/// @example
+/// let skip = caches::roots(&Locations::for_user()?);
+pub fn roots(locations: &Locations) -> Vec<PathBuf> {
+    SPECS
+        .iter()
+        .map(|spec| match spec.relative {
+            "" => locations.base(spec.base).to_path_buf(),
+            relative => locations.base(spec.base).join(relative),
+        })
+        .collect()
+}
+
 /// @name find
 /// @description Resolves the known global tool caches against `locations` and returns the ones
 /// that exist as real directories. Symlinks and anything inside protected browser or credential

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use gpui::{Pixels, px};
 
-use crate::theme;
+use crate::{persist, theme};
 
 const STEP: u16 = 10;
 const MIN: u16 = 50;
@@ -66,16 +66,8 @@ impl Zoom {
     }
 
     fn save(&self) {
-        let Some(file) = &self.file else {
-            return;
-        };
-        if let Some(parent) = file.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return;
-        }
-        if let Err(error) = std::fs::write(file, format!("{}\n", self.percent)) {
-            eprintln!("kuizer-gui: cannot save the zoom level: {error}");
+        if let Some(file) = &self.file {
+            persist::save(file.clone(), format!("{}\n", self.percent));
         }
     }
 }
@@ -114,6 +106,7 @@ mod tests {
         let mut zoom = Zoom::load(Some(file.clone()));
         zoom.zoom_in();
         zoom.zoom_in();
+        persist::flush();
         assert_eq!(Zoom::load(Some(file.clone())).percent, 120);
         assert_eq!(Zoom::load(Some(file)).rem_size(), px(19.2));
     }

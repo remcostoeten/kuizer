@@ -123,6 +123,19 @@ impl Locations {
         })
     }
 
+    /// @name roots
+    /// @description Lists the folder each tool keeps its installed versions in, whether or not
+    /// it exists.
+    ///
+    /// @example
+    /// let skip = Locations::for_user()?.roots();
+    pub fn roots(&self) -> Vec<PathBuf> {
+        Tool::ALL
+            .into_iter()
+            .map(|tool| self.versions(tool))
+            .collect()
+    }
+
     fn versions(&self, tool: Tool) -> PathBuf {
         match tool {
             Tool::Rustup => self.rustup.join("toolchains"),

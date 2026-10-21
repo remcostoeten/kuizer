@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, ConfigError};
 use crate::platform::MountTable;
+use crate::platform::dir::EntryKind;
 use crate::protect::Protected;
 use crate::scan::Cancel;
 use crate::scan::Issue;
-use crate::scan::walk::{Flow, Visitor, Walker};
+use crate::scan::walk::{Companion, Flow, Visitor, Walker};
 
 const MAX_PIN_FILE: u64 = 256 * 1024;
 
@@ -162,6 +163,10 @@ impl PinFinder {
 }
 
 impl Visitor for PinFinder {
+    fn wants_files(&self) -> bool {
+        true
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(Cancel::is_cancelled)
     }
@@ -170,11 +175,11 @@ impl Visitor for PinFinder {
         Flow::Continue
     }
 
-    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return Flow::Continue;
         };
-        if !file_type.is_file() || !is_pin_file(name) {
+        if kind != EntryKind::File || !is_pin_file(name) {
             return Flow::Continue;
         }
         if let Some(text) = read_small(path) {
@@ -186,6 +191,19 @@ impl Visitor for PinFinder {
                 }));
         }
         Flow::Continue
+    }
+}
+
+impl Companion for PinFinder {
+    fn fork(&self) -> Self {
+        Self {
+            pins: Vec::new(),
+            cancel: self.cancel.clone(),
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.pins.extend(other.pins);
     }
 }
 

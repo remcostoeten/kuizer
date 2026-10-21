@@ -56,9 +56,25 @@ impl Excludes {
     }
 
     pub fn path(&self, path: &Path) -> bool {
-        path.file_name()
-            .is_some_and(|name| self.names.is_match(name))
-            || self.paths.is_match(path)
+        path.file_name().is_some_and(|name| self.name(name)) || self.full_path(path)
+    }
+
+    pub fn name(&self, name: &OsStr) -> bool {
+        !self.names.is_empty() && self.names.is_match(name)
+    }
+
+    pub fn full_path(&self, path: &Path) -> bool {
+        !self.paths.is_empty() && self.paths.is_match(path)
+    }
+
+    /// @name Excludes::matches_paths
+    /// @description Returns whether any pattern needs the full path, so a walker can skip
+    /// building paths for entries that only need their name checked.
+    ///
+    /// @example
+    /// if excludes.matches_paths() && excludes.full_path(&dir.join(name)) { continue; }
+    pub fn matches_paths(&self) -> bool {
+        !self.paths.is_empty()
     }
 
     pub fn extension(&self, name: &OsStr) -> bool {

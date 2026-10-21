@@ -1,6 +1,8 @@
 //! Keyboard control: the key router, the list cursor, list filters and running commands from
 //! the command table.
 
+use std::cell::OnceCell;
+
 use gpui::{Keystroke, ScrollStrategy};
 
 use super::*;
@@ -42,11 +44,24 @@ fn step(motion: Motion, current: usize, count: usize, page: usize) -> usize {
 
 /// Whether any field contains the lowercase filter text, or there is no filter.
 pub(super) fn found(needle: Option<&str>, fields: &[&str]) -> bool {
-    needle.is_none_or(|needle| {
-        fields
-            .iter()
-            .any(|field| field.to_lowercase().contains(needle))
-    })
+    needle.is_none_or(|needle| fields.iter().any(|field| contains(field, needle)))
+}
+
+/// Whether `field` contains the lowercase `needle`, ignoring case. ASCII text is compared in
+/// place without allocating; anything else is lowercased first.
+pub(super) fn contains(field: &str, needle: &str) -> bool {
+    if !field.is_ascii() || !needle.is_ascii() {
+        return field.to_lowercase().contains(needle);
+    }
+    let (field, needle) = (field.as_bytes(), needle.as_bytes());
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    field.len() >= needle.len()
+        && (0..=field.len() - needle.len()).any(|start| {
+            field[start].to_ascii_lowercase() == first
+                && field[start + 1..start + needle.len()].eq_ignore_ascii_case(rest)
+        })
 }
 
 pub(super) fn found_path(needle: Option<&str>, path: &Path) -> bool {
@@ -77,7 +92,7 @@ pub(super) fn keep_visible(scroll: &ScrollHandle, row: Bounds<Pixels>, window: &
         return;
     }
     scroll.set_offset(offset);
-    window.on_next_frame(|window, _| window.refresh());
+    window.request_animation_frame();
 }
 
 /// One palette row: the command and, when it cannot run now, why.
@@ -279,14 +294,16 @@ impl Kuizer {
             .as_ref()
             .map_or("", |palette| palette.query.as_str());
         let specs = commands::table()
-            .into_iter()
+            .iter()
             .filter(|spec| spec.palette)
+            .cloned()
             .chain(commands::scans(&self.recent.paths))
             .collect();
+        let cursor = OnceCell::new();
         palette::rank(query, specs)
             .into_iter()
             .map(|spec| Entry {
-                blocked: self.blocked(&spec.command),
+                blocked: self.blocked_with(&spec.command, &cursor),
                 spec,
             })
             .collect()
@@ -394,11 +411,29 @@ impl Kuizer {
             self.reveal_cursor.set(false);
         }
         self.tab = tab;
+        if tab == Tab::Duplicates {
+            self.load_duplicates(cx);
+        }
         cx.notify();
     }
 
     /// Why a command cannot run right now, or `None` when it can.
     pub(super) fn blocked(&self, command: &Command) -> Option<&'static str> {
+        self.blocked_with(command, &OnceCell::new())
+    }
+
+    /// Like `blocked`, finding the cursor row at most once in `cursor`, so a caller asking about
+    /// many commands looks it up once.
+    fn blocked_with(
+        &self,
+        command: &Command,
+        cursor: &OnceCell<Option<Target>>,
+    ) -> Option<&'static str> {
+        let cursor = || cursor.get_or_init(|| self.cursor_target()).as_ref();
+        let repo = || match cursor() {
+            Some(Target::Repo(root)) if self.tab == Tab::Repos => Some(GitScope::One(root.clone())),
+            _ => None,
+        };
         let started = !matches!(self.phase, Phase::Start);
         let shown = self.report().is_some();
         match command {
@@ -413,6 +448,7 @@ impl Kuizer {
             Command::Rescan if !started || self.roots.is_empty() => Some(START_FIRST),
             Command::NewScan if !started => Some("The start screen is already open"),
             Command::Rescan | Command::NewScan => self.wait(),
+            Command::FindDuplicates => (!shown).then_some(NEEDS_SCAN),
             Command::Undo => {
                 let trashed = matches!(
                     self.toast,
@@ -464,9 +500,9 @@ impl Kuizer {
                 }
             }
             Command::Trash => {
-                let item = matches!(self.cursor_target(), Some(Target::Item(..)));
+                let item = matches!(cursor(), Some(Target::Item(..)));
                 self.trash_lock().or_else(|| self.wait()).or_else(|| {
-                    (self.selected().is_empty() && !item).then_some("Select items first")
+                    (self.selection.is_empty() && !item).then_some("Select items first")
                 })
             }
             Command::ExtendDown | Command::ExtendUp => {
@@ -476,7 +512,7 @@ impl Kuizer {
                     Some(LISTS_ONLY)
                 } else {
                     self.wait()
-                        .or_else(|| self.cursor_target().is_none().then_some(NO_ROWS))
+                        .or_else(|| cursor().is_none().then_some(NO_ROWS))
                 }
             }
             Command::SelectAll | Command::SelectNone | Command::Toggle => {
@@ -487,21 +523,16 @@ impl Kuizer {
                 }
             }
             Command::FocusFilter => (self.tab == Tab::Overview).then_some(LISTS_ONLY),
-            Command::Gc => self.gc_blocked(self.cursor_repo().map(GitScope::One).as_ref()),
+            Command::Gc => self.gc_blocked(repo().as_ref()),
             Command::GcAll => self.gc_blocked(self.in_repos().then_some(&GitScope::All)),
-            Command::Branches => {
-                self.branches_blocked(self.cursor_repo().map(GitScope::One).as_ref())
-            }
+            Command::Branches => self.branches_blocked(repo().as_ref()),
             Command::BranchesAll => {
                 self.branches_blocked(self.in_repos().then_some(&GitScope::All))
             }
-            Command::Reveal | Command::CopyPath | Command::OpenMenu if self.map_active() => self
-                .cursor_target()
-                .is_none()
-                .then_some("Focus an item tile first"),
-            Command::Reveal
-                if matches!(self.cursor_target(), Some(Target::Item(Source::Docker, ..))) =>
-            {
+            Command::Reveal | Command::CopyPath | Command::OpenMenu if self.map_active() => {
+                cursor().is_none().then_some("Focus an item tile first")
+            }
+            Command::Reveal if matches!(cursor(), Some(Target::Item(Source::Docker, ..))) => {
                 Some(NOT_ON_DISK)
             }
             Command::Down
@@ -516,7 +547,7 @@ impl Kuizer {
                 if self.tab == Tab::Overview {
                     Some(LISTS_ONLY)
                 } else {
-                    self.cursor_target().is_none().then_some(NO_ROWS)
+                    cursor().is_none().then_some(NO_ROWS)
                 }
             }
         }
@@ -562,6 +593,10 @@ impl Kuizer {
             Command::PreviousTab => self.go_to(self.tab.previous(), cx),
             Command::Rescan => self.rescan(cx),
             Command::NewScan => self.new_scan(cx),
+            Command::FindDuplicates => {
+                self.find_duplicates(cx);
+                self.go_to(Tab::Duplicates, cx);
+            }
             Command::Undo => self.undo_last(cx),
             Command::Down => self.move_cursor(Motion::Down),
             Command::Up => self.move_cursor(Motion::Up),
@@ -577,8 +612,9 @@ impl Kuizer {
                 }
             }
             Command::SelectAll => {
-                let keys = self.list_keys();
-                self.selection.extend(keys);
+                for key in self.list_keys() {
+                    self.select(key);
+                }
             }
             Command::SelectNone => {
                 for key in self.list_keys() {
@@ -586,7 +622,7 @@ impl Kuizer {
                 }
             }
             Command::Trash => {
-                if !self.selected().is_empty() {
+                if !self.selection.is_empty() {
                     self.confirm(None, window, cx);
                 } else if let Some(Target::Item(source, id, _)) = self.cursor_target() {
                     self.confirm(Some((source, id)), window, cx);
@@ -755,15 +791,81 @@ impl Kuizer {
     }
 
     pub(super) fn target_exists(&self, target: &Target) -> bool {
-        let Some(report) = self.report() else {
+        if self.report().is_none() {
             return false;
-        };
+        }
         match target {
-            Target::Item(Source::Artifact, id, _) => self
-                .rows
-                .iter()
-                .any(|&index| report.candidates[index].id == *id),
+            Target::Item(Source::Artifact, id, _) => {
+                self.artifact_row(*id, &self.artifact_row).is_some()
+            }
             _ => self.targets(target.tab()).contains(target),
+        }
+    }
+
+    /// Where an artifact sits in the rows on screen. `hint` is checked first and remembers the
+    /// answer, so finding a cursor or an anchor that has not moved costs the same in any list.
+    fn artifact_row(&self, id: u64, hint: &Cell<usize>) -> Option<usize> {
+        let report = self.report()?;
+        let at = |row: usize| {
+            self.rows
+                .get(row)
+                .is_some_and(|&index| report.candidates[index].id == id)
+        };
+        if at(hint.get()) {
+            return Some(hint.get());
+        }
+        let row = (0..self.rows.len()).find(|&row| at(row))?;
+        hint.set(row);
+        Some(row)
+    }
+
+    /// The rows of a list for a cursor move: `None` for the artifact list, which is read through
+    /// its row indices instead, else every target.
+    fn listing(&self, tab: Tab) -> Option<Vec<Target>> {
+        (tab != Tab::Artifacts).then(|| self.targets(tab))
+    }
+
+    fn listed_count(&self, listed: Option<&[Target]>) -> usize {
+        listed.map_or(self.rows.len(), <[Target]>::len)
+    }
+
+    fn listed_row(
+        &self,
+        listed: Option<&[Target]>,
+        target: &Target,
+        hint: &Cell<usize>,
+    ) -> Option<usize> {
+        match (listed, target) {
+            (Some(listed), _) => listed.iter().position(|row| row == target),
+            (None, Target::Item(Source::Artifact, id, _)) => self.artifact_row(*id, hint),
+            (None, _) => None,
+        }
+    }
+
+    fn listed_target(&self, listed: Option<&[Target]>, row: usize) -> Option<Target> {
+        match listed {
+            Some(listed) => listed.get(row).cloned(),
+            None => {
+                let candidate = &self.report()?.candidates[*self.rows.get(row)?];
+                Some(Target::Item(
+                    Source::Artifact,
+                    candidate.id,
+                    candidate.path.clone(),
+                ))
+            }
+        }
+    }
+
+    fn listed_key(&self, listed: Option<&[Target]>, row: usize) -> Option<(Source, u64)> {
+        match listed {
+            Some(listed) => match listed.get(row)? {
+                Target::Item(source, id, _) => Some((*source, *id)),
+                _ => None,
+            },
+            None => Some((
+                Source::Artifact,
+                self.report()?.candidates[*self.rows.get(row)?].id,
+            )),
         }
     }
 
@@ -792,17 +894,28 @@ impl Kuizer {
     }
 
     fn move_cursor(&mut self, motion: Motion) {
-        let targets = self.targets(self.tab);
-        if targets.is_empty() {
+        let tab = self.tab;
+        let listed = self.listing(tab);
+        let listed = listed.as_deref();
+        let count = self.listed_count(listed);
+        if count == 0 {
             return;
         }
         let current = self
             .cursor_target()
-            .and_then(|cursor| targets.iter().position(|target| *target == cursor))
+            .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row))
             .unwrap_or(0);
-        let next = step(motion, current, targets.len(), self.page_size());
-        self.cursors.insert(self.tab, targets[next].clone());
+        let next = step(motion, current, count, self.page_size());
+        self.place_cursor(listed, current, next);
+    }
+
+    fn place_cursor(&mut self, listed: Option<&[Target]>, current: usize, next: usize) {
+        let Some(target) = self.listed_target(listed, next) else {
+            return;
+        };
+        self.cursors.insert(self.tab, target);
         if self.tab == Tab::Artifacts {
+            self.artifact_row.set(next);
             let strategy = if next < current {
                 ScrollStrategy::Top
             } else {
@@ -818,43 +931,43 @@ impl Kuizer {
     /// cursor. Only the rows between the old and the new cursor change, so a step costs the
     /// same in any list size.
     fn extend(&mut self, motion: Motion) {
-        let targets = self.targets(self.tab);
-        let Some(cursor) = self.cursor_target().filter(|_| !targets.is_empty()) else {
+        let tab = self.tab;
+        let listed = self.listing(tab);
+        let listed = listed.as_deref();
+        let count = self.listed_count(listed);
+        let Some(cursor) = self.cursor_target().filter(|_| count > 0) else {
             return;
         };
-        let current = targets
-            .iter()
-            .position(|target| *target == cursor)
+        let current = self
+            .listed_row(listed, &cursor, &self.artifact_row)
             .unwrap_or(0);
         let mut range = self
             .range
             .take()
-            .filter(|range| range.tab == self.tab && targets.contains(&range.anchor))
+            .filter(|range| {
+                range.tab == tab
+                    && self
+                        .listed_row(listed, &range.anchor, &range.anchor_row)
+                        .is_some()
+            })
             .unwrap_or_else(|| Span {
-                tab: self.tab,
-                anchor: targets[current].clone(),
+                tab,
+                anchor: cursor.clone(),
+                anchor_row: Cell::new(current),
                 added: HashSet::new(),
             });
-        let anchor = targets
-            .iter()
-            .position(|target| *target == range.anchor)
+        let anchor = self
+            .listed_row(listed, &range.anchor, &range.anchor_row)
             .unwrap_or(current);
-        self.move_cursor(motion);
-        let next = step(motion, current, targets.len(), self.page_size());
+        let next = step(motion, current, count, self.page_size());
+        self.place_cursor(listed, current, next);
         let spans = |end: usize, index: usize| anchor.min(end) <= index && index <= anchor.max(end);
-        let first = current.min(next);
-        for (index, target) in targets
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(current.max(next) - first + 1)
-        {
-            let Target::Item(source, id, _) = target else {
+        for index in current.min(next)..=current.max(next) {
+            let Some(key) = self.listed_key(listed, index) else {
                 continue;
             };
-            let key = (*source, *id);
             if spans(next, index) {
-                if self.selection.insert(key) {
+                if self.select(key) {
                     range.added.insert(key);
                 }
             } else if spans(current, index) && range.added.remove(&key) {
@@ -935,7 +1048,9 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext, size};
 
     use super::*;
-    use crate::app::tests::{menu_target, open, project, scanned, type_text, wait_for_refresh};
+    use crate::app::tests::{
+        menu_target, open, project, scanned, type_text, wait_for_duplicates, wait_for_refresh,
+    };
 
     #[test]
     fn motions_stop_at_the_ends() {
@@ -978,9 +1093,11 @@ mod tests {
     ) -> (Entity<Kuizer>, &'a mut VisualTestContext) {
         cx.update(bind_keys);
         let (view, cx) = open(cx, dir.join("recent"));
+        view.update(cx, |app, _| app.options.duplicates = tab == Tab::Duplicates);
         type_text(cx, &root.display().to_string());
         cx.simulate_keystrokes("enter");
         wait_for_refresh(&view, cx);
+        wait_for_duplicates(&view, cx);
         view.update(cx, |app, cx| app.go_to(tab, cx));
         cx.update(|window, cx| window.draw(cx).clear());
         (view, cx)
@@ -1390,6 +1507,41 @@ mod tests {
         cx.simulate_keystrokes("enter escape");
         view.read_with(cx, |app, _| {
             assert_eq!(app.rows.len(), 12, "Escape outside the field clears it too");
+        });
+    }
+
+    #[gpui::test]
+    fn the_cursor_keeps_its_item_while_the_filter_changes(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 12);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        let cursor_id = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| match app.cursor_target() {
+                Some(Target::Item(_, id, _)) => id,
+                other => panic!("expected an item cursor, got {other:?}"),
+            })
+        };
+        cx.simulate_keystrokes("/");
+        type_text(cx, "project-1");
+        cx.simulate_keystrokes("enter j");
+        assert_eq!(cursor_row(&view, cx), 1);
+        let id = cursor_id(&view, cx);
+
+        cx.simulate_keystrokes("escape");
+        let row = cursor_row(&view, cx);
+        assert_eq!(cursor_id(&view, cx), id, "the cursor stays on its item");
+        cx.simulate_keystrokes("j");
+        assert_eq!(cursor_row(&view, cx), (row + 1).min(11));
+
+        cx.simulate_keystrokes("/");
+        type_text(cx, "project-1");
+        cx.simulate_keystrokes("backspace");
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.counts(Tab::Artifacts),
+                (12, 12),
+                "a shorter filter widens again"
+            );
         });
     }
 

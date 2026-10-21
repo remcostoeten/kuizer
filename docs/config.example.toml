@@ -26,10 +26,17 @@ category = "build"
 safety = "review"
 ecosystem = "jekyll"
 
+# The GUI searches for duplicate files on request, from the Duplicates section or the
+# command palette. With enabled = true it also searches after every scan, once the
+# rest of the results are on screen. `kuizer duplicates` is not affected.
 [duplicates]
+enabled = false
 min_size = "4KiB"
 threads = 0
 verify = false
+# Files in hidden home folders (~/.cache, ~/.rustup) and tool-managed folders (Go modules)
+# are skipped unless this is true; a scan root inside one still looks there.
+include_hidden = false
 
 [delete]
 mode = "trash"

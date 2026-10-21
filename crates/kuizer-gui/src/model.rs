@@ -1,14 +1,17 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Instant, SystemTime};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::cli::SortKey;
 use kuizer::commands::{measure_caches_with, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
-use kuizer::detect::{Category, Safety};
+use kuizer::detect::{Category, RuleInfo, Safety};
 use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
 use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
@@ -17,26 +20,91 @@ use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::repos::{self, Repository};
-use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, Summary};
+use kuizer::scan::{self, Cancel, Candidate, Collected, Issue, Progress, Summary};
 use kuizer::toolchains::{self, Toolchain};
 
-use crate::activity::{Activity, Step, grouped, plural, update};
+use crate::activity::{self, Found, Step, Tracker, grouped, plural};
 use crate::start::ScanOptions;
 use crate::theme;
 
 pub const CANCELLED: &str = "cancelled";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Stage {
-    #[default]
-    Starting,
-    Scanning(Progress),
-    Duplicates(dupes::Stage),
+/// One section of a scan that arrives on its own: the parts run side by side and each is
+/// shown the moment it is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Part {
+    Artifacts,
     Caches,
     Toolchains,
     Docker,
     Repos,
     History,
+}
+
+impl Part {
+    /// @name Part::expected
+    /// @description The parts a scan with these options delivers. Parts the options turn off
+    /// never arrive, so nothing waits for them.
+    ///
+    /// @example
+    /// let pending = Part::expected(&options);
+    pub fn expected(options: &ScanOptions) -> HashSet<Part> {
+        [
+            (true, Self::Artifacts),
+            (options.caches, Self::Caches),
+            (options.toolchains, Self::Toolchains),
+            (options.docker, Self::Docker),
+            (options.repos, Self::Repos),
+            (true, Self::History),
+        ]
+        .into_iter()
+        .filter_map(|(on, part)| on.then_some(part))
+        .collect()
+    }
+
+    pub fn source(self) -> Option<Source> {
+        match self {
+            Self::Artifacts => Some(Source::Artifact),
+            Self::Caches => Some(Source::Cache),
+            Self::Toolchains => Some(Source::Toolchain),
+            Self::Docker => Some(Source::Docker),
+            Self::Repos | Self::History => None,
+        }
+    }
+}
+
+/// What a running scan hands to the window: a batch of artifacts found so far while the folder
+/// walk runs, or a finished part that replaces its section of the report.
+pub enum Loaded {
+    Found(Vec<Candidate>),
+    Artifacts {
+        candidates: Vec<Candidate>,
+        issues: Vec<Issue>,
+        summary: Summary,
+        disks: Vec<Disk>,
+    },
+    Caches(Vec<(KnownCache, Candidate)>),
+    Toolchains(Vec<(Toolchain, Candidate)>),
+    Docker {
+        entries: Vec<(docker::Item, Candidate)>,
+        issues: Vec<String>,
+    },
+    Repos(Vec<Repository>),
+    History(Result<HistoryView, String>),
+}
+
+impl Loaded {
+    pub fn part(&self) -> Option<Part> {
+        match self {
+            Self::Found(_) => None,
+            Self::Artifacts { .. } => Some(Part::Artifacts),
+            Self::Caches(_) => Some(Part::Caches),
+            Self::Toolchains(_) => Some(Part::Toolchains),
+            Self::Docker { .. } => Some(Part::Docker),
+            Self::Repos(_) => Some(Part::Repos),
+            Self::History(_) => Some(Part::History),
+        }
+    }
 }
 
 pub struct Disk {
@@ -85,22 +153,37 @@ impl HistoryView {
             .filter(|run| run.action == Action::Delete)
     }
 
-    /// @name HistoryView::trash_state
-    /// @description Says whether a delete run can still be restored from the trash, using the
-    /// library's per item state: what is left in the trash, all of it restored, gone from the
-    /// trash, unknown because the trash cannot be read, or never trashed at all.
+    #[cfg(test)]
+    pub fn trash_state(&self, run: usize) -> TrashState {
+        self.state_of(&self.history.restored_ids(), run)
+    }
+
+    /// @name HistoryView::trash_states
+    /// @description Says for every run, in run order, whether it can still be restored from the
+    /// trash, using the library's per item state: what is left in the trash, all of it restored,
+    /// gone from the trash, unknown because the trash cannot be read, or never trashed at all.
+    /// Reads the restore runs once for all of them.
     ///
     /// @example
-    /// if let TrashState::Restorable { items, bytes } = view.trash_state(run) { .. }
-    pub fn trash_state(&self, run: usize) -> TrashState {
+    /// if let TrashState::Restorable { items, bytes } = view.trash_states()[run] { .. }
+    pub fn trash_states(&self) -> Vec<TrashState> {
+        let restored = self.history.restored_ids();
+        (0..self.history.runs.len())
+            .map(|run| self.state_of(&restored, run))
+            .collect()
+    }
+
+    fn state_of(&self, restored: &HashSet<&str>, run: usize) -> TrashState {
         let Some(entries) = self.history.runs.get(run).map(|run| run.deleted.len()) else {
             return TrashState::NotTrashed;
         };
-        let restored = self.history.restored_ids();
         let kept = self.trash_known.then_some(&self.kept);
-        let states: Vec<ItemState> = (0..entries)
-            .map(|entry| history::item_state(&self.history, &restored, kept, run, entry))
-            .filter(|state| !matches!(state, ItemState::Deleted | ItemState::DryRun))
+        let states: Vec<(usize, ItemState)> = (0..entries)
+            .map(|entry| {
+                let state = history::item_state(&self.history, restored, kept, run, entry);
+                (entry, state)
+            })
+            .filter(|(_, state)| !matches!(state, ItemState::Deleted | ItemState::DryRun))
             .collect();
         if states.is_empty() {
             return TrashState::NotTrashed;
@@ -108,17 +191,24 @@ impl HistoryView {
         if !self.trash_known {
             return TrashState::Unknown;
         }
-        let left = history::restorable(&self.history, &self.kept, run);
+        let left: Vec<usize> = states
+            .iter()
+            .filter(|(_, state)| *state == ItemState::InTrash)
+            .map(|&(entry, _)| entry)
+            .collect();
         if !left.is_empty() {
             return TrashState::Restorable {
                 items: left.len(),
                 bytes: left
                     .iter()
-                    .map(|&(run, entry)| self.history.runs[run].deleted[entry].bytes)
+                    .map(|&entry| self.history.runs[run].deleted[entry].bytes)
                     .sum(),
             };
         }
-        if states.iter().all(|state| *state == ItemState::Restored) {
+        if states
+            .iter()
+            .all(|(_, state)| *state == ItemState::Restored)
+        {
             TrashState::Restored
         } else {
             TrashState::Emptied
@@ -159,6 +249,111 @@ pub struct Bucket<K> {
 }
 
 impl Report {
+    /// @name Report::empty
+    /// @description A report with nothing in it yet, for the parts of a scan to fill in as they
+    /// finish.
+    ///
+    /// @example
+    /// let mut report = Report::empty(&roots, &options);
+    pub fn empty(roots: &[PathBuf], options: &ScanOptions) -> Self {
+        Self {
+            roots: roots.to_vec(),
+            options: options.clone(),
+            candidates: Vec::new(),
+            issues: Vec::new(),
+            summary: Summary {
+                progress: Progress::default(),
+                duration: Duration::ZERO,
+                cancelled: false,
+            },
+            caches: Vec::new(),
+            toolchains: Vec::new(),
+            docker: Vec::new(),
+            docker_issues: Vec::new(),
+            repos: Vec::new(),
+            duplicates: None,
+            history: Err(String::new()),
+            disks: Vec::new(),
+            scanned: SystemTime::now(),
+        }
+    }
+
+    /// @name Report::apply
+    /// @description Stores what a scan delivered. A batch of found artifacts joins the list,
+    /// largest first; a finished part replaces its section. Returns what the section held
+    /// before, so the caller can drop it where it does not hold up the window.
+    ///
+    /// @example
+    /// let old = report.apply(Loaded::Caches(caches));
+    pub fn apply(&mut self, loaded: Loaded) -> Loaded {
+        match loaded {
+            Loaded::Found(batch) => {
+                self.candidates.extend(batch);
+                sort_candidates(&mut self.candidates, SortKey::Size);
+                Loaded::Found(Vec::new())
+            }
+            Loaded::Artifacts {
+                candidates,
+                issues,
+                summary,
+                disks,
+            } => Loaded::Artifacts {
+                candidates: std::mem::replace(&mut self.candidates, candidates),
+                issues: std::mem::replace(&mut self.issues, issues),
+                summary: std::mem::replace(&mut self.summary, summary),
+                disks: std::mem::replace(&mut self.disks, disks),
+            },
+            Loaded::Caches(caches) => Loaded::Caches(std::mem::replace(&mut self.caches, caches)),
+            Loaded::Toolchains(toolchains) => {
+                Loaded::Toolchains(std::mem::replace(&mut self.toolchains, toolchains))
+            }
+            Loaded::Docker { entries, issues } => Loaded::Docker {
+                entries: std::mem::replace(&mut self.docker, entries),
+                issues: std::mem::replace(&mut self.docker_issues, issues),
+            },
+            Loaded::Repos(repos) => Loaded::Repos(std::mem::replace(&mut self.repos, repos)),
+            Loaded::History(history) => {
+                Loaded::History(std::mem::replace(&mut self.history, history))
+            }
+        }
+    }
+
+    /// @name Report::into_parts
+    /// @description Splits a report into its sections, so a saved scan can fill in only the
+    /// sections a fresh scan has not delivered yet.
+    ///
+    /// @example
+    /// for part in saved.into_parts() { report.apply(part); }
+    pub fn into_parts(self) -> Vec<Loaded> {
+        vec![
+            Loaded::Artifacts {
+                candidates: self.candidates,
+                issues: self.issues,
+                summary: self.summary,
+                disks: self.disks,
+            },
+            Loaded::Caches(self.caches),
+            Loaded::Toolchains(self.toolchains),
+            Loaded::Docker {
+                entries: self.docker,
+                issues: self.docker_issues,
+            },
+            Loaded::Repos(self.repos),
+            Loaded::History(self.history),
+        ]
+    }
+
+    /// The removable items of one section of the report.
+    pub fn section(&self, source: Source) -> Box<dyn Iterator<Item = &Candidate> + '_> {
+        match source {
+            Source::Artifact => Box::new(self.candidates.iter()),
+            Source::Cache => Box::new(self.caches.iter().map(|(_, candidate)| candidate)),
+            Source::Toolchain => Box::new(self.toolchains.iter().map(|(_, candidate)| candidate)),
+            Source::Docker => Box::new(self.docker.iter().map(|(_, candidate)| candidate)),
+        }
+    }
+
+    #[cfg(test)]
     pub fn total(&self, safety: Option<Safety>) -> u64 {
         self.candidates
             .iter()
@@ -284,298 +479,351 @@ pub fn short_path(path: &Path, roots: &[PathBuf]) -> String {
 }
 
 /// @name load
-/// @description Gathers everything the dashboard shows in one pass: project artifacts, duplicate
-/// files and toolchain pins from a single walk, global caches, installed toolchains, the cleanup
-/// history and free disk space.
-/// The start screen's options decide which of these run. Reports what it is doing through
-/// `activity` so the window can show it while this runs on a worker thread: the step, its live
-/// counters, the folder or item it touched last, finished steps with their result, and the
-/// largest items found so far. Stops early once `cancel` is set.
+/// @description Gathers everything the dashboard shows: project artifacts and toolchain pins
+/// from one folder walk, global caches, installed toolchains, git repositories, Docker objects,
+/// the cleanup history and free disk space.
+/// The start screen's options decide which of these run. History, caches, toolchains and Docker
+/// start with the walk and run beside it; repositories start when it ends, and toolchains wait
+/// for its pins before they are delivered, because a pinned version is never safe to remove.
+/// Artifacts go to `emit` in batches while the walk runs, and every part goes to `emit` the
+/// moment it is done. Progress goes through `tracker`, and the work stops once `cancel` is set.
 ///
 /// @example
-/// let activity = Mutex::new(Activity::default());
-/// let report = load(&config, &roots, &options, &Cancel::new(), &activity)?;
+/// let tracker = Tracker::new(|_| {});
+/// load(&config, &roots, &options, &Cancel::new(), &tracker, &|loaded| show(loaded))?;
 pub fn load(
     config: &Config,
     roots: &[PathBuf],
     options: &ScanOptions,
     cancel: &Cancel,
-    activity: &Mutex<Activity>,
-) -> Result<Report, String> {
-    let config = options.apply(config);
-    let duplicate_options = options.duplicates.then(|| Options::from_config(&config));
-    let docker_config = config.docker.clone();
-    let containers = options.docker.then(|| {
-        std::thread::Builder::new()
-            .name("kuizer-gui-docker".to_owned())
-            .spawn(move || {
-                docker::list(
-                    &docker_config.engines,
-                    docker_config.timeout(),
-                    docker_config.recent_hours,
-                )
-            })
-    });
+    tracker: &Tracker,
+    emit: &(dyn Fn(Loaded) + Sync),
+) -> Result<(), String> {
+    let config = &options.apply(config);
     let pin_search = options.toolchains && config.toolchains.pins;
     let started = Instant::now();
-    let (handle, walked) = repos::start_scan(
-        &config,
-        roots,
-        cancel.clone(),
-        duplicate_options,
-        pin_search,
-    )
-    .map_err(|error| error.to_string())?;
-    let collected = scan::collect_with(
-        &handle,
-        |progress| {
-            update(activity, |activity| {
-                activity.stage = Stage::Scanning(progress);
-                activity.current = handle.current();
+    let (handle, walked) = repos::start_scan(config, roots, cancel.clone(), None, pin_search)
+        .map_err(|error| error.to_string())?;
+    tracker.update_now(|activity| {
+        for step in Step::ALL {
+            if step.enabled(options) && step != Step::Repos {
+                activity.begin(step, None);
+            }
+        }
+    });
+    let finished = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        let ticker = spawn_part(scope, "pulse", || {
+            while !finished.load(Ordering::Relaxed) {
+                thread::park_timeout(Duration::from_millis(100));
+                tracker.flush();
+            }
+        });
+        spawn_part(scope, "history", || {
+            let history = HistoryView::load();
+            tracker.update_now(|activity| {
+                activity.finish(
+                    Step::History,
+                    started.elapsed(),
+                    match &history {
+                        Ok(view) => plural(view.delete_runs().count(), "cleanup"),
+                        Err(_) => "Cannot read it".to_owned(),
+                    },
+                );
             });
+            emit(Loaded::History(history));
+        });
+        if options.docker {
+            spawn_part(scope, "docker", || {
+                let listing = docker::list(
+                    &config.docker.engines,
+                    config.docker.timeout(),
+                    config.docker.recent_hours,
+                );
+                tracker.update_now(|activity| {
+                    activity.finish(
+                        Step::Docker,
+                        started.elapsed(),
+                        plural(listing.items.len(), "object"),
+                    );
+                });
+                emit(Loaded::Docker {
+                    entries: docker::entries(listing.items),
+                    issues: listing.issues,
+                });
+            });
+        }
+        if options.caches {
+            spawn_part(scope, "caches", || {
+                let caches = measure_caches(config, cancel, tracker);
+                let bytes = caches.iter().map(|(_, c)| c.usage.allocated).sum();
+                tracker.update_now(|activity| {
+                    activity.finish(
+                        Step::Caches,
+                        started.elapsed(),
+                        format!("{}, {}", plural(caches.len(), "cache"), theme::bytes(bytes)),
+                    );
+                });
+                emit(Loaded::Caches(caches));
+            });
+        }
+        let toolchains = options.toolchains.then(|| {
+            spawn_part(scope, "toolchains", || {
+                measure_toolchains(config, cancel, tracker)
+            })
+        });
+
+        let collected = walk(&handle, tracker, emit);
+        let (pins, found_repos) = walked
+            .recv()
+            .map(|walked| (walked.pins, walked.repositories))
+            .unwrap_or_default();
+        if cancel.is_cancelled() {
+            finished.store(true, Ordering::Relaxed);
+            ticker.thread().unpark();
+            return Err(CANCELLED.to_owned());
+        }
+        let mut candidates = collected.candidates;
+        sort_candidates(&mut candidates, SortKey::Size);
+        let artifact_bytes: u64 = candidates.iter().map(|c| c.usage.allocated).sum();
+        let found = candidates.len();
+        let dirs = collected.summary.progress.dirs;
+        emit(Loaded::Artifacts {
+            candidates,
+            issues: collected.issues,
+            summary: collected.summary,
+            disks: disks(roots),
+        });
+        tracker.update_now(|activity| {
+            activity.finish(
+                Step::Folders,
+                started.elapsed(),
+                format!(
+                    "{} found, {} in {} folders",
+                    plural(found, "item"),
+                    theme::bytes(artifact_bytes),
+                    grouped(dirs)
+                ),
+            );
+            if options.repos {
+                activity.begin(Step::Repos, Some(found_repos.len()));
+            }
+        });
+
+        if options.repos {
+            spawn_part(scope, "repos", move || {
+                let checked = found_repos.len();
+                let repos = repos::inspect_all_with(found_repos, &config.git, cancel, |root| {
+                    tracker.update(|activity| activity.advance(Step::Repos, root));
+                });
+                tracker.update_now(|activity| {
+                    activity.finish(
+                        Step::Repos,
+                        started.elapsed(),
+                        format!(
+                            "{} of {} worth cleaning",
+                            repos.len(),
+                            plural(checked, "repository")
+                        ),
+                    );
+                });
+                emit(Loaded::Repos(repos));
+            });
+        }
+        if let Some(measured) = toolchains {
+            let mut toolchains = measured.join().unwrap_or_default();
+            if let Some(pins) = &pins {
+                repin(&mut toolchains, &pins.pins);
+            }
+            let bytes = toolchains.iter().map(|(_, c)| c.usage.allocated).sum();
+            tracker.update_now(|activity| {
+                activity.finish(
+                    Step::Toolchains,
+                    started.elapsed(),
+                    format!(
+                        "{}, {}",
+                        plural(toolchains.len(), "version"),
+                        theme::bytes(bytes)
+                    ),
+                );
+            });
+            emit(Loaded::Toolchains(toolchains));
+        }
+        finished.store(true, Ordering::Relaxed);
+        ticker.thread().unpark();
+        Ok(())
+    });
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
+    result
+}
+
+fn spawn_part<'scope, T: Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'scope,
+) -> thread::ScopedJoinHandle<'scope, T> {
+    thread::Builder::new()
+        .name(format!("kuizer-gui-{name}"))
+        .spawn_scoped(scope, work)
+        .expect("spawn scan part thread")
+}
+
+#[derive(Default)]
+struct Streamed {
+    batch: Vec<Candidate>,
+    found: u64,
+    bytes: u64,
+    largest: Vec<Found>,
+}
+
+fn walk(handle: &scan::Scan, tracker: &Tracker, emit: &(dyn Fn(Loaded) + Sync)) -> Collected {
+    let streamed = RefCell::new(Streamed::default());
+    scan::collect_with(
+        handle,
+        |progress| {
+            let mut streamed = streamed.borrow_mut();
+            let (found, bytes) = (streamed.found, streamed.bytes);
+            streamed.found = 0;
+            streamed.bytes = 0;
+            tracker.update(|activity| {
+                activity.walked = progress;
+                activity.touch(Step::Folders, handle.current());
+                activity.merge(found, bytes, &streamed.largest);
+            });
+            if !streamed.batch.is_empty() {
+                emit(Loaded::Found(std::mem::take(&mut streamed.batch)));
+            }
         },
         |candidate| {
-            update(activity, |activity| {
-                activity.record(
-                    &candidate.path,
-                    &candidate.rule.name,
-                    candidate.usage.allocated,
+            let mut streamed = streamed.borrow_mut();
+            let bytes = candidate.usage.allocated;
+            streamed.batch.push(candidate.clone());
+            streamed.found += 1;
+            streamed.bytes += bytes;
+            if activity::beats(&streamed.largest, bytes) {
+                activity::keep(
+                    &mut streamed.largest,
+                    Found {
+                        path: candidate.path.clone(),
+                        name: candidate.rule.name.clone(),
+                        bytes,
+                    },
                 );
-            });
+            }
         },
-    );
-    let (files, pins, found_repos) = walked
-        .recv()
-        .map(|walked| (walked.files, walked.pins, walked.repositories))
-        .unwrap_or_default();
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-    let mut candidates = collected.candidates;
-    sort_candidates(&mut candidates, SortKey::Size);
-    let artifact_bytes: u64 = candidates.iter().map(|c| c.usage.allocated).sum();
-    update(activity, |activity| {
-        activity.finish(
-            Step::Folders,
-            started.elapsed(),
-            format!(
-                "{} found, {} in {} folders",
-                plural(candidates.len(), "item"),
-                theme::bytes(artifact_bytes),
-                grouped(collected.summary.progress.dirs)
-            ),
-        );
-    });
+    )
+}
 
-    let started = Instant::now();
-    let duplicates = duplicate_options
-        .zip(files)
-        .map(|(duplicate_options, files)| {
-            dupes::group(files, duplicate_options, |progress| {
-                update(activity, |activity| {
-                    activity.begin(Stage::Duplicates(progress), None);
-                });
-            })
-        });
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-    if let Some(duplicates) = &duplicates {
-        update(activity, |activity| {
-            activity.finish(
-                Step::Duplicates,
-                started.elapsed(),
-                if duplicates.groups.is_empty() {
-                    "No duplicates".to_owned()
-                } else {
-                    format!(
-                        "{}, {} reclaimable",
-                        plural(duplicates.groups.len(), "group"),
-                        theme::bytes(duplicates.reclaimable())
-                    )
-                },
-            );
-        });
-    }
-
-    let caches = if options.caches {
-        let started = Instant::now();
-        let excludes = config.excludes().ok();
-        let found: Vec<KnownCache> = Locations::for_user()
-            .map(|locations| {
-                caches::find(&locations, &Protected::for_user())
-                    .into_iter()
-                    .filter(|cache| {
-                        excludes
-                            .as_ref()
-                            .is_none_or(|excludes| !excludes.path(&cache.path))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        update(activity, |activity| {
-            activity.begin(Stage::Caches, Some(found.len()));
-        });
-        let caches = measure_caches_with(found, cancel, |candidate| {
-            update(activity, |activity| {
-                activity.advance(&candidate.path);
-                if candidate.usage.entries > 0 {
-                    activity.record(
-                        &candidate.path,
-                        &candidate.rule.name,
-                        candidate.usage.allocated,
-                    );
-                }
-            });
-        });
-        let bytes = caches.iter().map(|(_, c)| c.usage.allocated).sum();
-        update(activity, |activity| {
-            activity.finish(
-                Step::Caches,
-                started.elapsed(),
-                format!("{}, {}", plural(caches.len(), "cache"), theme::bytes(bytes)),
-            );
-        });
-        caches
-    } else {
-        Vec::new()
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let toolchains = if options.toolchains {
-        let started = Instant::now();
-        let excludes = config.excludes().ok();
-        let found: Vec<Toolchain> = toolchains::Locations::for_user()
-            .map(|locations| {
-                let mut found: Vec<Toolchain> =
-                    toolchains::find(&locations, &config.toolchains.tools)
-                        .into_iter()
-                        .filter(|toolchain| {
-                            excludes
-                                .as_ref()
-                                .is_none_or(|excludes| !excludes.path(&toolchain.path))
-                        })
-                        .collect();
-                if let Some(pins) = &pins {
-                    toolchains::apply_pins(&mut found, &pins.pins);
-                }
-                found
-            })
-            .unwrap_or_default();
-        update(activity, |activity| {
-            activity.begin(Stage::Toolchains, Some(found.len()));
-        });
-        let toolchains = toolchains::measure_with(found, cancel, |candidate| {
-            update(activity, |activity| {
-                activity.advance(&candidate.path);
-                activity.record(
-                    &candidate.path,
-                    &candidate.rule.name,
-                    candidate.usage.allocated,
-                );
-            });
-        });
-        let bytes = toolchains.iter().map(|(_, c)| c.usage.allocated).sum();
-        update(activity, |activity| {
-            activity.finish(
-                Step::Toolchains,
-                started.elapsed(),
-                format!(
-                    "{}, {}",
-                    plural(toolchains.len(), "version"),
-                    theme::bytes(bytes)
-                ),
-            );
-        });
-        toolchains
-    } else {
-        Vec::new()
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let repos = if options.repos {
-        let started = Instant::now();
-        let checked = found_repos.len();
-        update(activity, |activity| {
-            activity.begin(Stage::Repos, Some(checked));
-        });
-        let repos = repos::inspect_all_with(found_repos, &config.git, cancel, |root| {
-            update(activity, |activity| activity.advance(root));
-        });
-        update(activity, |activity| {
-            activity.finish(
-                Step::Repos,
-                started.elapsed(),
-                format!(
-                    "{} of {} worth cleaning",
-                    repos.len(),
-                    plural(checked, "repository")
-                ),
-            );
-        });
-        repos
-    } else {
-        Vec::new()
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-
-    let started = Instant::now();
-    let listing = match containers {
-        Some(Ok(handle)) => {
-            update(activity, |activity| activity.begin(Stage::Docker, None));
-            handle.join().unwrap_or_default()
-        }
-        Some(Err(error)) => docker::Listing {
-            items: Vec::new(),
-            issues: vec![format!("cannot ask Docker: {error}")],
-        },
-        None => docker::Listing::default(),
-    };
-    if cancel.is_cancelled() {
-        return Err(CANCELLED.to_owned());
-    }
-    if options.docker {
-        update(activity, |activity| {
-            activity.finish(
-                Step::Docker,
-                started.elapsed(),
-                plural(listing.items.len(), "object"),
-            );
-        });
-    }
-
-    update(activity, |activity| activity.begin(Stage::History, None));
-    let history = HistoryView::load();
-    let disks = roots
+fn disks(roots: &[PathBuf]) -> Vec<Disk> {
+    roots
         .iter()
         .map(|path| Disk {
             available: platform::available_space(path),
             total: platform::total_space(path),
         })
-        .collect();
+        .collect()
+}
 
-    Ok(Report {
-        roots: roots.to_vec(),
-        options: options.clone(),
-        candidates,
-        issues: collected.issues,
-        summary: collected.summary,
-        caches,
-        toolchains,
-        docker: docker::entries(listing.items),
-        docker_issues: listing.issues,
-        repos,
-        duplicates,
-        history,
-        disks,
-        scanned: SystemTime::now(),
+fn measure_caches(
+    config: &Config,
+    cancel: &Cancel,
+    tracker: &Tracker,
+) -> Vec<(KnownCache, Candidate)> {
+    let excludes = config.excludes().ok();
+    let found: Vec<KnownCache> = Locations::for_user()
+        .map(|locations| {
+            caches::find(&locations, &Protected::for_user())
+                .into_iter()
+                .filter(|cache| {
+                    excludes
+                        .as_ref()
+                        .is_none_or(|excludes| !excludes.path(&cache.path))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    tracker.update_now(|activity| activity.begin(Step::Caches, Some(found.len())));
+    measure_caches_with(found, cancel, |candidate| {
+        tracker.update(|activity| {
+            activity.advance(Step::Caches, &candidate.path);
+            if candidate.usage.entries > 0 {
+                activity.record(
+                    &candidate.path,
+                    &candidate.rule.name,
+                    candidate.usage.allocated,
+                );
+            }
+        });
     })
+}
+
+fn measure_toolchains(
+    config: &Config,
+    cancel: &Cancel,
+    tracker: &Tracker,
+) -> Vec<(Toolchain, Candidate)> {
+    let excludes = config.excludes().ok();
+    let found: Vec<Toolchain> = toolchains::Locations::for_user()
+        .map(|locations| {
+            toolchains::find(&locations, &config.toolchains.tools)
+                .into_iter()
+                .filter(|toolchain| {
+                    excludes
+                        .as_ref()
+                        .is_none_or(|excludes| !excludes.path(&toolchain.path))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    tracker.update_now(|activity| activity.begin(Step::Toolchains, Some(found.len())));
+    toolchains::measure_with(found, cancel, |candidate| {
+        tracker.update(|activity| {
+            activity.advance(Step::Toolchains, &candidate.path);
+            activity.record(
+                &candidate.path,
+                &candidate.rule.name,
+                candidate.usage.allocated,
+            );
+        });
+    })
+}
+
+fn repin(entries: &mut [(Toolchain, Candidate)], pins: &[toolchains::Pin]) {
+    let mut found: Vec<Toolchain> = entries
+        .iter()
+        .map(|(toolchain, _)| toolchain.clone())
+        .collect();
+    toolchains::apply_pins(&mut found, pins);
+    for ((toolchain, candidate), pinned) in entries.iter_mut().zip(found) {
+        let safety = pinned.safety();
+        if candidate.rule.safety != safety {
+            candidate.rule = Arc::new(RuleInfo {
+                safety,
+                ..RuleInfo::clone(&candidate.rule)
+            });
+        }
+        *toolchain = pinned;
+    }
+}
+
+/// @name find_duplicates
+/// @description Finds duplicate files under the roots with the start screen's options laid
+/// over the config, on request rather than as part of every scan. Groups are the same as a
+/// scan that collects files during its walk would find.
+///
+/// @example
+/// let found = find_duplicates(&config, &roots, &options, |stage| show(stage))?;
+pub fn find_duplicates(
+    config: &Config,
+    roots: &[PathBuf],
+    options: &ScanOptions,
+    on_stage: impl FnMut(dupes::Stage),
+) -> Result<Duplicates, String> {
+    let config = options.apply(config);
+    dupes::find(&config, roots, Options::from_config(&config), on_stage)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -587,6 +835,8 @@ pub enum Source {
 }
 
 impl Source {
+    pub const ALL: [Source; 4] = [Self::Artifact, Self::Cache, Self::Toolchain, Self::Docker];
+
     /// Toolchains and Docker objects are deleted for good; everything else goes to the trash.
     pub fn permanent(self) -> bool {
         matches!(self, Self::Toolchain | Self::Docker)
@@ -904,6 +1154,58 @@ mod tests {
             ..view
         };
         assert_eq!(unknown.trash_state(0), TrashState::Unknown);
+    }
+
+    #[test]
+    fn duplicates_on_request_match_the_ones_a_scan_walk_collects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("photos");
+        for (folder, size) in [
+            ("a", 8192),
+            ("b", 8192),
+            ("c", 9000),
+            ("d", 9000),
+            ("e", 5000),
+        ] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            std::fs::write(root.join(folder).join("same.bin"), vec![b'z'; size]).unwrap();
+        }
+        std::fs::create_dir_all(root.join("site/node_modules")).unwrap();
+        std::fs::write(root.join("site/package.json"), "{}").unwrap();
+        std::fs::write(root.join("site/node_modules/same.bin"), vec![b'z'; 8192]).unwrap();
+        let config = Config::default();
+        let roots = scan::normalize_roots(&[root]);
+        let options = ScanOptions::from_config(&config);
+        let groups = |found: Duplicates| -> Vec<Vec<PathBuf>> {
+            found
+                .groups
+                .into_iter()
+                .map(|group| {
+                    group
+                        .members
+                        .into_iter()
+                        .map(|member| member.path)
+                        .collect()
+                })
+                .collect()
+        };
+
+        let lazy = groups(find_duplicates(&config, &roots, &options, |_| {}).unwrap());
+        let applied = options.apply(&config);
+        let duplicate_options = Options::from_config(&applied);
+        let (handle, walked) = repos::start_scan(
+            &applied,
+            &roots,
+            Cancel::new(),
+            Some(duplicate_options),
+            false,
+        )
+        .unwrap();
+        scan::collect(&handle, |_| {});
+        let files = walked.recv().unwrap().files.unwrap();
+        let walked = groups(dupes::group(files, duplicate_options, |_| {}));
+        assert_eq!(lazy.len(), 2);
+        assert_eq!(lazy, walked);
     }
 
     #[test]

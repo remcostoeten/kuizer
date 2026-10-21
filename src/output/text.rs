@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::style::{bold, dim};
 use crate::caches::KnownCache;
@@ -16,18 +17,29 @@ use crate::units::{ByteSize, age};
 const MAX_ISSUES: usize = 10;
 const LARGEST: usize = 10;
 
+fn home() -> Option<&'static Path> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(platform::home_dir).as_deref()
+}
+
 pub fn display_path(path: &Path) -> String {
-    let display: String = match platform::home_dir()
-        .and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
-    {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Some(rest) => PathBuf::from("~").join(rest).display().to_string(),
-        None => path.display().to_string(),
+    let mut display = String::with_capacity(path.as_os_str().len() + 2);
+    let rest = match home().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => {
+            display.push('~');
+            if !rest.as_os_str().is_empty() {
+                display.push('/');
+            }
+            rest
+        }
+        None => path,
     };
+    display.extend(
+        rest.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c }),
+    );
     display
-        .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
 }
 
 pub fn print_progress(progress: Progress) {
@@ -98,7 +110,7 @@ fn row(candidate: &Candidate, idle: bool) -> String {
 }
 
 pub fn print_scan(candidates: &[Candidate], issues: &[Issue], summary: &Summary, quiet: bool) {
-    let mut out = io::stdout().lock();
+    let mut out = BufWriter::new(io::stdout().lock());
     let idle = shows_idle(candidates);
     if !candidates.is_empty() {
         let _ = writeln!(out, "{}", dim(&header(idle)));
@@ -277,7 +289,7 @@ fn print_issues(issues: &[Issue]) {
 }
 
 pub fn print_candidates(candidates: &[Candidate]) {
-    let mut out = io::stdout().lock();
+    let mut out = BufWriter::new(io::stdout().lock());
     let idle = shows_idle(candidates);
     let _ = writeln!(out, "{}", dim(&header(idle)));
     for candidate in candidates {
@@ -359,7 +371,7 @@ pub fn print_status(text: &str) {
 }
 
 pub fn print_duplicates(found: &Duplicates, groups: &[Group], quiet: bool) {
-    let mut out = io::stdout().lock();
+    let mut out = BufWriter::new(io::stdout().lock());
     for group in groups {
         let _ = writeln!(
             out,
@@ -427,7 +439,7 @@ pub fn print_caches(entries: &[(KnownCache, Candidate)], quiet: bool) {
         println!("No known tool caches found");
         return;
     }
-    let mut out = io::stdout().lock();
+    let mut out = BufWriter::new(io::stdout().lock());
     let _ = writeln!(
         out,
         "{}",

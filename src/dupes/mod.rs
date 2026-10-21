@@ -1,20 +1,25 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{Config, ConfigError};
+use crate::platform::dir::EntryKind;
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
-use crate::scan::walk::{Flow, Visitor, Walker};
+use crate::scan::walk::{Companion, Flow, Visitor, Walker};
 use crate::scan::{self, Cancel, Issue, Scan};
 use crate::toolchains::PinFinder;
+use crate::{caches, toolchains};
 
-const PARTIAL: u64 = 16 * 1024;
-const CHUNK: usize = 64 * 1024;
+const SAMPLE: u64 = 16 * 1024;
+const SAMPLED: u64 = 3 * SAMPLE;
+const CHUNK: usize = 1024 * 1024;
+const COMPARE_CHUNK: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -65,6 +70,7 @@ pub struct Options {
     pub min_size: u64,
     pub threads: usize,
     pub verify: bool,
+    pub include_hidden: bool,
 }
 
 impl Options {
@@ -73,6 +79,7 @@ impl Options {
             min_size: config.duplicates.min_size.0,
             threads: config.duplicates.threads,
             verify: config.duplicates.verify,
+            include_hidden: config.duplicates.include_hidden,
         }
     }
 
@@ -100,9 +107,65 @@ struct Candidate {
     member: Member,
 }
 
+#[derive(Debug, Clone)]
+struct Skip {
+    protected: Protected,
+    tool_roots: Vec<PathBuf>,
+    lifted: Vec<PathBuf>,
+    last: Option<(PathBuf, bool)>,
+}
+
+impl Skip {
+    fn for_user(roots: &[PathBuf]) -> Self {
+        let mut tool_roots = Vec::new();
+        if let Some(locations) = caches::Locations::for_user() {
+            tool_roots.extend(caches::roots(&locations));
+        }
+        if let Some(locations) = toolchains::Locations::for_user() {
+            tool_roots.extend(locations.roots());
+        }
+        Self::new(Protected::for_user(), tool_roots, roots)
+    }
+
+    fn new(protected: Protected, tool_roots: Vec<PathBuf>, roots: &[PathBuf]) -> Self {
+        let mut skip = Self {
+            protected,
+            tool_roots,
+            lifted: Vec::new(),
+            last: None,
+        };
+        skip.lifted = roots
+            .iter()
+            .filter(|root| skip.hidden(root))
+            .cloned()
+            .collect();
+        skip
+    }
+
+    fn hidden(&self, dir: &Path) -> bool {
+        self.protected.in_hidden_home_dir(dir)
+            || self.tool_roots.iter().any(|root| dir.starts_with(root))
+    }
+
+    fn skips(&mut self, path: &Path) -> bool {
+        let Some(dir) = path.parent() else {
+            return false;
+        };
+        if let Some((last, skipped)) = &self.last
+            && last == dir
+        {
+            return *skipped;
+        }
+        let skipped = self.hidden(dir) && !self.lifted.iter().any(|root| dir.starts_with(root));
+        self.last = Some((dir.to_path_buf(), skipped));
+        skipped
+    }
+}
+
 pub struct Files {
     min_size: u64,
-    seen: Vec<Seen>,
+    paths: Vec<PathBuf>,
+    skip: Option<Skip>,
     issues: Vec<Issue>,
     counted: u64,
     started: Instant,
@@ -110,9 +173,27 @@ pub struct Files {
 
 impl Files {
     pub fn new(options: Options) -> Self {
+        Self::for_roots(options, &[])
+    }
+
+    /// @name for_roots
+    /// @description Like `new`, and keeps looking inside a scan root that is itself in a hidden or
+    /// tool-managed folder, even when `include_hidden` is off.
+    ///
+    /// @example
+    /// let files = Files::for_roots(options, &[PathBuf::from("/home/me/.config/app")]);
+    pub fn for_roots(options: Options, roots: &[PathBuf]) -> Self {
+        Self::with_skip(
+            options,
+            (!options.include_hidden).then(|| Skip::for_user(roots)),
+        )
+    }
+
+    fn with_skip(options: Options, skip: Option<Skip>) -> Self {
         Self {
             min_size: options.min_size,
-            seen: Vec::new(),
+            paths: Vec::new(),
+            skip,
             issues: Vec::new(),
             counted: 0,
             started: Instant::now(),
@@ -121,62 +202,101 @@ impl Files {
 }
 
 impl Visitor for Files {
+    fn wants_files(&self) -> bool {
+        true
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         self.issues.push(issue);
         Flow::Continue
     }
 
-    fn counted(&mut self, file_type: fs::FileType) {
-        if file_type.is_file() {
+    fn counted(&mut self, kind: EntryKind) {
+        if kind == EntryKind::File {
             self.counted += 1;
         }
     }
 
-    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
-        if !file_type.is_file() {
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
+        if kind != EntryKind::File {
             return Flow::Continue;
         }
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) => return self.issue(Issue::from_io(path.to_path_buf(), &error)),
-        };
-        let size = metadata.len();
-        if size == 0 || size < self.min_size {
+        if let Some(skip) = &mut self.skip
+            && skip.skips(path)
+        {
             return Flow::Continue;
         }
-        self.seen.push(Seen {
-            path: path.to_path_buf(),
-            size,
-            allocated: platform::allocated(&metadata),
-            identity: platform::identity(&metadata),
-            modified: metadata.modified().ok(),
-        });
+        self.paths.push(path.to_path_buf());
         Flow::Continue
+    }
+}
+
+impl Companion for Files {
+    fn fork(&self) -> Self {
+        Self {
+            min_size: self.min_size,
+            paths: Vec::new(),
+            skip: self.skip.clone(),
+            issues: Vec::new(),
+            counted: 0,
+            started: self.started,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.paths.extend(other.paths);
+        self.issues.extend(other.issues);
+        self.counted += other.counted;
     }
 }
 
 struct Reporting<'a> {
     files: Files,
+    cancel: &'a Cancel,
     on_stage: &'a mut dyn FnMut(Stage),
 }
 
 impl Visitor for Reporting<'_> {
+    fn wants_files(&self) -> bool {
+        true
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         self.files.issue(issue)
     }
 
-    fn counted(&mut self, file_type: fs::FileType) {
-        self.files.counted(file_type);
-        if file_type.is_file() && self.files.counted.is_multiple_of(4096) {
+    fn counted(&mut self, kind: EntryKind) {
+        self.files.counted(kind);
+        if kind == EntryKind::File && self.files.counted.is_multiple_of(4096) {
             (self.on_stage)(Stage::Walking {
                 files: self.files.counted,
             });
         }
     }
 
-    fn file(&mut self, path: &Path, file_type: fs::FileType) -> Flow {
-        self.files.file(path, file_type)
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
+        self.files.file(path, kind)
     }
+}
+
+fn stat(path: &Path, min_size: u64) -> Result<Option<Seen>, Issue> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| Issue::from_io(path.to_path_buf(), &error))?;
+    let size = metadata.len();
+    if size == 0 || size < min_size || !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(Seen {
+        path: path.to_path_buf(),
+        size,
+        allocated: platform::allocated(&metadata),
+        identity: platform::shared_inode(&metadata),
+        modified: metadata.modified().ok(),
+    }))
 }
 
 fn merge_links(files: Vec<Seen>) -> Vec<Candidate> {
@@ -208,22 +328,56 @@ fn merge_links(files: Vec<Seen>) -> Vec<Candidate> {
     merged
 }
 
-fn hash_file(path: &Path, limit: Option<u64>) -> io::Result<blake3::Hash> {
+fn interrupted() -> io::Error {
+    io::Error::from(io::ErrorKind::Interrupted)
+}
+
+fn advise_sequential(file: &File) {
+    #[cfg(target_os = "linux")]
+    let _ = rustix::fs::fadvise(file, 0, None, rustix::fs::Advice::Sequential);
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+}
+
+fn sample_hash(path: &Path, size: u64) -> io::Result<blake3::Hash> {
     let file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
-    match limit {
-        Some(limit) => io::copy(&mut file.take(limit), &mut hasher)?,
-        None => io::copy(&mut io::BufReader::with_capacity(CHUNK, file), &mut hasher)?,
-    };
+    let mut buffer = [0u8; SAMPLE as usize];
+    for offset in [0, (size - SAMPLE) / 2, size - SAMPLE] {
+        file.read_exact_at(&mut buffer, offset)?;
+        hasher.update(&buffer);
+    }
     Ok(hasher.finalize())
 }
 
-fn same_bytes(a: &Path, b: &Path) -> io::Result<bool> {
-    let mut left = io::BufReader::with_capacity(CHUNK, File::open(a)?);
-    let mut right = io::BufReader::with_capacity(CHUNK, File::open(b)?);
-    let mut left_buf = vec![0u8; CHUNK];
-    let mut right_buf = vec![0u8; CHUNK];
+fn full_hash(path: &Path, size: u64, cancel: &Cancel) -> io::Result<blake3::Hash> {
+    let mut file = File::open(path)?;
+    if size > CHUNK as u64 {
+        advise_sequential(&file);
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; CHUNK.min(usize::try_from(size).unwrap_or(CHUNK) + 1)];
     loop {
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hasher.finalize());
+        }
+        hasher.update(&buffer[..read]);
+    }
+}
+
+fn same_bytes(a: &Path, b: &Path, cancel: &Cancel) -> io::Result<bool> {
+    let mut left = io::BufReader::with_capacity(COMPARE_CHUNK, File::open(a)?);
+    let mut right = io::BufReader::with_capacity(COMPARE_CHUNK, File::open(b)?);
+    let mut left_buf = vec![0u8; COMPARE_CHUNK];
+    let mut right_buf = vec![0u8; COMPARE_CHUNK];
+    loop {
+        if cancel.is_cancelled() {
+            return Err(interrupted());
+        }
         let read = left.read(&mut left_buf)?;
         if read == 0 {
             return Ok(right.read(&mut right_buf[..1])? == 0);
@@ -240,10 +394,11 @@ fn same_bytes(a: &Path, b: &Path) -> io::Result<bool> {
 fn in_parallel<T: Sync, R: Send>(
     items: &[T],
     workers: usize,
+    cancel: &Cancel,
     work: impl Fn(&T) -> R + Sync,
-) -> Vec<R> {
+) -> Option<Vec<R>> {
     if items.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let next = AtomicUsize::new(0);
     let mut results: Vec<(usize, R)> = thread::scope(|scope| {
@@ -252,6 +407,9 @@ fn in_parallel<T: Sync, R: Send>(
                 scope.spawn(|| {
                     let mut done = Vec::new();
                     loop {
+                        if cancel.is_cancelled() {
+                            break done;
+                        }
                         let index = next.fetch_add(1, Ordering::Relaxed);
                         let Some(item) = items.get(index) else {
                             break done;
@@ -266,25 +424,22 @@ fn in_parallel<T: Sync, R: Send>(
             .flat_map(|handle| handle.join().expect("hashing thread panicked"))
             .collect()
     });
+    if cancel.is_cancelled() {
+        return None;
+    }
     results.sort_unstable_by_key(|(index, _)| *index);
-    results.into_iter().map(|(_, result)| result).collect()
+    Some(results.into_iter().map(|(_, result)| result).collect())
 }
 
-fn regroup(
-    groups: Vec<Vec<Candidate>>,
-    workers: usize,
-    limit: Option<u64>,
+type Hashed = Vec<(blake3::Hash, Vec<Candidate>)>;
+
+fn bucket(
+    candidates: Vec<Candidate>,
+    hashes: Vec<io::Result<blake3::Hash>>,
     issues: &mut Vec<Issue>,
-    on_stage: &mut dyn FnMut(Stage),
-) -> Vec<(blake3::Hash, Vec<Candidate>)> {
-    let flat: Vec<Candidate> = groups.into_iter().flatten().collect();
-    on_stage(Stage::Hashing { files: flat.len() });
-    let hashes = in_parallel(&flat, workers, |candidate| {
-        let limit = limit.filter(|&limit| candidate.size > limit);
-        hash_file(&candidate.member.path, limit)
-    });
+) -> Vec<((u64, blake3::Hash), Vec<Candidate>)> {
     let mut keyed: HashMap<(u64, blake3::Hash), Vec<Candidate>> = HashMap::new();
-    for (candidate, hash) in flat.into_iter().zip(hashes) {
+    for (candidate, hash) in candidates.into_iter().zip(hashes) {
         match hash {
             Ok(hash) => keyed
                 .entry((candidate.size, hash))
@@ -296,22 +451,71 @@ fn regroup(
     keyed
         .into_iter()
         .filter(|(_, members)| members.len() > 1)
-        .map(|((_, hash), members)| (hash, members))
         .collect()
 }
 
-fn split_by_bytes(members: Vec<Candidate>, issues: &mut Vec<Issue>) -> Vec<Vec<Candidate>> {
+struct Pass<'a> {
+    workers: usize,
+    cancel: &'a Cancel,
+}
+
+impl Pass<'_> {
+    fn full(
+        &self,
+        mut flat: Vec<Candidate>,
+        issues: &mut Vec<Issue>,
+        on_stage: &mut dyn FnMut(Stage),
+    ) -> Option<Hashed> {
+        flat.sort_by_key(|candidate| std::cmp::Reverse(candidate.size));
+        on_stage(Stage::Hashing { files: flat.len() });
+        let hashes = in_parallel(&flat, self.workers, self.cancel, |candidate| {
+            full_hash(&candidate.member.path, candidate.size, self.cancel)
+        })?;
+        Some(
+            bucket(flat, hashes, issues)
+                .into_iter()
+                .map(|((_, hash), members)| (hash, members))
+                .collect(),
+        )
+    }
+
+    fn sampled(
+        &self,
+        flat: Vec<Candidate>,
+        issues: &mut Vec<Issue>,
+        on_stage: &mut dyn FnMut(Stage),
+    ) -> Option<Vec<Candidate>> {
+        on_stage(Stage::Hashing { files: flat.len() });
+        let samples = in_parallel(&flat, self.workers, self.cancel, |candidate| {
+            sample_hash(&candidate.member.path, candidate.size)
+        })?;
+        Some(
+            bucket(flat, samples, issues)
+                .into_iter()
+                .flat_map(|(_, members)| members)
+                .collect(),
+        )
+    }
+}
+
+fn split_by_bytes(
+    members: Vec<Candidate>,
+    cancel: &Cancel,
+    issues: &mut Vec<Issue>,
+) -> Vec<Vec<Candidate>> {
     let mut clusters: Vec<Vec<Candidate>> = Vec::new();
     'members: for member in members {
         for cluster in &mut clusters {
-            match same_bytes(&cluster[0].member.path, &member.member.path) {
+            match same_bytes(&cluster[0].member.path, &member.member.path, cancel) {
                 Ok(true) => {
                     cluster.push(member);
                     continue 'members;
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    issues.push(Issue::from_io(member.member.path, &error));
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        issues.push(Issue::from_io(member.member.path, &error));
+                    }
                     continue 'members;
                 }
             }
@@ -326,9 +530,10 @@ fn split_by_bytes(members: Vec<Candidate>, issues: &mut Vec<Issue>) -> Vec<Vec<C
 
 /// @name find
 /// @description Finds files with identical contents under `roots`. Files are grouped by size,
-/// then by a BLAKE3 hash of their first 16 KiB, then by a full hash, and with `verify` by a byte
-/// comparison. Hard links to one inode count as a single member. Empty files, symlinks,
-/// generated artifact directories and browser or credential data are never considered.
+/// then by a BLAKE3 hash of three 16 KiB samples (start, middle, end), then by a full hash, and
+/// with `verify` by a byte comparison. Hard links to one inode count as a single member. Empty
+/// files, symlinks, generated artifact directories, browser or credential data and, unless
+/// `include_hidden` is set, hidden home folders and tool-managed caches are never considered.
 ///
 /// @example
 /// let found = dupes::find(&config, &roots, Options::from_config(&config), |_| {})?;
@@ -337,6 +542,23 @@ pub fn find(
     config: &Config,
     roots: &[PathBuf],
     options: Options,
+    on_stage: impl FnMut(Stage),
+) -> Result<Duplicates, ConfigError> {
+    find_cancellable(config, roots, options, &Cancel::new(), on_stage)
+}
+
+/// @name find_cancellable
+/// @description Like `find`, and stops within one file or one MiB of reading once `cancel` is
+/// set, returning no groups.
+///
+/// @example
+/// let cancel = Cancel::new();
+/// let found = dupes::find_cancellable(&config, &roots, options, &cancel, |_| {})?;
+pub fn find_cancellable(
+    config: &Config,
+    roots: &[PathBuf],
+    options: Options,
+    cancel: &Cancel,
     mut on_stage: impl FnMut(Stage),
 ) -> Result<Duplicates, ConfigError> {
     let detector = config.detector()?;
@@ -350,7 +572,8 @@ pub fn find(
         mounts: &mounts,
         protected: &protected,
         visitor: Reporting {
-            files: Files::new(options),
+            files: Files::for_roots(options, roots),
+            cancel,
             on_stage: &mut on_stage,
         },
     };
@@ -358,7 +581,7 @@ pub fn find(
         walker.walk_root(root);
     }
     let files = walker.visitor.files;
-    Ok(group(files, options, on_stage))
+    Ok(group_cancellable(files, options, cancel, on_stage))
 }
 
 /// @name start_scan
@@ -376,7 +599,12 @@ pub fn start_scan(
     cancel: Cancel,
     options: Option<Options>,
 ) -> Result<(Scan, crossbeam_channel::Receiver<Option<Files>>), ConfigError> {
-    scan::start_with(config, roots, cancel, options.map(Files::new))
+    scan::start_with(
+        config,
+        roots,
+        cancel,
+        options.map(|options| Files::for_roots(options, roots)),
+    )
 }
 
 /// What a walk collected next to the artifacts: files for duplicate detection and toolchain pins.
@@ -401,7 +629,10 @@ pub fn start_scan_with_pins(
         config,
         roots,
         cancel,
-        (options.map(Files::new), pins.then(PinFinder::new)),
+        (
+            options.map(|options| Files::for_roots(options, roots)),
+            pins.then(PinFinder::new),
+        ),
     )
 }
 
@@ -413,38 +644,75 @@ pub fn start_scan_with_pins(
 /// @example
 /// let (scan, files) = scan::start_with(&config, &roots, Cancel::new(), Files::new(options))?;
 /// let found = dupes::group(files.recv()?, options, |_| {});
-pub fn group(files: Files, options: Options, mut on_stage: impl FnMut(Stage)) -> Duplicates {
+pub fn group(files: Files, options: Options, on_stage: impl FnMut(Stage)) -> Duplicates {
+    group_cancellable(files, options, &Cancel::new(), on_stage)
+}
+
+/// @name group_cancellable
+/// @description Like `group`, and stops within one file or one MiB of reading once `cancel` is
+/// set, returning no groups. A group is only reported after a full-content hash match, or a byte
+/// comparison with `verify`.
+///
+/// @example
+/// let found = dupes::group_cancellable(files, options, &cancel, |_| {});
+pub fn group_cancellable(
+    files: Files,
+    options: Options,
+    cancel: &Cancel,
+    mut on_stage: impl FnMut(Stage),
+) -> Duplicates {
     let Files {
-        seen,
+        min_size,
+        paths,
         mut issues,
         counted,
         started,
         ..
     } = files;
+    let workers = options.workers();
+    let cancelled = |issues: Vec<Issue>| Duplicates {
+        groups: Vec::new(),
+        issues,
+        files: counted,
+        duration: started.elapsed(),
+    };
 
+    let Some(stats) = in_parallel(&paths, workers, cancel, |path| stat(path, min_size)) else {
+        return cancelled(issues);
+    };
+    drop(paths);
+    let mut seen = Vec::new();
+    for stat in stats {
+        match stat {
+            Ok(Some(file)) => seen.push(file),
+            Ok(None) => {}
+            Err(issue) => issues.push(issue),
+        }
+    }
+
+    seen.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
     for candidate in merge_links(seen) {
         by_size.entry(candidate.size).or_default().push(candidate);
     }
-    let sized: Vec<Vec<Candidate>> = by_size
+    let (small, large): (Vec<_>, Vec<_>) = by_size
         .into_values()
         .filter(|group| group.len() > 1)
-        .collect();
+        .flatten()
+        .partition(|candidate| candidate.size <= SAMPLED);
 
-    let workers = options.workers();
-    let partial = regroup(sized, workers, Some(PARTIAL), &mut issues, &mut on_stage);
-    let (small, large): (Vec<_>, Vec<_>) = partial
-        .into_iter()
-        .partition(|(_, members)| members[0].size <= PARTIAL);
-    let full = regroup(
-        large.into_iter().map(|(_, members)| members).collect(),
-        workers,
-        None,
-        &mut issues,
-        &mut on_stage,
-    );
+    let pass = Pass { workers, cancel };
+    let Some(mut hashed) = pass.full(small, &mut issues, &mut on_stage) else {
+        return cancelled(issues);
+    };
+    let Some(survivors) = pass.sampled(large, &mut issues, &mut on_stage) else {
+        return cancelled(issues);
+    };
+    let Some(full) = pass.full(survivors, &mut issues, &mut on_stage) else {
+        return cancelled(issues);
+    };
+    hashed.extend(full);
 
-    let mut hashed: Vec<(blake3::Hash, Vec<Candidate>)> = small.into_iter().chain(full).collect();
     if options.verify {
         on_stage(Stage::Verifying {
             groups: hashed.len(),
@@ -452,12 +720,15 @@ pub fn group(files: Files, options: Options, mut on_stage: impl FnMut(Stage)) ->
         hashed = hashed
             .into_iter()
             .flat_map(|(hash, members)| {
-                split_by_bytes(members, &mut issues)
+                split_by_bytes(members, cancel, &mut issues)
                     .into_iter()
                     .map(move |cluster| (hash, cluster))
                     .collect::<Vec<_>>()
             })
             .collect();
+        if cancel.is_cancelled() {
+            return cancelled(issues);
+        }
     }
 
     let mut groups: Vec<Group> = hashed
@@ -494,17 +765,51 @@ pub fn group(files: Files, options: Options, mut on_stage: impl FnMut(Stage)) ->
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::scan::{self, Cancel};
+
+    fn options() -> Options {
+        Options {
+            min_size: 1,
+            threads: 2,
+            verify: true,
+            include_hidden: true,
+        }
+    }
+
+    fn collect(root: &Path, options: Options) -> Files {
+        let config = Config::default();
+        let detector = config.detector().unwrap();
+        let excludes = config.excludes().unwrap();
+        let mounts = MountTable::load();
+        let protected = Protected::default();
+        let mut walker = Walker {
+            scan: &config.scan,
+            detector: &detector,
+            excludes: &excludes,
+            mounts: &mounts,
+            protected: &protected,
+            visitor: Files::with_skip(options, None),
+        };
+        walker.walk_root(root);
+        walker.visitor
+    }
+
+    fn write(root: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
 
     #[test]
     fn shared_scan_walk_finds_the_same_duplicates() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
         for relative in ["a/one.txt", "b/two.txt", "c/three.txt"] {
-            let path = root.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"identical contents").unwrap();
+            write(&root, relative, b"identical contents");
         }
         fs::write(root.join("unique.txt"), b"something else").unwrap();
         let config = Config::default();
@@ -512,6 +817,7 @@ mod tests {
             min_size: 1,
             threads: 2,
             verify: true,
+            include_hidden: true,
         };
         let roots = vec![root];
 
@@ -531,5 +837,66 @@ mod tests {
         assert_eq!(members(&alone).len(), 1);
         assert_eq!(members(&alone), members(&shared));
         assert_eq!(alone.files, shared.files);
+    }
+
+    #[test]
+    fn same_samples_with_different_middles_are_not_duplicates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let size = 200 * 1024;
+        let base = vec![7u8; size];
+        let mut changed = base.clone();
+        changed[size / 4] = 9;
+        write(&root, "a/one.bin", &base);
+        write(&root, "b/two.bin", &base);
+        write(&root, "c/three.bin", &changed);
+        let options = Options {
+            verify: false,
+            ..options()
+        };
+
+        let found = group(collect(&root, options), options, |_| {});
+
+        assert_eq!(found.groups.len(), 1);
+        let names: Vec<_> = found.groups[0]
+            .members
+            .iter()
+            .map(|member| member.path.strip_prefix(&root).unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [PathBuf::from("a/one.bin"), PathBuf::from("b/two.bin")]
+        );
+    }
+
+    #[test]
+    fn cancelling_returns_no_groups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        write(&root, "a/one.bin", &[1u8; 100 * 1024]);
+        write(&root, "b/two.bin", &[1u8; 100 * 1024]);
+        let files = collect(&root, options());
+        let cancel = Cancel::new();
+        cancel.cancel();
+
+        let found = group_cancellable(files, options(), &cancel, |_| {});
+
+        assert!(found.groups.is_empty());
+    }
+
+    #[test]
+    fn hidden_home_folders_and_tool_roots_are_skipped_unless_a_root_is_inside() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = fs::canonicalize(tmp.path()).unwrap();
+        let protected = Protected::new(Some(&home));
+        let tool = home.join("go/pkg/mod");
+        let mut skip = Skip::new(protected.clone(), vec![tool.clone()], &[]);
+        assert!(skip.skips(&home.join(".cache/pip/a.whl")));
+        assert!(skip.skips(&tool.join("lib/a.go")));
+        assert!(!skip.skips(&home.join("dev/app/a.go")));
+
+        let mut lifted = Skip::new(protected, vec![tool], &[home.join(".config/app")]);
+        assert!(!lifted.skips(&home.join(".config/app/a.toml")));
+        assert!(lifted.skips(&home.join(".config/other/a.toml")));
     }
 }

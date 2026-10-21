@@ -13,6 +13,7 @@ fn find(root: &Path, verify: bool) -> Duplicates {
         min_size: 1,
         threads: 2,
         verify,
+        include_hidden: false,
     };
     dupes::find(&Config::default(), &[root.to_path_buf()], options, |_| {}).unwrap()
 }
@@ -126,6 +127,7 @@ fn respects_min_size() {
         min_size: 4096,
         threads: 1,
         verify: false,
+        include_hidden: false,
     };
     let found = dupes::find(&Config::default(), &[root], options, |_| {}).unwrap();
     assert!(found.groups.is_empty());
@@ -150,6 +152,7 @@ fn skips_roots_on_excluded_filesystem_types() {
         min_size: 1,
         threads: 2,
         verify: false,
+        include_hidden: false,
     };
     let found = dupes::find(&config, std::slice::from_ref(&root), options, |_| {}).unwrap();
     assert!(found.groups.is_empty());

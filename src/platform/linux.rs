@@ -40,6 +40,18 @@ pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
         .collect()
 }
 
+pub fn rotational(device: u64) -> bool {
+    let block = format!(
+        "/sys/dev/block/{}:{}",
+        rustix::fs::major(device),
+        rustix::fs::minor(device)
+    );
+    ["queue/rotational", "../queue/rotational"]
+        .iter()
+        .find_map(|flag| std::fs::read_to_string(format!("{block}/{flag}")).ok())
+        .is_some_and(|text| text.trim() == "1")
+}
+
 pub fn mounts() -> Vec<Mount> {
     std::fs::read_to_string("/proc/self/mountinfo")
         .map(|text| parse_mountinfo(&text))
