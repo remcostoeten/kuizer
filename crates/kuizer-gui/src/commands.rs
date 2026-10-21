@@ -7,12 +7,16 @@ use kuizer::output::display_path;
 use crate::squarify::Direction;
 use crate::tab::Tab;
 
-actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom, Undo, TogglePalette]);
+actions!(
+    kuizer,
+    [ZoomIn, ZoomOut, ResetZoom, Undo, TogglePalette, Quit]
+);
 
 /// Everything the keyboard, the command palette and the shortcuts overlay can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Palette,
+    Quit,
     Shortcuts,
     GoTo(Tab),
     NextTab,
@@ -162,6 +166,9 @@ fn build_table() -> Vec<Spec> {
             .keys(&["secondary-k"])
             .extra(&["secondary-shift-p"])
             .hidden()
+            .global(),
+        Spec::new(Command::Quit, "Quit", General)
+            .keys(&["secondary-q"])
             .global(),
         Spec::new(Command::Shortcuts, "Keyboard shortcuts", General).keys(&["?"]),
         Spec::new(Command::Rescan, "Rescan", General).keys(&["secondary-r"]),
@@ -354,6 +361,7 @@ pub fn bind_keys(cx: &mut App) {
                 Command::ResetZoom => KeyBinding::new(key, ResetZoom, None),
                 Command::Undo => KeyBinding::new(key, Undo, None),
                 Command::Palette => KeyBinding::new(key, TogglePalette, None),
+                Command::Quit => KeyBinding::new(key, Quit, None),
                 _ => continue,
             });
         }

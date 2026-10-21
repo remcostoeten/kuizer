@@ -438,6 +438,7 @@ impl Kuizer {
         let shown = self.report().is_some();
         match command {
             Command::Palette
+            | Command::Quit
             | Command::Shortcuts
             | Command::ZoomIn
             | Command::ZoomOut
@@ -597,6 +598,7 @@ impl Kuizer {
                 self.find_duplicates(cx);
                 self.go_to(Tab::Duplicates, cx);
             }
+            Command::Quit => cx.quit(),
             Command::Undo => self.undo_last(cx),
             Command::Down => self.move_cursor(Motion::Down),
             Command::Up => self.move_cursor(Motion::Up),
