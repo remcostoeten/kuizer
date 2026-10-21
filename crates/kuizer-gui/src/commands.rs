@@ -21,6 +21,8 @@ pub enum Command {
     Undo,
     Down,
     Up,
+    ExtendDown,
+    ExtendUp,
     First,
     Last,
     PageDown,
@@ -182,6 +184,12 @@ pub fn table() -> Vec<Spec> {
             .hidden(),
         Spec::new(Command::Up, "Move up", Lists)
             .keys(&["k", "up"])
+            .hidden(),
+        Spec::new(Command::ExtendDown, "Extend the selection down", Lists)
+            .keys(&["J", "shift-down"])
+            .hidden(),
+        Spec::new(Command::ExtendUp, "Extend the selection up", Lists)
+            .keys(&["K", "shift-up"])
             .hidden(),
         Spec::new(Command::First, "First row", Lists)
             .keys(&["g", "home"])

@@ -469,6 +469,16 @@ impl Kuizer {
                     (self.selected().is_empty() && !item).then_some("Select items first")
                 })
             }
+            Command::ExtendDown | Command::ExtendUp => {
+                if !self.tab.selects() {
+                    Some(SELECT_LISTS)
+                } else if self.map_active() {
+                    Some(LISTS_ONLY)
+                } else {
+                    self.wait()
+                        .or_else(|| self.cursor_target().is_none().then_some(NO_ROWS))
+                }
+            }
             Command::SelectAll | Command::SelectNone | Command::Toggle => {
                 if self.tab.selects() {
                     self.wait()
@@ -538,6 +548,9 @@ impl Kuizer {
         if self.blocked(&command).is_some() {
             return;
         }
+        if !matches!(command, Command::ExtendDown | Command::ExtendUp) {
+            self.range = None;
+        }
         match command {
             Command::Palette => self.open_palette(cx),
             Command::Shortcuts => {
@@ -552,6 +565,8 @@ impl Kuizer {
             Command::Undo => self.undo_last(cx),
             Command::Down => self.move_cursor(Motion::Down),
             Command::Up => self.move_cursor(Motion::Up),
+            Command::ExtendDown => self.extend(Motion::Down),
+            Command::ExtendUp => self.extend(Motion::Up),
             Command::First => self.move_cursor(Motion::First),
             Command::Last => self.move_cursor(Motion::Last),
             Command::PageDown => self.move_cursor(Motion::PageDown),
@@ -797,6 +812,56 @@ impl Kuizer {
         } else {
             self.reveal_cursor.set(true);
         }
+    }
+
+    /// Moves the cursor and grows or shrinks the Shift selection to span the anchor and the
+    /// cursor. Only the rows between the old and the new cursor change, so a step costs the
+    /// same in any list size.
+    fn extend(&mut self, motion: Motion) {
+        let targets = self.targets(self.tab);
+        let Some(cursor) = self.cursor_target().filter(|_| !targets.is_empty()) else {
+            return;
+        };
+        let current = targets
+            .iter()
+            .position(|target| *target == cursor)
+            .unwrap_or(0);
+        let mut range = self
+            .range
+            .take()
+            .filter(|range| range.tab == self.tab && targets.contains(&range.anchor))
+            .unwrap_or_else(|| Span {
+                tab: self.tab,
+                anchor: targets[current].clone(),
+                added: HashSet::new(),
+            });
+        let anchor = targets
+            .iter()
+            .position(|target| *target == range.anchor)
+            .unwrap_or(current);
+        self.move_cursor(motion);
+        let next = step(motion, current, targets.len(), self.page_size());
+        let spans = |end: usize, index: usize| anchor.min(end) <= index && index <= anchor.max(end);
+        let first = current.min(next);
+        for (index, target) in targets
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(current.max(next) - first + 1)
+        {
+            let Target::Item(source, id, _) = target else {
+                continue;
+            };
+            let key = (*source, *id);
+            if spans(next, index) {
+                if self.selection.insert(key) {
+                    range.added.insert(key);
+                }
+            } else if spans(current, index) && range.added.remove(&key) {
+                self.selection.remove(&key);
+            }
+        }
+        self.range = Some(range);
     }
 
     /// How many rows PageUp and PageDown move: the rows that fit in the list, less one.
@@ -1089,6 +1154,39 @@ mod tests {
             assert!(app.roots[0].ends_with("b/work"));
             assert_eq!(app.report().unwrap().candidates.len(), 2);
         });
+    }
+
+    #[gpui::test]
+    fn shift_motions_select_from_the_anchor_to_the_cursor(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 6);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        let selected = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| {
+                let report = app.report().unwrap();
+                app.rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, index)| {
+                        app.selection
+                            .contains(&(Source::Artifact, report.candidates[**index].id))
+                    })
+                    .map(|(row, _)| row)
+                    .collect::<Vec<_>>()
+            })
+        };
+        cx.simulate_keystrokes("j j space j");
+        cx.simulate_keystrokes("K K K");
+        assert_eq!(selected(&view, cx), vec![0, 1, 2, 3]);
+        cx.simulate_keystrokes("shift-down shift-down");
+        assert_eq!(cursor_row(&view, cx), 2);
+        assert_eq!(
+            selected(&view, cx),
+            vec![2, 3],
+            "moving back keeps only what was selected before"
+        );
+        cx.simulate_keystrokes("j j J shift-down");
+        assert_eq!(selected(&view, cx), vec![2, 3, 4, 5]);
     }
 
     #[gpui::test]

@@ -558,6 +558,7 @@ fn help(frame: &mut Frame) {
             "Navigate",
             &[
                 (&["j", "k", "↑", "↓"], "move"),
+                (&["J", "K", "shift ↑↓"], "select while moving"),
                 (&["g", "home"], "first"),
                 (&["G", "end"], "last"),
                 (&["pgup", "pgdn"], "page"),
