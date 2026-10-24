@@ -16,7 +16,7 @@ include = ["/src/**", "/tests/**", "/examples/synth.rs", "/docs/config.example.t
 members = [".", "crates/kuizer-gui"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 
 [[bin]]
 name = "kuizer"

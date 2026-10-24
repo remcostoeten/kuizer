@@ -3394,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "kuizer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake3",
  "clap",
@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "kuizer-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dirs 7.0.0",
  "futures",
