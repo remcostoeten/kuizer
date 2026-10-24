@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,13 +27,34 @@ pub enum Flow {
     Stop,
 }
 
+pub struct FileEntry<'a> {
+    parent: &'a Path,
+    built: Option<&'a Path>,
+    pub name: &'a OsStr,
+    pub kind: EntryKind,
+}
+
+impl FileEntry<'_> {
+    /// @name FileEntry::path
+    /// @description Returns the full path of the file, built on demand.
+    ///
+    /// @example
+    /// if is_pin_file(entry.name) { pins.push(entry.path().into_owned()); }
+    pub fn path(&self) -> Cow<'_, Path> {
+        match self.built {
+            Some(path) => Cow::Borrowed(path),
+            None => Cow::Owned(self.parent.join(self.name)),
+        }
+    }
+}
+
 pub trait Visitor {
     fn cancelled(&self) -> bool {
         false
     }
 
-    /// Whether [`Visitor::file`] wants to be called. Walkers skip building a path per file
-    /// when nothing asks for it.
+    /// Whether [`Visitor::file`] or [`Visitor::entry`] wants to be called. Walkers skip
+    /// building a path per file when nothing asks for it.
     fn wants_files(&self) -> bool {
         false
     }
@@ -48,6 +71,14 @@ pub trait Visitor {
 
     fn file(&mut self, _path: &Path, _kind: EntryKind) -> Flow {
         Flow::Continue
+    }
+
+    fn entry(&mut self, entry: &FileEntry<'_>) -> Flow {
+        if self.wants_files() {
+            self.file(&entry.path(), entry.kind)
+        } else {
+            Flow::Continue
+        }
     }
 
     fn repository(&mut self, _root: &Path) {}
@@ -98,6 +129,13 @@ impl<V: Visitor> Visitor for Option<V> {
         }
     }
 
+    fn entry(&mut self, entry: &FileEntry<'_>) -> Flow {
+        match self {
+            Some(visitor) => visitor.entry(entry),
+            None => Flow::Continue,
+        }
+    }
+
     fn repository(&mut self, root: &Path) {
         if let Some(visitor) = self {
             visitor.repository(root);
@@ -136,6 +174,13 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
 
     fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
         match (self.0.file(path, kind), self.1.file(path, kind)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+
+    fn entry(&mut self, entry: &FileEntry<'_>) -> Flow {
+        match (self.0.entry(entry), self.1.entry(entry)) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
             _ => Flow::Stop,
         }
@@ -191,6 +236,12 @@ impl<V: Visitor> Walker<'_, V> {
             }
         }
     }
+}
+
+pub(crate) struct Child {
+    pub path: PathBuf,
+    pub probe: bool,
+    pub splits: bool,
 }
 
 pub(crate) struct Pending {
@@ -272,6 +323,77 @@ impl<'a> Context<'a> {
             })
     }
 
+    /// @name Context::child
+    /// @description Decides whether the subdirectory `name` of `parent` is entered at all and
+    /// how: skipped names, excludes, known protected directories and excluded mounts are
+    /// refused, mount points and btrfs-style splits are marked for a device check. `splits` is
+    /// whether `parent` may hold subvolumes on other devices.
+    ///
+    /// @example
+    /// let Some(child) = context.child(&dir, name, pending.splits) else { continue };
+    pub fn child(&self, parent: &Path, name: &OsStr, splits: bool) -> Option<Child> {
+        if self.scan.skip_dirs.iter().any(|skip| name == skip.as_str()) || self.excludes.name(name)
+        {
+            return None;
+        }
+        let path = parent.join(name);
+        if self.excludes.full_path(&path)
+            || self.protected.is_known(&path)
+            || self.excluded_mounts.contains(path.as_path())
+        {
+            return None;
+        }
+        let mount = self.mounts.is_mount_point(&path);
+        let below = if mount {
+            self.mounts.device_may_change_below(&path)
+        } else {
+            splits
+        };
+        Some(Child {
+            path,
+            probe: mount || splits,
+            splits: below,
+        })
+    }
+
+    /// @name Context::same_device
+    /// @description Compares the device of the open `dir` with `expected`. Returns the device
+    /// to carry on with, or `None` when the directory sits on another device that the scan
+    /// must not enter: `one_file_system` is set or the mount is excluded.
+    ///
+    /// @example
+    /// match context.same_device(&dir, pending.device, &pending.path) { Ok(Some(device)) => walk(device), _ => return }
+    pub fn same_device(&self, dir: &Dir, expected: u64, path: &Path) -> io::Result<Option<u64>> {
+        let device = dir.stat()?.device;
+        if device == expected {
+            return Ok(Some(device));
+        }
+        if self.scan.one_file_system || self.excluded_mount(path) {
+            return Ok(None);
+        }
+        Ok(Some(device))
+    }
+
+    /// @name Context::splits
+    /// @description Returns whether directories below `root` can sit on other devices without
+    /// being mount points, so every one needs a device check.
+    ///
+    /// @example
+    /// let splits = context.splits(&root);
+    pub fn splits(&self, root: &Path) -> bool {
+        self.mounts.device_may_change_below(root)
+    }
+
+    /// @name Context::prunes
+    /// @description Returns whether a directory with this listing is left alone entirely: it
+    /// holds the ignore file or browser and application data.
+    ///
+    /// @example
+    /// if context.prunes(&own) { return Flow::Continue; }
+    pub fn prunes(&self, own: &Listing) -> bool {
+        self.scan.ignores(self.detector, own) || protect::holds_app_data(self.detector, own)
+    }
+
     /// @name Context::root
     /// @description Checks a scan root and returns it as the first directory to visit, or
     /// reports why it is skipped.
@@ -316,7 +438,7 @@ impl<'a> Context<'a> {
             depth: 0,
             device: platform::device(&metadata),
             probe: false,
-            splits: self.mounts.device_may_change_below(root),
+            splits: self.splits(root),
             inode: 0,
         })
     }
@@ -340,14 +462,9 @@ impl<'a> Context<'a> {
         };
         let mut device = pending.device;
         if pending.probe {
-            match dir.stat() {
-                Ok(stat) if stat.device != pending.device => {
-                    if self.scan.one_file_system || self.excluded_mount(&pending.path) {
-                        return Flow::Continue;
-                    }
-                    device = stat.device;
-                }
-                Ok(_) => {}
+            match self.same_device(&dir, pending.device, &pending.path) {
+                Ok(Some(found)) => device = found,
+                Ok(None) => return Flow::Continue,
                 Err(error) => return visitor.issue(Issue::from_io(pending.path, &error)),
             }
         }
@@ -396,7 +513,7 @@ impl<'a> Context<'a> {
         }
         drop(dir);
 
-        if self.scan.ignores(self.detector, &own) || protect::holds_app_data(self.detector, &own) {
+        if self.prunes(&own) {
             return Flow::Continue;
         }
         if pending.depth > 0
@@ -422,7 +539,6 @@ impl<'a> Context<'a> {
 
         let own = Arc::new(own);
         let wants_files = visitor.wants_files();
-        let file_paths = wants_files || self.excludes.matches_paths();
         let first_child = out.len();
         for entry in entries.iter() {
             let name = name_of(names, entry);
@@ -432,31 +548,16 @@ impl<'a> Context<'a> {
                     if name == GIT_DIR {
                         visitor.repository(&pending.path);
                     }
-                    if self.scan.skip_dirs.iter().any(|skip| name == skip.as_str())
-                        || self.excludes.name(name)
-                    {
+                    let Some(child) = self.child(&pending.path, name, pending.splits) else {
                         continue;
-                    }
-                    let path = pending.path.join(name);
-                    if self.excludes.full_path(&path)
-                        || self.protected.is_known(&path)
-                        || self.excluded_mounts.contains(path.as_path())
-                    {
-                        continue;
-                    }
-                    let mount = self.mounts.is_mount_point(&path);
-                    let splits = if mount {
-                        self.mounts.device_may_change_below(&path)
-                    } else {
-                        pending.splits
                     };
                     out.push(Pending {
-                        path,
+                        path: child.path,
                         parent: Arc::clone(&own),
                         depth: pending.depth + 1,
                         device,
-                        probe: mount || pending.splits,
-                        splits,
+                        probe: child.probe,
+                        splits: child.splits,
                         inode: entry.inode,
                     });
                 }
@@ -465,14 +566,24 @@ impl<'a> Context<'a> {
                     if self.excludes.extension(name) || self.excludes.name(name) {
                         continue;
                     }
-                    let path = file_paths.then(|| pending.path.join(name));
-                    if let Some(path) = &path {
-                        if self.excludes.full_path(path) {
-                            continue;
-                        }
-                        if wants_files && let Flow::Stop = visitor.file(path, entry.kind) {
-                            return Flow::Stop;
-                        }
+                    let path = self
+                        .excludes
+                        .matches_paths()
+                        .then(|| pending.path.join(name));
+                    if let Some(path) = &path
+                        && self.excludes.full_path(path)
+                    {
+                        continue;
+                    }
+                    if wants_files
+                        && let Flow::Stop = visitor.entry(&FileEntry {
+                            parent: &pending.path,
+                            built: path.as_deref(),
+                            name,
+                            kind: entry.kind,
+                        })
+                    {
+                        return Flow::Stop;
                     }
                     if let Some(rule) = self.detector.classify_file(name, &own)
                         && self.detector.reports(&rule)

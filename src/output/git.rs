@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::json::SCHEMA_VERSION;
+use super::json::{SCHEMA_VERSION, lossy_path};
 use super::style::{bold, dim};
 use super::text::display_path;
 use crate::repos::{Branch, Busy, Collected, Pruned, RepoError, Repository};
@@ -17,6 +17,7 @@ pub struct GitOutcome<'a> {
 
 #[derive(Serialize)]
 struct RepositoryJson<'a> {
+    #[serde(serialize_with = "lossy_path")]
     path: &'a Path,
     loose_objects: u64,
     loose_bytes: u64,
@@ -47,6 +48,7 @@ struct BranchJson<'a> {
 
 #[derive(Serialize)]
 struct OutcomeJson<'a> {
+    #[serde(serialize_with = "lossy_path")]
     path: &'a Path,
     gc: Option<GcJson>,
     gc_error: Option<String>,
@@ -128,8 +130,11 @@ fn summary(repositories: &[Repository]) -> GitSummary {
 /// `--branches` when they ran, as the versioned JSON report.
 ///
 /// @example
-/// println!("{}", output::git_report(&found, None));
-pub fn git_report(repositories: &[Repository], outcomes: Option<&[GitOutcome]>) -> String {
+/// println!("{}", output::git_report(&found, None)?);
+pub fn git_report(
+    repositories: &[Repository],
+    outcomes: Option<&[GitOutcome]>,
+) -> Result<String, serde_json::Error> {
     let report = GitReport {
         schema_version: SCHEMA_VERSION,
         command: "git",
@@ -137,7 +142,7 @@ pub fn git_report(repositories: &[Repository], outcomes: Option<&[GitOutcome]>) 
         results: outcomes.map(|outcomes| outcomes.iter().map(outcome_json).collect()),
         summary: summary(repositories),
     };
-    serde_json::to_string_pretty(&report).unwrap_or_default()
+    serde_json::to_string_pretty(&report)
 }
 
 pub fn print_repositories(repositories: &[Repository], quiet: bool) {

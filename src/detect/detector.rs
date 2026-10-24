@@ -138,8 +138,12 @@ fn parts(name: &str, pattern: &str) -> Result<Vec<Part>, RuleError> {
         Some(inner) => inner.split(',').map(simple_part).collect(),
         None => simple_part(pattern).map(|part| vec![part]),
     };
-    let glob = compile_glob(name, pattern)?;
-    Ok(simple.unwrap_or_else(|| vec![Part::Glob(glob)]))
+    match simple {
+        Some(parts) => Ok(parts),
+        None => Ok(vec![Part::Glob(
+            parse_glob(name, pattern)?.compile_matcher(),
+        )]),
+    }
 }
 
 #[derive(Default)]
@@ -270,14 +274,12 @@ fn has_glob_meta(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', ']', '{', '}'])
 }
 
-fn compile_glob(name: &str, pattern: &str) -> Result<GlobMatcher, RuleError> {
-    Glob::new(pattern)
-        .map(|glob| glob.compile_matcher())
-        .map_err(|source| RuleError::Pattern {
-            name: name.to_owned(),
-            pattern: pattern.to_owned(),
-            source,
-        })
+fn parse_glob(name: &str, pattern: &str) -> Result<Glob, RuleError> {
+    Glob::new(pattern).map_err(|source| RuleError::Pattern {
+        name: name.to_owned(),
+        pattern: pattern.to_owned(),
+        source,
+    })
 }
 
 fn valid_cachedir_tag(dir: &Path) -> bool {
@@ -364,7 +366,7 @@ impl Detector {
             reported: Category::ALL.to_vec(),
         };
         Ok(detector.watching(
-            crate::protect::APP_DATA_MARKERS
+            super::APP_DATA_MARKERS
                 .iter()
                 .flat_map(|set| set.iter().copied()),
         ))
@@ -398,8 +400,14 @@ impl Detector {
         self.reported.contains(&rule.category)
     }
 
-    pub fn rule_count(&self) -> usize {
-        self.rules.len()
+    /// @name watches
+    /// @description Returns whether listings record an entry called `name`, so
+    /// [`Detector::lists`] may be asked about it.
+    ///
+    /// @example
+    /// if detector.watches(".kuizerignore") && detector.lists(&own, ".kuizerignore") { skip(); }
+    pub fn watches(&self, name: &str) -> bool {
+        self.evidence.names.contains_key(name.as_bytes())
     }
 
     /// @name note

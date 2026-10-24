@@ -2,6 +2,7 @@ mod activity;
 mod app;
 mod chart;
 mod commands;
+mod fallback;
 mod field;
 mod frame;
 mod glossary;
@@ -45,22 +46,32 @@ fn font(cx: &App) -> SharedString {
 }
 
 fn main() -> ExitCode {
-    let loaded = match Config::load(None) {
-        Ok(loaded) => loaded,
+    let (config, problem) = match Config::load(None) {
+        Ok(loaded) => {
+            for warning in &loaded.warnings {
+                eprintln!("kuizer-gui: config: {warning}");
+            }
+            (loaded.config, fallback::notice(&loaded.warnings))
+        }
         Err(error) => {
             eprintln!("kuizer-gui: {error}");
-            return ExitCode::FAILURE;
+            (
+                Config::default(),
+                Some(fallback::summary(&error.to_string())),
+            )
         }
     };
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let roots = kuizer::scan::normalize_roots(&paths);
-    let config = loaded.config;
 
     Application::new()
         .with_assets(icon::Assets)
         .run(move |cx: &mut App| {
             let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
             let font = font(cx);
+            if let Some(reason) = problem {
+                fallback::remember(reason, font.clone());
+            }
             app::bind_keys(cx);
             let opened = cx.open_window(
                 WindowOptions {

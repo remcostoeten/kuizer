@@ -2,7 +2,7 @@
 //! in them, with sizes added up the path. Pure data, built from a report's paths.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use kuizer::detect::{Category, Safety};
@@ -111,63 +111,92 @@ impl Node {
 }
 
 #[derive(Default)]
-struct Trie {
-    leaf: Option<Leaf>,
-    children: BTreeMap<OsString, Trie>,
+struct Trie<'a> {
+    leaf: Option<usize>,
+    children: BTreeMap<&'a OsStr, Trie<'a>>,
 }
 
-impl Trie {
-    fn insert(&mut self, relative: &Path, leaf: Leaf) {
+impl<'a> Trie<'a> {
+    fn insert(&mut self, relative: &'a Path, index: usize) {
         let mut node = self;
         for part in relative.components() {
-            node = node
-                .children
-                .entry(part.as_os_str().to_owned())
-                .or_default();
+            node = node.children.entry(part.as_os_str()).or_default();
         }
         if node.leaf.is_none() {
-            node.leaf = Some(leaf);
+            node.leaf = Some(index);
         }
     }
+}
 
+struct Builder<'a> {
+    base: &'a Path,
+    leaves: &'a [Leaf],
+}
+
+impl<'a> Builder<'a> {
     /// Turns a folder of the trie into a node, folding a folder with a single child into that
     /// child so a chain of folders reads as one `a/b/c` tile.
-    fn into_node(self, name: String, path: PathBuf) -> Option<Node> {
-        if let Some(leaf) = self.leaf {
-            return Some(Node {
-                key: leaf.path.to_string_lossy().into_owned(),
-                name,
-                path: Some(leaf.path),
-                bytes: leaf.bytes,
-                items: 1,
-                kind: Kind::Item(leaf.item),
-                children: Vec::new(),
-            });
+    fn tile(&self, mut trie: Trie<'a>, parts: &mut Vec<&'a OsStr>) -> Option<Node> {
+        let start = parts.len() - 1;
+        while trie.leaf.is_none() && trie.children.len() == 1 {
+            let (part, only) = trie.children.pop_first()?;
+            parts.push(part);
+            trie = only;
         }
-        let mut children: Vec<Node> = self
-            .children
-            .into_iter()
-            .filter_map(|(part, trie)| {
-                let child = path.join(&part);
-                trie.into_node(part.to_string_lossy().into_owned(), child)
-            })
-            .collect();
-        match children.len() {
-            0 => None,
-            1 => {
-                let mut only = children.remove(0);
-                only.name = format!("{name}/{}", only.name);
-                Some(only)
-            }
-            _ => Some(container(
+        let name = chain_name(&parts[start..]);
+        let depth = parts.len();
+        let node = if let Some(index) = trie.leaf {
+            self.item(index, name)
+        } else if trie.children.is_empty() {
+            None
+        } else {
+            let mut path = self.base.to_path_buf();
+            path.extend(parts.iter().copied());
+            let children = trie
+                .children
+                .into_iter()
+                .filter_map(|(part, child)| {
+                    parts.push(part);
+                    let node = self.tile(child, parts);
+                    parts.truncate(depth);
+                    node
+                })
+                .collect();
+            Some(container(
                 path.to_string_lossy().into_owned(),
                 name,
                 Some(path),
                 Kind::Folder,
                 children,
-            )),
-        }
+            ))
+        };
+        parts.truncate(start + 1);
+        node
     }
+
+    fn item(&self, index: usize, name: String) -> Option<Node> {
+        let leaf = self.leaves.get(index)?;
+        Some(Node {
+            key: leaf.path.to_string_lossy().into_owned(),
+            name,
+            path: Some(leaf.path.clone()),
+            bytes: leaf.bytes,
+            items: 1,
+            kind: Kind::Item(leaf.item),
+            children: Vec::new(),
+        })
+    }
+}
+
+fn chain_name(parts: &[&OsStr]) -> String {
+    let mut name = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            name.push('/');
+        }
+        name.push_str(&part.to_string_lossy());
+    }
+    name
 }
 
 fn container(
@@ -190,38 +219,32 @@ fn container(
 
 /// A group of leaves under `base`, such as one scan root, as a node whose children are the
 /// folders and items right below it.
-fn group(key: String, name: String, base: &Path, leaves: Vec<Leaf>) -> Option<Node> {
+fn group(key: String, name: String, base: &Path, leaves: &[Leaf]) -> Option<Node> {
     if leaves.is_empty() {
         return None;
     }
     let mut trie = Trie::default();
-    for leaf in leaves {
-        let relative = leaf
-            .path
-            .strip_prefix(base)
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        trie.insert(&relative, leaf);
+    for (index, leaf) in leaves.iter().enumerate() {
+        let relative = leaf.path.strip_prefix(base).unwrap_or(Path::new(""));
+        trie.insert(relative, index);
     }
-    let children = if let Some(leaf) = trie.leaf.take() {
-        let name = leaf.path.file_name().map_or_else(
-            || display_path(&leaf.path),
+    let builder = Builder { base, leaves };
+    let children = if let Some(index) = trie.leaf.take() {
+        let path = &leaves.get(index)?.path;
+        let name = path.file_name().map_or_else(
+            || display_path(path),
             |name| name.to_string_lossy().into_owned(),
         );
-        let path = leaf.path.clone();
-        vec![
-            Trie {
-                leaf: Some(leaf),
-                children: BTreeMap::new(),
-            }
-            .into_node(name, path)?,
-        ]
+        vec![builder.item(index, name)?]
     } else {
+        let mut parts = Vec::new();
         trie.children
             .into_iter()
             .filter_map(|(part, child)| {
-                let path = base.join(&part);
-                child.into_node(part.to_string_lossy().into_owned(), path)
+                parts.push(part);
+                let node = builder.tile(child, &mut parts);
+                parts.pop();
+                node
             })
             .collect()
     };
@@ -235,12 +258,12 @@ fn group(key: String, name: String, base: &Path, leaves: Vec<Leaf>) -> Option<No
 }
 
 /// The deepest folder that holds every path.
-fn common_ancestor(paths: impl IntoIterator<Item = PathBuf>) -> PathBuf {
+fn common_ancestor<'a>(paths: impl IntoIterator<Item = &'a Path>) -> PathBuf {
     let mut paths = paths.into_iter();
     let Some(first) = paths.next() else {
         return PathBuf::new();
     };
-    let mut base = first.parent().map(Path::to_path_buf).unwrap_or(first);
+    let mut base = first.parent().unwrap_or(first).to_path_buf();
     for path in paths {
         while !path.starts_with(&base) {
             if !base.pop() {
@@ -318,23 +341,23 @@ pub fn build(roots: &[PathBuf], artifacts: Vec<Leaf>, caches: Vec<Leaf>) -> Node
                 root.to_string_lossy().into_owned(),
                 display_path(root),
                 root,
-                leaves,
+                &leaves,
             )
         })
         .collect();
-    let base = common_ancestor(elsewhere.iter().map(|leaf| leaf.path.clone()));
+    let base = common_ancestor(elsewhere.iter().map(|leaf| leaf.path.as_path()));
     groups.extend(group(
         ELSEWHERE.to_owned(),
         "Outside the scanned folders".to_owned(),
         &base,
-        elsewhere,
+        &elsewhere,
     ));
-    let base = common_ancestor(caches.iter().map(|leaf| leaf.path.clone()));
+    let base = common_ancestor(caches.iter().map(|leaf| leaf.path.as_path()));
     groups.extend(group(
         CACHES.to_owned(),
         "Global caches".to_owned(),
         &base,
-        caches,
+        &caches,
     ));
     let mut top = if groups.len() == 1 {
         groups.remove(0)

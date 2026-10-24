@@ -45,12 +45,13 @@ fn resolve(
         return restore::latest_run(history, restored).ok_or(AppError::NothingToRestore);
     }
     let mut targets = Vec::new();
+    let mut seen = HashSet::new();
     for id in &args.ids {
         let found = history
             .find(id)
             .ok_or_else(|| AppError::UnknownRun(id.clone()))?;
         for target in found {
-            if !targets.contains(&target) {
+            if seen.insert(target) {
                 targets.push(target);
             }
         }
@@ -83,7 +84,7 @@ pub fn run(args: RestoreArgs, json: bool) -> Result<(), AppError> {
             reason: outcome.reason.as_deref(),
         })
         .collect();
-    report(&outcomes, args.dry_run, json);
+    report(&outcomes, args.dry_run, json)?;
     let failed = result.count(Status::Failed);
     if failed > 0 {
         return Err(AppError::RestoreFailed(failed));
@@ -91,7 +92,7 @@ pub fn run(args: RestoreArgs, json: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-fn report(outcomes: &[Outcome], dry_run: bool, json: bool) {
+fn report(outcomes: &[Outcome], dry_run: bool, json: bool) -> Result<(), AppError> {
     let count = |status: Status| {
         outcomes
             .iter()
@@ -121,11 +122,8 @@ fn report(outcomes: &[Outcome], dry_run: bool, json: bool) {
             items: outcomes,
             summary,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
-        );
-        return;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
     }
     for outcome in outcomes {
         let label = match outcome.status {
@@ -161,4 +159,5 @@ fn report(outcomes: &[Outcome], dry_run: bool, json: bool) {
             String::new()
         }
     );
+    Ok(())
 }

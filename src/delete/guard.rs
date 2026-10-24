@@ -1,7 +1,9 @@
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
-use crate::platform;
+use crate::platform::{self, MountTable};
 use crate::protect::Protected;
 
 const PROTECTED: &[&str] = &[
@@ -60,12 +62,28 @@ pub enum Refusal {
     Inspect(String),
 }
 
+#[derive(Clone, Default)]
+struct Mounts(Arc<OnceLock<MountTable>>);
+
+impl Mounts {
+    fn is_mount_point(&self, path: &Path) -> bool {
+        self.0.get_or_init(MountTable::load).is_mount_point(path)
+    }
+}
+
+impl fmt::Debug for Mounts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Mounts")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Guard {
     roots: Vec<PathBuf>,
     anchors: Vec<PathBuf>,
     cwd: Option<PathBuf>,
     protected: Protected,
+    mounts: Mounts,
 }
 
 impl Guard {
@@ -79,6 +97,7 @@ impl Guard {
             anchors,
             cwd: std::env::current_dir().ok(),
             protected: Protected::for_user(),
+            mounts: Mounts::default(),
         }
     }
 
@@ -136,6 +155,9 @@ impl Guard {
         if identity.is_some() && platform::identity(&metadata) != identity {
             return Err(Refusal::Changed);
         }
+        if self.mounts.is_mount_point(path) {
+            return Err(Refusal::MountPoint);
+        }
         if metadata.is_dir() {
             let parent = path.parent().ok_or(Refusal::TooShallow)?;
             let parent_meta =
@@ -151,6 +173,25 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_a_bind_mount_on_the_same_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let mounted = base.join("app/node_modules");
+        let plain = base.join("app/dist");
+        fs::create_dir_all(&mounted).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        let guard = Guard::new(std::slice::from_ref(&base)).with_cwd(None);
+        let table = MountTable::from_mounts(vec![platform::Mount {
+            point: mounted.clone(),
+            fs_type: "ext4".to_owned(),
+        }]);
+        guard.mounts.0.set(table).ok().unwrap();
+
+        assert_eq!(guard.check(&mounted, None), Err(Refusal::MountPoint));
+        assert_eq!(guard.check(&plain, None), Ok(()));
+    }
 
     fn guard() -> Guard {
         Guard::new(&[PathBuf::from("/home/me/projects")]).with_cwd(Some(PathBuf::from("/tmp/x")))

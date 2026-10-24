@@ -6,6 +6,7 @@ use super::AppError;
 use crate::cli::{HistoryAction, HistoryArgs};
 use crate::delete::Mode;
 use crate::history::{self, Action, Entry, History, Run, Total};
+use crate::output;
 use crate::units::ByteSize;
 
 #[derive(Serialize)]
@@ -70,6 +71,10 @@ impl Trash {
 pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
     let path = history::default_path()?;
     let history = history::load(&path)?;
+    if history.runs.is_empty() && !json && args.command.is_none() {
+        println!("nothing deleted yet, history is kept in {}", path.display());
+        return Ok(());
+    }
     let trash = Trash::read(&history);
     if let Some(HistoryAction::Show { run }) = args.command {
         return show(&history, &trash, &run, json);
@@ -82,14 +87,7 @@ pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
             in_trash,
             freed_bytes: freed,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
-        );
-        return Ok(());
-    }
-    if history.runs.is_empty() {
-        println!("nothing deleted yet, history is kept in {}", path.display());
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     print_runs(&history, &trash);
@@ -205,10 +203,7 @@ fn show(history: &History, trash: &Trash, id: &str, json: bool) -> Result<(), Ap
             run,
             items,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     println!(
@@ -233,7 +228,7 @@ fn show(history: &History, trash: &Trash, id: &str, json: bool) -> Result<(), Ap
             item.entry.size,
             item.state,
             item.entry.rule,
-            item.entry.path.display()
+            output::display_path(&item.entry.path)
         );
     }
     Ok(())

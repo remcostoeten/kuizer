@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,14 +14,15 @@ use crate::platform::dir::EntryKind;
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
 use crate::scan::walk::{Companion, Flow, Visitor, Walker};
-use crate::scan::{self, Cancel, Issue, Scan};
-use crate::toolchains::PinFinder;
+use crate::scan::{Cancel, Issue};
 use crate::{caches, toolchains};
 
 const SAMPLE: u64 = 16 * 1024;
 const SAMPLED: u64 = 3 * SAMPLE;
 const CHUNK: usize = 1024 * 1024;
 const COMPARE_CHUNK: usize = 64 * 1024;
+const STAT_BATCH: usize = 256;
+const ROTATIONAL_WORKERS: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -83,8 +86,9 @@ impl Options {
         }
     }
 
-    fn workers(self) -> usize {
+    fn workers(self, roots: &[PathBuf]) -> usize {
         match self.threads {
+            0 if roots.iter().any(|root| platform::rotational_at(root)) => ROTATIONAL_WORKERS,
             0 => thread::available_parallelism().map_or(4, |n| n.get().min(8)),
             n => n,
         }
@@ -148,9 +152,10 @@ impl Skip {
     }
 
     fn skips(&mut self, path: &Path) -> bool {
-        let Some(dir) = path.parent() else {
-            return false;
-        };
+        path.parent().is_some_and(|dir| self.skips_dir(dir))
+    }
+
+    fn skips_dir(&mut self, dir: &Path) -> bool {
         if let Some((last, skipped)) = &self.last
             && last == dir
         {
@@ -162,10 +167,76 @@ impl Skip {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Entry {
+    start: usize,
+    dir: u32,
+    len: u32,
+}
+
+#[derive(Default)]
+struct Paths {
+    dirs: Vec<PathBuf>,
+    names: Vec<u8>,
+    entries: Vec<Entry>,
+}
+
+impl Paths {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn push(&mut self, path: &Path) {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return;
+        };
+        let Ok(len) = u32::try_from(name.len()) else {
+            return;
+        };
+        if self.dirs.last().is_none_or(|last| last != dir) {
+            self.dirs.push(dir.to_path_buf());
+        }
+        let Ok(dir) = u32::try_from(self.dirs.len() - 1) else {
+            return;
+        };
+        self.entries.push(Entry {
+            start: self.names.len(),
+            dir,
+            len,
+        });
+        self.names.extend_from_slice(name.as_bytes());
+    }
+
+    fn fill(&self, index: usize, buffer: &mut PathBuf) {
+        let entry = self.entries[index];
+        let name = &self.names[entry.start..entry.start + entry.len as usize];
+        buffer.clear();
+        buffer.push(&self.dirs[entry.dir as usize]);
+        buffer.push(OsStr::from_bytes(name));
+    }
+
+    fn append(&mut self, other: Self) {
+        let Ok(dirs) = u32::try_from(self.dirs.len()) else {
+            return;
+        };
+        let names = self.names.len();
+        self.entries
+            .extend(other.entries.into_iter().map(|entry| Entry {
+                start: entry.start + names,
+                dir: entry.dir + dirs,
+                len: entry.len,
+            }));
+        self.dirs.extend(other.dirs);
+        self.names.extend(other.names);
+    }
+}
+
 pub struct Files {
     min_size: u64,
-    paths: Vec<PathBuf>,
+    roots: Vec<PathBuf>,
+    paths: Paths,
     skip: Option<Skip>,
+    skipping: bool,
     issues: Vec<Issue>,
     counted: u64,
     started: Instant,
@@ -183,17 +254,21 @@ impl Files {
     /// @example
     /// let files = Files::for_roots(options, &[PathBuf::from("/home/me/.config/app")]);
     pub fn for_roots(options: Options, roots: &[PathBuf]) -> Self {
-        Self::with_skip(
+        let mut files = Self::with_skip(
             options,
             (!options.include_hidden).then(|| Skip::for_user(roots)),
-        )
+        );
+        files.roots = roots.to_vec();
+        files
     }
 
     fn with_skip(options: Options, skip: Option<Skip>) -> Self {
         Self {
             min_size: options.min_size,
-            paths: Vec::new(),
+            roots: Vec::new(),
+            paths: Paths::default(),
             skip,
+            skipping: false,
             issues: Vec::new(),
             counted: 0,
             started: Instant::now(),
@@ -203,12 +278,16 @@ impl Files {
 
 impl Visitor for Files {
     fn wants_files(&self) -> bool {
-        true
+        !self.skipping
     }
 
     fn issue(&mut self, issue: Issue) -> Flow {
         self.issues.push(issue);
         Flow::Continue
+    }
+
+    fn entered(&mut self, path: &Path) {
+        self.skipping = self.skip.as_mut().is_some_and(|skip| skip.skips_dir(path));
     }
 
     fn counted(&mut self, kind: EntryKind) {
@@ -226,7 +305,7 @@ impl Visitor for Files {
         {
             return Flow::Continue;
         }
-        self.paths.push(path.to_path_buf());
+        self.paths.push(path);
         Flow::Continue
     }
 }
@@ -235,8 +314,10 @@ impl Companion for Files {
     fn fork(&self) -> Self {
         Self {
             min_size: self.min_size,
-            paths: Vec::new(),
+            roots: Vec::new(),
+            paths: Paths::default(),
             skip: self.skip.clone(),
+            skipping: false,
             issues: Vec::new(),
             counted: 0,
             started: self.started,
@@ -244,7 +325,7 @@ impl Companion for Files {
     }
 
     fn merge(&mut self, other: Self) {
-        self.paths.extend(other.paths);
+        self.paths.append(other.paths);
         self.issues.extend(other.issues);
         self.counted += other.counted;
     }
@@ -258,7 +339,7 @@ struct Reporting<'a> {
 
 impl Visitor for Reporting<'_> {
     fn wants_files(&self) -> bool {
-        true
+        self.files.wants_files()
     }
 
     fn cancelled(&self) -> bool {
@@ -267,6 +348,10 @@ impl Visitor for Reporting<'_> {
 
     fn issue(&mut self, issue: Issue) -> Flow {
         self.files.issue(issue)
+    }
+
+    fn entered(&mut self, path: &Path) {
+        self.files.entered(path);
     }
 
     fn counted(&mut self, kind: EntryKind) {
@@ -297,6 +382,83 @@ fn stat(path: &Path, min_size: u64) -> Result<Option<Seen>, Issue> {
         identity: platform::shared_inode(&metadata),
         modified: metadata.modified().ok(),
     }))
+}
+
+fn stat_all(
+    paths: &Paths,
+    min_size: u64,
+    workers: usize,
+    cancel: &Cancel,
+) -> Option<(Vec<Seen>, Vec<Issue>)> {
+    let total = paths.len();
+    if total == 0 {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let next = AtomicUsize::new(0);
+    let parts: Vec<(Vec<Seen>, Vec<Issue>)> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers.clamp(1, total.div_ceil(STAT_BATCH)))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut seen = Vec::new();
+                    let mut issues = Vec::new();
+                    let mut buffer = PathBuf::new();
+                    loop {
+                        let start = next.fetch_add(STAT_BATCH, Ordering::Relaxed);
+                        if start >= total || cancel.is_cancelled() {
+                            break (seen, issues);
+                        }
+                        for index in start..(start + STAT_BATCH).min(total) {
+                            paths.fill(index, &mut buffer);
+                            match stat(&buffer, min_size) {
+                                Ok(Some(file)) => seen.push(file),
+                                Ok(None) => {}
+                                Err(issue) => issues.push(issue),
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("stat thread panicked"))
+            .collect()
+    });
+    if cancel.is_cancelled() {
+        return None;
+    }
+    let mut seen = Vec::new();
+    let mut issues = Vec::new();
+    for (found, failed) in parts {
+        seen.extend(found);
+        issues.extend(failed);
+    }
+    issues.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    Some((seen, issues))
+}
+
+fn same_size_candidates(mut seen: Vec<Seen>) -> Vec<Candidate> {
+    seen.sort_unstable_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path)));
+    let mut candidates = Vec::new();
+    let mut group: Vec<Seen> = Vec::new();
+    for file in seen {
+        if group.first().is_some_and(|first| first.size != file.size) {
+            keep_group(&mut group, &mut candidates);
+        }
+        group.push(file);
+    }
+    keep_group(&mut group, &mut candidates);
+    candidates
+}
+
+fn keep_group(group: &mut Vec<Seen>, candidates: &mut Vec<Candidate>) {
+    let files = std::mem::take(group);
+    if files.len() > 1 {
+        let merged = merge_links(files);
+        if merged.len() > 1 {
+            candidates.extend(merged);
+        }
+    }
 }
 
 fn merge_links(files: Vec<Seen>) -> Vec<Candidate> {
@@ -498,34 +660,62 @@ impl Pass<'_> {
     }
 }
 
-fn split_by_bytes(
-    members: Vec<Candidate>,
-    cancel: &Cancel,
-    issues: &mut Vec<Issue>,
-) -> Vec<Vec<Candidate>> {
-    let mut clusters: Vec<Vec<Candidate>> = Vec::new();
-    'members: for member in members {
+struct Split {
+    clusters: Vec<Vec<usize>>,
+    issues: Vec<Issue>,
+}
+
+fn split_by_bytes(members: &[Candidate], cancel: &Cancel) -> Split {
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut issues = Vec::new();
+    'members: for (index, member) in members.iter().enumerate() {
         for cluster in &mut clusters {
-            match same_bytes(&cluster[0].member.path, &member.member.path, cancel) {
+            match same_bytes(
+                &members[cluster[0]].member.path,
+                &member.member.path,
+                cancel,
+            ) {
                 Ok(true) => {
-                    cluster.push(member);
+                    cluster.push(index);
                     continue 'members;
                 }
                 Ok(false) => {}
                 Err(error) => {
                     if error.kind() != io::ErrorKind::Interrupted {
-                        issues.push(Issue::from_io(member.member.path, &error));
+                        issues.push(Issue::from_io(member.member.path.clone(), &error));
                     }
                     continue 'members;
                 }
             }
         }
-        clusters.push(vec![member]);
+        clusters.push(vec![index]);
     }
-    clusters
-        .into_iter()
-        .filter(|cluster| cluster.len() > 1)
-        .collect()
+    clusters.retain(|cluster| cluster.len() > 1);
+    Split { clusters, issues }
+}
+
+fn verified(
+    hashed: Hashed,
+    workers: usize,
+    cancel: &Cancel,
+    issues: &mut Vec<Issue>,
+) -> Option<Hashed> {
+    let splits = in_parallel(&hashed, workers, cancel, |(_, members)| {
+        split_by_bytes(members, cancel)
+    })?;
+    let mut groups = Vec::new();
+    for ((hash, members), split) in hashed.into_iter().zip(splits) {
+        issues.extend(split.issues);
+        let mut slots: Vec<Option<Candidate>> = members.into_iter().map(Some).collect();
+        for cluster in split.clusters {
+            let cluster = cluster
+                .into_iter()
+                .filter_map(|index| slots[index].take())
+                .collect();
+            groups.push((hash, cluster));
+        }
+    }
+    Some(groups)
 }
 
 /// @name find
@@ -584,58 +774,6 @@ pub fn find_cancellable(
     Ok(group_cancellable(files, options, cancel, on_stage))
 }
 
-/// @name start_scan
-/// @description Starts an artifact scan that also collects files for duplicate detection during
-/// the same walk, like the dashboard does. Pass `None` to skip duplicates. The returned receiver
-/// yields the collected files once the walk ends; hand them to `group`.
-///
-/// @example
-/// let (scan, files) = dupes::start_scan(&config, &roots, Cancel::new(), Some(options))?;
-/// let collected = scan::collect(&scan, |_| {});
-/// let found = files.recv().ok().flatten().map(|files| dupes::group(files, options, |_| {}));
-pub fn start_scan(
-    config: &Config,
-    roots: &[PathBuf],
-    cancel: Cancel,
-    options: Option<Options>,
-) -> Result<(Scan, crossbeam_channel::Receiver<Option<Files>>), ConfigError> {
-    scan::start_with(
-        config,
-        roots,
-        cancel,
-        options.map(|options| Files::for_roots(options, roots)),
-    )
-}
-
-/// What a walk collected next to the artifacts: files for duplicate detection and toolchain pins.
-pub type Collected = (Option<Files>, Option<PinFinder>);
-
-/// @name start_scan_with_pins
-/// @description Like `start_scan`, and with `pins` set also records toolchain pin files
-/// (`.nvmrc`, `rust-toolchain.toml` and the like) during the same walk. The receiver yields the
-/// collected files and pins once the walk ends.
-///
-/// @example
-/// let (scan, found) = dupes::start_scan_with_pins(&config, &roots, Cancel::new(), None, true)?;
-/// let (_, pins) = found.recv()?;
-pub fn start_scan_with_pins(
-    config: &Config,
-    roots: &[PathBuf],
-    cancel: Cancel,
-    options: Option<Options>,
-    pins: bool,
-) -> Result<(Scan, crossbeam_channel::Receiver<Collected>), ConfigError> {
-    scan::start_with(
-        config,
-        roots,
-        cancel,
-        (
-            options.map(|options| Files::for_roots(options, roots)),
-            pins.then(PinFinder::new),
-        ),
-    )
-}
-
 /// @name group
 /// @description Groups files collected during a walk into sets of identical contents, the same
 /// way `find` does after its own walk. Lets a caller that already walks the tree, such as the
@@ -663,13 +801,14 @@ pub fn group_cancellable(
 ) -> Duplicates {
     let Files {
         min_size,
+        roots,
         paths,
         mut issues,
         counted,
         started,
         ..
     } = files;
-    let workers = options.workers();
+    let workers = options.workers(&roots);
     let cancelled = |issues: Vec<Issue>| Duplicates {
         groups: Vec::new(),
         issues,
@@ -677,28 +816,14 @@ pub fn group_cancellable(
         duration: started.elapsed(),
     };
 
-    let Some(stats) = in_parallel(&paths, workers, cancel, |path| stat(path, min_size)) else {
+    let Some((seen, failed)) = stat_all(&paths, min_size, workers, cancel) else {
         return cancelled(issues);
     };
     drop(paths);
-    let mut seen = Vec::new();
-    for stat in stats {
-        match stat {
-            Ok(Some(file)) => seen.push(file),
-            Ok(None) => {}
-            Err(issue) => issues.push(issue),
-        }
-    }
+    issues.extend(failed);
 
-    seen.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    for candidate in merge_links(seen) {
-        by_size.entry(candidate.size).or_default().push(candidate);
-    }
-    let (small, large): (Vec<_>, Vec<_>) = by_size
-        .into_values()
-        .filter(|group| group.len() > 1)
-        .flatten()
+    let (small, large): (Vec<_>, Vec<_>) = same_size_candidates(seen)
+        .into_iter()
         .partition(|candidate| candidate.size <= SAMPLED);
 
     let pass = Pass { workers, cancel };
@@ -717,18 +842,10 @@ pub fn group_cancellable(
         on_stage(Stage::Verifying {
             groups: hashed.len(),
         });
-        hashed = hashed
-            .into_iter()
-            .flat_map(|(hash, members)| {
-                split_by_bytes(members, cancel, &mut issues)
-                    .into_iter()
-                    .map(move |cluster| (hash, cluster))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        if cancel.is_cancelled() {
+        let Some(checked) = verified(hashed, workers, cancel, &mut issues) else {
             return cancelled(issues);
-        }
+        };
+        hashed = checked;
     }
 
     let mut groups: Vec<Group> = hashed
@@ -898,5 +1015,44 @@ mod tests {
         let mut lifted = Skip::new(protected, vec![tool], &[home.join(".config/app")]);
         assert!(!lifted.skips(&home.join(".config/app/a.toml")));
         assert!(lifted.skips(&home.join(".config/other/a.toml")));
+    }
+
+    #[test]
+    fn entering_a_skipped_folder_stops_collecting_its_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = fs::canonicalize(tmp.path()).unwrap();
+        let skip = Skip::new(Protected::new(Some(&home)), Vec::new(), &[]);
+        let mut files = Files::with_skip(options(), Some(skip));
+
+        files.entered(&home.join(".cache/pip"));
+        assert!(!files.wants_files());
+        files.entered(&home.join("dev/app"));
+        assert!(files.wants_files());
+    }
+
+    #[test]
+    fn merged_path_stores_rebuild_every_path() {
+        let mut left = Paths::default();
+        let mut right = Paths::default();
+        for path in ["/a/x/one", "/a/x/two", "/a/y/three"] {
+            left.push(Path::new(path));
+        }
+        for path in ["/b/four", "/b/five"] {
+            right.push(Path::new(path));
+        }
+        left.append(right);
+
+        let mut buffer = PathBuf::new();
+        let rebuilt: Vec<PathBuf> = (0..left.len())
+            .map(|index| {
+                left.fill(index, &mut buffer);
+                buffer.clone()
+            })
+            .collect();
+
+        assert_eq!(
+            rebuilt,
+            ["/a/x/one", "/a/x/two", "/a/y/three", "/b/four", "/b/five"].map(PathBuf::from)
+        );
     }
 }

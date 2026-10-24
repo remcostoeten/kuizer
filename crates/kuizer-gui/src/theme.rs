@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use gpui::{Pixels, Rems, Rgba, px, rems, rgb, rgba};
+use gpui::{Hsla, Pixels, Rems, Rgba, hsla, px, rems, rgb, rgba};
 use kuizer::detect::Category;
 use kuizer::units::ByteSize;
 
@@ -42,6 +42,7 @@ pub mod size {
     pub const DOT: f32 = 6.;
     pub const ICON: f32 = 16.;
     pub const CHECK: f32 = 14.;
+    pub const GLYPH: f32 = 10.;
     pub const BADGE: f32 = 18.;
     pub const SEGMENT: f32 = 24.;
     pub const CONTROL: f32 = 28.;
@@ -88,12 +89,20 @@ pub mod col {
     pub const WIDE: f32 = 240.;
 }
 
+pub const DISABLED: f32 = 0.4;
+
+pub const DIM: f32 = 0.8;
+
 pub fn background() -> Rgba {
     rgb(0x0011_1111)
 }
 
 pub fn transparent() -> Rgba {
     rgba(0x0000_0000)
+}
+
+pub fn shadow() -> Hsla {
+    hsla(0., 0., 0., 0.4)
 }
 
 pub fn scrim() -> Rgba {

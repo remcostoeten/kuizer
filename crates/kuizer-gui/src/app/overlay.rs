@@ -51,7 +51,7 @@ impl Kuizer {
                         && palette.active != index
                     {
                         palette.active = index;
-                        cx.notify();
+                        app.redraw_chrome(cx);
                     }
                 }))
                 .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {

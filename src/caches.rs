@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::config::Excludes;
 use crate::detect::Safety;
 use crate::protect::Protected;
 
@@ -386,6 +387,27 @@ pub fn roots(locations: &Locations) -> Vec<PathBuf> {
 /// @example
 /// let found = caches::find(&Locations::for_user()?, &Protected::for_user());
 pub fn find(locations: &Locations, protected: &Protected) -> Vec<KnownCache> {
+    candidates(locations, protected).collect()
+}
+
+/// @name find_excluding
+/// @description Like [`find`], and leaves out every cache whose path or any folder above it
+/// matches `excludes`, so a cache the user excluded from scans is neither listed nor offered for
+/// deletion.
+///
+/// @example
+/// let found = caches::find_excluding(&Locations::for_user()?, &Protected::for_user(), &config.excludes()?);
+pub fn find_excluding(
+    locations: &Locations,
+    protected: &Protected,
+    excludes: &Excludes,
+) -> Vec<KnownCache> {
+    candidates(locations, protected)
+        .filter(|cache| !cache.path.ancestors().any(|dir| excludes.path(dir)))
+        .collect()
+}
+
+fn candidates(locations: &Locations, protected: &Protected) -> impl Iterator<Item = KnownCache> {
     SPECS
         .iter()
         .map(|spec| KnownCache {
@@ -402,7 +424,6 @@ pub fn find(locations: &Locations, protected: &Protected) -> Vec<KnownCache> {
             std::fs::symlink_metadata(&cache.path).is_ok_and(|metadata| metadata.is_dir())
                 && !protected.covers(&cache.path)
         })
-        .collect()
 }
 
 #[cfg(test)]
@@ -419,12 +440,21 @@ mod tests {
         fs::create_dir_all(home.join(".cargo/registry/cache")).expect("cargo");
         fs::create_dir_all(home.join(".cache")).expect("cache");
         fs::write(home.join(".cache/pip"), "not a dir").expect("pip file");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(home.join(".npm"), home.join(".cache/yarn")).expect("link");
 
         let found = find(&Locations::under(home), &Protected::new(Some(home)));
         let names: Vec<&str> = found.iter().map(|cache| cache.name).collect();
         assert_eq!(names, ["npm", "cargo-registry-cache"]);
+
+        let pattern = home.join(".npm").display().to_string();
+        let excludes = Excludes::new(&[pattern], &[]).expect("excludes");
+        let kept = find_excluding(
+            &Locations::under(home),
+            &Protected::new(Some(home)),
+            &excludes,
+        );
+        let names: Vec<&str> = kept.iter().map(|cache| cache.name).collect();
+        assert_eq!(names, ["cargo-registry-cache"]);
     }
 
     #[test]

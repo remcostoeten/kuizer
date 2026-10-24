@@ -28,7 +28,7 @@ pub fn run(config: &Config, args: ToolchainArgs, json: bool, quiet: bool) -> Res
     let cleaning = args.clean || args.removal.dry_run;
     if !cleaning {
         if json {
-            println!("{}", output::toolchain_report(&entries));
+            println!("{}", output::toolchain_report(&entries)?);
         } else {
             output::print_toolchains(&entries, quiet);
         }

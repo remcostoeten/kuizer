@@ -7,7 +7,7 @@ use gpui::{
     Animation, AnimationExt, AnyView, App, Bounds, Context, Corner, DispatchPhase, Entity,
     FontWeight, Global, IntoElement, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled, Task, Window, anchored, canvas,
-    deferred, div, point, prelude::*, px,
+    deferred, div, point, prelude::*,
 };
 use kuizer::output::display_path;
 
@@ -20,7 +20,6 @@ const DELAY: Duration = Duration::from_millis(250);
 const ENTER: Duration = Duration::from_millis(125);
 const WARM: Duration = Duration::from_millis(300);
 const RISE: f32 = 3.;
-const GAP: f32 = 6.;
 const ROOM: f32 = 160.;
 
 type Build = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
@@ -299,17 +298,17 @@ impl Render for Layer {
             let bounds = shown.anchor.bounds;
             let above = bounds.bottom() + unit(ROOM).to_pixels(window.rem_size())
                 > window.viewport_size().height;
-            let gap = unit(GAP).to_pixels(window.rem_size());
+            let gap = unit(space::S).to_pixels(window.rem_size());
+            let margin = unit(space::M).to_pixels(window.rem_size());
             let x = shown.anchor.x.max(bounds.left());
             let (corner, y) = if above {
                 (Corner::BottomLeft, bounds.top() - gap)
             } else {
                 (Corner::TopLeft, bounds.bottom() + gap)
             };
-            let rise = if motion::reduced() { 0. } else { RISE };
-            let direction = if above { -rise } else { rise };
+            let direction = if above { -RISE } else { RISE };
             let content = div().relative().child(shown.view.clone());
-            let content = if shown.animate {
+            let content = if shown.animate && !motion::reduced() {
                 content
                     .with_animation(
                         ("tooltip-enter", shown.epoch),
@@ -327,7 +326,7 @@ impl Render for Layer {
                 anchored()
                     .anchor(corner)
                     .position(point(x, y))
-                    .snap_to_window_with_margin(px(8.))
+                    .snap_to_window_with_margin(margin)
                     .child(content),
             )
             .with_priority(1)
@@ -404,7 +403,7 @@ pub fn term(term: Term) -> impl Fn(&mut Window, &mut App) -> AnyView {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, px};
 
     use super::*;
 

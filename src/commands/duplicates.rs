@@ -38,7 +38,7 @@ pub fn run(config: &Config, args: DuplicatesArgs, json: bool, quiet: bool) -> Re
     };
     let shown = &found.groups[..found.groups.len().min(limit)];
     if json {
-        println!("{}", output::duplicates_report(&roots, &found, shown));
+        println!("{}", output::duplicates_report(&roots, &found, shown)?);
     } else {
         output::print_duplicates(&found, shown, quiet);
     }

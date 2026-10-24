@@ -6,15 +6,12 @@ use std::process::{Command, Stdio};
 pub enum Os {
     Linux,
     Mac,
-    Windows,
 }
 
 impl Os {
     pub fn current() -> Self {
         if cfg!(target_os = "macos") {
             Self::Mac
-        } else if cfg!(windows) {
-            Self::Windows
         } else {
             Self::Linux
         }
@@ -25,8 +22,6 @@ impl Os {
 pub struct Launch {
     pub program: &'static str,
     pub args: Vec<OsString>,
-    /// Whether a non-zero exit means it failed. Explorer exits with 1 even when it opened.
-    pub checks_status: bool,
 }
 
 impl Launch {
@@ -34,7 +29,6 @@ impl Launch {
         Self {
             program,
             args: args.into_iter().map(Into::into).collect(),
-            checks_status: true,
         }
     }
 }
@@ -64,8 +58,7 @@ pub fn file_uri(path: &Path) -> String {
 /// @name commands
 /// @description The commands that show `path` selected in the file manager, in the order to try
 /// them. Linux asks the desktop's file manager over D-Bus with `gdbus` or `dbus-send`, then falls
-/// back to opening the containing folder with `xdg-open`. macOS uses `open -R` and Windows
-/// `explorer /select,`.
+/// back to opening the containing folder with `xdg-open`. macOS uses `open -R`.
 ///
 /// @example
 /// let tries = commands(Path::new("/p/site/node_modules"), Os::Linux);
@@ -76,14 +69,6 @@ pub fn commands(path: &Path, os: Os) -> Vec<Launch> {
         .unwrap_or(path);
     match os {
         Os::Mac => vec![Launch::new("open", [OsString::from("-R"), path.into()])],
-        Os::Windows => {
-            let mut select = OsString::from("/select,");
-            select.push(path);
-            vec![Launch {
-                checks_status: false,
-                ..Launch::new("explorer", [select])
-            }]
-        }
         Os::Linux => {
             let uri = file_uri(path);
             vec![
@@ -140,7 +125,7 @@ pub fn run(tries: &[Launch]) -> Result<(), String> {
             .stderr(Stdio::null())
             .status();
         match status {
-            Ok(status) if status.success() || !launch.checks_status => return Ok(()),
+            Ok(status) if status.success() => return Ok(()),
             Ok(status) => last = format!("{} exited with {status}", launch.program),
             Err(error) => last = format!("cannot run {}: {error}", launch.program),
         }
@@ -193,7 +178,6 @@ mod tests {
                 "xdg-open /p/my site",
             ]
         );
-        assert!(tries.iter().all(|launch| launch.checks_status));
     }
 
     #[test]
@@ -201,14 +185,6 @@ mod tests {
         let tries = commands(Path::new("/Users/me/app/dist"), Os::Mac);
         assert_eq!(tries.len(), 1);
         assert_eq!(line(&tries[0]), "open -R /Users/me/app/dist");
-    }
-
-    #[test]
-    fn windows_selects_the_item_in_explorer() {
-        let tries = commands(Path::new("C:/work/app/dist"), Os::Windows);
-        assert_eq!(tries.len(), 1);
-        assert_eq!(line(&tries[0]), "explorer /select,C:/work/app/dist");
-        assert!(!tries[0].checks_status);
     }
 
     #[test]

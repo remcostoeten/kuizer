@@ -1,5 +1,3 @@
-use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static OFF: AtomicBool = AtomicBool::new(false);
@@ -80,41 +78,12 @@ pub fn configure(enabled: bool) {
 }
 
 /// @name reduced
-/// @description Whether animations should stand still: `appearance.motion` is off, or the
-/// desktop asks for less motion (KDE with its animation speed set to instant, or GTK with
-/// animations turned off). The desktop settings are read once per process.
+/// @description Whether animations should stand still because `appearance.motion` is off.
 ///
 /// @example
 /// let _ = reduced();
 pub fn reduced() -> bool {
-    OFF.load(Ordering::Relaxed) || desktop()
-}
-
-fn desktop() -> bool {
-    static REDUCED: OnceLock<bool> = OnceLock::new();
-    *REDUCED.get_or_init(|| {
-        dirs::config_dir().is_some_and(|config| {
-            let kde = read(&config.join("kdeglobals"), "AnimationDurationFactor");
-            let gtk = read(
-                &config.join("gtk-3.0/settings.ini"),
-                "gtk-enable-animations",
-            );
-            kde.is_some_and(|factor| factor.parse::<f32>().is_ok_and(|factor| factor == 0.0))
-                || gtk.is_some_and(|enabled| matches!(enabled.as_str(), "0" | "false"))
-        })
-    })
-}
-
-fn read(file: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    setting(&text, key)
-}
-
-fn setting(text: &str, key: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let (name, value) = line.split_once('=')?;
-        (name.trim() == key).then(|| value.trim().to_owned())
-    })
+    OFF.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -140,15 +109,5 @@ mod tests {
             assert!(value >= previous);
             previous = value;
         }
-    }
-
-    #[test]
-    fn settings_are_read_by_key() {
-        let text = "[KDE]\nAnimationDurationFactor=0\nSingleClick=false\n";
-        assert_eq!(
-            setting(text, "AnimationDurationFactor").as_deref(),
-            Some("0")
-        );
-        assert_eq!(setting(text, "Missing"), None);
     }
 }

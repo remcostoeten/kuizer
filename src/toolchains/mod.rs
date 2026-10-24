@@ -3,12 +3,13 @@ pub mod pins;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
 pub use pins::{Pin, PinFinder};
 
+use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Target};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::output::display_path;
@@ -438,7 +439,8 @@ pub fn measure(found: Vec<Toolchain>) -> Vec<(Toolchain, Candidate)> {
 
 /// @name measure_with
 /// @description Like `measure`, but stops sizing once `cancel` is set and calls `on_measured`
-/// from the measuring thread as each toolchain is done.
+/// from the measuring thread as each toolchain is done. Sizing runs on as many threads as a scan
+/// of the folders holding the versions would use, not one per version.
 ///
 /// @example
 /// let entries = toolchains::measure_with(found, &cancel, |candidate| done.push(candidate.id));
@@ -447,13 +449,40 @@ pub fn measure_with(
     cancel: &Cancel,
     on_measured: impl Fn(&Candidate) + Sync,
 ) -> Vec<(Toolchain, Candidate)> {
+    let mut parents: Vec<PathBuf> = found
+        .iter()
+        .filter_map(|toolchain| toolchain.path.parent().map(Path::to_path_buf))
+        .collect();
+    parents.sort();
+    parents.dedup();
+    let threads = scan::scan_threads(&Config::default(), &parents);
+    measure_with_threads(found, cancel, threads, on_measured)
+}
+
+/// @name measure_with_threads
+/// @description Like `measure_with`, on at most `threads` threads, so a frontend can pass the
+/// count from `scan::size_threads` or `scan::scan_threads` for its configuration.
+///
+/// @example
+/// let entries = toolchains::measure_with_threads(found, &cancel, 4, |_| {});
+pub fn measure_with_threads(
+    found: Vec<Toolchain>,
+    cancel: &Cancel,
+    threads: usize,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(Toolchain, Candidate)> {
     let on_measured = &on_measured;
-    let mut entries: Vec<(Toolchain, Candidate)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = found
-            .into_iter()
-            .enumerate()
-            .map(|(index, toolchain)| {
-                scope.spawn(move || {
+    let workers = threads.clamp(1, found.len().max(1));
+    let queue = Mutex::new(found.into_iter().enumerate().collect::<Vec<_>>());
+    let done = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
+                    let Some((index, toolchain)) = next else {
+                        break;
+                    };
                     let measured = scan::measure(&toolchain.path, cancel);
                     let candidate = Candidate {
                         id: index as u64 + 1,
@@ -467,15 +496,14 @@ pub fn measure_with(
                         project_last_active: None,
                     };
                     on_measured(&candidate);
-                    (toolchain, candidate)
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .collect()
+                    done.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((toolchain, candidate));
+                }
+            });
+        }
     });
+    let mut entries = done.into_inner().unwrap_or_else(PoisonError::into_inner);
     entries.sort_by(|(a, x), (b, y)| {
         y.usage
             .allocated
@@ -537,10 +565,7 @@ fn uninstall(program: &str, tool: Tool, version: &str) -> Result<(), DeleteError
 pub fn remove(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
     let tool = Tool::from_name(&candidate.rule.name)
         .ok_or_else(|| DeleteError::Tool(format!("{} is not a toolchain", candidate.rule.name)))?;
-    let target = Target {
-        path: candidate.path.clone(),
-        identity: candidate.identity,
-    };
+    let target = Target::from(candidate);
     let volta = tool == Tool::Volta
         && candidate
             .path

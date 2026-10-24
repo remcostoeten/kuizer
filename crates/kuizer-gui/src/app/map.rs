@@ -16,6 +16,8 @@ const LABEL: (f32, f32) = (72., 36.);
 const NAME: (f32, f32) = (40., 18.);
 pub(super) const MAP_ONLY: &str = "Available in the space map";
 
+type CountedFor = (u64, usize, usize);
+
 /// What the space map shows and where it is zoomed to.
 #[derive(Default)]
 pub(super) struct SpaceMap {
@@ -27,6 +29,9 @@ pub(super) struct SpaceMap {
     pub focus: Option<String>,
     pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub epoch: usize,
+    pub dirty: bool,
+    pub built: usize,
+    pub selected: Cell<Option<(CountedFor, u64)>>,
 }
 
 impl Kuizer {
@@ -35,9 +40,24 @@ impl Kuizer {
         self.tab == Tab::Overview && self.map.shown && self.report().is_some()
     }
 
+    pub(super) fn refresh_map(&mut self) {
+        if self.map.shown {
+            self.rebuild_map();
+        } else {
+            self.map.dirty = true;
+        }
+    }
+
+    pub(super) fn ensure_map(&mut self) {
+        if self.map.dirty && self.map.shown {
+            self.rebuild_map();
+        }
+    }
+
     /// Builds the map again from the report on screen, keeping as much of the zoom path and
     /// the focus tile as still exists.
     pub(super) fn rebuild_map(&mut self) {
+        self.map.dirty = false;
         let Some(report) = self.report() else {
             self.map.tree = None;
             return;
@@ -66,6 +86,7 @@ impl Kuizer {
         let depth = tree.trail(&self.map.path).len() - 1;
         self.map.path.truncate(depth);
         self.map.tree = Some(tree);
+        self.map.built += 1;
         let kept = self.map.focus.as_deref().is_some_and(|focus| {
             self.map_level()
                 .is_some_and(|level| level.child(focus).is_some())
@@ -110,6 +131,23 @@ impl Kuizer {
         let node = self.map_focused()?;
         let item = node.item()?;
         Some(Target::Item(item.source, item.id, node.path.clone()?))
+    }
+
+    fn map_selected(&self, level: &Node) -> u64 {
+        let key = (self.selection.generation(), self.map.built, self.map.epoch);
+        if let Some((counted, bytes)) = self.map.selected.get()
+            && counted == key
+        {
+            return bytes;
+        }
+        let bytes = level
+            .leaves()
+            .iter()
+            .filter(|(item, _)| self.selection.contains(&(item.source, item.id)))
+            .map(|(_, bytes)| bytes)
+            .sum();
+        self.map.selected.set(Some((key, bytes)));
+        bytes
     }
 
     /// Opens a folder tile of the current level as the new level.
@@ -228,6 +266,7 @@ impl Kuizer {
                     )
                     .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                         app.map.shown = true;
+                        app.ensure_map();
                         cx.notify();
                     })),
             )
@@ -238,12 +277,7 @@ impl Kuizer {
         let Some(level) = trail.last().copied() else {
             return div().into_any_element();
         };
-        let selected: u64 = level
-            .leaves()
-            .iter()
-            .filter(|(item, _)| self.selection.contains(&(item.source, item.id)))
-            .map(|(_, bytes)| bytes)
-            .sum();
+        let selected = self.map_selected(level);
         let depth = trail.len() - 1;
         let crumbs = trail.iter().enumerate().flat_map(|(index, node)| {
             let current = index == depth;
@@ -644,6 +678,29 @@ mod tests {
         });
         draw(cx);
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn a_hidden_map_is_built_when_it_is_shown(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let root = workspace(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        type_text(cx, &root.display().to_string());
+        cx.simulate_keystrokes("enter");
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.map.tree.is_none(),
+                "nothing is built for a map nobody opened"
+            );
+            assert!(app.map.dirty);
+        });
+        cx.simulate_keystrokes("m");
+        view.read_with(cx, |app, _| {
+            assert!(!app.map.dirty);
+            assert!(app.map_level().is_some_and(|level| level.items > 0));
+        });
     }
 
     fn level(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Vec<(String, u64)> {

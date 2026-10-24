@@ -1,5 +1,6 @@
 mod edit;
 mod exclude;
+mod lenient;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use crate::units::ByteSize;
 
 pub use edit::{EditError, add_exclude, exclude_pattern};
 pub use exclude::{ExcludeError, Excludes};
+pub use lenient::ConfigWarning;
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
 
@@ -269,9 +271,11 @@ pub enum ConfigError {
     UnknownDisabled(String),
 }
 
+#[derive(Default)]
 pub struct Loaded {
     pub config: Config,
     pub source: Option<PathBuf>,
+    pub warnings: Vec<ConfigWarning>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -296,24 +300,48 @@ impl Config {
         Ok(config)
     }
 
+    /// @name Config::load
+    /// @description Loads the config file, or `explicit` when given. A file that cannot be
+    /// parsed or holds invalid settings never fails the load: the bad settings fall back to their
+    /// defaults and come back as `warnings`. Only an explicitly requested file that cannot be
+    /// read is an error.
+    ///
+    /// @example
+    /// let loaded = Config::load(None)?;
+    /// for warning in &loaded.warnings {
+    ///     eprintln!("config: {warning}");
+    /// }
     pub fn load(explicit: Option<&Path>) -> Result<Loaded, ConfigError> {
         let path = match explicit {
             Some(path) => Some(expand_home(path)),
             None => default_path().filter(|path| path.is_file()),
         };
         let Some(path) = path else {
-            return Ok(Loaded {
-                config: Self::default(),
-                source: None,
-            });
+            return Ok(Loaded::default());
         };
-        let text = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
-            path: path.clone(),
-            source,
-        })?;
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if explicit.is_some() => {
+                return Err(ConfigError::Read { path, source });
+            }
+            Err(source) => {
+                let mut config = Self::default();
+                config.delete.confirm = true;
+                return Ok(Loaded {
+                    config,
+                    warnings: vec![ConfigWarning {
+                        key: String::new(),
+                        message: format!("cannot read {}: {source}", path.display()),
+                    }],
+                    source: Some(path),
+                });
+            }
+        };
+        let (config, warnings) = Self::parse_lenient(&text);
         Ok(Loaded {
-            config: Self::parse(&text, &path)?,
+            config,
             source: Some(path),
+            warnings,
         })
     }
 

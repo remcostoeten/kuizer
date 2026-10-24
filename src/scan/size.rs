@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::cancel::Cancel;
 use super::pool::{Local, Queue};
 use super::types::Usage;
-use crate::platform;
 use crate::platform::dir::{Buffer, Dir, Stat, stat_path};
 
 pub struct Measured {
@@ -21,81 +19,19 @@ pub struct Measured {
     pub identity: Option<(u64, u64)>,
 }
 
-fn newer(current: Option<SystemTime>, metadata: &fs::Metadata) -> Option<SystemTime> {
-    match (current, metadata.modified().ok()) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    }
-}
-
+/// @name measure
+/// @description Measures `path` on the calling thread: its size on disk and apparent size,
+/// entry count and newest modification time. Hard links count once, other devices are not
+/// entered, and an unreadable part marks the result as partial.
+///
+/// @example
+/// let usage = scan::measure(&cache, &Cancel::new()).usage;
 pub fn measure(path: &Path, cancel: &Cancel) -> Measured {
-    let mut usage = Usage::default();
-    let Ok(root) = fs::symlink_metadata(path) else {
-        usage.partial = true;
-        return Measured {
-            usage,
-            newest: None,
-            identity: None,
-        };
-    };
-    let device = platform::device(&root);
-    let identity = platform::identity(&root);
-    let mut newest = newer(None, &root);
-    let mut seen: HashSet<(u64, u64)> = HashSet::new();
-    usage.allocated = platform::allocated(&root);
-    usage.apparent = root.len();
-    if !root.is_dir() {
-        usage.entries = 1;
-        return Measured {
-            usage,
-            newest,
-            identity,
-        };
-    }
-
-    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if cancel.is_cancelled() {
-            usage.partial = true;
-            break;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            usage.partial = true;
-            continue;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                usage.partial = true;
-                continue;
-            };
-            let Ok(metadata) = entry.metadata() else {
-                usage.partial = true;
-                continue;
-            };
-            if metadata.is_dir() && platform::device(&metadata) != device {
-                usage.partial = true;
-                continue;
-            }
-            usage.entries += 1;
-            newest = newer(newest, &metadata);
-            if platform::shared_inode(&metadata).is_some_and(|key| !seen.insert(key)) {
-                continue;
-            }
-            usage.allocated += platform::allocated(&metadata);
-            usage.apparent += metadata.len();
-            if metadata.is_dir() {
-                stack.push(entry.path());
-            }
-        }
-    }
-    Measured {
-        usage,
-        newest,
-        identity,
-    }
+    measure_parallel(path, cancel, 1)
 }
 
 const CHUNK: usize = 1024;
+const MAX_MEASURE_THREADS: usize = 64;
 const LINK_SHARDS: usize = 16;
 
 #[derive(Default)]
@@ -408,6 +344,40 @@ pub(crate) fn run_size_task<T, Q>(
     (total.outstanding.fetch_sub(1, Ordering::AcqRel) == 1).then_some(total)
 }
 
+fn drain<T: Send + Sync>(
+    seeds: Vec<SizeTask<T>>,
+    cancel: &Cancel,
+    threads: usize,
+    done: impl Fn(&Total<T>) + Sync,
+) {
+    if seeds.is_empty() {
+        return;
+    }
+    let queue = Queue::new(seeds);
+    let worker = || {
+        let mut local = queue.local();
+        let mut scratch = SizeScratch::default();
+        while let Some(task) = local.next() {
+            if let Some(total) = run_size_task(task, &mut scratch, cancel, &mut local, |task| task)
+            {
+                done(&total);
+            }
+            local.done();
+        }
+    };
+    thread::scope(|scope| {
+        for index in 1..threads.clamp(1, MAX_MEASURE_THREADS) {
+            let spawned = thread::Builder::new()
+                .name(format!("kuizer-size-{index}"))
+                .spawn_scoped(scope, worker);
+            if spawned.is_err() {
+                break;
+            }
+        }
+        worker();
+    });
+}
+
 /// @name measure_parallel
 /// @description Measures `path` like [`measure`], with the same totals, but spreads the
 /// directories and the entries of very large directories over `threads` threads. Meant for a
@@ -420,21 +390,56 @@ pub fn measure_parallel(path: &Path, cancel: &Cancel, threads: usize) -> Measure
         Start::Done((), measured) => return measured,
         Start::Tree(total, root) => (total, root),
     };
-    let queue = Queue::new(vec![SizeTask::dir(Arc::clone(&total), root)]);
-    thread::scope(|scope| {
-        for _ in 0..threads.max(1) {
-            scope.spawn(|| {
-                let mut local = queue.local();
-                let mut scratch = SizeScratch::default();
-                while let Some(task) = local.next() {
-                    run_size_task(task, &mut scratch, cancel, &mut local, |task| task);
-                    local.done();
+    drain(
+        vec![SizeTask::dir(Arc::clone(&total), root)],
+        cancel,
+        threads,
+        |_| {},
+    );
+    total.measured()
+}
+
+/// @name measure_many
+/// @description Measures every path of `items` on one shared pool of `threads` threads, so one
+/// huge item gets help from every thread once the small ones are done. `on_done` gets each item
+/// with its measurement, in completion order, possibly from several threads at once. Items that
+/// are files or cannot be read are reported before the pool starts.
+///
+/// @example
+/// scan::measure_many(caches, &Cancel::new(), scan::size_threads(&config), |cache, measured| {
+///     results.lock().unwrap().push((cache, measured));
+/// });
+pub fn measure_many<T: Send>(
+    items: Vec<(T, PathBuf)>,
+    cancel: &Cancel,
+    threads: usize,
+    on_done: impl Fn(T, Measured) + Sync,
+) {
+    let mut seeds = Vec::new();
+    for (item, path) in items {
+        match start_measure(Slot(Mutex::new(Some(item))), &path) {
+            Start::Done(slot, measured) => {
+                if let Some(item) = slot.take() {
+                    on_done(item, measured);
                 }
-            });
+            }
+            Start::Tree(total, root) => seeds.push(SizeTask::dir(total, root)),
+        }
+    }
+    drain(seeds, cancel, threads, |total| {
+        if let Some(item) = total.item.take() {
+            on_done(item, total.measured());
         }
     });
-    if cancel.is_cancelled() {
-        total.partial.store(true, Ordering::Relaxed);
+}
+
+struct Slot<T>(Mutex<Option<T>>);
+
+impl<T> Slot<T> {
+    fn take(&self) -> Option<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
     }
-    total.measured()
 }

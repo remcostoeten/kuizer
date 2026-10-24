@@ -2,7 +2,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use super::AppError;
-use crate::cli::{RemovalArgs, Selection};
+use super::scan::sort_candidates;
+use crate::cli::{RemovalArgs, Selection, SortKey};
 use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
@@ -68,12 +69,7 @@ pub fn select(mut candidates: Vec<Candidate>, selections: &[Selection]) -> Vec<C
             Selection::Rule(name) => &candidate.rule.name == name,
         })
     });
-    candidates.sort_by(|a, b| {
-        b.usage
-            .allocated
-            .cmp(&a.usage.allocated)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    sort_candidates(&mut candidates, SortKey::Size);
     candidates
 }
 
@@ -152,7 +148,7 @@ pub fn run(
                     request.roots,
                     &pending(candidates),
                     issues
-                )
+                )?
             );
         } else {
             println!("Dry run, nothing was removed");
@@ -169,7 +165,7 @@ pub fn run(
                     request.roots,
                     &pending(candidates),
                     issues
-                )
+                )?
             );
         } else {
             println!("Cancelled, nothing was removed");
@@ -208,7 +204,7 @@ pub fn run(
     if request.json {
         println!(
             "{}",
-            output::removal_report(request.command, mode, request.roots, &removals, issues)
+            output::removal_report(request.command, mode, request.roots, &removals, issues)?
         );
     } else {
         output::print_removal_summary(&removals, mode);

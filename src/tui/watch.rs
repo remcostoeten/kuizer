@@ -9,13 +9,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Row, Table};
 
-use super::view::{CURRENT_WIDTH, MUTED, cells, shorten};
+use super::palette::MUTED;
+use super::view::{CURRENT_WIDTH, cells, shorten};
 use crate::detect::Safety;
 use crate::output::display_path;
 use crate::scan::{Candidate, Collected, Event, Issue, Scan, Summary};
 use crate::units::ByteSize;
 
 const FRAME: Duration = Duration::from_millis(50);
+const IDLE: Duration = Duration::from_millis(250);
 const EVENTS_PER_FRAME: usize = 5_000;
 const FIXED_COLUMNS: u16 = 10 + 6 + 12 + 20 + 4;
 
@@ -290,7 +292,9 @@ pub fn watch(scan: &Scan, safe_only: bool) -> io::Result<Collected> {
     };
     let mut terminal = ratatui::try_init()?;
     let outcome = (|| -> io::Result<()> {
+        let mut redraw = true;
         loop {
+            let scanning = watch.summary.is_none();
             for _ in 0..EVENTS_PER_FRAME {
                 if watch.summary.is_some() {
                     break;
@@ -307,13 +311,23 @@ pub fn watch(scan: &Scan, safe_only: bool) -> io::Result<Collected> {
                     }
                 }
             }
-            terminal.draw(|frame| draw(frame, &mut watch, scan))?;
-            if event::poll(FRAME)?
-                && let TermEvent::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                && handle_key(&mut watch, key.code, key.modifiers)
-            {
-                return Ok(());
+            if redraw || scanning {
+                terminal.draw(|frame| draw(frame, &mut watch, scan))?;
+                redraw = false;
+            }
+            let wait = if watch.summary.is_none() { FRAME } else { IDLE };
+            if !event::poll(wait)? {
+                continue;
+            }
+            match event::read()? {
+                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    redraw = true;
+                    if handle_key(&mut watch, key.code, key.modifiers) {
+                        return Ok(());
+                    }
+                }
+                TermEvent::Resize(..) => redraw = true,
+                _ => {}
             }
         }
     })();

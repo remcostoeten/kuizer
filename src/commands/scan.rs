@@ -155,7 +155,7 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     if json {
         println!(
             "{}",
-            output::scan_report(&roots, &candidates, &collected.issues, &collected.summary)
+            output::scan_report(&roots, &candidates, &collected.issues, &collected.summary)?
         );
     } else {
         output::print_scan(&candidates, &collected.issues, &collected.summary, quiet);
@@ -229,7 +229,7 @@ fn write_report(
     issues: &[Issue],
     summary: &Summary,
 ) -> Result<PathBuf, AppError> {
-    let page = output::scan_html(roots, candidates, issues, summary, &generated_at());
+    let page = output::scan_html(roots, candidates, issues, summary, &generated_at())?;
     write_page(target, force, "report", &page)
 }
 

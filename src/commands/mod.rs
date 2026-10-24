@@ -16,11 +16,12 @@ mod ui;
 use std::path::PathBuf;
 
 use crate::cli::{Cli, Command, HistoryAction, NestedCommand, ScanArgs};
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, Loaded};
 use crate::history::HistoryError;
 use clap::CommandFactory;
 
 pub use cache::measure as measure_caches;
+pub use cache::measure_threaded as measure_caches_threaded;
 pub use cache::measure_with as measure_caches_with;
 pub use scan::sort_candidates;
 
@@ -30,6 +31,10 @@ pub enum AppError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error("cannot write the report: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("the config has problems, see the warnings above")]
+    ConfigProblems,
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("unknown selection `{name}`, expected safe, all or one of: {known}")]
@@ -94,13 +99,34 @@ fn print_subcommand_help(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn config_notice(loaded: &Loaded) -> Option<String> {
+    let first = loaded.warnings.first()?;
+    let more = loaded.warnings.len() - 1;
+    Some(if more == 0 {
+        format!("config: {first}")
+    } else {
+        format!("config: {first} (and {more} more)")
+    })
+}
+
 pub fn run(cli: Cli) -> Result<(), AppError> {
     if let Some(name) = cli.command.as_ref().and_then(nested_help) {
         return print_subcommand_help(name);
     }
-    let loaded = Config::load(cli.config.as_deref())?;
+    let loaded = match cli.command {
+        Some(Command::History(_) | Command::Restore(_)) => Loaded::default(),
+        _ => Config::load(cli.config.as_deref())?,
+    };
+    for warning in &loaded.warnings {
+        eprintln!("kuizer: config: {warning}");
+    }
     match cli.command {
-        None if !cli.json && interactive() => ui::run(&loaded.config, cli.paths, cli.confirm),
+        None if !cli.json && interactive() => ui::run(
+            &loaded.config,
+            cli.paths,
+            cli.confirm,
+            config_notice(&loaded),
+        ),
         None => {
             let args = ScanArgs {
                 paths: cli.paths,

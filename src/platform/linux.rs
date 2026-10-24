@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::Mount;
 
@@ -26,18 +26,39 @@ fn unescape(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
-    text.lines()
-        .filter_map(|line| {
-            let (left, right) = line.split_once(" - ")?;
-            let point = left.split(' ').nth(4)?;
-            let fs_type = right.split(' ').next()?;
-            Some(Mount {
+fn entries(text: &str) -> impl Iterator<Item = (Mount, String)> {
+    text.lines().filter_map(|line| {
+        let (left, right) = line.split_once(" - ")?;
+        let point = left.split(' ').nth(4)?;
+        let mut right = right.split(' ');
+        let fs_type = right.next()?;
+        let source = right.next().unwrap_or_default();
+        Some((
+            Mount {
                 point: PathBuf::from(unescape(point)),
                 fs_type: fs_type.to_owned(),
-            })
-        })
-        .collect()
+            },
+            unescape(source),
+        ))
+    })
+}
+
+pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
+    entries(text).map(|(mount, _)| mount).collect()
+}
+
+fn source_of(text: &str, path: &Path) -> Option<String> {
+    entries(text)
+        .filter(|(mount, _)| path.starts_with(&mount.point))
+        .max_by_key(|(mount, _)| mount.point.components().count())
+        .map(|(_, source)| source)
+}
+
+fn flag(block: &str) -> Option<bool> {
+    ["queue/rotational", "../queue/rotational"]
+        .iter()
+        .find_map(|flag| std::fs::read_to_string(format!("{block}/{flag}")).ok())
+        .map(|text| text.trim() == "1")
 }
 
 pub fn rotational(device: u64) -> bool {
@@ -46,10 +67,22 @@ pub fn rotational(device: u64) -> bool {
         rustix::fs::major(device),
         rustix::fs::minor(device)
     );
-    ["queue/rotational", "../queue/rotational"]
-        .iter()
-        .find_map(|flag| std::fs::read_to_string(format!("{block}/{flag}")).ok())
-        .is_some_and(|text| text.trim() == "1")
+    flag(&block).unwrap_or(false)
+}
+
+pub fn rotational_mount(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let Some(source) = source_of(&text, path) else {
+        return false;
+    };
+    source
+        .split(':')
+        .filter(|device| device.starts_with("/dev/"))
+        .filter_map(|device| std::fs::canonicalize(device).ok())
+        .filter_map(|device| device.file_name().map(|name| name.to_owned()))
+        .any(|name| flag(&format!("/sys/class/block/{}", name.to_string_lossy())).unwrap_or(false))
 }
 
 pub fn mounts() -> Vec<Mount> {
@@ -70,5 +103,19 @@ mod tests {
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[0].fs_type, "proc");
         assert_eq!(mounts[1].point, PathBuf::from("/mnt/my disk"));
+    }
+
+    #[test]
+    fn finds_the_source_of_the_deepest_mount() {
+        let text = "22 1 0:30 / / rw - btrfs /dev/sda2 rw\n\
+                    30 22 0:31 / /mnt/pool rw - bcachefs /dev/sdb:/dev/sdc rw\n";
+        assert_eq!(
+            source_of(text, Path::new("/mnt/pool/data")).as_deref(),
+            Some("/dev/sdb:/dev/sdc")
+        );
+        assert_eq!(
+            source_of(text, Path::new("/home/me")).as_deref(),
+            Some("/dev/sda2")
+        );
     }
 }

@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 pub use builtin::builtin_rules;
 pub use detector::{Detector, Listing, Match, RuleError, RuleInfo};
 
+pub(crate) const APP_DATA_MARKERS: &[&[&str]] = &[
+    &["Local State"],
+    &["profiles.ini"],
+    &["Cookies", "Preferences"],
+    &["cookies.sqlite", "prefs.js"],
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {

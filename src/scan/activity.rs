@@ -1,24 +1,36 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::SystemTime;
 
-use super::Candidate;
+use super::walk::Context;
+use super::{Cancel, Candidate};
+use crate::config::{Excludes, ScanConfig};
 use crate::detect::{Detector, Listing};
-use crate::git;
+use crate::git::{self, RootFinder};
+use crate::platform::MountTable;
+use crate::platform::dir::{Buffer, Dir, EntryKind};
+use crate::protect::{self, Protected};
+
+const MAX_ACTIVITY_THREADS: usize = 64;
+
+pub struct ActivityScope<'a> {
+    pub detector: &'a Detector,
+    pub scan: &'a ScanConfig,
+    pub excludes: &'a Excludes,
+    pub mounts: &'a MountTable,
+    pub protected: &'a Protected,
+}
 
 /// @name annotate
-/// @description Fills `project_last_active` on every candidate with the activity of its project:
-/// the later of the newest file modification outside the project's artifacts and nested
-/// projects, and the last commit of its git repository. Anything `detector` recognises as an
-/// artifact is skipped, reported or not, because installs and builds refresh those times in
-/// projects that are otherwise abandoned. With a
-/// `cutoff`, a project stops being walked at the first file newer than it. A project without
-/// readable files or git history keeps `None`.
+/// @description Fills `project_last_active` on every candidate with the activity of its project
+/// like [`annotate_in`], under the default scan limits and the given `skip_dirs`: no crossing
+/// filesystems, no excluded filesystem types, no protected folders. Prefer [`annotate_in`] with
+/// the configuration of the scan that produced the candidates.
 ///
 /// @example
 /// scan::annotate(&mut candidates, &detector, &config.scan.skip_dirs, Some(cutoff), 4);
@@ -29,6 +41,54 @@ pub fn annotate(
     cutoff: Option<SystemTime>,
     threads: usize,
 ) {
+    let scan = ScanConfig {
+        skip_dirs: skip_dirs.to_vec(),
+        ..ScanConfig::default()
+    };
+    let excludes = Excludes::new(&[], &[]).expect("an empty exclude list is valid");
+    let mounts = MountTable::load();
+    let protected = Protected::for_user();
+    annotate_in(
+        candidates,
+        &ActivityScope {
+            detector,
+            scan: &scan,
+            excludes: &excludes,
+            mounts: &mounts,
+            protected: &protected,
+        },
+        cutoff,
+        threads,
+        &Cancel::new(),
+        |_, _| {},
+    );
+}
+
+/// @name annotate_in
+/// @description Fills `project_last_active` on every candidate with the activity of its project:
+/// the later of the newest file modification outside the project's artifacts and nested
+/// projects, and the last commit of its git repository. Anything `scope.detector` recognises as
+/// an artifact is skipped, reported or not, because installs and builds refresh those times in
+/// projects that are otherwise abandoned. Folders and files the scan itself would not enter
+/// (other filesystems, excluded mounts, excludes, ignore files, protected folders) do not count.
+/// With a `cutoff`, a project stops being walked at the first file newer than it. A project
+/// without readable files or git history keeps `None`.
+///
+/// `on_project` gets each project and its activity as soon as it is known, from the worker
+/// threads, so a frontend can show results while the rest still runs. Once `cancel` is raised
+/// no further results are reported, and candidates whose project was not finished by then are
+/// left unknown.
+///
+/// @example
+/// scan::annotate_in(&mut candidates, &scope, None, 4, &cancel, |project, active| show(project, active));
+pub fn annotate_in(
+    candidates: &mut [Candidate],
+    scope: &ActivityScope<'_>,
+    cutoff: Option<SystemTime>,
+    threads: usize,
+    cancel: &Cancel,
+    on_project: impl Fn(&Path, Option<SystemTime>) + Sync,
+) {
     let artifacts: HashSet<PathBuf> = candidates.iter().map(|c| c.path.clone()).collect();
     let projects: Vec<PathBuf> = candidates
         .iter()
@@ -36,40 +96,61 @@ pub fn annotate(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let context = Context::new(
+        scope.scan,
+        scope.detector,
+        scope.excludes,
+        scope.mounts,
+        scope.protected,
+    );
+    let roots = RootFinder::from_env();
+    let commits = Commits::default();
     let activity = Mutex::new(BTreeMap::new());
-    let commits = Mutex::new(HashMap::new());
     let next = AtomicUsize::new(0);
-    thread::scope(|scope| {
-        for _ in 0..threads.clamp(1, projects.len().max(1)) {
-            scope.spawn(|| {
-                loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(project) = projects.get(index) else {
-                        break;
-                    };
-                    let after = &projects[index + 1..];
-                    let nested =
-                        &after[..after.partition_point(|other| other.starts_with(project))];
-                    let last = project_activity(
-                        project,
-                        &Skip {
-                            detector,
-                            artifacts: &artifacts,
-                            nested,
-                            names: skip_dirs,
-                        },
-                        cutoff,
-                        &commits,
-                    );
-                    activity
-                        .lock()
-                        .expect("activity lock")
-                        .insert(project.clone(), last);
-                }
-            });
+    let worker = || {
+        let mut scratch = Scratch::default();
+        while !cancel.is_cancelled() {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            let Some(project) = projects.get(index) else {
+                break;
+            };
+            let after = &projects[index + 1..];
+            let nested = &after[..after.partition_point(|other| other.starts_with(project))];
+            let skip = Skip {
+                scope,
+                context: &context,
+                artifacts: &artifacts,
+                nested,
+            };
+            let commit = roots.find(project).and_then(|root| commits.at(&root));
+            let last = project_activity(project, &skip, commit, cutoff, cancel, &mut scratch);
+            if cancel.is_cancelled() {
+                break;
+            }
+            on_project(project, last);
+            activity
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(project.clone(), last);
         }
+    };
+    thread::scope(|threads_scope| {
+        let extra = threads
+            .clamp(1, projects.len().max(1))
+            .min(MAX_ACTIVITY_THREADS);
+        for index in 1..extra {
+            let spawned = thread::Builder::new()
+                .name(format!("kuizer-activity-{index}"))
+                .spawn_scoped(threads_scope, worker);
+            if spawned.is_err() {
+                break;
+            }
+        }
+        worker();
     });
-    let activity = activity.into_inner().expect("activity lock");
+    let activity = activity
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
     for candidate in candidates {
         candidate.project_last_active = candidate
             .project
@@ -78,11 +159,29 @@ pub fn annotate(
     }
 }
 
+#[derive(Default)]
+struct Commits {
+    times: Mutex<HashMap<PathBuf, Arc<OnceLock<Option<SystemTime>>>>>,
+}
+
+impl Commits {
+    fn at(&self, root: &Path) -> Option<SystemTime> {
+        let cell = {
+            let mut times = self
+                .times
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            Arc::clone(times.entry(root.to_path_buf()).or_default())
+        };
+        *cell.get_or_init(|| git::last_commit(root))
+    }
+}
+
 struct Skip<'a> {
-    detector: &'a Detector,
+    scope: &'a ActivityScope<'a>,
+    context: &'a Context<'a>,
     artifacts: &'a HashSet<PathBuf>,
     nested: &'a [PathBuf],
-    names: &'a [String],
 }
 
 impl Skip<'_> {
@@ -92,72 +191,156 @@ impl Skip<'_> {
                 .nested
                 .binary_search_by(|other| other.as_path().cmp(path))
                 .is_ok()
-            || path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| self.names.iter().any(|skip| skip == name))
+    }
+
+    fn pruned(&self, own: &Listing) -> bool {
+        let scope = self.scope;
+        (scope.detector.watches(&scope.scan.ignore_file) && scope.scan.ignores(scope.detector, own))
+            || protect::holds_app_data(scope.detector, own)
     }
 }
 
 fn project_activity(
     project: &Path,
     skip: &Skip,
+    commit: Option<SystemTime>,
     cutoff: Option<SystemTime>,
-    commits: &Mutex<HashMap<PathBuf, Option<SystemTime>>>,
+    cancel: &Cancel,
+    scratch: &mut Scratch,
 ) -> Option<SystemTime> {
-    let commit = git::repository_root(project).and_then(|root| {
-        if let Some(known) = commits.lock().expect("commit lock").get(&root) {
-            return *known;
-        }
-        let time = git::last_commit(&root);
-        commits.lock().expect("commit lock").insert(root, time);
-        time
-    });
     if commit
         .zip(cutoff)
         .is_some_and(|(time, cutoff)| time > cutoff)
     {
         return commit;
     }
-    let files = newest_file(project, skip, cutoff);
+    let files = newest_file(project, skip, cutoff, cancel, scratch);
     commit.max(files)
 }
 
-fn newest_file(project: &Path, skip: &Skip, cutoff: Option<SystemTime>) -> Option<SystemTime> {
+#[derive(Default)]
+struct Scratch {
+    buffer: Buffer,
+    names: Vec<u8>,
+    entries: Vec<(usize, usize, EntryKind)>,
+}
+
+struct Frame {
+    path: PathBuf,
+    parent: Option<Arc<Listing>>,
+    device: u64,
+    probe: bool,
+    splits: bool,
+}
+
+fn newest_file(
+    project: &Path,
+    skip: &Skip,
+    cutoff: Option<SystemTime>,
+    cancel: &Cancel,
+    scratch: &mut Scratch,
+) -> Option<SystemTime> {
+    let (scope, context) = (skip.scope, skip.context);
     let mut newest: Option<SystemTime> = None;
-    let mut pending: Vec<(PathBuf, Option<Arc<Listing>>)> = vec![(project.to_path_buf(), None)];
-    while let Some((dir, parent)) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
+    let mut pending = vec![Frame {
+        path: project.to_path_buf(),
+        parent: None,
+        device: 0,
+        probe: false,
+        splits: context.splits(project),
+    }];
+    while let Some(frame) = pending.pop() {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let Ok(dir) = Dir::open(&frame.path, frame.parent.is_none()) else {
             continue;
         };
-        let children: Vec<(OsString, fs::FileType)> = entries
-            .flatten()
-            .filter_map(|entry| Some((entry.file_name(), entry.file_type().ok()?)))
-            .collect();
-        let own = skip.detector.listing(children.iter().map(|(name, _)| name));
-        if let Some(parent) = parent
-            && skip.detector.classify_dir(&dir, &parent, &own).is_some()
+        let device = if frame.parent.is_none() {
+            match dir.stat() {
+                Ok(stat) => stat.device,
+                Err(_) => continue,
+            }
+        } else if frame.probe {
+            match context.same_device(&dir, frame.device, &frame.path) {
+                Ok(Some(device)) => device,
+                _ => continue,
+            }
+        } else {
+            frame.device
+        };
+        let Scratch {
+            buffer,
+            names,
+            entries,
+        } = scratch;
+        names.clear();
+        entries.clear();
+        let _ = dir.read(buffer, |name, kind, _| {
+            let start = names.len();
+            names.extend_from_slice(name.as_bytes());
+            entries.push((start, names.len(), kind));
+        });
+        let mut own = Listing::default();
+        for (start, end, kind) in entries.iter_mut() {
+            let name = OsStr::from_bytes(&names[*start..*end]);
+            if *kind == EntryKind::Unknown {
+                match dir.kind_at(name) {
+                    Ok(resolved) => *kind = resolved,
+                    Err(_) => continue,
+                }
+            }
+            scope.detector.note(&mut own, name);
+        }
+        if let Some(parent) = &frame.parent
+            && scope
+                .detector
+                .classify_dir(&frame.path, parent, &own)
+                .is_some()
         {
             continue;
         }
+        if skip.pruned(&own) {
+            continue;
+        }
         let own = Arc::new(own);
-        for (name, file_type) in children {
-            let path = dir.join(&name);
-            if file_type.is_dir() {
-                if !skip.contains(&path) {
-                    pending.push((path, Some(Arc::clone(&own))));
+        for &(start, end, kind) in entries.iter() {
+            let name = OsStr::from_bytes(&names[start..end]);
+            match kind {
+                EntryKind::Dir => {
+                    let Some(child) = context.child(&frame.path, name, frame.splits) else {
+                        continue;
+                    };
+                    if skip.contains(&child.path) {
+                        continue;
+                    }
+                    pending.push(Frame {
+                        path: child.path,
+                        parent: Some(Arc::clone(&own)),
+                        device,
+                        probe: child.probe,
+                        splits: child.splits,
+                    });
                 }
-                continue;
-            }
-            if !file_type.is_file() || skip.detector.classify_file(&name, &own).is_some() {
-                continue;
-            }
-            let Ok(modified) = fs::symlink_metadata(&path).and_then(|meta| meta.modified()) else {
-                continue;
-            };
-            newest = newest.max(Some(modified));
-            if cutoff.is_some_and(|cutoff| modified > cutoff) {
-                return newest;
+                EntryKind::File => {
+                    if scope.excludes.extension(name)
+                        || scope.excludes.name(name)
+                        || scope.detector.classify_file(name, &own).is_some()
+                        || (scope.excludes.matches_paths()
+                            && scope.excludes.full_path(&frame.path.join(name)))
+                    {
+                        continue;
+                    }
+                    let Some(modified) = dir.stat_at(name).ok().and_then(|stat| stat.modified)
+                    else {
+                        continue;
+                    };
+                    newest = newest.max(Some(modified));
+                    if cutoff.is_some_and(|cutoff| modified > cutoff) {
+                        return newest;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -166,6 +349,7 @@ fn newest_file(project: &Path, skip: &Skip, cutoff: Option<SystemTime>) -> Optio
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -270,5 +454,75 @@ mod tests {
         let mut candidates = [candidate(app.join("dist"))];
         annotate(&mut candidates, &detector(), &[], None, 1);
         assert_eq!(days_idle(&candidates[0]), Some(90));
+    }
+
+    #[test]
+    fn leaves_out_what_the_scan_would_not_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path().join("app");
+        touch(&app.join("src/main.js"), DAY * 50);
+        touch(&app.join("vendored/lib.js"), Duration::ZERO);
+        touch(&app.join("shared/.kuizerignore"), Duration::ZERO);
+        touch(&app.join("shared/new.js"), Duration::ZERO);
+        touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
+        let mut candidates = [candidate(app.join("node_modules"))];
+        let detector = detector().watching([".kuizerignore", ".sweepignore"]);
+        let scan = ScanConfig::default();
+        let excludes = Excludes::new(&["vendored".to_owned()], &[]).expect("excludes");
+        let mounts = MountTable::load();
+        let protected = Protected::default();
+        let reported = Mutex::new(Vec::new());
+        annotate_in(
+            &mut candidates,
+            &ActivityScope {
+                detector: &detector,
+                scan: &scan,
+                excludes: &excludes,
+                mounts: &mounts,
+                protected: &protected,
+            },
+            None,
+            2,
+            &Cancel::new(),
+            |project, active| {
+                reported
+                    .lock()
+                    .unwrap()
+                    .push((project.to_path_buf(), active.is_some()));
+            },
+        );
+        assert_eq!(days_idle(&candidates[0]), Some(50));
+        assert_eq!(reported.into_inner().unwrap(), [(app, true)]);
+    }
+
+    #[test]
+    fn a_cancelled_run_leaves_activity_unknown() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path().join("app");
+        touch(&app.join("src/main.js"), DAY * 50);
+        touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
+        let mut candidates = [candidate(app.join("node_modules"))];
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let detector = detector();
+        let scan = ScanConfig::default();
+        let excludes = Excludes::new(&[], &[]).expect("excludes");
+        let mounts = MountTable::load();
+        let protected = Protected::default();
+        annotate_in(
+            &mut candidates,
+            &ActivityScope {
+                detector: &detector,
+                scan: &scan,
+                excludes: &excludes,
+                mounts: &mounts,
+                protected: &protected,
+            },
+            None,
+            2,
+            &cancel,
+            |_, _| panic!("nothing is reported after cancel"),
+        );
+        assert_eq!(candidates[0].project_last_active, None);
     }
 }

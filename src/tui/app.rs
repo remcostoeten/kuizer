@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -37,6 +38,8 @@ pub struct Item {
     pub selected: bool,
     pub status: Status,
     lower_path: String,
+    rule_group: u32,
+    project_group: u32,
 }
 
 /// A Shift+motion selection: the item it started on and the items it selected that were not
@@ -110,6 +113,14 @@ pub struct App {
     pub quit: bool,
     range: Option<Span>,
     index: HashMap<u64, usize>,
+    sorted: Vec<u32>,
+    sorted_upto: usize,
+    sorted_by_path: bool,
+    view_pos: Vec<u32>,
+    rule_ids: HashMap<Category, HashMap<String, u32>>,
+    rule_groups: Vec<(Category, String)>,
+    project_ids: HashMap<PathBuf, u32>,
+    project_groups: Vec<PathBuf>,
     unchecked: HashSet<PathBuf>,
     total_bytes: u64,
     selected_count: usize,
@@ -151,6 +162,14 @@ impl App {
             quit: false,
             range: None,
             index: HashMap::new(),
+            sorted: Vec::new(),
+            sorted_upto: 0,
+            sorted_by_path: false,
+            view_pos: Vec::new(),
+            rule_ids: HashMap::new(),
+            rule_groups: Vec::new(),
+            project_ids: HashMap::new(),
+            project_groups: Vec::new(),
             unchecked: HashSet::new(),
             total_bytes: 0,
             selected_count: 0,
@@ -165,13 +184,44 @@ impl App {
         self.index.insert(candidate.id, self.items.len());
         self.total_bytes += candidate.usage.allocated;
         let lower_path = candidate.path.to_string_lossy().to_lowercase();
+        let rule_group = self.rule_group_of(&candidate);
+        let project_group = self.project_group_of(&candidate);
         self.items.push(Item {
             candidate,
             selected: false,
             status: Status::Ready,
             lower_path,
+            rule_group,
+            project_group,
         });
         self.grown = true;
+    }
+
+    fn rule_group_of(&mut self, candidate: &Candidate) -> u32 {
+        let rule = &candidate.rule;
+        let by_name = self.rule_ids.entry(rule.category).or_default();
+        if let Some(&id) = by_name.get(rule.name.as_str()) {
+            return id;
+        }
+        let id = self.rule_groups.len() as u32;
+        by_name.insert(rule.name.clone(), id);
+        self.rule_groups.push((rule.category, rule.name.clone()));
+        id
+    }
+
+    fn project_group_of(&mut self, candidate: &Candidate) -> u32 {
+        let project = project_of(candidate);
+        if let Some(&id) = self.project_ids.get(project) {
+            return id;
+        }
+        let id = self.project_groups.len() as u32;
+        self.project_ids.insert(project.to_path_buf(), id);
+        self.project_groups.push(project.to_path_buf());
+        id
+    }
+
+    pub fn knows_project(&self, project: &Path) -> bool {
+        self.project_ids.contains_key(project)
     }
 
     fn current_id(&self) -> Option<u64> {
@@ -207,118 +257,135 @@ impl App {
         self.grown
     }
 
+    fn compare_items(items: &[Item], by_path: bool, a: u32, b: u32) -> Ordering {
+        let left = &items[a as usize].candidate;
+        let right = &items[b as usize].candidate;
+        let order = if by_path {
+            left.path.cmp(&right.path)
+        } else {
+            right
+                .usage
+                .allocated
+                .cmp(&left.usage.allocated)
+                .then_with(|| left.path.cmp(&right.path))
+        };
+        order.then(a.cmp(&b))
+    }
+
+    fn order_items(&mut self) {
+        let by_path = self.sort == SortKey::Path;
+        let total = self.items.len();
+        let items = &self.items;
+        let compare = |a: &u32, b: &u32| Self::compare_items(items, by_path, *a, *b);
+        if self.sorted_by_path != by_path {
+            self.sorted = (0..total as u32).collect();
+            self.sorted.sort_unstable_by(compare);
+            self.sorted_by_path = by_path;
+        } else if self.sorted_upto < total {
+            let mut fresh: Vec<u32> = (self.sorted_upto as u32..total as u32).collect();
+            fresh.sort_unstable_by(compare);
+            let mut merged = Vec::with_capacity(total);
+            let (mut old, mut new) = (self.sorted.iter().peekable(), fresh.iter().peekable());
+            while let (Some(&&a), Some(&&b)) = (old.peek(), new.peek()) {
+                if compare(&a, &b) == Ordering::Less {
+                    merged.push(a);
+                    old.next();
+                } else {
+                    merged.push(b);
+                    new.next();
+                }
+            }
+            merged.extend(old);
+            merged.extend(new);
+            self.sorted = merged;
+        }
+        self.sorted_upto = total;
+    }
+
     pub fn refresh(&mut self) {
         if !self.dirty && !self.grown {
             return;
         }
         let keep = self.current_id();
+        self.order_items();
         let needle = self.filter.to_lowercase();
         let items = &self.items;
-        let matched: Vec<usize> = (0..items.len())
-            .filter(|&index| self.matches(&items[index], &needle))
-            .collect();
-        let mut groups: Vec<Pending> = Vec::new();
-        let mut group_of: Vec<usize> = Vec::with_capacity(matched.len());
-        match self.grouping {
-            Grouping::Rule => {
-                let mut seen: HashMap<(Category, &str), usize> = HashMap::new();
-                for &index in &matched {
-                    let rule = &items[index].candidate.rule;
-                    let group = *seen
-                        .entry((rule.category, rule.name.as_str()))
-                        .or_insert_with(|| {
-                            groups.push(Pending::new(
-                                Some(rule.category),
-                                Cow::Borrowed(rule.name.as_str()),
-                                index,
-                            ));
-                            groups.len() - 1
-                        });
-                    groups[group].add(items[index].candidate.usage.allocated);
-                    group_of.push(group);
-                }
+        let by_project = self.grouping == Grouping::Project;
+        let slots = if by_project {
+            self.project_groups.len()
+        } else {
+            self.rule_groups.len()
+        };
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); slots];
+        let mut bytes = vec![0u64; slots];
+        let mut first = vec![usize::MAX; slots];
+        for &index in &self.sorted {
+            let position = index as usize;
+            let item = &items[position];
+            if !self.matches(item, &needle) {
+                continue;
             }
-            Grouping::Project => {
-                let mut seen: HashMap<&Path, usize> = HashMap::new();
-                for &index in &matched {
-                    let project = project_of(&items[index].candidate);
-                    let group = *seen.entry(project).or_insert_with(|| {
-                        groups.push(Pending::new(None, project.to_string_lossy(), index));
-                        groups.len() - 1
-                    });
-                    groups[group].add(items[index].candidate.usage.allocated);
-                    group_of.push(group);
-                }
-            }
+            let slot = if by_project {
+                item.project_group
+            } else {
+                item.rule_group
+            } as usize;
+            buckets[slot].push(index);
+            bytes[slot] += item.candidate.usage.allocated;
+            first[slot] = first[slot].min(position);
         }
-        let mut order: Vec<usize> = (0..groups.len()).collect();
+        let category_of = |slot: usize| (!by_project).then(|| self.rule_groups[slot].0);
+        let name_of = |slot: usize| -> Cow<'_, str> {
+            if by_project {
+                self.project_groups[slot].to_string_lossy()
+            } else {
+                Cow::Borrowed(self.rule_groups[slot].1.as_str())
+            }
+        };
+        let mut order: Vec<usize> = (0..slots)
+            .filter(|&slot| !buckets[slot].is_empty())
+            .collect();
         order.sort_by(|&a, &b| {
-            let by_key = groups[a]
-                .category
-                .cmp(&groups[b].category)
-                .then_with(|| groups[a].name.cmp(&groups[b].name));
+            let by_key = category_of(a)
+                .cmp(&category_of(b))
+                .then_with(|| name_of(a).cmp(&name_of(b)));
             match self.sort {
-                SortKey::Size | SortKey::Idle => groups[b].bytes.cmp(&groups[a].bytes).then(by_key),
+                SortKey::Size | SortKey::Idle => bytes[b].cmp(&bytes[a]).then(by_key),
                 SortKey::Path | SortKey::Category => by_key,
             }
         });
-        let mut rank = vec![0; groups.len()];
-        for (position, &group) in order.iter().enumerate() {
-            rank[group] = position;
-        }
-        let mut entries: Vec<(usize, usize)> = matched
-            .iter()
-            .zip(&group_of)
-            .map(|(&index, &group)| (rank[group], index))
-            .collect();
-        entries.sort_unstable_by(|&(left_rank, a), &(right_rank, b)| {
-            let left = &items[a].candidate;
-            let right = &items[b].candidate;
-            left_rank.cmp(&right_rank).then_with(|| match self.sort {
-                SortKey::Size | SortKey::Category | SortKey::Idle => right
-                    .usage
-                    .allocated
-                    .cmp(&left.usage.allocated)
-                    .then_with(|| left.path.cmp(&right.path)),
-                SortKey::Path => left.path.cmp(&right.path),
-            })
-        });
-        let mut rows = Vec::with_capacity(entries.len() + groups.len());
-        let mut view = Vec::with_capacity(entries.len());
-        let mut view_row = Vec::with_capacity(entries.len());
+        let matched: usize = order.iter().map(|&slot| buckets[slot].len()).sum();
+        let mut rows = Vec::with_capacity(matched + order.len());
+        let mut view = Vec::with_capacity(matched);
+        let mut view_row = Vec::with_capacity(matched);
+        let mut view_pos = vec![u32::MAX; items.len()];
         let mut largest = 0;
-        let mut previous = None;
-        for &(group, index) in &entries {
-            if previous != Some(group) {
-                rows.push(Row::Group(group));
-                previous = Some(group);
+        let mut groups = Vec::with_capacity(order.len());
+        for (rank, &slot) in order.iter().enumerate() {
+            rows.push(Row::Group(rank));
+            for &index in &buckets[slot] {
+                view_row.push(rows.len());
+                rows.push(Row::Item(view.len()));
+                view_pos[index as usize] = view.len() as u32;
+                view.push(index as usize);
+                largest = largest.max(items[index as usize].candidate.usage.allocated);
             }
-            view_row.push(rows.len());
-            rows.push(Row::Item(view.len()));
-            view.push(index);
-            largest = largest.max(items[index].candidate.usage.allocated);
+            groups.push(Group {
+                category: category_of(slot),
+                name: name_of(slot).into_owned(),
+                count: buckets[slot].len(),
+                bytes: bytes[slot],
+                first: first[slot],
+            });
         }
-        let groups = order
-            .iter()
-            .map(|&group| {
-                let pending = &groups[group];
-                Group {
-                    category: pending.category,
-                    name: pending.name.clone().into_owned(),
-                    count: pending.count,
-                    bytes: pending.bytes,
-                    first: pending.first,
-                }
-            })
-            .collect();
         self.cursor = keep
-            .and_then(|id| {
-                view.iter()
-                    .position(|&index| self.items[index].candidate.id == id)
-            })
-            .unwrap_or(0)
+            .and_then(|id| self.index.get(&id))
+            .and_then(|&index| view_pos.get(index))
+            .filter(|&&position| position != u32::MAX)
+            .map_or(0, |&position| position as usize)
             .min(view.len().saturating_sub(1));
         self.view = view;
+        self.view_pos = view_pos;
         self.rows = rows;
         self.view_row = view_row;
         self.largest = largest;
@@ -379,9 +446,12 @@ impl App {
     }
 
     fn position(&self, id: u64) -> Option<usize> {
-        self.view
-            .iter()
-            .position(|&index| self.items[index].candidate.id == id)
+        let index = *self.index.get(&id)?;
+        self.view_pos
+            .get(index)
+            .copied()
+            .filter(|&position| position != u32::MAX)
+            .map(|position| position as usize)
     }
 
     pub fn move_to(&mut self, index: usize) {
@@ -462,10 +532,12 @@ impl App {
         }
     }
 
-    pub fn set_status(&mut self, project: PathBuf, count: Option<usize>) {
-        self.unchecked.remove(&project);
-        if let Some(count) = count {
-            self.changes.insert(project, count);
+    pub fn set_statuses(&mut self, updates: impl IntoIterator<Item = (PathBuf, Option<usize>)>) {
+        for (project, count) in updates {
+            self.unchecked.remove(&project);
+            if let Some(count) = count {
+                self.changes.insert(project, count);
+            }
         }
         if matches!(self.overlay, Overlay::Confirm { .. }) {
             self.confirm_stats = self.compute_confirm_stats();
@@ -710,31 +782,6 @@ impl App {
     }
 }
 
-struct Pending<'a> {
-    category: Option<Category>,
-    name: Cow<'a, str>,
-    count: usize,
-    bytes: u64,
-    first: usize,
-}
-
-impl<'a> Pending<'a> {
-    fn new(category: Option<Category>, name: Cow<'a, str>, first: usize) -> Self {
-        Self {
-            category,
-            name,
-            count: 0,
-            bytes: 0,
-            first,
-        }
-    }
-
-    fn add(&mut self, bytes: u64) {
-        self.count += 1;
-        self.bytes += bytes;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -885,7 +932,7 @@ mod tests {
             app.confirm_stats.as_ref().map(|stats| stats.checking),
             Some(1)
         );
-        app.set_status(PathBuf::from("/p/b"), Some(0));
+        app.set_statuses([(PathBuf::from("/p/b"), Some(0))]);
         assert_eq!(
             app.confirm_stats.as_ref().map(|stats| stats.checking),
             Some(0)
@@ -1029,6 +1076,105 @@ mod tests {
         app.changes.insert(PathBuf::from("/p/b"), 0);
         assert_eq!(app.changes_in(&app.items[0].candidate), Some(3));
         assert_eq!(app.changes_in(&app.items[1].candidate), None);
+    }
+
+    #[test]
+    fn ordering_matches_a_full_sort_after_every_batch_for_every_sort_and_grouping() {
+        let rules: Vec<Arc<RuleInfo>> = (0..4)
+            .map(|index| {
+                Arc::new(RuleInfo {
+                    name: format!("rule-{}", index % 3),
+                    category: Category::ALL[index % Category::ALL.len()],
+                    safety: if index == 0 {
+                        Safety::Review
+                    } else {
+                        Safety::Safe
+                    },
+                    ecosystem: "x".to_owned(),
+                })
+            })
+            .collect();
+        let build = |id: u64| {
+            let mut made = candidate(
+                id,
+                &format!("/p/{}/{id}/out", id * 7 % 13),
+                id * 37 % 11 * 100,
+                Safety::Safe,
+            );
+            made.rule = Arc::clone(&rules[id as usize % rules.len()]);
+            made.project = Some(PathBuf::from(format!("/p/proj{}", id % 9)));
+            made
+        };
+        let expected = |app: &App| -> Vec<u64> {
+            let key = |candidate: &Candidate| match app.grouping {
+                Grouping::Rule => (Some(candidate.rule.category), candidate.rule.name.clone()),
+                Grouping::Project => (None, project_of(candidate).to_string_lossy().into_owned()),
+            };
+            let shown: Vec<&Candidate> = app
+                .items
+                .iter()
+                .map(|item| &item.candidate)
+                .filter(|candidate| !app.safe_only || candidate.rule.safety == Safety::Safe)
+                .collect();
+            let mut bytes: HashMap<_, u64> = HashMap::new();
+            for candidate in &shown {
+                *bytes.entry(key(candidate)).or_default() += candidate.usage.allocated;
+            }
+            let mut ordered = shown.clone();
+            ordered.sort_by(|a, b| {
+                let (left, right) = (key(a), key(b));
+                let group = match app.sort {
+                    SortKey::Size | SortKey::Idle => {
+                        bytes[&right].cmp(&bytes[&left]).then(left.cmp(&right))
+                    }
+                    SortKey::Path | SortKey::Category => left.cmp(&right),
+                };
+                group.then_with(|| match app.sort {
+                    SortKey::Path => a.path.cmp(&b.path),
+                    _ => b
+                        .usage
+                        .allocated
+                        .cmp(&a.usage.allocated)
+                        .then_with(|| a.path.cmp(&b.path)),
+                })
+            });
+            ordered.iter().map(|candidate| candidate.id).collect()
+        };
+        let mut app = App::new(Mode::Trash, true);
+        for batch in [1..41u64, 41..61, 61..64] {
+            for id in batch {
+                app.push(build(id));
+            }
+            for safe_only in [false, true] {
+                app.safe_only = safe_only;
+                for sort in [
+                    SortKey::Size,
+                    SortKey::Path,
+                    SortKey::Category,
+                    SortKey::Size,
+                ] {
+                    for grouping in [Grouping::Rule, Grouping::Project] {
+                        app.sort = sort;
+                        app.grouping = grouping;
+                        app.dirty = true;
+                        app.refresh();
+                        let order: Vec<u64> = app
+                            .view
+                            .iter()
+                            .map(|&index| app.items[index].candidate.id)
+                            .collect();
+                        assert_eq!(
+                            order,
+                            expected(&app),
+                            "{sort:?} {grouping:?} safe={safe_only}"
+                        );
+                        let positions: Vec<Option<usize>> =
+                            order.iter().map(|&id| app.position(id)).collect();
+                        assert_eq!(positions, (0..order.len()).map(Some).collect::<Vec<_>>());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

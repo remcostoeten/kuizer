@@ -177,9 +177,8 @@ pub struct Walked {
 
 /// @name start_scan
 /// @description Starts an artifact scan that also notes every git repository during the same
-/// walk, and like `dupes::start_scan_with_pins` collects files for duplicate detection with
-/// `duplicates` and toolchain pin files with `pins`. The receiver yields what was collected once
-/// the walk ends.
+/// walk, and collects files for duplicate detection with `duplicates` and toolchain pin files
+/// with `pins`. The receiver yields what was collected once the walk ends.
 ///
 /// @example
 /// let (scan, walked) = repos::start_scan(&config, &roots, Cancel::new(), None, false)?;
@@ -248,8 +247,18 @@ pub fn find(config: &Config, roots: &[PathBuf]) -> Result<Vec<PathBuf>, ConfigEr
     Ok(found)
 }
 
-fn threads(config: &GitConfig) -> usize {
+const ROTATIONAL_THREADS: usize = 2;
+const ROTATIONAL_SAMPLE: usize = 8;
+
+fn threads(config: &GitConfig, roots: &[PathBuf]) -> usize {
     match config.threads {
+        0 if roots
+            .iter()
+            .take(ROTATIONAL_SAMPLE)
+            .any(|root| platform::rotational_at(root)) =>
+        {
+            ROTATIONAL_THREADS
+        }
         0 => thread::available_parallelism().map_or(4, |n| n.get().min(8)),
         n => n,
     }
@@ -277,10 +286,11 @@ pub fn inspect_all_with(
     cancel: &Cancel,
     on_inspected: impl Fn(&Path) + Sync,
 ) -> Vec<Repository> {
+    let workers = threads(config, &roots);
     let queue = Mutex::new(roots);
     let found = Mutex::new(Vec::new());
     thread::scope(|scope| {
-        for _ in 0..threads(config) {
+        for _ in 0..workers {
             scope.spawn(|| {
                 loop {
                     if cancel.is_cancelled() {
@@ -463,6 +473,10 @@ pub fn delete_branches(
     let root = &repository.root;
     let current = read(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     let base = default_branch(root, None, config);
+    let merge_bases = base
+        .as_deref()
+        .map(|base| bases(root, None, base))
+        .unwrap_or_default();
     let checked_out = worktree_branches(root);
     branches
         .iter()
@@ -471,7 +485,7 @@ pub fn delete_branches(
             result: delete_branch(
                 root,
                 branch,
-                base.as_deref(),
+                (base.as_deref(), &merge_bases),
                 current.as_deref(),
                 &checked_out,
                 config,
@@ -483,7 +497,7 @@ pub fn delete_branches(
 fn delete_branch(
     root: &Path,
     branch: &Branch,
-    base: Option<&str>,
+    (base, merge_bases): (Option<&str>, &[String]),
     current: Option<&str>,
     checked_out: &[String],
     config: &GitConfig,
@@ -494,11 +508,9 @@ fn delete_branch(
     }
     let reference = format!("refs/heads/{name}");
     let at = read(root, &["rev-parse", "--verify", "--quiet", &reference]);
-    let merged = base.is_some_and(|base| {
-        bases(root, None, base)
-            .iter()
-            .any(|base| succeeds(root, &["merge-base", "--is-ancestor", &branch.commit, base]))
-    });
+    let merged = merge_bases
+        .iter()
+        .any(|base| succeeds(root, &["merge-base", "--is-ancestor", &branch.commit, base]));
     if at.as_deref() != Some(branch.commit.as_str()) || !merged {
         return Err(RepoError::Changed(branch.name.clone()));
     }
@@ -855,10 +867,13 @@ fn is_object_id(text: &str) -> bool {
     text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn parse_id(hex: &str) -> Option<[u8; 20]> {
-    let mut id = [0; 20];
-    for (index, byte) in id.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+fn loose_id(fan: u8, name: &str) -> Option<[u8; 20]> {
+    if name.len() != 38 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut id = [fan; 20];
+    for (index, byte) in id[1..].iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&name[index * 2..index * 2 + 2], 16).ok()?;
     }
     Some(id)
 }
@@ -877,25 +892,20 @@ fn objects_on_disk(dir: &Path) -> Option<Objects> {
     let mut garbage_bytes = 0;
     let mut loose_ids = Vec::new();
     for fan in 0..=255u8 {
-        let prefix = format!("{fan:02x}");
-        let Ok(entries) = fs::read_dir(dir.join(&prefix)) else {
+        let Ok(entries) = fs::read_dir(dir.join(format!("{fan:02x}"))) else {
             continue;
         };
         for entry in entries {
             let entry = entry.ok()?;
-            let path = entry.path();
             let name = entry.file_name();
-            let id = name
-                .to_str()
-                .filter(|name| name.len() == 38)
-                .and_then(|name| parse_id(&format!("{prefix}{name}")));
-            match (id, fs::symlink_metadata(&path)) {
+            let id = name.to_str().and_then(|name| loose_id(fan, name));
+            match (id, entry.metadata()) {
                 (Some(id), Ok(metadata)) if metadata.is_file() => {
                     objects.loose += 1;
                     loose_bytes += platform::allocated(&metadata);
                     loose_ids.push(id);
                 }
-                _ => garbage_bytes += stat_size(&path),
+                _ => garbage_bytes += stat_size(&entry.path()),
             }
         }
     }

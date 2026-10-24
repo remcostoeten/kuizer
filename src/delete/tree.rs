@@ -1,21 +1,24 @@
 use std::ffi::{CStr, CString, OsStr};
-use std::fs;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, ResolveFlags, fstat, openat, openat2, statat,
+    unlinkat,
+};
 use rustix::io::Errno;
 
 const OPEN_DIR: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+
+static OPENAT2_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 enum Parent {
     Dir(Arc<Node>),
@@ -138,7 +141,7 @@ impl Run {
 
     fn execute<'scope, 'env>(&'scope self, task: Task, scope: Scope<'scope, 'env>) {
         let Task { parent, name } = task;
-        let opened = openat(&parent.fd, name.as_c_str(), OPEN_DIR, Mode::empty())
+        let opened = open_below(&parent.fd, name.as_c_str())
             .and_then(|fd| fstat(&fd).map(|stat| (fd, stat.st_dev)));
         match opened {
             Ok((fd, device)) if device == self.device => {
@@ -150,7 +153,7 @@ impl Run {
                 });
                 self.scan(&node, scope);
             }
-            Ok(_) => {
+            Ok(_) | Err(Errno::XDEV) => {
                 let path = self
                     .path_of(&parent)
                     .join(OsStr::from_bytes(name.to_bytes()));
@@ -239,42 +242,75 @@ fn is_directory(node: &Node, kind: FileType, name: &CStr) -> bool {
     }
 }
 
-/// @name remove
-/// @description Removes a file, a symlink or a whole directory tree, unlinking the contents of
-/// different directories on several threads. Symlinks are removed, never followed, and a
-/// directory on another device than the tree root (a mount) is left alone and reported as an
-/// error, which `std::fs::remove_dir_all` does not do.
-///
-/// @example
-/// remove(Path::new("/home/me/app/node_modules"), 4)?;
-pub fn remove(path: &Path, workers: usize) -> io::Result<()> {
-    remove_on(path, workers, None)
+fn open_below(parent: impl AsFd, name: &CStr) -> Result<OwnedFd, Errno> {
+    if !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed) {
+        match openat2(
+            &parent,
+            name,
+            OPEN_DIR,
+            Mode::empty(),
+            ResolveFlags::NO_XDEV,
+        ) {
+            Err(Errno::NOSYS | Errno::PERM) => OPENAT2_UNAVAILABLE.store(true, Ordering::Relaxed),
+            opened => return opened,
+        }
+    }
+    openat(parent, name, OPEN_DIR, Mode::empty())
 }
 
-fn remove_on(path: &Path, workers: usize, device: Option<u64>) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() {
-        return fs::remove_file(path);
-    }
+/// @name remove
+/// @description Removes a file, a symlink or a whole directory tree, unlinking the contents of
+/// different directories on several threads. Symlinks are removed, never followed. When
+/// `expected` holds the (device, inode) recorded at scan time, the entry is removed only if it
+/// still has that identity, so a parent folder swapped for a symlink cannot redirect the removal.
+/// A directory on another device than the tree root, and any mount point (bind mounts included
+/// where the kernel supports `openat2`), is left alone and reported as an error, which
+/// `std::fs::remove_dir_all` does not do.
+///
+/// @example
+/// remove(Path::new("/home/me/app/node_modules"), Some((dev, ino)), 4)?;
+pub fn remove(path: &Path, expected: Option<(u64, u64)>, workers: usize) -> io::Result<()> {
+    remove_on(path, expected, workers, None)
+}
+
+fn changed() -> io::Error {
+    io::Error::other("path changed since the scan, not removed")
+}
+
+fn remove_on(
+    path: &Path,
+    expected: Option<(u64, u64)>,
+    workers: usize,
+    device: Option<u64>,
+) -> io::Result<()> {
     let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "path has no parent directory",
         ));
     };
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
     let parent_fd = openat(
         CWD,
         parent,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    let fd = openat(&parent_fd, name, OPEN_DIR, Mode::empty())?;
-    let stat = fstat(&fd)?;
-    if stat.st_dev != metadata.dev() || stat.st_ino != metadata.ino() {
-        return Err(io::Error::other("path changed while it was being removed"));
+    let seen = statat(&parent_fd, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)?;
+    let identity = (seen.st_dev, seen.st_ino);
+    let wanted = expected.unwrap_or(identity);
+    if identity != wanted {
+        return Err(changed());
     }
-    let name = CString::new(name.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    if FileType::from_raw_mode(seen.st_mode) != FileType::Directory {
+        return unlinkat(&parent_fd, name.as_c_str(), AtFlags::empty()).map_err(io::Error::from);
+    }
+    let fd = open_below(&parent_fd, name.as_c_str())?;
+    let stat = fstat(&fd)?;
+    if (stat.st_dev, stat.st_ino) != wanted {
+        return Err(changed());
+    }
     let run = Run {
         root: path.to_path_buf(),
         device: device.unwrap_or(stat.st_dev),
@@ -303,7 +339,8 @@ fn remove_on(path: &Path, workers: usize, device: Option<u64>) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, symlink};
 
     use super::*;
 
@@ -330,7 +367,7 @@ mod tests {
         build(&tree, 6, 3);
         fs::write(base.join("keep.txt"), b"x").unwrap();
 
-        remove(&tree, 4).unwrap();
+        remove(&tree, None, 4).unwrap();
 
         assert!(!tree.exists());
         assert!(base.join("keep.txt").exists());
@@ -347,14 +384,14 @@ mod tests {
         symlink(&outside, tree.join("d0/escape")).unwrap();
         symlink(outside.join("f0"), tree.join("link-to-file")).unwrap();
 
-        remove(&tree, 4).unwrap();
+        remove(&tree, None, 4).unwrap();
         assert!(!tree.exists());
         assert!(outside.join("f0").exists());
         assert!(outside.join("d0/f0").exists());
 
         let link = base.join("alone");
         symlink(&outside, &link).unwrap();
-        remove(&link, 4).unwrap();
+        remove(&link, None, 4).unwrap();
         assert!(fs::symlink_metadata(&link).is_err());
         assert!(outside.join("f0").exists());
     }
@@ -367,11 +404,42 @@ mod tests {
         build(&tree, 2, 1);
         let wrong = fs::symlink_metadata(&tree).unwrap().dev() + 1;
 
-        let error = remove_on(&tree, 4, Some(wrong)).unwrap_err();
+        let error = remove_on(&tree, None, 4, Some(wrong)).unwrap_err();
 
         assert!(error.to_string().contains("mount point"));
         assert!(tree.join("d0/f0").exists());
         assert!(tree.join("d1/f1").exists());
         assert!(!tree.join("f0").exists());
+    }
+
+    #[test]
+    fn a_changed_identity_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let tree = base.join("tree");
+        build(&tree, 2, 1);
+        let file = base.join("file");
+        fs::write(&file, b"x").unwrap();
+        let scanned = |path: &Path| {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            (metadata.dev(), metadata.ino() + 1)
+        };
+
+        let error = remove(&tree, Some(scanned(&tree)), 4).unwrap_err();
+        assert!(error.to_string().contains("changed"));
+        assert!(tree.join("f0").exists());
+        assert!(tree.join("d1/f1").exists());
+
+        assert!(remove(&file, Some(scanned(&file)), 4).is_err());
+        assert!(file.exists());
+
+        let identity = |path: &Path| {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            Some((metadata.dev(), metadata.ino()))
+        };
+        remove(&tree, identity(&tree), 4).unwrap();
+        remove(&file, identity(&file), 4).unwrap();
+        assert!(!tree.exists());
+        assert!(!file.exists());
     }
 }

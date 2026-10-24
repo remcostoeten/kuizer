@@ -25,7 +25,7 @@ pub fn run(config: &Config, args: DockerArgs, json: bool, quiet: bool) -> Result
     let cleaning = args.clean || args.removal.dry_run;
     if !cleaning {
         if json {
-            println!("{}", output::docker_report(&entries, &listing.issues));
+            println!("{}", output::docker_report(&entries, &listing.issues)?);
         } else {
             output::print_docker(&entries, &listing.issues, quiet);
         }

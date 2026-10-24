@@ -45,7 +45,7 @@ pub fn button(
     if enabled {
         base.cursor_pointer().hover(move |style| style.bg(hover))
     } else {
-        base.opacity(0.4)
+        base.opacity(theme::DISABLED)
     }
 }
 

@@ -7,18 +7,15 @@ use ratatui::widgets::{
 };
 
 use super::app::{App, ConfirmStats, Group, Grouping, Item, Overlay, Row, Status, project_of};
+use super::palette::{
+    self, CURSOR, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL, SELECTED, WARNING,
+};
 use crate::cli::SortKey;
 use crate::delete::Mode;
 use crate::detect::{Category, Safety};
 use crate::output::display_path;
 use crate::units::{ByteSize, age};
 
-pub(super) const MUTED: Color = Color::Indexed(244);
-const FAINT: Color = Color::Indexed(240);
-const CURSOR: Color = Color::Indexed(237);
-const WARNING: Color = Color::Yellow;
-const SAFE: Color = Color::Green;
-const SELECTED: Color = Color::Indexed(22);
 const BAR: u16 = 8;
 pub(super) const CURRENT_WIDTH: usize = 48;
 type HelpRow = (&'static [&'static str], &'static str);
@@ -33,23 +30,6 @@ pub(super) fn shorten(text: &str, width: usize) -> String {
     }
     let tail: String = text.chars().skip(count - (width - 1)).collect();
     format!("…{tail}")
-}
-
-fn category_color(category: Category) -> Color {
-    match category {
-        Category::Dependencies => Color::Cyan,
-        Category::Build => Color::Blue,
-        Category::Cache => Color::Magenta,
-        Category::Temp => Color::Indexed(180),
-    }
-}
-
-fn size_color(bytes: u64) -> Color {
-    match bytes {
-        b if b >= 1 << 30 => Color::Red,
-        b if b >= 100 << 20 => Color::Yellow,
-        _ => Color::Reset,
-    }
 }
 
 fn size_bar(bytes: u64, largest: u64) -> String {
@@ -89,21 +69,21 @@ fn filters(app: &App) -> Vec<Span<'static>> {
     if let Some(category) = app.category {
         spans.push(Span::styled(
             format!(" {} ", category.as_str()),
-            Style::new().fg(Color::Black).bg(category_color(category)),
+            Style::new().fg(ON_FILL).bg(palette::category(category)),
         ));
         spans.push(Span::raw(" "));
     }
     if app.safe_only {
         spans.push(Span::styled(
             " safe only ",
-            Style::new().fg(Color::Black).bg(SAFE),
+            Style::new().fg(ON_FILL).bg(SAFE),
         ));
         spans.push(Span::raw(" "));
     }
     if !app.filter.is_empty() {
         spans.push(Span::styled(
             format!(" \"{}\" ", app.filter),
-            Style::new().fg(Color::Black).bg(Color::White),
+            Style::new().fg(ON_FILL).bg(SEARCH_FILL),
         ));
         spans.push(Span::raw(" "));
     }
@@ -228,11 +208,11 @@ fn item_row(item: &Item, largest: u64, path_width: usize) -> TableRow<'static> {
     TableRow::new(vec![
         Cell::from(mark),
         Cell::from(format!("{:>10}", ByteSize(bytes).to_string()))
-            .style(Style::new().fg(dim_if(size_color(bytes)))),
+            .style(Style::new().fg(dim_if(palette::size(bytes)))),
         Cell::from(size_bar(bytes, largest)).style(Style::new().fg(FAINT)),
         Cell::from(badge).style(Style::new().fg(dim_if(badge_color))),
         Cell::from(candidate.rule.category.as_str())
-            .style(Style::new().fg(dim_if(category_color(candidate.rule.category)))),
+            .style(Style::new().fg(dim_if(palette::category(candidate.rule.category)))),
         Cell::from(candidate.rule.name.clone()),
         Cell::from(age(candidate.newest)).style(Style::new().fg(MUTED)),
         Cell::from(shorten(&display_path(&candidate.path), path_width)),
@@ -342,8 +322,8 @@ fn key_chip(key: &str) -> Span<'static> {
     Span::styled(
         format!(" {key} "),
         Style::new()
-            .fg(Color::White)
-            .bg(Color::Indexed(238))
+            .fg(KEY_FG)
+            .bg(KEY_BG)
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -529,6 +509,7 @@ fn help(frame: &mut Frame) {
                 (&["g", "home"], "first"),
                 (&["G", "end"], "last"),
                 (&["pgup", "pgdn"], "page"),
+                (&["ctrl-d", "ctrl-u"], "half page"),
             ],
         ),
         (

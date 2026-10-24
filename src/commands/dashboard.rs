@@ -61,7 +61,12 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
         output::print_status("measuring global caches");
     }
     let locations = Locations::for_user().ok_or(AppError::NoHome)?;
-    let cache_entries = cache::measure(caches::find(&locations, &Protected::for_user()));
+    let cache_entries = cache::measure_threaded(
+        caches::find(&locations, &Protected::for_user()),
+        &Cancel::new(),
+        scan::size_threads(config),
+        |_| {},
+    );
     if show_progress {
         output::clear_progress();
     }
@@ -87,14 +92,14 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
         generated: &generated,
     };
     if json {
-        println!("{}", output::dashboard_data(&dashboard));
+        println!("{}", output::dashboard_data(&dashboard)?);
         return Ok(());
     }
     let path = write_page(
         args.out,
         args.force,
         "dashboard",
-        &output::dashboard_html(&dashboard),
+        &output::dashboard_html(&dashboard)?,
     )?;
     announce_report(Some(&path), open);
     Ok(())

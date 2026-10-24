@@ -14,6 +14,7 @@ use crate::scan::{Candidate, Usage};
 use crate::units::ByteSize;
 
 const REMOVE_TIMEOUT: Duration = Duration::from_secs(300);
+const INSPECT_TIMEOUT: Duration = Duration::from_secs(30);
 const TEXT_BUSY: i32 = 26;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -702,11 +703,28 @@ fn parse_path(path: &Path) -> Option<(String, Object, String)> {
         .then(|| (program.to_owned(), object, id.to_owned()))
 }
 
+fn still_untagged(program: &str, id: &str) -> Result<bool, Failure> {
+    let out = run(
+        program,
+        &["image", "inspect", "--format", "{{len .RepoTags}}", id],
+        INSPECT_TIMEOUT,
+    )?;
+    Ok(out.trim() == "0")
+}
+
+fn refusal(engine: &str, failure: Failure) -> DeleteError {
+    DeleteError::Tool(match failure {
+        Failure::Failed(message) => format!("{engine} refused: {message}"),
+        other => describe(engine, &other),
+    })
+}
+
 /// @name remove
 /// @description Removes one object through its engine: `image rm`, `container rm`,
 /// `builder prune --force` or `volume rm`, never with force on an image, container or volume, so
-/// anything still in use is refused by the engine itself. Nothing under `/var/lib/docker` is
-/// touched. These removals are permanent; a dry run does nothing.
+/// anything still in use is refused by the engine itself. An image is inspected right before it
+/// is removed and left alone once it carries a tag. Nothing under `/var/lib/docker` is touched.
+/// These removals are permanent; a dry run does nothing.
 ///
 /// @example
 /// docker::remove(&guard, &candidate, Mode::Permanent)?;
@@ -720,21 +738,22 @@ pub fn remove(_guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), D
     if mode == Mode::DryRun {
         return Ok(());
     }
+    let engine = engine_name(&program);
+    if object == Object::Image && !still_untagged(&program, &id).map_err(|f| refusal(engine, f))? {
+        return Err(DeleteError::Tool(format!(
+            "{engine} image {} is tagged now, not removed",
+            short(&id)
+        )));
+    }
     let args: Vec<&str> = match object {
         Object::Image => vec!["image", "rm", &id],
         Object::Container => vec!["container", "rm", &id],
         Object::BuildCache => vec!["builder", "prune", "--force"],
         Object::Volume => vec!["volume", "rm", &id],
     };
-    let engine = engine_name(&program);
     run(&program, &args, REMOVE_TIMEOUT)
         .map(drop)
-        .map_err(|failure| {
-            DeleteError::Tool(match failure {
-                Failure::Failed(message) => format!("{engine} refused: {message}"),
-                other => describe(engine, &other),
-            })
-        })
+        .map_err(|failure| refusal(engine, failure))
 }
 
 #[cfg(all(test, unix))]
@@ -761,6 +780,7 @@ mod tests {
 echo "$*" >> "$log"
 case "$1 $2" in
   "image ls") printf 'sha256:aaaaaaaaaaaaaaaa\t1.5GB\t3 weeks ago\nsha256:bbbbbbbbbbbbbbbb\t200MB\t2 days ago\n' ;;
+  "image inspect") cat "$(dirname "$0")/tags" 2>/dev/null || echo 0 ;;
   "container ls") printf 'c1\told_api\tapi:1\t12.5MB (virtual 900MB)\tExited (0) 3 days ago\nc2\tfresh\tweb:2\t1kB (virtual 10MB)\tExited (1) 2 hours ago\nc3\tnever\tweb:2\t0B (virtual 10MB)\tCreated\n' ;;
   "system df")
     if [ "$3" = "--verbose" ]; then
@@ -834,14 +854,34 @@ esac"#,
             removals,
             [
                 "builder prune --force",
+                "image inspect --format {{len .RepoTags}} aaaaaaaaaaaaaaaa",
                 "image rm aaaaaaaaaaaaaaaa",
                 "volume rm pgdata",
+                "image inspect --format {{len .RepoTags}} bbbbbbbbbbbbbbbb",
                 "image rm bbbbbbbbbbbbbbbb",
                 "container rm c1",
                 "container rm c2",
                 "container rm c3",
             ]
         );
+    }
+
+    #[test]
+    fn an_image_tagged_after_listing_is_not_removed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let program = fake_docker(tmp.path());
+        let entries = entries(list(&[program], TIMEOUT, 24).items);
+        let (_, image) = entries
+            .iter()
+            .find(|(item, _)| item.id == "aaaaaaaaaaaaaaaa")
+            .expect("image");
+        fs::write(tmp.path().join("tags"), "1\n").expect("tags");
+
+        let error = remove(&Guard::new(&[]), image, Mode::Permanent).unwrap_err();
+
+        assert!(error.to_string().contains("is tagged now"), "{error}");
+        let calls = fs::read_to_string(tmp.path().join("calls")).expect("calls");
+        assert!(!calls.contains("image rm"), "{calls}");
     }
 
     #[test]

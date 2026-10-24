@@ -64,7 +64,7 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
                         .w(relative(share.max(0.004)))
                         .flex_shrink()
                         .bg(segment.fill)
-                        .hover(|style| style.opacity(0.8))
+                        .hover(|style| style.opacity(theme::DIM))
                         .tip(segment_tip(segment, share))
                 }),
         );
@@ -193,7 +193,7 @@ pub fn swatch(fill: Rgba) -> Div {
 
 pub fn breathe(id: impl Into<ElementId>, element: Div) -> AnyElement {
     if motion::reduced() {
-        return element.opacity(0.8).into_any_element();
+        return element.opacity(theme::DIM).into_any_element();
     }
     element
         .with_animation(

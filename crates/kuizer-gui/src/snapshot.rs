@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -288,6 +289,8 @@ pub fn age_label(saved: SystemTime, now: SystemTime) -> String {
     format!("From {count} {noun}{plural} ago")
 }
 
+type Interned = HashMap<usize, (Arc<RuleInfo>, usize)>;
+
 #[derive(Serialize, Deserialize)]
 struct Stored {
     schema: u32,
@@ -296,6 +299,8 @@ struct Stored {
     roots: Vec<PathBuf>,
     options: ScanOptions,
     rules: Vec<StoredRule>,
+    #[serde(skip)]
+    interned: Interned,
     candidates: Vec<StoredCandidate>,
     issues: Vec<StoredIssue>,
     summary: StoredSummary,
@@ -317,6 +322,7 @@ impl Stored {
             roots: roots.to_vec(),
             options: options.clone(),
             rules: Vec::new(),
+            interned: Interned::new(),
             candidates: Vec::new(),
             issues: Vec::new(),
             summary: StoredSummary::new(&Summary {
@@ -363,7 +369,7 @@ impl Stored {
     ) {
         self.candidates = candidates
             .iter()
-            .map(|candidate| StoredCandidate::new(candidate, &mut self.rules))
+            .map(|candidate| StoredCandidate::new(candidate, &mut self.rules, &mut self.interned))
             .collect();
         self.issues = issues.iter().map(StoredIssue::new).collect();
         self.summary = StoredSummary::new(summary);
@@ -380,7 +386,7 @@ impl Stored {
                 (
                     cache.name.to_owned(),
                     cache.path.clone(),
-                    StoredCandidate::new(candidate, &mut self.rules),
+                    StoredCandidate::new(candidate, &mut self.rules, &mut self.interned),
                 )
             })
             .collect();
@@ -392,7 +398,7 @@ impl Stored {
             .map(|(toolchain, candidate)| {
                 (
                     toolchain.clone(),
-                    StoredCandidate::new(candidate, &mut self.rules),
+                    StoredCandidate::new(candidate, &mut self.rules, &mut self.interned),
                 )
             })
             .collect();
@@ -498,27 +504,39 @@ struct StoredCandidate {
     project_last_active: Option<SystemTime>,
 }
 
-impl StoredCandidate {
-    fn new(candidate: &Candidate, rules: &mut Vec<StoredRule>) -> Self {
-        let usage = candidate.usage;
-        let info = &candidate.rule;
-        let rule = rules
-            .iter()
-            .position(|rule| {
-                rule.name == info.name
-                    && rule.category == info.category
-                    && rule.safety == info.safety
-                    && rule.ecosystem == info.ecosystem
-            })
-            .unwrap_or_else(|| {
-                rules.push(StoredRule {
-                    name: info.name.clone(),
-                    category: info.category,
-                    safety: info.safety,
-                    ecosystem: info.ecosystem.clone(),
-                });
-                rules.len() - 1
+fn rule_index(info: &Arc<RuleInfo>, rules: &mut Vec<StoredRule>, interned: &mut Interned) -> usize {
+    let address = Arc::as_ptr(info).addr();
+    if let Some((_, index)) = interned.get(&address) {
+        return *index;
+    }
+    let index = rules
+        .iter()
+        .position(|rule| {
+            rule.name == info.name
+                && rule.category == info.category
+                && rule.safety == info.safety
+                && rule.ecosystem == info.ecosystem
+        })
+        .unwrap_or_else(|| {
+            rules.push(StoredRule {
+                name: info.name.clone(),
+                category: info.category,
+                safety: info.safety,
+                ecosystem: info.ecosystem.clone(),
             });
+            rules.len() - 1
+        });
+    if Arc::strong_count(info) > 1 {
+        // The kept clone stops the address from being reused by another rule.
+        interned.insert(address, (Arc::clone(info), index));
+    }
+    index
+}
+
+impl StoredCandidate {
+    fn new(candidate: &Candidate, rules: &mut Vec<StoredRule>, interned: &mut Interned) -> Self {
+        let usage = candidate.usage;
+        let rule = rule_index(&candidate.rule, rules, interned);
         Self {
             id: candidate.id,
             path: candidate.path.clone(),
@@ -932,6 +950,26 @@ mod tests {
             std::fs::read_dir(dir.path().join("scans")).unwrap().count(),
             2
         );
+    }
+
+    #[test]
+    fn candidates_with_the_same_rule_share_one_stored_rule() {
+        let first = candidate(1, "/p/a/node_modules");
+        let mut shared = candidate(2, "/p/b/node_modules");
+        shared.rule = Arc::clone(&first.rule);
+        let equal = candidate(3, "/p/c/node_modules");
+        let mut other = candidate(4, "/p/d/dist");
+        other.rule = Arc::new(RuleInfo {
+            name: "dist".to_owned(),
+            ..(*first.rule).clone()
+        });
+        let candidates = vec![first, shared, equal, other];
+        let mut stored = Stored::empty(&[PathBuf::from("/p")], &report("/p").options);
+        let summary = report("/p").summary;
+        stored.put_artifacts(&candidates, &[], &summary, &[]);
+        let indices: Vec<usize> = stored.candidates.iter().map(|c| c.rule).collect();
+        assert_eq!(indices, [0, 0, 0, 1]);
+        assert_eq!(stored.rules.len(), 2);
     }
 
     #[test]

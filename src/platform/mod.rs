@@ -1,4 +1,3 @@
-#[cfg(unix)]
 pub mod dir;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -94,8 +93,9 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// @name rotational
 /// @description Returns whether `device` is a spinning disk, read from sysfs on Linux, so a
-/// scan can stay sequential where parallel reads would only add seeks. Unknown devices, such
-/// as btrfs subvolumes or other platforms, count as not rotational.
+/// scan can stay sequential where parallel reads would only add seeks. Anonymous devices, such
+/// as btrfs subvolumes, and other platforms count as not rotational; [`rotational_at`] resolves
+/// the former through the mount source.
 ///
 /// @example
 /// let threads = if platform::rotational(device) { 2 } else { 16 };
@@ -109,68 +109,57 @@ pub fn rotational(_device: u64) -> bool {
     false
 }
 
-#[cfg(unix)]
+/// @name rotational_at
+/// @description Returns whether the filesystem holding `path` sits on a spinning disk. Where the
+/// file reports an anonymous device, as on btrfs and bcachefs, the disk behind the mount is
+/// looked up through the mount source instead. Unknown setups, ZFS datasets included, count as
+/// not rotational.
+///
+/// @example
+/// let threads = if platform::rotational_at(&root) { 2 } else { 16 };
+#[cfg(target_os = "linux")]
+pub fn rotational_at(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let dev = device(&metadata);
+    if rustix::fs::major(dev) != 0 {
+        return linux::rotational(dev);
+    }
+    linux::rotational_mount(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn rotational_at(_path: &Path) -> bool {
+    false
+}
+
 pub fn device(metadata: &std::fs::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::dev(metadata)
 }
 
-#[cfg(not(unix))]
-pub fn device(_metadata: &std::fs::Metadata) -> u64 {
-    0
-}
-
-#[cfg(unix)]
 pub fn allocated(metadata: &std::fs::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::blocks(metadata) * 512
 }
 
-#[cfg(not(unix))]
-pub fn allocated(metadata: &std::fs::Metadata) -> u64 {
-    metadata.len()
-}
-
-#[cfg(unix)]
 pub fn identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     Some((metadata.dev(), metadata.ino()))
 }
 
-#[cfg(not(unix))]
-pub fn identity(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
-    None
-}
-
-#[cfg(unix)]
 pub fn shared_inode(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     (metadata.nlink() > 1 && !metadata.is_dir()).then(|| (metadata.dev(), metadata.ino()))
 }
 
-#[cfg(not(unix))]
-pub fn shared_inode(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
-    None
-}
-
-#[cfg(unix)]
 pub fn available_space(path: &Path) -> Option<u64> {
     let stats = rustix::fs::statvfs(path).ok()?;
     Some(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
-#[cfg(not(unix))]
-pub fn available_space(_path: &Path) -> Option<u64> {
-    None
-}
-
-#[cfg(unix)]
 pub fn total_space(path: &Path) -> Option<u64> {
     let stats = rustix::fs::statvfs(path).ok()?;
     Some(stats.f_blocks.saturating_mul(stats.f_frsize))
-}
-
-#[cfg(not(unix))]
-pub fn total_space(_path: &Path) -> Option<u64> {
-    None
 }
 
 /// @name open_in_browser
@@ -184,13 +173,7 @@ pub fn open_in_browser(path: &Path) -> std::io::Result<()> {
 
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]);
-        command
-    };
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(target_os = "macos"))]
     let mut command = Command::new("xdg-open");
 
     command
@@ -222,7 +205,6 @@ mod tests {
         assert_eq!(table.fs_type(Path::new("/processes")), Some("ext4"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn reports_available_space_for_existing_paths() {
         let dir = tempfile::tempdir().expect("tempdir");

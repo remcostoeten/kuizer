@@ -11,6 +11,7 @@ use super::*;
 pub(super) const GIT_RUNNING: &str = "Available once the running git command finishes";
 const NOTHING_TO_PACK: &str = "git gc would free less than git.min_gain here";
 const NO_BRANCHES: &str = "No merged branches here";
+const NOT_IN_REPOS: &str = "Available in Git repositories";
 
 /// What one background git run did to a repository, and how the repository looks after it.
 struct Done {
@@ -45,51 +46,46 @@ impl Kuizer {
             .find(|repository| repository.root == root)
     }
 
-    pub(super) fn shows_repo(&self, repository: &Repository) -> bool {
-        self.needle(Tab::Repos).is_none_or(|needle| {
-            contains(&repository.root.to_string_lossy(), &needle)
-                || repository
-                    .merged
-                    .iter()
-                    .any(|branch| contains(&branch.name, &needle))
-        })
-    }
-
     fn min_gain(&self) -> u64 {
         self.config.git.min_gain.0
     }
 
     /// The repositories a scope covers that git gc would run in.
-    fn collectable(&self, scope: &GitScope) -> Vec<Repository> {
+    fn collectable(&self, scope: &GitScope) -> Vec<&Repository> {
+        let min_gain = self.min_gain();
         self.scoped(scope)
             .into_iter()
-            .filter(|repository| {
-                repository.collectable(self.min_gain()) && repository.busy.is_none()
-            })
+            .filter(|repository| repository.collectable(min_gain) && repository.busy.is_none())
             .collect()
     }
 
     /// The repositories a scope covers that have merged branches to delete.
-    pub(super) fn prunable(&self, scope: &GitScope) -> Vec<Repository> {
+    pub(super) fn prunable(&self, scope: &GitScope) -> Vec<&Repository> {
         self.scoped(scope)
             .into_iter()
             .filter(|repository| !repository.merged.is_empty() && repository.busy.is_none())
             .collect()
     }
 
-    fn scoped(&self, scope: &GitScope) -> Vec<Repository> {
+    fn scoped(&self, scope: &GitScope) -> Vec<&Repository> {
         let Some(report) = self.report() else {
             return Vec::new();
         };
-        report
-            .repos
-            .iter()
-            .filter(|repository| match scope {
-                GitScope::One(root) => repository.root == *root,
-                GitScope::All => self.shows_repo(repository),
-            })
-            .cloned()
-            .collect()
+        match scope {
+            GitScope::One(root) => report
+                .repos
+                .iter()
+                .filter(|repository| repository.root == *root)
+                .collect(),
+            GitScope::All => {
+                let needle = self.needle(Tab::Repos);
+                report
+                    .repos
+                    .iter()
+                    .filter(|repository| repo_matches(needle.as_deref(), repository))
+                    .collect()
+            }
+        }
     }
 
     /// The repository under the keyboard cursor of the Git repositories section.
@@ -103,39 +99,78 @@ impl Kuizer {
     /// Why git gc cannot run for the scope now, or `None` when it can.
     pub(super) fn gc_blocked(&self, scope: Option<&GitScope>) -> Option<&'static str> {
         let Some(scope) = scope else {
-            return Some("Available in Git repositories");
+            return Some(NOT_IN_REPOS);
         };
-        if self.git_running() {
-            return Some(GIT_RUNNING);
+        match scope {
+            GitScope::One(root) => match self.repository(root) {
+                Some(repository) => self.gc_lock(repository),
+                None if self.git_running() => Some(GIT_RUNNING),
+                None => Some(NOTHING_TO_PACK),
+            },
+            GitScope::All => self.gc_lock_all(&self.scoped(scope)),
         }
-        if let GitScope::One(root) = scope
-            && let Some(busy) = self.repository(root).and_then(|repository| repository.busy)
-        {
-            return Some(busy_reason(busy));
-        }
-        self.collectable(scope)
-            .is_empty()
-            .then_some(NOTHING_TO_PACK)
-            .or_else(|| self.wait())
     }
 
     /// Why merged branches cannot be deleted for the scope now, or `None` when they can.
     pub(super) fn branches_blocked(&self, scope: Option<&GitScope>) -> Option<&'static str> {
         let Some(scope) = scope else {
-            return Some("Available in Git repositories");
+            return Some(NOT_IN_REPOS);
         };
+        match scope {
+            GitScope::One(root) => match self.repository(root) {
+                Some(repository) => self.branches_lock(repository),
+                None if self.git_running() => Some(GIT_RUNNING),
+                None => Some(NO_BRANCHES),
+            },
+            GitScope::All => self.branches_lock_all(&self.scoped(scope)),
+        }
+    }
+
+    fn gc_lock(&self, repository: &Repository) -> Option<&'static str> {
         if self.git_running() {
             return Some(GIT_RUNNING);
         }
-        if let GitScope::One(root) = scope
-            && let Some(busy) = self.repository(root).and_then(|repository| repository.busy)
-        {
+        if let Some(busy) = repository.busy {
             return Some(busy_reason(busy));
         }
-        self.prunable(scope)
+        (!repository.collectable(self.min_gain()))
+            .then_some(NOTHING_TO_PACK)
+            .or_else(|| self.wait())
+    }
+
+    fn gc_lock_all(&self, shown: &[&Repository]) -> Option<&'static str> {
+        if self.git_running() {
+            return Some(GIT_RUNNING);
+        }
+        let min_gain = self.min_gain();
+        let any = shown
+            .iter()
+            .any(|repository| repository.collectable(min_gain) && repository.busy.is_none());
+        (!any).then_some(NOTHING_TO_PACK).or_else(|| self.wait())
+    }
+
+    fn branches_lock(&self, repository: &Repository) -> Option<&'static str> {
+        if self.git_running() {
+            return Some(GIT_RUNNING);
+        }
+        if let Some(busy) = repository.busy {
+            return Some(busy_reason(busy));
+        }
+        repository
+            .merged
             .is_empty()
             .then_some(NO_BRANCHES)
             .or_else(|| self.wait())
+    }
+
+    fn branches_lock_all(&self, shown: &[&Repository]) -> Option<&'static str> {
+        if self.git_running() {
+            return Some(GIT_RUNNING);
+        }
+        let any = shown
+            .iter()
+            .any(|repository| !repository.merged.is_empty() && repository.busy.is_none());
+        (!any).then_some(NO_BRANCHES).or_else(|| self.wait())
     }
 
     /// Runs `git gc` in every repository of the scope on a worker, with no confirmation: it
@@ -144,7 +179,7 @@ impl Kuizer {
         if self.gc_blocked(Some(scope)).is_some() {
             return;
         }
-        let targets = self.collectable(scope);
+        let targets: Vec<Repository> = self.collectable(scope).into_iter().cloned().collect();
         let config = self.config.git.clone();
         self.run_git(targets, cx, move |repository| Done {
             root: repository.root.clone(),
@@ -172,7 +207,7 @@ impl Kuizer {
             cx.notify();
             return;
         }
-        let targets = self.prunable(&scope);
+        let targets: Vec<Repository> = self.prunable(&scope).into_iter().cloned().collect();
         let config = self.config.git.clone();
         self.run_git(targets, cx, move |repository| Done {
             root: repository.root.clone(),
@@ -191,19 +226,22 @@ impl Kuizer {
         if targets.is_empty() {
             return;
         }
-        self.git.roots = targets
+        let roots = targets
             .iter()
             .map(|repository| repository.root.clone())
             .collect();
+        let spawned = spawn_worker("kuizer-gui-git", move || {
+            targets.into_iter().map(work).collect::<Vec<Done>>()
+        });
+        let receiver = match spawned {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.tell(Notice::Failed(format!("Could not run git: {error}")), cx);
+                return;
+            }
+        };
+        self.git.roots = roots;
         cx.notify();
-        let (sender, receiver) = oneshot::channel();
-        std::thread::Builder::new()
-            .name("kuizer-gui-git".to_owned())
-            .spawn(move || {
-                let done: Vec<Done> = targets.into_iter().map(work).collect();
-                let _ = sender.send(done);
-            })
-            .expect("spawn git thread");
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let done = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.git_done(done, cx));
@@ -222,6 +260,7 @@ impl Kuizer {
             return;
         };
         let min_gain = self.min_gain();
+        self.report_generation += 1;
         if let Phase::Ready(report) = &mut self.phase {
             for result in &done {
                 let index = report
@@ -249,10 +288,11 @@ impl Kuizer {
             return div().into_any_element();
         };
         let min_gain = self.min_gain();
-        let shown: Vec<&Repository> = report
-            .repos
+        let shown: Vec<&Repository> = self
+            .listed(Tab::Repos)
+            .slots
             .iter()
-            .filter(|repository| self.shows_repo(repository))
+            .filter_map(|&(at, _)| report.repos.get(at))
             .collect();
         let gain: u64 = shown
             .iter()
@@ -266,150 +306,18 @@ impl Kuizer {
             .child(head(col::S, "Merged", Term::MergedBranches).text_right())
             .child(div().flex_1().child("Repository"))
             .child(div().w(unit(size::ACTIONS)).flex_none());
-        let cursor = self.cursor_target();
-        let rows = shown
-            .iter()
-            .enumerate()
-            .map(|(index, repository)| {
-                let root = repository.root.clone();
-                let running = self.git.roots.contains(&root);
-                let one = GitScope::One(root.clone());
-                let gc_lock = self.gc_blocked(Some(&one));
-                let branch_lock = self.branches_blocked(Some(&one));
-                let id = index as u64;
-                let row = table_row(("repo", id), false)
-                    .debug_selector(move || format!("repo-row-{index}"));
-                let target = Target::Repo(root.clone());
-                let names: Vec<&str> = repository
-                    .merged
-                    .iter()
-                    .map(|branch| branch.name.as_str())
-                    .collect();
-                let detail = match (repository.busy, names.is_empty()) {
-                    (Some(busy), _) => Some((format!("Skipped: {}", busy_reason(busy)), true)),
-                    (None, false) => Some((
-                        format!(
-                            "merged into {}: {}",
-                            repository.default_branch.as_deref().unwrap_or("default"),
-                            names.join(", ")
-                        ),
-                        false,
-                    )),
-                    (None, true) => None,
-                };
-                let gc_root = root.clone();
-                let branch_root = root.clone();
-                self.menu_row(row, target, cursor.as_ref(), cx)
-                    .h(unit(size::ROW_TALL))
-                    .child(
-                        column(col::M)
-                            .id(("repo-gain", id))
-                            .text_right()
-                            .tip(gain_details(repository))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(theme::bytes(repository.objects.gain())),
-                    )
-                    .child(
-                        column(col::S)
-                            .text_right()
-                            .text_color(theme::muted())
-                            .child(repository.objects.loose.to_string()),
-                    )
-                    .child(
-                        column(col::S)
-                            .text_right()
-                            .text_color(theme::muted())
-                            .child(repository.merged.len().to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .justify_center()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .id(("repo-path", id))
-                                    .truncate()
-                                    .tip(tooltip::path(&repository.root))
-                                    .child(self.shown_path(&repository.root)),
-                            )
-                            .children(detail.map(|(text, busy)| {
-                                div()
-                                    .truncate()
-                                    .text_size(unit(font::SMALL))
-                                    .text_color(if busy {
-                                        theme::review()
-                                    } else {
-                                        theme::faint()
-                                    })
-                                    .child(text)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .justify_end()
-                            .gap(unit(space::S))
-                            .w(unit(size::ACTIONS))
-                            .child(
-                                ui::button(
-                                    ("repo-gc", id),
-                                    if running { "Running" } else { "Run git gc" },
-                                    ButtonKind::Secondary,
-                                    gc_lock.is_none(),
-                                )
-                                .debug_selector(move || format!("repo-gc-{index}"))
-                                .tip(
-                                    match gc_lock {
-                                        Some(reason) => Tooltip::new(reason),
-                                        None => Tooltip::new(format!(
-                                            "Pack loose objects, frees up to {}",
-                                            theme::bytes(repository.objects.gain())
-                                        ))
-                                        .keys(&["C"]),
-                                    }
-                                    .build(),
-                                )
-                                .on_click(cx.listener(
-                                    move |app, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        app.collect_garbage(&GitScope::One(gc_root.clone()), cx);
-                                    },
-                                )),
-                            )
-                            .child(
-                                ui::button(
-                                    ("repo-branches", id),
-                                    "Branches",
-                                    ButtonKind::Ghost,
-                                    branch_lock.is_none(),
-                                )
-                                .debug_selector(move || format!("repo-branches-{index}"))
-                                .tip(
-                                    match branch_lock {
-                                        Some(reason) => Tooltip::new(reason),
-                                        None => Tooltip::new(
-                                            "Delete the merged branches, after a confirmation",
-                                        )
-                                        .keys(&["B"]),
-                                    }
-                                    .build(),
-                                )
-                                .on_click(cx.listener(
-                                    move |app, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        app.ask_branches(GitScope::One(branch_root.clone()), cx);
-                                    },
-                                )),
-                            ),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let all_gc = self.gc_blocked(Some(&GitScope::All));
-        let all_branches = self.branches_blocked(Some(&GitScope::All));
+        let rows = shown.len();
+        let list = self
+            .table_list(
+                "repos",
+                Tab::Repos,
+                rows,
+                |app, range, cx| app.repo_rows(range, cx),
+                cx,
+            )
+            .debug_selector(|| "repo-list".to_owned());
+        let all_gc = self.gc_lock_all(&shown);
+        let all_branches = self.branches_lock_all(&shown);
         div()
             .flex()
             .flex_col()
@@ -436,7 +344,7 @@ impl Kuizer {
                                 Some(reason) => Tooltip::new(reason),
                                 None => {
                                     Tooltip::new("Pack every listed repository that is worth it")
-                                        .keys(&["Shift+C"])
+                                        .keys(&[hint(&Command::GcAll)])
                                 }
                             }
                             .build(),
@@ -461,7 +369,7 @@ impl Kuizer {
                                 None => Tooltip::new(
                                     "Delete every listed merged branch, after a confirmation",
                                 )
-                                .keys(&["Shift+B"]),
+                                .keys(&[hint(&Command::BranchesAll)]),
                             }
                             .build(),
                         )
@@ -473,25 +381,178 @@ impl Kuizer {
                     ),
             )
             .child(header)
+            .child(if report.repos.is_empty() {
+                div()
+                    .flex_1()
+                    .child(ui::empty(if report.options.repos {
+                        "No git repositories worth cleaning"
+                    } else {
+                        "Git repositories were skipped for this scan"
+                    }))
+                    .into_any_element()
+            } else if rows == 0 {
+                div().flex_1().into_any_element()
+            } else {
+                list.into_any_element()
+            })
+            .into_any_element()
+    }
+
+    fn repo_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(report) = self.report() else {
+            return Vec::new();
+        };
+        let listed = self.listed(Tab::Repos);
+        let cursor = self.cursor_target();
+        range
+            .filter_map(|row| {
+                let repository = report.repos.get(listed.slots.get(row)?.0)?;
+                Some(self.repo_row(row, repository, cursor.as_ref(), cx))
+            })
+            .collect()
+    }
+
+    fn repo_row(
+        &self,
+        index: usize,
+        repository: &Repository,
+        cursor: Option<&Target>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let root = repository.root.clone();
+        let running = self.git.roots.contains(&root);
+        let gc_lock = self.gc_lock(repository);
+        let branch_lock = self.branches_lock(repository);
+        let id = index as u64;
+        let row =
+            table_row(("repo", id), false).debug_selector(move || format!("repo-row-{index}"));
+        let target = Target::Repo(root.clone());
+        let names: Vec<&str> = repository
+            .merged
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        let detail = match (repository.busy, names.is_empty()) {
+            (Some(busy), _) => Some((format!("Skipped: {}", busy_reason(busy)), true)),
+            (None, false) => Some((
+                format!(
+                    "merged into {}: {}",
+                    repository.default_branch.as_deref().unwrap_or("default"),
+                    names.join(", ")
+                ),
+                false,
+            )),
+            (None, true) => None,
+        };
+        let gc_root = root.clone();
+        let branch_root = root.clone();
+        self.menu_row(row, target, cursor, cx)
+            .h(unit(size::ROW_TALL))
+            .child(
+                column(col::M)
+                    .id(("repo-gain", id))
+                    .text_right()
+                    .tip(gain_details(repository))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(theme::bytes(repository.objects.gain())),
+            )
+            .child(
+                column(col::S)
+                    .text_right()
+                    .text_color(theme::muted())
+                    .child(repository.objects.loose.to_string()),
+            )
+            .child(
+                column(col::S)
+                    .text_right()
+                    .text_color(theme::muted())
+                    .child(repository.merged.len().to_string()),
+            )
             .child(
                 div()
-                    .id("repo-rows")
-                    .debug_selector(|| "repo-list".to_owned())
                     .flex()
                     .flex_col()
+                    .justify_center()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_for(Tab::Repos))
-                    .children(rows)
-                    .when(report.repos.is_empty(), |this| {
-                        this.child(ui::empty(if report.options.repos {
-                            "No git repositories worth cleaning"
-                        } else {
-                            "Git repositories were skipped for this scan"
-                        }))
-                    }),
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(("repo-path", id))
+                            .truncate()
+                            .tip(tooltip::path(&repository.root))
+                            .child(self.shown_path(&repository.root)),
+                    )
+                    .children(detail.map(|(text, busy)| {
+                        div()
+                            .truncate()
+                            .text_size(unit(font::SMALL))
+                            .text_color(if busy {
+                                theme::review()
+                            } else {
+                                theme::faint()
+                            })
+                            .child(text)
+                    })),
             )
-            .into_any_element()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .justify_end()
+                    .gap(unit(space::S))
+                    .w(unit(size::ACTIONS))
+                    .child(
+                        ui::button(
+                            ("repo-gc", id),
+                            if running { "Running" } else { "Run git gc" },
+                            ButtonKind::Secondary,
+                            gc_lock.is_none(),
+                        )
+                        .debug_selector(move || format!("repo-gc-{index}"))
+                        .tip(
+                            match gc_lock {
+                                Some(reason) => Tooltip::new(reason),
+                                None => Tooltip::new(format!(
+                                    "Pack loose objects, frees up to {}",
+                                    theme::bytes(repository.objects.gain())
+                                ))
+                                .keys(&[hint(&Command::Gc)]),
+                            }
+                            .build(),
+                        )
+                        .on_click(cx.listener(
+                            move |app, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                app.collect_garbage(&GitScope::One(gc_root.clone()), cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::button(
+                            ("repo-branches", id),
+                            "Branches",
+                            ButtonKind::Ghost,
+                            branch_lock.is_none(),
+                        )
+                        .debug_selector(move || format!("repo-branches-{index}"))
+                        .tip(
+                            match branch_lock {
+                                Some(reason) => Tooltip::new(reason),
+                                None => {
+                                    Tooltip::new("Delete the merged branches, after a confirmation")
+                                        .keys(&[hint(&Command::Branches)])
+                                }
+                            }
+                            .build(),
+                        )
+                        .on_click(cx.listener(
+                            move |app, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                app.ask_branches(GitScope::One(branch_root.clone()), cx);
+                            },
+                        )),
+                    ),
+            )
     }
 
     pub(super) fn render_branch_dialog(
@@ -595,6 +656,16 @@ impl Kuizer {
                     ),
             )
     }
+}
+
+pub(super) fn repo_matches(needle: Option<&str>, repository: &Repository) -> bool {
+    needle.is_none_or(|needle| {
+        contains(&repository.root.to_string_lossy(), needle)
+            || repository
+                .merged
+                .iter()
+                .any(|branch| contains(&branch.name, needle))
+    })
 }
 
 fn count(count: usize, one: &str, many: &str) -> String {

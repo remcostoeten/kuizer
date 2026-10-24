@@ -7,10 +7,7 @@ use crate::config::{Config, Loaded, default_path};
 pub fn run(loaded: &Loaded, action: Option<ConfigAction>, json: bool) -> Result<(), AppError> {
     match action.unwrap_or(ConfigAction::Show) {
         ConfigAction::Show if json => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&loaded.config).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(&loaded.config)?);
         }
         ConfigAction::Show => {
             match &loaded.source {
@@ -35,6 +32,9 @@ pub fn run(loaded: &Loaded, action: Option<ConfigAction>, json: bool) -> Result<
             println!("wrote {}", path.display());
         }
         ConfigAction::Check => {
+            if !loaded.warnings.is_empty() {
+                return Err(AppError::ConfigProblems);
+            }
             loaded.config.validate()?;
             println!("config ok");
         }

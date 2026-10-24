@@ -113,50 +113,6 @@ impl Kuizer {
         (!text.is_empty()).then(|| text.to_lowercase())
     }
 
-    pub(super) fn shows_cache(
-        &self,
-        cache: &kuizer::caches::KnownCache,
-        candidate: &Candidate,
-    ) -> bool {
-        found(
-            self.needle(Tab::Caches).as_deref(),
-            &[
-                candidate.path.to_string_lossy().as_ref(),
-                cache.name,
-                cache.tool,
-            ],
-        )
-    }
-
-    pub(super) fn shows_toolchain(
-        &self,
-        toolchain: &kuizer::toolchains::Toolchain,
-        candidate: &Candidate,
-    ) -> bool {
-        found(
-            self.needle(Tab::Toolchains).as_deref(),
-            &[
-                candidate.path.to_string_lossy().as_ref(),
-                toolchain.tool.name(),
-                toolchain.runtime.as_str(),
-                toolchain.version.as_str(),
-            ],
-        )
-    }
-
-    pub(super) fn shows_docker(&self, item: &kuizer::docker::Item, candidate: &Candidate) -> bool {
-        found(
-            self.needle(Tab::Docker).as_deref(),
-            &[
-                candidate.path.to_string_lossy().as_ref(),
-                item.engine.as_str(),
-                item.object.name(),
-                item.label.as_str(),
-                item.note.as_str(),
-            ],
-        )
-    }
-
     pub(super) fn scroll_for(&self, tab: Tab) -> ScrollHandle {
         self.scrolls.get(&tab).cloned().unwrap_or_default()
     }
@@ -284,6 +240,7 @@ impl Kuizer {
         self.shortcuts = false;
         self.filtering = false;
         self.palette = Some(Palette::default());
+        Self::probe_recent(self.recent.paths.clone(), cx);
         cx.notify();
     }
 
@@ -344,7 +301,7 @@ impl Kuizer {
         if let Some(palette) = &self.palette {
             palette.scroll.scroll_to_item(palette.active);
         }
-        cx.notify();
+        self.redraw_chrome(cx);
     }
 
     /// Runs the palette row at `index`, unless it cannot run now.
@@ -387,12 +344,13 @@ impl Kuizer {
 
     /// Applies a changed filter to the rows on screen.
     fn filtered(&mut self) {
-        self.refresh_rows();
-        self.reveal_cursor.set(false);
         if self.tab == Tab::Artifacts {
-            self.artifact_scroll.scroll_to_item(0, ScrollStrategy::Top);
-        } else {
-            self.scroll_for(self.tab).set_offset(point(px(0.), px(0.)));
+            self.refresh_rows();
+        }
+        self.reveal_cursor.set(false);
+        match self.list_scroll(self.tab) {
+            Some(scroll) => scroll.scroll_to_item(0, ScrollStrategy::Top),
+            None => self.scroll_for(self.tab).set_offset(point(px(0.), px(0.))),
         }
     }
 
@@ -468,9 +426,11 @@ impl Kuizer {
                     None
                 }
             }
-            Command::Scan(path) => self
-                .wait()
-                .or_else(|| (!path.is_dir()).then_some("This folder is missing")),
+            Command::Scan(path) => self.wait().or_else(|| {
+                self.recent
+                    .is_gone(path)
+                    .then_some("This folder is missing")
+            }),
             _ if !shown => Some(NEEDS_SCAN),
             Command::SpaceMap => None,
             Command::MapIn
@@ -668,6 +628,7 @@ impl Kuizer {
                     self.go_to(Tab::Overview, cx);
                     self.map.shown = true;
                 }
+                self.ensure_map();
             }
             Command::MapIn => {
                 if let Some(key) = self.map_focused().map(|node| node.key.clone()) {
@@ -701,95 +662,11 @@ impl Kuizer {
         self.rows.clear();
         self.toast = None;
         self.stale = None;
-        self.phase = Phase::Start;
+        self.set_phase(Phase::Start, cx);
         self.folder = display_path(path);
         self.whole_home = false;
         self.folder_error = None;
         self.start_scan(cx);
-    }
-
-    /// Every row of a list in the order it is drawn, after its filters.
-    pub(super) fn targets(&self, tab: Tab) -> Vec<Target> {
-        let Some(report) = self.report() else {
-            return Vec::new();
-        };
-        let needle = self.needle(tab);
-        let needle = needle.as_deref();
-        match tab {
-            Tab::Overview => Vec::new(),
-            Tab::Artifacts => self
-                .rows
-                .iter()
-                .map(|&index| {
-                    let candidate = &report.candidates[index];
-                    Target::Item(Source::Artifact, candidate.id, candidate.path.clone())
-                })
-                .collect(),
-            Tab::Caches => report
-                .caches
-                .iter()
-                .filter(|(cache, candidate)| self.shows_cache(cache, candidate))
-                .map(|(_, candidate)| {
-                    Target::Item(Source::Cache, candidate.id, candidate.path.clone())
-                })
-                .collect(),
-            Tab::Toolchains => report
-                .toolchains
-                .iter()
-                .filter(|(toolchain, candidate)| self.shows_toolchain(toolchain, candidate))
-                .map(|(_, candidate)| {
-                    Target::Item(Source::Toolchain, candidate.id, candidate.path.clone())
-                })
-                .collect(),
-            Tab::Docker => report
-                .docker
-                .iter()
-                .filter(|(item, candidate)| self.shows_docker(item, candidate))
-                .map(|(_, candidate)| {
-                    Target::Item(Source::Docker, candidate.id, candidate.path.clone())
-                })
-                .collect(),
-            Tab::Duplicates => report
-                .duplicates
-                .iter()
-                .flat_map(|found| found.groups.iter().take(DUPLICATE_GROUPS))
-                .flat_map(|group| &group.members)
-                .filter(|member| found_path(needle, &member.path))
-                .map(|member| Target::Duplicate(member.path.clone()))
-                .collect(),
-            Tab::Issues => report
-                .issues
-                .iter()
-                .take(ISSUE_LIMIT)
-                .filter(|issue| {
-                    found(
-                        needle,
-                        &[
-                            issue.path.to_string_lossy().as_ref(),
-                            issue.message.as_str(),
-                        ],
-                    )
-                })
-                .map(|issue| Target::Issue(issue.path.clone()))
-                .collect(),
-            Tab::Repos => report
-                .repos
-                .iter()
-                .filter(|repository| self.shows_repo(repository))
-                .map(|repository| Target::Repo(repository.root.clone()))
-                .collect(),
-            Tab::History => report
-                .history
-                .as_ref()
-                .map(|view| {
-                    view.delete_runs()
-                        .rev()
-                        .filter(|run| shows_run(needle, run))
-                        .map(|run| Target::Run(run.id, run.command.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
     }
 
     pub(super) fn target_exists(&self, target: &Target) -> bool {
@@ -823,7 +700,7 @@ impl Kuizer {
 
     /// The rows of a list for a cursor move: `None` for the artifact list, which is read through
     /// its row indices instead, else every target.
-    fn listing(&self, tab: Tab) -> Option<Vec<Target>> {
+    fn listing(&self, tab: Tab) -> Option<Rc<[Target]>> {
         (tab != Tab::Artifacts).then(|| self.targets(tab))
     }
 
@@ -878,7 +755,7 @@ impl Kuizer {
                 let candidate = &report.candidates[index];
                 Target::Item(Source::Artifact, candidate.id, candidate.path.clone())
             }),
-            tab => self.targets(tab).into_iter().next(),
+            tab => self.targets(tab).first().cloned(),
         }
     }
 
@@ -918,12 +795,14 @@ impl Kuizer {
         self.cursors.insert(self.tab, target);
         if self.tab == Tab::Artifacts {
             self.artifact_row.set(next);
+        }
+        if let Some(scroll) = self.list_scroll(self.tab) {
             let strategy = if next < current {
                 ScrollStrategy::Top
             } else {
                 ScrollStrategy::Bottom
             };
-            self.artifact_scroll.scroll_to_item(next, strategy);
+            scroll.scroll_to_item(next, strategy);
         } else {
             self.reveal_cursor.set(true);
         }
@@ -986,10 +865,9 @@ impl Kuizer {
         reason = "a positive row count far below usize::MAX"
     )]
     fn page_size(&self) -> usize {
-        let view = if self.tab == Tab::Artifacts {
-            self.artifact_scroll.0.borrow().base_handle.bounds()
-        } else {
-            self.scroll_for(self.tab).bounds()
+        let view = match self.list_scroll(self.tab) {
+            Some(scroll) => scroll.0.borrow().base_handle.bounds(),
+            None => self.scroll_for(self.tab).bounds(),
         };
         match self.cursor_bounds.get() {
             Some(row) if row.size.height > px(0.) => {
@@ -1002,9 +880,9 @@ impl Kuizer {
     /// The selectable items of the current list, after its filters.
     fn list_keys(&self) -> Vec<(Source, u64)> {
         self.targets(self.tab)
-            .into_iter()
+            .iter()
             .filter_map(|target| match target {
-                Target::Item(source, id, _) => Some((source, id)),
+                Target::Item(source, id, _) => Some((*source, *id)),
                 _ => None,
             })
             .collect()
@@ -1018,7 +896,7 @@ impl Kuizer {
         let shown = if tab == Tab::Artifacts {
             self.rows.len()
         } else {
-            self.targets(tab).len()
+            self.listed(tab).slots.len()
         };
         let total = match tab {
             Tab::Overview => 0,
@@ -1051,7 +929,8 @@ mod tests {
 
     use super::*;
     use crate::app::tests::{
-        menu_target, open, project, scanned, type_text, wait_for_duplicates, wait_for_refresh,
+        artifact, menu_target, open, project, scanned, type_text, wait_for_duplicates,
+        wait_for_refresh,
     };
 
     #[test]
@@ -1072,6 +951,73 @@ mod tests {
         assert!(found(Some("node"), &["/x/Node_Modules"]));
         assert!(found(Some("cargo"), &["/x/target", "Cargo build output"]));
         assert!(!found(Some("pip"), &["/x/target", "cargo"]));
+    }
+
+    #[gpui::test]
+    fn the_palette_asks_the_marked_folders_not_the_disk(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, _| {
+            let nowhere = dir.path().join("not-created");
+            assert_eq!(
+                app.blocked(&Command::Scan(nowhere)),
+                None,
+                "the interface thread never touches the disk for it"
+            );
+            let there = dir.path().to_path_buf();
+            app.recent.mark_gone(vec![there.clone()]);
+            assert_eq!(
+                app.blocked(&Command::Scan(there)),
+                Some("This folder is missing")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_list_is_filtered_again_only_when_its_filter_or_the_report_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, cx| {
+            app.roots = vec![PathBuf::from("/p")];
+            let mut report = Report::empty(&app.roots, &app.options);
+            report.caches = [("npm", "/c/npm"), ("pnpm", "/c/pnpm")]
+                .into_iter()
+                .zip(1..)
+                .map(|((name, path), id)| {
+                    let cache = kuizer::caches::KnownCache {
+                        name,
+                        tool: name,
+                        path: PathBuf::from(path),
+                        safety: Safety::Safe,
+                        note: "",
+                    };
+                    (cache, artifact(id, Path::new(path)))
+                })
+                .collect();
+            app.phase = Phase::Ready(Box::new(report));
+            app.refresh_stats();
+            assert_eq!(app.counts(Tab::Caches), (2, 2));
+            assert!(
+                Rc::ptr_eq(
+                    &app.listed(Tab::Caches).targets,
+                    &app.listed(Tab::Caches).targets
+                ),
+                "asking again reuses the rows"
+            );
+
+            app.filters.insert(Tab::Caches, "PNPM".to_owned());
+            assert_eq!(app.counts(Tab::Caches), (1, 2));
+            assert_eq!(app.targets(Tab::Caches).len(), 1);
+
+            app.take(vec![Update::Loaded(Loaded::Caches(Vec::new()))], cx);
+            assert_eq!(
+                app.counts(Tab::Caches),
+                (0, 0),
+                "a new report is listed anew"
+            );
+        });
     }
 
     /// A folder with `count` projects, each with its own node_modules folder.
@@ -1425,6 +1371,44 @@ mod tests {
         draw(cx);
         draw(cx);
         inside(cx, "duplicate-0-0", "duplicate-list");
+    }
+
+    #[gpui::test]
+    fn a_long_cache_list_scrolls_to_the_cursor(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, cx| {
+            app.roots = vec![PathBuf::from("/p")];
+            let mut report = Report::empty(&app.roots, &app.options);
+            report.caches = (1..=60u64)
+                .map(|id| {
+                    let path = PathBuf::from(format!("/c/cache-{id}"));
+                    let cache = kuizer::caches::KnownCache {
+                        name: "cache",
+                        tool: "tool",
+                        path: path.clone(),
+                        safety: Safety::Safe,
+                        note: "",
+                    };
+                    (cache, artifact(id, &path))
+                })
+                .collect();
+            app.phase = Phase::Ready(Box::new(report));
+            app.refresh_stats();
+            app.go_to(Tab::Caches, cx);
+        });
+        cx.simulate_resize(size(px(900.), px(520.)));
+        draw(cx);
+        cx.simulate_keystrokes("end");
+        assert_eq!(cursor_row(&view, cx), 59);
+        draw(cx);
+        draw(cx);
+        inside(cx, "cache-row-59", "cache-list");
+        cx.simulate_keystrokes("home");
+        draw(cx);
+        draw(cx);
+        inside(cx, "cache-row-0", "cache-list");
     }
 
     #[gpui::test]

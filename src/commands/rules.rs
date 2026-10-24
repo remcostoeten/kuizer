@@ -5,10 +5,7 @@ use crate::detect::Kind;
 pub fn run(config: &Config, json: bool) -> Result<(), AppError> {
     let specs = config.rule_specs()?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&specs).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&specs)?);
         return Ok(());
     }
     println!(

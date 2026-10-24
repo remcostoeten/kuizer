@@ -64,12 +64,9 @@ impl Stat {
 
 /// An open directory that lists its entries and stats them relative to itself, so a walk
 /// pays no path lookup per entry. On Linux it reads with `getdents64` into a caller-owned
-/// buffer; elsewhere it falls back to `std::fs`.
+/// buffer; elsewhere it reads through `readdir`.
 pub struct Dir {
-    #[cfg(target_os = "linux")]
     fd: rustix::fd::OwnedFd,
-    #[cfg(not(target_os = "linux"))]
-    path: std::path::PathBuf,
 }
 
 /// Reusable scratch space for [`Dir::read`], one per thread.
@@ -90,7 +87,6 @@ impl Default for Buffer {
     }
 }
 
-#[cfg(target_os = "linux")]
 mod imp {
     use std::ffi::OsStr;
     use std::io;
@@ -98,7 +94,7 @@ mod imp {
     use std::path::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RawDir};
+    use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags};
 
     use super::{Buffer, Dir, EntryKind, Stat};
 
@@ -157,13 +153,14 @@ mod imp {
             )?))
         }
 
+        #[cfg(target_os = "linux")]
         pub fn read(
             &self,
             buffer: &mut Buffer,
             mut each: impl FnMut(&OsStr, EntryKind, u64),
         ) -> io::Result<()> {
             buffer.bytes.clear();
-            let mut entries = RawDir::new(&self.fd, buffer.bytes.spare_capacity_mut());
+            let mut entries = rustix::fs::RawDir::new(&self.fd, buffer.bytes.spare_capacity_mut());
             while let Some(entry) = entries.next() {
                 let entry = entry?;
                 let name = entry.file_name().to_bytes();
@@ -178,62 +175,24 @@ mod imp {
             }
             Ok(())
         }
-    }
-}
 
-#[cfg(not(target_os = "linux"))]
-mod imp {
-    use std::ffi::OsStr;
-    use std::fs;
-    use std::io;
-    use std::os::unix::fs::DirEntryExt;
-    use std::path::Path;
-
-    use super::{Buffer, Dir, EntryKind, Stat};
-
-    impl Dir {
-        pub fn open(path: &Path, follow: bool) -> io::Result<Self> {
-            let metadata = if follow {
-                fs::metadata(path)?
-            } else {
-                fs::symlink_metadata(path)?
-            };
-            if !metadata.is_dir() {
-                return Err(io::Error::from(io::ErrorKind::NotADirectory));
-            }
-            Ok(Self {
-                path: path.to_path_buf(),
-            })
-        }
-
-        pub fn stat(&self) -> io::Result<Stat> {
-            Ok(Stat::from_metadata(&fs::metadata(&self.path)?))
-        }
-
-        pub fn stat_at(&self, name: &OsStr) -> io::Result<Stat> {
-            Ok(Stat::from_metadata(&fs::symlink_metadata(
-                self.path.join(name),
-            )?))
-        }
-
+        #[cfg(not(target_os = "linux"))]
         pub fn read(
             &self,
             _buffer: &mut Buffer,
             mut each: impl FnMut(&OsStr, EntryKind, u64),
         ) -> io::Result<()> {
-            for entry in fs::read_dir(&self.path)? {
+            for entry in rustix::fs::Dir::read_from(&self.fd)? {
                 let entry = entry?;
-                let file_type = entry.file_type()?;
-                let kind = if file_type.is_dir() {
-                    EntryKind::Dir
-                } else if file_type.is_file() {
-                    EntryKind::File
-                } else if file_type.is_symlink() {
-                    EntryKind::Symlink
-                } else {
-                    EntryKind::Other
-                };
-                each(&entry.file_name(), kind, entry.ino());
+                let name = entry.file_name().to_bytes();
+                if name == b"." || name == b".." {
+                    continue;
+                }
+                each(
+                    OsStr::from_bytes(name),
+                    kind(entry.file_type()),
+                    entry.ino(),
+                );
             }
             Ok(())
         }

@@ -1,9 +1,9 @@
 mod app;
 mod jobs;
+mod palette;
 mod view;
 mod watch;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,10 +62,32 @@ fn handle_filter(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_chord(app: &mut App, key: KeyEvent) {
+    app.message = None;
+    app.end_range();
+    let plain_control =
+        key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT);
+    if app.filtering || app.overlay != Overlay::None || !plain_control {
+        return;
+    }
+    match key.code {
+        KeyCode::Char('d') => app.move_by(PAGE / 2),
+        KeyCode::Char('u') => app.move_by(-PAGE / 2),
+        _ => {}
+    }
+}
+
 fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
     {
         app.quit = true;
+        return;
+    }
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        handle_chord(app, key);
         return;
     }
     app.message = None;
@@ -130,7 +152,23 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 /// @example
 /// tui::run(&config, &roots, false)?;
 pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result<()> {
+    run_with_notice(config, roots, confirm, None)
+}
+
+/// @name run_with_notice
+/// @description Like `run`, and shows `notice` in the footer until the first key press, for
+/// problems found before the interface opened such as ignored config settings.
+///
+/// @example
+/// tui::run_with_notice(&config, &roots, false, Some("config: bad key".to_owned()))?;
+pub fn run_with_notice(
+    config: &Config,
+    roots: &[PathBuf],
+    confirm: bool,
+    notice: Option<String>,
+) -> std::io::Result<()> {
     let mut app = App::new(config.delete.mode.into(), confirm);
+    app.message = notice;
     let mut terminal = ratatui::try_init()?;
     let started = terminal
         .draw(|frame| view::draw(frame, &app))
@@ -153,7 +191,6 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
     let (nudge_tx, nudge_rx) = unbounded::<()>();
     let (free_tx, free_rx) = unbounded::<Option<u64>>();
     jobs::spawn_disk(roots.to_vec(), nudge_rx, free_tx);
-    let mut projects = HashSet::new();
 
     let outcome = (|| -> std::io::Result<()> {
         let mut scanning = true;
@@ -167,9 +204,10 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
                 match handle.events.try_recv() {
                     Ok(Event::Candidate(candidate)) => {
                         let project = project_of(&candidate);
-                        if projects.insert(project.to_path_buf()) {
-                            app.expect_status(project.to_path_buf());
-                            let _ = project_tx.send(project.to_path_buf());
+                        if !app.knows_project(project) {
+                            let project = project.to_path_buf();
+                            app.expect_status(project.clone());
+                            let _ = project_tx.send(project);
                         }
                         app.push(candidate);
                     }
@@ -183,8 +221,9 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
                     Err(TryRecvError::Disconnected) => scanning = false,
                 }
             }
-            while let Ok((project, count)) = changes_rx.try_recv() {
-                app.set_status(project, count);
+            let updates: Vec<_> = changes_rx.try_iter().collect();
+            if !updates.is_empty() {
+                app.set_statuses(updates);
                 redraw = true;
             }
             let mut removed = false;
@@ -247,4 +286,96 @@ pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result
         eprintln!("kuizer: {error}");
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::detect::{Category, Kind, RuleInfo, Safety};
+    use crate::scan::{Candidate, Usage};
+    use app::Status;
+
+    fn candidate(id: u64, path: &str) -> Candidate {
+        Candidate {
+            id,
+            path: PathBuf::from(path),
+            kind: Kind::Dir,
+            rule: Arc::new(RuleInfo {
+                name: "node-modules".to_owned(),
+                category: Category::Dependencies,
+                safety: Safety::Safe,
+                ecosystem: "node".to_owned(),
+            }),
+            project: None,
+            usage: Usage {
+                allocated: 10 * id,
+                ..Usage::default()
+            },
+            newest: None,
+            identity: None,
+            project_last_active: None,
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new(Mode::Trash, false);
+        for id in 1..=30 {
+            app.push(candidate(id, &format!("/p/{id}/node_modules")));
+        }
+        app.refresh();
+        app
+    }
+
+    fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode, modifiers: KeyModifiers) {
+        handle_key(app, KeyEvent::new(code, modifiers), jobs);
+    }
+
+    #[test]
+    fn control_and_alt_chords_never_run_the_plain_key_actions() {
+        let (jobs, queued) = unbounded::<Job>();
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.cursor, (PAGE / 2) as usize);
+        press(&mut app, &jobs, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.cursor, 0);
+        for (code, modifiers) in [
+            (KeyCode::Char('d'), KeyModifiers::ALT),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL),
+            (KeyCode::Char('s'), KeyModifiers::ALT),
+        ] {
+            press(&mut app, &jobs, code, modifiers);
+        }
+        assert!(queued.is_empty());
+        assert_eq!(app.selected_count(), 0);
+        assert!(app.items.iter().all(|item| item.status == Status::Ready));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.cursor, 0);
+        assert!(!app.quit);
+
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(queued.len(), 1);
+    }
+
+    #[test]
+    fn chords_do_not_confirm_a_dialog_or_type_into_the_filter() {
+        let (jobs, queued) = unbounded::<Job>();
+        let mut app = app();
+        app.open_confirm();
+        press(&mut app, &jobs, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        press(&mut app, &jobs, KeyCode::Char('y'), KeyModifiers::ALT);
+        assert!(matches!(app.overlay, Overlay::Confirm { .. }));
+        assert!(queued.is_empty());
+        app.overlay = Overlay::None;
+        app.filtering = true;
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, &jobs, KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert_eq!(app.filter, "D");
+    }
 }

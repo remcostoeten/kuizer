@@ -11,7 +11,7 @@ use crate::motion;
 use crate::theme::{self, size, unit};
 
 const VIEWBOX: f32 = 24.;
-const HOVER: Duration = Duration::from_millis(450);
+const HOVER: Duration = Duration::from_millis(140);
 
 /// A monochrome line icon. Icons take the text color they are given, never a hue of their own.
 /// Each icon is built from layers, so parts of it can move on their own when it is hovered.

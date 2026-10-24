@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use super::{Config, ConfigError};
+use super::{ConfigError, Excludes};
 use crate::platform;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,8 +47,8 @@ pub fn exclude_pattern(path: &Path) -> String {
 /// @name add_exclude
 /// @description Appends a pattern to `scan.exclude` in the config file at `file`, creating the
 /// file and the `[scan]` table when they are missing. Comments and layout of the rest of the file
-/// are kept, and the result is checked with the normal config validation before it is written.
-/// Returns `false` when the pattern was already there.
+/// are kept, and only the new pattern is checked before it is written, so the rest of the file may
+/// hold settings that do not validate. Returns `false` when the pattern was already there.
 ///
 /// @example
 /// add_exclude(&config_path, &exclude_pattern(Path::new("/p/site/node_modules")))?;
@@ -83,12 +83,12 @@ pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
     if exclude.iter().any(|value| value.as_str() == Some(pattern)) {
         return Ok(false);
     }
+    Excludes::new(&[pattern.to_owned()], &[]).map_err(|source| EditError::Invalid {
+        path: file.to_path_buf(),
+        source: Box::new(ConfigError::Exclude(source)),
+    })?;
     exclude.push(pattern);
     let updated = document.to_string();
-    Config::parse(&updated, file).map_err(|source| EditError::Invalid {
-        path: file.to_path_buf(),
-        source: Box::new(source),
-    })?;
     let write_error = |source| EditError::Write {
         path: file.to_path_buf(),
         source,
@@ -105,6 +105,7 @@ pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn patterns_escape_glob_characters_and_match_only_that_path() {
@@ -141,6 +142,21 @@ mod tests {
                 .expect("valid")
                 .path(Path::new("/p/b/node_modules"))
         );
+    }
+
+    #[test]
+    fn other_invalid_settings_do_not_block_adding_an_exclude() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        fs::write(&file, "[appearance]\nmotion = \"no\"\n").expect("write");
+        assert!(add_exclude(&file, "/p/a").expect("adds"));
+        assert!(matches!(
+            add_exclude(&file, "["),
+            Err(EditError::Invalid { .. })
+        ));
+        let loaded = Config::load(Some(&file)).expect("loads");
+        assert_eq!(loaded.config.scan.exclude, ["/p/a"]);
+        assert_eq!(loaded.warnings.len(), 1);
     }
 
     #[test]

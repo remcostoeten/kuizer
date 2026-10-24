@@ -1,15 +1,15 @@
 use gpui::{
-    Bounds, BoxShadow, CursorStyle, Decorations, Div, Global, HitboxBehavior, Hsla, MouseButton,
+    Bounds, BoxShadow, CursorStyle, Decorations, Div, Global, HitboxBehavior, MouseButton,
     PathBuilder, Pixels, Point, ResizeEdge, Size, Stateful, Tiling, TitlebarOptions, Window,
     WindowDecorations, canvas, div, point, prelude::*, px,
 };
 
+use crate::fallback;
 use crate::theme::{self, size, space, unit};
 
-pub const TITLEBAR: Pixels = px(40.);
+pub const TITLEBAR: Pixels = px(size::BAR);
 const SHADOW: Pixels = px(10.);
 const TRAFFIC_LIGHTS: Pixels = px(78.);
-const ICON: Pixels = px(10.);
 
 struct HoveredEdge(ResizeEdge);
 
@@ -90,11 +90,13 @@ pub fn titlebar_down(clicks: usize, window: &Window) -> bool {
 /// @name frame
 /// @description Wraps the whole window when kuizer draws its own decorations: a transparent
 /// margin for the shadow and resize handles, and a bordered body. With server decorations the
-/// content is returned as is.
+/// content is returned as is. When settings in the config file could not be used, the banner
+/// from `fallback` sits above the content either way.
 ///
 /// @example
 /// let root = frame(content, window);
 pub fn frame(content: impl IntoElement, window: &mut Window) -> Stateful<Div> {
+    let content = fallback::wrap(content, fallback::current(), inset(window));
     let Decorations::Client { tiling } = window.window_decorations() else {
         return div().id("window").size_full().child(content);
     };
@@ -131,12 +133,7 @@ pub fn frame(content: impl IntoElement, window: &mut Window) -> Stateful<Div> {
                 .when(!tiling.right, |this| this.border_r_1())
                 .when(!tiling.is_tiled(), |this| {
                     this.shadow(vec![BoxShadow {
-                        color: Hsla {
-                            h: 0.,
-                            s: 0.,
-                            l: 0.,
-                            a: 0.4,
-                        },
+                        color: theme::shadow(),
                         blur_radius: SHADOW / 2.,
                         spread_radius: px(0.),
                         offset: point(px(0.), px(0.)),
@@ -295,11 +292,12 @@ fn icon(kind: Control) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
-            let origin = bounds.center() - point(ICON / 2., ICON / 2.);
-            let mut path = PathBuilder::stroke(px(1.));
+            let glyph = unit(size::GLYPH).to_pixels(window.rem_size());
+            let origin = bounds.center() - point(glyph / 2., glyph / 2.);
+            let mut path = PathBuilder::stroke(unit(size::HAIR).to_pixels(window.rem_size()));
             for line in lines(kind) {
                 path.add_polygon(
-                    &line.map(|(x, y)| origin + point(ICON * x, ICON * y)),
+                    &line.map(|(x, y)| origin + point(glyph * x, glyph * y)),
                     false,
                 );
             }
@@ -308,7 +306,7 @@ fn icon(kind: Control) -> impl IntoElement {
             }
         },
     )
-    .size(ICON)
+    .size(unit(size::GLYPH))
 }
 
 fn lines(kind: Control) -> Vec<[(f32, f32); 2]> {

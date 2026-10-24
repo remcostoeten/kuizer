@@ -58,7 +58,7 @@ pub fn run(config: &Config, args: GitArgs, json: bool, quiet: bool) -> Result<()
     let acting = (args.gc || args.branches) && !args.dry_run;
     if !acting {
         if json {
-            println!("{}", output::git_report(&found, None));
+            println!("{}", output::git_report(&found, None)?);
         } else {
             output::print_repositories(&found, quiet);
             if args.dry_run && (args.gc || args.branches) && !found.is_empty() {
@@ -72,7 +72,7 @@ pub fn run(config: &Config, args: GitArgs, json: bool, quiet: bool) -> Result<()
     }
     if found.is_empty() {
         if json {
-            println!("{}", output::git_report(&found, Some(&[])));
+            println!("{}", output::git_report(&found, Some(&[]))?);
         } else {
             println!("Nothing to clean");
         }
@@ -119,7 +119,7 @@ pub fn run(config: &Config, args: GitArgs, json: bool, quiet: bool) -> Result<()
         })
         .sum();
     if json {
-        println!("{}", output::git_report(&found, Some(&outcomes)));
+        println!("{}", output::git_report(&found, Some(&outcomes))?);
     } else if !quiet {
         let freed: u64 = outcomes
             .iter()

@@ -2,14 +2,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::detect::{Detector, Listing};
-
-pub(crate) const APP_DATA_MARKERS: &[&[&str]] = &[
-    &["Local State"],
-    &["profiles.ini"],
-    &["Cookies", "Preferences"],
-    &["cookies.sqlite", "prefs.js"],
-];
+use crate::detect::{APP_DATA_MARKERS, Detector, Listing};
 
 const BROWSERS: &[&str] = &[
     "BraveSoftware",
@@ -147,6 +140,27 @@ impl Protected {
         Self::new(dirs::home_dir().as_deref())
     }
 
+    /// @name with_paths
+    /// @description Adds `extra` absolute directories to the protected ones, together with their
+    /// symlink-resolved form, so walkers never enter them and deletion refuses them and
+    /// everything below. Relative paths are ignored. The built-in directories stay protected
+    /// whatever is passed.
+    ///
+    /// @example
+    /// let protected = Protected::for_user().with_paths(&[PathBuf::from("/home/me/thesis")]);
+    pub fn with_paths(mut self, extra: &[PathBuf]) -> Self {
+        for path in extra.iter().filter(|path| path.is_absolute()) {
+            let resolved = std::fs::canonicalize(path).ok();
+            for dir in std::iter::once(path.clone()).chain(resolved) {
+                if let Some(name) = dir.file_name() {
+                    self.names.insert(name.to_owned());
+                }
+                self.dirs.insert(dir);
+            }
+        }
+        self
+    }
+
     /// @name is_known
     /// @description Checks whether `path` is exactly one of the known browser, keyring or
     /// credential directories. Walkers call it per directory, top-down, so descendants are never
@@ -231,6 +245,18 @@ mod tests {
     }
 
     #[test]
+    fn extra_paths_add_to_the_built_in_ones() {
+        let home = Path::new("/home/me");
+        let protected = Protected::new(Some(home))
+            .with_paths(&[home.join("thesis"), PathBuf::from("relative/dir")]);
+        assert!(protected.is_known(&home.join("thesis")));
+        assert!(protected.covers(&home.join("thesis/figures/node_modules")));
+        assert!(!protected.covers(&home.join("thesis-old/node_modules")));
+        assert!(!protected.covers(Path::new("relative/dir/x")));
+        assert!(protected.is_known(&home.join(".ssh")));
+    }
+
+    #[test]
     fn covers_global_tool_installs() {
         let home = Path::new("/home/me");
         let protected = Protected::new(Some(home));
@@ -250,7 +276,6 @@ mod tests {
         assert!(!protected.covers(&home.join("code/web/node_modules")));
     }
 
-    #[cfg(unix)]
     #[test]
     fn protects_resolved_paths_of_a_symlinked_home() {
         let tmp = tempfile::tempdir().expect("tempdir");

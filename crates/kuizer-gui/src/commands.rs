@@ -104,6 +104,7 @@ pub struct Spec {
     pub group: Group,
     pub palette: bool,
     pub global: bool,
+    parsed: Vec<Keystroke>,
 }
 
 impl Spec {
@@ -116,16 +117,27 @@ impl Spec {
             group,
             palette: true,
             global: false,
+            parsed: Vec::new(),
         }
     }
 
     fn keys(mut self, keys: &'static [&'static str]) -> Self {
         self.keys = keys;
-        self
+        self.parse()
     }
 
     fn extra(mut self, extra: &'static [&'static str]) -> Self {
         self.extra = extra;
+        self.parse()
+    }
+
+    fn parse(mut self) -> Self {
+        self.parsed = self
+            .keys
+            .iter()
+            .chain(self.extra)
+            .filter_map(|pattern| Keystroke::parse(pattern).ok())
+            .collect();
         self
     }
 
@@ -141,10 +153,7 @@ impl Spec {
 
     /// Whether one of this command's keys is the keystroke.
     pub fn answers(&self, keystroke: &Keystroke) -> bool {
-        self.keys
-            .iter()
-            .chain(self.extra)
-            .any(|pattern| matches(pattern, keystroke))
+        self.parsed.iter().any(|want| names(want, keystroke))
     }
 }
 
@@ -214,9 +223,11 @@ fn build_table() -> Vec<Spec> {
             .hidden(),
         Spec::new(Command::PageDown, "Page down", Lists)
             .keys(&["pagedown"])
+            .extra(&["ctrl-d"])
             .hidden(),
         Spec::new(Command::PageUp, "Page up", Lists)
             .keys(&["pageup"])
+            .extra(&["ctrl-u"])
             .hidden(),
         Spec::new(Command::Toggle, "Select or deselect the row", Lists)
             .keys(&["space"])
@@ -241,6 +252,7 @@ fn build_table() -> Vec<Spec> {
             Map,
         )
         .keys(&["left"])
+        .extra(&["h"])
         .hidden(),
         Spec::new(
             Command::MapMove(Direction::Right),
@@ -248,6 +260,7 @@ fn build_table() -> Vec<Spec> {
             Map,
         )
         .keys(&["right"])
+        .extra(&["l"])
         .hidden(),
         Spec::new(Command::MapMove(Direction::Up), "Focus the tile above", Map)
             .keys(&["up"])
@@ -376,9 +389,10 @@ pub fn bind_keys(cx: &mut App) {
 /// @example
 /// assert!(matches("secondary-k", &Keystroke::parse("ctrl-k").unwrap()));
 pub fn matches(pattern: &str, keystroke: &Keystroke) -> bool {
-    let Ok(want) = Keystroke::parse(pattern) else {
-        return false;
-    };
+    Keystroke::parse(pattern).is_ok_and(|want| names(&want, keystroke))
+}
+
+fn names(want: &Keystroke, keystroke: &Keystroke) -> bool {
     let have = keystroke.modifiers;
     let need = want.modifiers;
     if have.control != need.control || have.alt != need.alt || have.platform != need.platform {
@@ -515,6 +529,21 @@ mod tests {
                 seen.push(key);
             }
         }
+    }
+
+    #[test]
+    fn vim_motions_run_the_arrow_and_page_commands() {
+        assert_eq!(lookup(&key("ctrl-d"), false), Some(Command::PageDown));
+        assert_eq!(lookup(&key("ctrl-u"), false), Some(Command::PageUp));
+        assert_eq!(
+            lookup(&key("h"), true),
+            Some(Command::MapMove(Direction::Left))
+        );
+        assert_eq!(
+            lookup(&key("l"), true),
+            Some(Command::MapMove(Direction::Right))
+        );
+        assert_eq!(lookup(&key("h"), false), None);
     }
 
     #[test]
