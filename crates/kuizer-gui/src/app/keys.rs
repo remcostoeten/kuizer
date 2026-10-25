@@ -407,6 +407,8 @@ impl Kuizer {
             Command::Rescan if !started || self.roots.is_empty() => Some(START_FIRST),
             Command::NewScan if !started => Some("The start screen is already open"),
             Command::Rescan | Command::NewScan => self.wait(),
+            Command::StopScan => (!matches!(self.phase, Phase::Loading(_)) && !self.refreshing())
+                .then_some("No scan is running"),
             Command::FindDuplicates => (!shown).then_some(NEEDS_SCAN),
             Command::Undo => {
                 let trashed = matches!(
@@ -554,6 +556,7 @@ impl Kuizer {
             Command::PreviousTab => self.go_to(self.tab.previous(), cx),
             Command::Rescan => self.rescan(cx),
             Command::NewScan => self.new_scan(cx),
+            Command::StopScan => self.stop_scan(cx),
             Command::FindDuplicates => {
                 self.find_duplicates(cx);
                 self.go_to(Tab::Duplicates, cx);
