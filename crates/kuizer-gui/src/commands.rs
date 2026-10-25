@@ -23,6 +23,7 @@ pub enum Command {
     PreviousTab,
     Rescan,
     NewScan,
+    StopScan,
     Undo,
     Down,
     Up,
@@ -182,6 +183,12 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::Shortcuts, "Keyboard shortcuts", General).keys(&["?"]),
         Spec::new(Command::Rescan, "Rescan", General).keys(&["secondary-r"]),
         Spec::new(Command::NewScan, "New scan", General).keys(&["secondary-n"]),
+        Spec::new(
+            Command::StopScan,
+            "Stop the scan and keep what it found",
+            General,
+        )
+        .keys(&["s"]),
         Spec::new(Command::FindDuplicates, "Find duplicate files", General).keys(&["D"]),
         Spec::new(Command::Undo, "Undo last cleanup", General)
             .keys(&["secondary-z"])

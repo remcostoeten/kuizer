@@ -417,6 +417,31 @@ impl Kuizer {
         cx.notify();
     }
 
+    /// Ends the running scan and keeps what it found so far. Parts that had not finished stay
+    /// empty, and the report is marked as stopped early.
+    pub(super) fn stop_scan(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.task = None;
+        let mut dropped = Vec::new();
+        if matches!(self.phase, Phase::Loading(_)) {
+            self.show_parts(&mut dropped);
+        }
+        if let Phase::Ready(report) = &mut self.phase {
+            report.summary.cancelled = true;
+            report.drop_paths(&self.excluded);
+        }
+        self.scan_over();
+        self.refresh_stats();
+        self.refresh_rows();
+        self.refresh_map();
+        if !dropped.is_empty() {
+            cx.background_spawn(async move { drop(dropped) }).detach();
+        }
+        cx.notify();
+    }
+
     pub(super) fn new_scan(&mut self, cx: &mut Context<Self>) {
         if self.busy() || self.refreshing() {
             return;
@@ -517,6 +542,8 @@ impl Kuizer {
                         ui::tabular(div().text_color(theme::muted()))
                             .child(activity::took(self.started.elapsed())),
                     )
+                    .child(ui::kbd("S"))
+                    .child("keeps what it found")
                     .child(ui::kbd("Esc"))
                     .child("cancels"),
             );
