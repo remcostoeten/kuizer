@@ -21,6 +21,7 @@ const ENTER: Duration = Duration::from_millis(125);
 const WARM: Duration = Duration::from_millis(300);
 const RISE: f32 = 3.;
 const ROOM: f32 = 160.;
+const WRAP_AT: usize = 48;
 
 type Build = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
 
@@ -95,6 +96,7 @@ impl Render for Tooltip {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::text())
                         .child(title),
@@ -102,11 +104,16 @@ impl Render for Tooltip {
                 .children(self.keys.iter().cloned().map(ui::kbd))
         });
         let keys_inline = self.title.is_none() && !self.keys.is_empty();
+        let wraps = self
+            .text
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > WRAP_AT);
         div()
             .flex()
             .flex_col()
             .gap(unit(space::XS))
             .max_w(unit(size::LIST))
+            .when(wraps, |this| this.w(unit(size::LIST)))
             .px(unit(space::M))
             .py(unit(space::S))
             .rounded(theme::radius_control())
@@ -119,16 +126,21 @@ impl Render for Tooltip {
             .when_some(font, |this, font| this.font_family(font))
             .children(heading)
             .when_some(self.text.clone(), |this, text| {
-                this.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(unit(space::L))
-                        .child(div().flex_1().child(text))
-                        .when(keys_inline, |this| {
-                            this.children(self.keys.iter().cloned().map(ui::kbd))
-                        }),
-                )
+                let body = div()
+                    .debug_selector(|| "tooltip-text".to_owned())
+                    .child(text);
+                if keys_inline {
+                    this.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(unit(space::L))
+                            .child(body)
+                            .children(self.keys.iter().cloned().map(ui::kbd)),
+                    )
+                } else {
+                    this.child(body)
+                }
             })
             .when(!self.rows.is_empty(), |this| {
                 this.child(div().flex().flex_col().gap(unit(space::XXS)).children(
@@ -139,10 +151,16 @@ impl Render for Tooltip {
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .text_color(theme::faint())
                                     .child(label.clone()),
                             )
-                            .child(div().text_color(theme::text()).child(value.clone()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_color(theme::text())
+                                    .child(value.clone()),
+                            )
                     }),
                 ))
             })
@@ -152,7 +170,6 @@ impl Render for Tooltip {
 #[derive(Clone, Copy, PartialEq)]
 struct Anchor {
     bounds: Bounds<Pixels>,
-    x: Pixels,
 }
 
 struct Shown {
@@ -300,11 +317,17 @@ impl Render for Layer {
                 > window.viewport_size().height;
             let gap = unit(space::S).to_pixels(window.rem_size());
             let margin = unit(space::M).to_pixels(window.rem_size());
-            let x = shown.anchor.x.max(bounds.left());
-            let (corner, y) = if above {
-                (Corner::BottomLeft, bounds.top() - gap)
+            let trailing = bounds.center().x > window.viewport_size().width / 2.;
+            let x = if trailing {
+                bounds.right()
             } else {
-                (Corner::TopLeft, bounds.bottom() + gap)
+                bounds.left()
+            };
+            let (corner, y) = match (above, trailing) {
+                (true, false) => (Corner::BottomLeft, bounds.top() - gap),
+                (true, true) => (Corner::BottomRight, bounds.top() - gap),
+                (false, false) => (Corner::TopLeft, bounds.bottom() + gap),
+                (false, true) => (Corner::TopRight, bounds.bottom() + gap),
             };
             let direction = if above { -RISE } else { RISE };
             let content = div().relative().child(shown.view.clone());
@@ -373,10 +396,7 @@ pub trait Tip: StatefulInteractiveElement + ParentElement + Sized {
             };
             let layer = layer(cx);
             layer.update(cx, |layer, cx| {
-                let anchor = Anchor {
-                    bounds: area,
-                    x: window.mouse_position().x,
-                };
+                let anchor = Anchor { bounds: area };
                 if *hovered {
                     layer.request(anchor, Rc::clone(&build), window, cx);
                 } else {
@@ -407,6 +427,9 @@ mod tests {
 
     use super::*;
 
+    const LONG: &str = "Caches that package managers and tools keep in your home folder, \
+        which are rebuilt the next time they are needed";
+
     struct Target;
 
     impl Render for Target {
@@ -428,6 +451,22 @@ mod tests {
                         .h(px(40.))
                         .tip(Tooltip::new("Starts the scan").keys(&["Enter"]).build())
                         .child("start"),
+                )
+                .child(
+                    div()
+                        .id("third")
+                        .w(px(200.))
+                        .h(px(40.))
+                        .tip(plain(LONG))
+                        .child("long"),
+                )
+                .child(
+                    div()
+                        .id("fourth")
+                        .w(px(200.))
+                        .h(px(40.))
+                        .tip(term(Term::ItemsRemoved))
+                        .child("removed"),
                 )
                 .child(layer(cx))
         }
@@ -466,7 +505,6 @@ mod tests {
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         assert!(bounds.origin.y >= px(40.));
-        assert!(bounds.origin.x >= px(20.));
     }
 
     #[gpui::test]
@@ -503,5 +541,27 @@ mod tests {
         assert!(visible(cx));
         cx.simulate_click(point(px(20.), px(20.)), Modifiers::default());
         assert!(!visible(cx));
+    }
+
+    #[gpui::test]
+    fn long_text_wraps_inside_the_card(cx: &mut TestAppContext) {
+        let cx = open(cx);
+        hover(cx, 20., 100.);
+        cx.executor().advance_clock(DELAY);
+        cx.run_until_parked();
+        let bounds = shown(cx).expect("the tooltip is painted");
+        let text = cx.debug_bounds("tooltip-text").expect("the tooltip text");
+        assert!(text.right() <= bounds.right());
+    }
+
+    #[gpui::test]
+    fn the_card_grows_to_hold_wrapped_text(cx: &mut TestAppContext) {
+        let cx = open(cx);
+        hover(cx, 20., 140.);
+        cx.executor().advance_clock(DELAY);
+        cx.run_until_parked();
+        let bounds = shown(cx).expect("the tooltip is painted");
+        let text = cx.debug_bounds("tooltip-text").expect("the tooltip text");
+        assert!(bounds.bottom() - text.bottom() >= px(space::S));
     }
 }
