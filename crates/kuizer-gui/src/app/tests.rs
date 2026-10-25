@@ -389,6 +389,49 @@ pub(super) fn artifact(id: u64, path: &Path) -> Candidate {
 }
 
 #[gpui::test]
+fn stopping_a_scan_keeps_what_it_found(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    let cancel = Cancel::new();
+    view.update(cx, |app, cx| {
+        app.roots = vec![PathBuf::from("/p")];
+        app.cancel = Some(cancel.clone());
+        app.pending = Part::expected(&app.options);
+        app.phase = Phase::Loading(Box::default());
+        app.take(
+            vec![Update::Loaded(Loaded::History(
+                Err("unreadable".to_owned()),
+            ))],
+            cx,
+        );
+        app.stop_scan(cx);
+        let report = app
+            .report()
+            .expect("a stop before any artifact still shows results");
+        assert!(report.candidates.is_empty());
+        assert!(report.history.is_err(), "a finished part is kept");
+        let scanned = report.scanned;
+
+        app.cancel = Some(cancel.clone());
+        app.stale = Some(scanned);
+        app.streamed = true;
+        app.take(
+            vec![Update::Loaded(Loaded::Found(vec![artifact(
+                2,
+                Path::new("/p/a/node_modules"),
+            )]))],
+            cx,
+        );
+        app.stop_scan(cx);
+        let report = app.report().expect("the results so far stay");
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.summary.cancelled);
+        assert!(!app.refreshing());
+    });
+    assert!(cancel.is_cancelled());
+}
+
+#[gpui::test]
 fn parts_fill_the_shown_scan_while_deletion_waits(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));

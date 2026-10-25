@@ -19,6 +19,15 @@ impl Kuizer {
         let refreshing = self.refreshing();
         let scanning = matches!(self.phase, Phase::Loading(_)) || refreshing;
         let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_)) && !refreshing;
+        let partial = (finished
+            && self
+                .report()
+                .is_some_and(|report| report.summary.cancelled))
+        .then(|| {
+            ui::tag("partial", "Partial", ui::Tone::Review).tip(tooltip::plain(
+                "The scan was stopped early, so some folders and sections are missing. Rescan to get everything",
+            ))
+        });
         let stale = self.stale.map(|saved| {
             div()
                 .flex()
@@ -55,6 +64,17 @@ impl Kuizer {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
+                    ui::button("stop-scan", "Stop here", ButtonKind::Ghost, true)
+                        .tip(
+                            Tooltip::new("Stop the scan and keep what it found so far")
+                                .keys(&["S"])
+                                .build(),
+                        )
+                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                            app.stop_scan(cx);
+                        })),
+                )
+                .child(
                     ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true)
                         .tip(
                             Tooltip::new("Stop the scan and go back to the start screen")
@@ -149,6 +169,7 @@ impl Kuizer {
                     .items_center()
                     .justify_end()
                     .gap(unit(space::L))
+                    .children(partial)
                     .children(stale)
                     .child(actions)
                     .children(controls),
