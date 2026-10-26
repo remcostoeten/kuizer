@@ -12,7 +12,7 @@ use crate::platform;
 use crate::toolchains::Tool;
 use crate::units::ByteSize;
 
-pub use edit::{EditError, add_exclude, exclude_pattern};
+pub use edit::{EditError, SettingValue, add_exclude, exclude_pattern, set_setting};
 pub use exclude::{ExcludeError, Excludes};
 pub use lenient::ConfigWarning;
 
@@ -28,6 +28,7 @@ pub struct Config {
     pub delete: DeleteConfig,
     pub git: GitConfig,
     pub appearance: AppearanceConfig,
+    pub route_shortcuts: RouteShortcutsConfig,
     pub toolchains: ToolchainConfig,
     pub docker: DockerConfig,
 }
@@ -198,6 +199,24 @@ impl Default for AppearanceConfig {
         Self {
             motion: true,
             sidebar: Sidebar::default(),
+        }
+    }
+}
+
+/// The GUI keys that open a sidebar section: whether they work, and whether the sidebar shows
+/// them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RouteShortcutsConfig {
+    pub enabled: bool,
+    pub hints: bool,
+}
+
+impl Default for RouteShortcutsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hints: true,
         }
     }
 }
@@ -491,6 +510,14 @@ mod tests {
         assert_eq!(config.appearance.sidebar, Sidebar::Collapsed);
         assert_eq!(Config::default().appearance.sidebar, Sidebar::Expanded);
         assert!(parse("[appearance]\nsidebar = \"wide\"\n").is_err());
+    }
+
+    #[test]
+    fn route_shortcuts_can_be_switched_off() {
+        let config = parse("[route_shortcuts]\nenabled = false\n").expect("parses");
+        assert!(!config.route_shortcuts.enabled);
+        assert!(config.route_shortcuts.hints);
+        assert!(Config::default().route_shortcuts.enabled);
     }
 
     #[test]

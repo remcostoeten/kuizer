@@ -323,14 +323,10 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                ui::toolbar()
-                    .child(format!(
-                        "{} frees up to {}",
-                        count(shown.len(), "repository", "repositories"),
-                        theme::bytes(gain)
-                    ))
+                self.list_toolbar(cx)
                     .child(div().child(count(branches, "merged branch", "merged branches")))
                     .child(div().flex_1())
+                    .child(self.tally(Tab::Repos, Some(gain)))
                     .child(
                         ui::button(
                             "repos-gc-all",

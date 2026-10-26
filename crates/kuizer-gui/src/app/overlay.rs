@@ -242,13 +242,16 @@ impl Kuizer {
         )
     }
 
-    /// The filter field above a list, with how many rows it shows.
+    /// The filter field of a list, with the key that focuses it while it is empty.
     pub(super) fn render_filter(&self, cx: &mut Context<Self>) -> Div {
         let text = self.filters.get(&self.tab).map_or("", String::as_str);
         let active = self.filtering;
-        let (shown, total) = self.counts(self.tab);
         let key = commands::shortcut(&Command::FocusFilter).unwrap_or_default();
-        ui::toolbar()
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::M))
             .child(
                 field::view("filter-field", text, "Filter by path or name", active)
                     .debug_selector(|| "filter".to_owned())
@@ -265,44 +268,107 @@ impl Kuizer {
                     })),
             )
             .when(!active && text.is_empty(), |this| this.child(ui::kbd(key)))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .debug_selector(|| "filter-count".to_owned())
-                    .text_size(unit(font::SMALL))
-                    .text_color(theme::muted())
-                    .child(format!("{shown} of {total}")),
-            )
     }
 
-    /// Opens the palette from the status bar, and says which key does the same.
+    /// The start of every list toolbar: the filter, and the safety segments on sections whose
+    /// rows are graded. Sections add their own controls, a spacer and `tally` after it.
+    pub(super) fn list_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        ui::toolbar()
+            .child(self.render_filter(cx))
+            .when(self.tab.grades(), |this| {
+                this.child(self.safety_segments(cx))
+            })
+    }
+
+    fn safety_segments(&self, cx: &mut Context<Self>) -> Div {
+        let totals = match self.tab {
+            Tab::Artifacts => Some(&self.report_stats.artifacts),
+            Tab::Caches => Some(&self.report_stats.caches),
+            Tab::Toolchains => Some(&self.report_stats.toolchains),
+            Tab::Docker => Some(&self.report_stats.docker),
+            _ => None,
+        };
+        let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
+            ui::segment(id, label, self.safety == value)
+                .when_some(value, |this, safety| {
+                    let term = Term::safety(safety);
+                    let tip = Tooltip::new(term.text()).title(term.title());
+                    let tip = match totals {
+                        Some(totals) => {
+                            let tally = match safety {
+                                Safety::Safe => &totals.safe,
+                                Safety::Review => &totals.review,
+                            };
+                            tip.row("Items", tally.count.to_string())
+                                .row("Size", theme::bytes(tally.bytes))
+                        }
+                        None => tip,
+                    };
+                    this.tip(tip.build())
+                })
+                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                    app.safety = value;
+                    app.filtered();
+                    cx.notify();
+                }))
+        };
+        ui::segments()
+            .child(segment("safety-all", "All", None))
+            .child(segment("safety-safe", "Safe", Some(Safety::Safe)))
+            .child(segment("safety-review", "Review", Some(Safety::Review)))
+    }
+
+    /// The figure at the end of a list toolbar: how many rows are listed out of how many the
+    /// section has, and their size when the section measures one.
+    pub(super) fn tally(&self, tab: Tab, bytes: Option<u64>) -> Stateful<Div> {
+        let (shown, total) = self.counts(tab);
+        let (one, many) = tab.noun();
+        let noun = if total == 1 { one } else { many };
+        let mut text = if shown == total {
+            format!("{total} {noun}")
+        } else {
+            format!("{shown} of {total} {noun}")
+        };
+        if let Some(bytes) = bytes {
+            text.push_str(&format!(", {}", theme::bytes(bytes)));
+        }
+        let tip = match tab {
+            Tab::Issues => Some(Tooltip::new(Term::Issues.text()).title(Term::Issues.title())),
+            Tab::Repos => Some(Tooltip::new("What git gc frees in the listed repositories")),
+            _ if bytes.is_some() => Some(Tooltip::new("Space the listed rows take on disk")),
+            _ => None,
+        };
+        ui::tabular(
+            div()
+                .id("tally")
+                .debug_selector(|| "tally".to_owned())
+                .flex_none()
+                .text_color(theme::muted())
+                .when_some(tip, |this, tip| this.tip(tip.build()))
+                .child(text),
+        )
+    }
+
+    /// Opens the palette from the titlebar, and shows the key that does the same.
     pub(super) fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let key = commands::shortcut(&Command::Palette).unwrap_or_default();
+        let key = hint(&Command::Palette);
         div()
             .id("search")
             .debug_selector(|| "search".to_owned())
             .flex()
+            .flex_none()
             .items_center()
-            .gap(unit(space::M))
-            .w(unit(size::FILTER))
-            .min_w(unit(size::SEARCH))
+            .gap(unit(space::S))
             .h(unit(size::CONTROL))
-            .pl(unit(space::M))
-            .pr(unit(space::XS))
+            .px(unit(space::S))
             .rounded(theme::radius_control())
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::background())
             .cursor_pointer()
-            .text_size(unit(font::SMALL))
-            .text_color(theme::faint())
-            .hover(|style| {
-                style
-                    .border_color(theme::border_strong())
-                    .text_color(theme::muted())
-            })
+            .hover(|style| style.bg(theme::hover()))
             .tip_hover(
-                tooltip::plain("Search every command, section and recent folder"),
+                Tooltip::new("Search every command, section and recent folder")
+                    .title("Search or run a command")
+                    .keys(&[key])
+                    .build(),
                 cx.listener(|app, hovered: &bool, _, cx| {
                     app.hover_icon(Icon::Search, *hovered, cx);
                 }),
@@ -310,17 +376,10 @@ impl Kuizer {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(icon::view(
                 Icon::Search,
-                theme::faint(),
+                theme::muted(),
                 self.icon_epoch(Icon::Search),
                 self.zoom.rem_size(),
             ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child("Search or run a command"),
-            )
             .child(ui::kbd(key))
             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.open_palette(cx)))
     }

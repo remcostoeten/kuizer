@@ -41,11 +41,12 @@ pub enum Term {
     GcGain,
     LooseObjects,
     MergedBranches,
+    Engine,
 }
 
 impl Term {
     #[cfg(test)]
-    pub const ALL: [Term; 39] = [
+    pub const ALL: [Term; 40] = [
         Self::Overview,
         Self::History,
         Self::Trash,
@@ -85,6 +86,7 @@ impl Term {
         Self::GcGain,
         Self::LooseObjects,
         Self::MergedBranches,
+        Self::Engine,
     ];
 
     pub fn safety(safety: Safety) -> Self {
@@ -144,6 +146,7 @@ impl Term {
             Self::GcGain => "git gc gain",
             Self::LooseObjects => "Loose objects",
             Self::MergedBranches => "Merged branches",
+            Self::Engine => "Engine",
         }
     }
 
@@ -203,6 +206,9 @@ impl Term {
             }
             Self::Docker => {
                 "Dangling images, stopped containers, the build cache and volumes no container uses, from Docker and Podman. kuizer removes them through the engine, which refuses anything in use. Removal is permanent: nothing goes to the trash. Volumes can hold data and are always marked review."
+            }
+            Self::Engine => {
+                "Docker or Podman, whichever owns the object. kuizer removes it through the engine, which refuses anything in use. Removal is permanent: nothing goes to the trash."
             }
             Self::DuplicateFiles => {
                 "Files with exactly the same content in more than one place. Keeping one copy of each frees the rest."

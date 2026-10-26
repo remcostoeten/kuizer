@@ -1027,7 +1027,7 @@ esac
         docker[0].1.id
     });
 
-    cx.simulate_keystrokes("5");
+    cx.simulate_keystrokes("shift-5");
     view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Docker));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("docker-row-1").is_some());
@@ -1093,7 +1093,7 @@ fn toolchains_are_deleted_for_good_without_undo_inside(cx: &mut TestAppContext) 
     assert_eq!(pinned.safety(), Safety::Review);
     assert!(pinned.note().contains(".nvmrc"), "{}", pinned.note());
 
-    cx.simulate_keystrokes("4");
+    cx.simulate_keystrokes("shift-4");
     view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Toolchains));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("toolchain-row-1").is_some());

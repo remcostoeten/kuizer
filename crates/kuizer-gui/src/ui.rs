@@ -73,6 +73,37 @@ pub fn checkbox(checked: bool) -> Div {
         })
 }
 
+pub fn switch(on: bool) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .when(on, |this| this.justify_end())
+        .w(unit(size::SWITCH))
+        .h(unit(size::SWITCH_HEIGHT))
+        .p(unit(space::XXS))
+        .rounded(theme::radius_checkbox())
+        .border_1()
+        .border_color(if on {
+            theme::primary()
+        } else {
+            theme::border_strong()
+        })
+        .bg(if on { theme::primary() } else { theme::track() })
+        .child(
+            div()
+                .size(unit(
+                    size::SWITCH_HEIGHT - 2. * space::XXS - 2. * size::HAIR,
+                ))
+                .rounded(theme::radius_dot())
+                .bg(if on {
+                    theme::on_primary()
+                } else {
+                    theme::muted()
+                }),
+        )
+}
+
 pub fn card(title: impl Into<SharedString>) -> Div {
     div()
         .flex()

@@ -71,6 +71,7 @@ mod overview;
 mod pane;
 mod repos;
 mod session;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -351,6 +352,7 @@ pub struct Kuizer {
     menu: Option<Menu>,
     palette: Option<Palette>,
     shortcuts: bool,
+    settings: Option<settings::Settings>,
     filtering: bool,
     filters: HashMap<Tab, String>,
     cursors: HashMap<Tab, Target>,
@@ -445,6 +447,7 @@ impl Kuizer {
             menu: None,
             palette: None,
             shortcuts: false,
+            settings: None,
             filtering: false,
             filters: HashMap::new(),
             cursors: HashMap::new(),
@@ -911,7 +914,6 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .child(self.render_filter(cx))
                     .children(pending)
                     .child(div().flex().flex_col().flex_1().min_h_0().child(list))
                     .into_any_element()
@@ -943,17 +945,6 @@ impl Kuizer {
         }
         let shown_bytes = self.rows_bytes;
         let all_checked = self.all_rows_checked();
-        let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
-            ui::segment(id, label, self.safety == value)
-                .when_some(value, |this, safety| {
-                    this.tip(tooltip::term(Term::safety(safety)))
-                })
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    app.safety = value;
-                    app.refresh_rows();
-                    cx.notify();
-                }))
-        };
         let chip = |category: Category| {
             let shown = !self.hidden.contains(&category);
             div()
@@ -978,25 +969,12 @@ impl Kuizer {
                     cx.notify();
                 }))
         };
-        let toolbar = ui::toolbar()
-            .child(
-                ui::segments()
-                    .child(segment("safety-all", "All", None))
-                    .child(segment("safety-safe", "Safe", Some(Safety::Safe)))
-                    .child(segment("safety-review", "Review", Some(Safety::Review))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(unit(space::XXS))
-                    .children(Category::ALL.into_iter().map(chip)),
-            )
+        let chips: Vec<Stateful<Div>> = Category::ALL.into_iter().map(chip).collect();
+        let toolbar = self
+            .list_toolbar(cx)
+            .child(div().flex().gap(unit(space::XXS)).children(chips))
             .child(div().flex_1())
-            .child(div().text_color(theme::muted()).child(format!(
-                "{} items, {}",
-                self.rows.len(),
-                theme::bytes(shown_bytes)
-            )));
+            .child(self.tally(Tab::Artifacts, Some(shown_bytes)));
         let header = table_header()
             .child(
                 div()
@@ -1123,23 +1101,22 @@ impl Kuizer {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
+        let toolbar = self
+            .list_toolbar(cx)
+            .child(div().flex_1())
+            .child(self.tally(Tab::Issues, None));
         if report.issues.is_empty() {
-            return centered(ui::empty("The scan reported no issues"));
+            return framed(toolbar, centered(ui::empty("The scan reported no issues")));
         }
         let cursor = self.cursor_target();
         let needle = self.needle(Tab::Issues);
-        scroll("issues")
+        let list = scroll("issues")
             .debug_selector(|| "issue-list".to_owned())
             .track_scroll(&self.scroll_for(Tab::Issues))
             .child(
                 div()
-                    .id("issues-count")
                     .text_color(theme::muted())
-                    .tip(tooltip::term(Term::Issues))
-                    .child(format!(
-                        "{} folders could not be read or were skipped",
-                        report.issues.len()
-                    )),
+                    .child("Folders that could not be read or were skipped"),
             )
             .children(
                 report
@@ -1181,7 +1158,8 @@ impl Kuizer {
                             )
                     }),
             )
-            .into_any_element()
+            .into_any_element();
+        framed(toolbar, list)
     }
 
     fn shown_path(&self, path: &Path) -> String {
@@ -1217,6 +1195,7 @@ impl Render for Kuizer {
         let menu = self.render_menu(cx);
         let palette = self.render_palette(cx);
         let shortcuts = self.render_shortcuts(cx);
+        let settings = self.render_settings(cx);
         let start = matches!(self.phase, Phase::Start);
         let titlebar = self.render_titlebar(window, cx);
         let root = div()
@@ -1255,6 +1234,10 @@ impl Render for Kuizer {
                             ),
                         )
                     })
+                    .when(
+                        matches!(self.dialog, Some(Dialog::Confirm { .. })),
+                        |this| this.child(div().id("confirm-guard").absolute().inset_0().occlude()),
+                    )
                     .children(toast),
             )
             .when(!start, |this| this.child(self.render_statusbar(cx)))
@@ -1262,6 +1245,7 @@ impl Render for Kuizer {
             .children(menu)
             .children(palette)
             .children(shortcuts)
+            .children(settings)
             .child(div().absolute().size_0().child(chrome))
             .child(tooltip::layer(cx));
         frame::frame(root, window)
@@ -1291,6 +1275,17 @@ fn centered(child: impl IntoElement) -> AnyElement {
         .items_center()
         .justify_center()
         .child(child)
+        .into_any_element()
+}
+
+/// A section with its toolbar on top and the rest filling what is left below it.
+fn framed(toolbar: Div, body: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .child(toolbar)
+        .child(div().flex().flex_col().flex_1().min_h_0().child(body))
         .into_any_element()
 }
 

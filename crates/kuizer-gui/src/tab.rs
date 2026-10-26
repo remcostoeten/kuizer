@@ -51,6 +51,25 @@ impl Tab {
         )
     }
 
+    /// Whether rows in this section carry a safety grade, so the safety segments apply to it.
+    pub fn grades(self) -> bool {
+        self.selects()
+    }
+
+    /// What one row of this section is called, singular and plural.
+    pub fn noun(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Overview | Self::Artifacts => ("item", "items"),
+            Self::Caches => ("cache", "caches"),
+            Self::Toolchains => ("version", "versions"),
+            Self::Docker => ("object", "objects"),
+            Self::Repos => ("repository", "repositories"),
+            Self::Duplicates => ("file", "files"),
+            Self::History => ("cleanup", "cleanups"),
+            Self::Issues => ("issue", "issues"),
+        }
+    }
+
     pub fn term(self) -> Term {
         match self {
             Self::Overview => Term::Overview,
@@ -92,15 +111,15 @@ impl Tab {
     /// The keys that open this section: its place in the sidebar.
     pub fn keys(self) -> &'static [&'static str] {
         match self {
-            Self::Overview => &["1"],
-            Self::Artifacts => &["2"],
-            Self::Caches => &["3"],
-            Self::Toolchains => &["4"],
-            Self::Docker => &["5"],
-            Self::Repos => &["6"],
-            Self::Duplicates => &["7"],
-            Self::History => &["8"],
-            Self::Issues => &["9"],
+            Self::Overview => &["shift-1"],
+            Self::Artifacts => &["shift-2"],
+            Self::Caches => &["shift-3"],
+            Self::Toolchains => &["shift-4"],
+            Self::Docker => &["shift-5"],
+            Self::Repos => &["shift-6"],
+            Self::Duplicates => &["shift-7"],
+            Self::History => &["shift-8"],
+            Self::Issues => &["shift-9"],
         }
     }
 

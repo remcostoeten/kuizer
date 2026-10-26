@@ -57,6 +57,13 @@ motion = true
 # Ctrl+B (Cmd+B on macOS) switches between the two while the app runs.
 sidebar = "expanded"
 
+# The keys that open a sidebar section in the GUI (Shift+1 to Shift+9). With enabled = false
+# they do nothing; the command palette still opens every section. hints = false hides the
+# key badges in the sidebar and in the section tooltips.
+[route_shortcuts]
+enabled = true
+hints = true
+
 [toolchains]
 tools = ["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]
 pins = true

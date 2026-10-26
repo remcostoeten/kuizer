@@ -132,6 +132,10 @@ impl Kuizer {
             self.dialog_key(keystroke, cx);
             return;
         }
+        if self.settings.is_some() {
+            self.settings_key(keystroke, cx);
+            return;
+        }
         if self.palette.is_some() {
             self.palette_key(keystroke, window, cx);
             return;
@@ -165,7 +169,9 @@ impl Kuizer {
             }
             _ => {}
         }
-        if let Some(command) = commands::lookup(keystroke, self.map_active()) {
+        if let Some(command) = commands::lookup(keystroke, self.map_active())
+            && (self.config.route_shortcuts.enabled || !matches!(command, Command::GoTo(_)))
+        {
             self.run(command, window, cx);
         }
     }
@@ -343,7 +349,7 @@ impl Kuizer {
     }
 
     /// Applies a changed filter to the rows on screen.
-    fn filtered(&mut self) {
+    pub(super) fn filtered(&mut self) {
         if self.tab == Tab::Artifacts {
             self.refresh_rows();
         }
@@ -398,6 +404,7 @@ impl Kuizer {
             Command::Palette
             | Command::Quit
             | Command::Shortcuts
+            | Command::Settings
             | Command::ZoomIn
             | Command::ZoomOut
             | Command::ResetZoom => None,
@@ -551,6 +558,7 @@ impl Kuizer {
                 self.palette = None;
                 self.shortcuts = true;
             }
+            Command::Settings => self.open_settings(cx),
             Command::GoTo(tab) => self.go_to(tab, cx),
             Command::NextTab => self.go_to(self.tab.next(), cx),
             Command::PreviousTab => self.go_to(self.tab.previous(), cx),
@@ -1014,6 +1022,16 @@ mod tests {
             assert_eq!(app.counts(Tab::Caches), (1, 2));
             assert_eq!(app.targets(Tab::Caches).len(), 1);
 
+            app.filters.remove(&Tab::Caches);
+            app.safety = Some(Safety::Review);
+            assert_eq!(
+                app.counts(Tab::Caches),
+                (0, 2),
+                "the safety segments narrow the list too"
+            );
+            app.safety = None;
+            assert_eq!(app.counts(Tab::Caches), (2, 2));
+
             app.take(vec![Update::Loaded(Loaded::Caches(Vec::new()))], cx);
             assert_eq!(
                 app.counts(Tab::Caches),
@@ -1168,6 +1186,69 @@ mod tests {
                 Some(Dialog::Confirm { only: None, .. })
             ));
         });
+    }
+
+    #[gpui::test]
+    fn d_opens_the_confirmation_and_escape_leaves_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        cx.simulate_keystrokes("d");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm { only: Some(_), .. })
+            ));
+        });
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
+
+        view.update(cx, |app, cx| {
+            let id = app.report().unwrap().candidates[0].id;
+            app.toggle(Source::Artifact, id, cx);
+        });
+        cx.simulate_keystrokes("d");
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.dialog,
+                Some(Dialog::Confirm { only: None, .. })
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn disabled_route_shortcuts_leave_the_section_alone(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        view.update(cx, |app, _| app.config.route_shortcuts.enabled = false);
+        cx.simulate_keystrokes("shift-3");
+        view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Artifacts));
+        view.update(cx, |app, _| app.config.route_shortcuts.enabled = true);
+        cx.simulate_keystrokes("shift-3");
+        view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Caches));
+    }
+
+    #[gpui::test]
+    fn a_switch_in_the_settings_popover_is_written_to_the_config(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let file = dir.path().join("config.toml");
+        view.update(cx, |app, _| app.config_path = Some(file.clone()));
+        cx.simulate_keystrokes("ctrl-,");
+        view.read_with(cx, |app, _| assert!(app.settings.is_some()));
+        draw(cx);
+        assert!(cx.debug_bounds("settings").is_some());
+        cx.simulate_keystrokes("tab space");
+        view.read_with(cx, |app, _| assert!(!app.config.route_shortcuts.enabled));
+        cx.run_until_parked();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("enabled = false"), "{written}");
+        cx.simulate_keystrokes("ctrl-,");
+        view.read_with(cx, |app, _| assert!(app.settings.is_none(), "it toggles"));
+        cx.simulate_keystrokes("ctrl-, escape");
+        view.read_with(cx, |app, _| assert!(app.settings.is_none()));
     }
 
     #[gpui::test]
@@ -1466,7 +1547,7 @@ mod tests {
             assert!(app.filtering);
         });
         draw(cx);
-        assert!(cx.debug_bounds("filter-count").is_some());
+        assert!(cx.debug_bounds("tally").is_some());
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| {
             assert!(!app.filtering, "Enter keeps the filter")
@@ -1561,7 +1642,7 @@ mod tests {
         let root = project(dir.path());
         let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Overview);
         let tab = |cx: &mut VisualTestContext| view.read_with(cx, |app, _| app.tab);
-        cx.simulate_keystrokes("3");
+        cx.simulate_keystrokes("shift-3");
         assert_eq!(tab(cx), Tab::Caches);
         cx.simulate_keystrokes("ctrl-tab");
         assert_eq!(tab(cx), Tab::Toolchains);
@@ -1569,7 +1650,7 @@ mod tests {
         assert_eq!(tab(cx), Tab::Overview);
         cx.simulate_keystrokes("ctrl-shift-tab");
         assert_eq!(tab(cx), Tab::Issues, "it wraps around");
-        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("shift-1");
         assert_eq!(tab(cx), Tab::Overview);
     }
 
