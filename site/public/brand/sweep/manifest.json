@@ -429,162 +429,162 @@
     {
       "path": "social/banner-dark.jpg",
       "format": "jpg",
-      "bytes": 35281,
+      "bytes": 35329,
       "width": 1500,
       "height": 500,
-      "sha256": "b590dbea6ded9d4bc92547c94c23f4ae58b9e2a585cc68c9917fc39d5660714d"
+      "sha256": "ac6f7c851ca850942df239d6c4d77ced6d9ca0e971d67a3942f2aa678a17e745"
     },
     {
       "path": "social/banner-dark.png",
       "format": "png",
-      "bytes": 230193,
+      "bytes": 230273,
       "width": 1500,
       "height": 500,
-      "sha256": "2ca5be1cc7a08d30c45fd501d84918fd5d85bfd14ac24ea13aa874931be82a27"
+      "sha256": "18e3afca3dbd485e6e29286be2a135e9d5d8018d4c5879bdc70b5626e078a483"
     },
     {
       "path": "social/banner-light.jpg",
       "format": "jpg",
-      "bytes": 36220,
+      "bytes": 36273,
       "width": 1500,
       "height": 500,
-      "sha256": "abc17650e796a482129a31d246934e33e8f35460c47c18bf93d364434edf3941"
+      "sha256": "80570cec15a3161e8f50a22bff5d1ef297ff700bbeb568379bfc6270e964482d"
     },
     {
       "path": "social/banner-light.png",
       "format": "png",
-      "bytes": 228656,
+      "bytes": 228729,
       "width": 1500,
       "height": 500,
-      "sha256": "ed2c32ee10d3630f4f7fae90750b6bedbc9d2489df2ec31b69dc7e8f1ac40ac1"
+      "sha256": "955cd61561c01ee530050ac7c1f1d69d091f737354658e60ecd88f3617241ae7"
     },
     {
       "path": "social/github-dark.jpg",
       "format": "jpg",
-      "bytes": 44462,
+      "bytes": 44478,
       "width": 1280,
       "height": 640,
-      "sha256": "da0c1552768c6be8f8d27e204fa397d3f35176f8fc68dac895bd3828f3dcb275"
+      "sha256": "2ac64726ae10265451766ca5d299ac56b9d8fabbe4f85d281a114375115e70dc"
     },
     {
       "path": "social/github-dark.png",
       "format": "png",
-      "bytes": 247453,
+      "bytes": 247522,
       "width": 1280,
       "height": 640,
-      "sha256": "d77d0765bfe55a7d7a73fc274f87c1cab9f81885d7098002edf4cd2ec9c2017c"
+      "sha256": "337b86509de5bc8f98ac3c99f95fd2d7936a298581acebc5493c88d8698e09bf"
     },
     {
       "path": "social/github-light.jpg",
       "format": "jpg",
-      "bytes": 45538,
+      "bytes": 45540,
       "width": 1280,
       "height": 640,
-      "sha256": "a33c89050d40535234b0e0f5257d7262228bd33c352be1146121906b6253f61c"
+      "sha256": "f0243d3232e1e79af4ef60074cf166024f6ce8e215094c46d9f1d96cac9cd6ae"
     },
     {
       "path": "social/github-light.png",
       "format": "png",
-      "bytes": 245867,
+      "bytes": 245936,
       "width": 1280,
       "height": 640,
-      "sha256": "191c5031e859621e3094ee3c423c9d5953066033dcd8ea0dd86cfb7622dff8fd"
+      "sha256": "4a0bf442537638ef40d75129812489eb5e06373a49fe9fa08277d3a6c26af109"
     },
     {
       "path": "social/opengraph-dark.jpg",
       "format": "jpg",
-      "bytes": 43980,
+      "bytes": 44021,
       "width": 1200,
       "height": 630,
-      "sha256": "937481c63b648240cfd93b95e997e78f1016716e967157d1fff40e707c8f5523"
+      "sha256": "e36f592cec6bf251841563479ab648b3f7087d19d0a9307a22c48469450b969c"
     },
     {
       "path": "social/opengraph-dark.png",
       "format": "png",
-      "bytes": 246878,
+      "bytes": 246945,
       "width": 1200,
       "height": 630,
-      "sha256": "4ed86ffb57f072b05aaddf561824afdc94b184ab778a8d1500e3a234c0636ea3"
+      "sha256": "e71e5da04fbe4f58fb68238a3bb11228fae397060b5d37a1a9acf9efdf7833dc"
     },
     {
       "path": "social/opengraph-light.jpg",
       "format": "jpg",
-      "bytes": 45026,
+      "bytes": 45047,
       "width": 1200,
       "height": 630,
-      "sha256": "a7bbcd3b867d77d14789f6953c06d3f24d06cbdcb8e7db7fcd8923910db33c55"
+      "sha256": "8895cb1533e7172e0a7511bb2cf7271e0c46002e31f5f4a75cc102aeb34b4397"
     },
     {
       "path": "social/opengraph-light.png",
       "format": "png",
-      "bytes": 245225,
+      "bytes": 245290,
       "width": 1200,
       "height": 630,
-      "sha256": "17c09a71caa83a77c10dc471348828653aab68ad4574e84868eff604e4adc00a"
+      "sha256": "b8926ea826720b8a6555550608a74eedb4d9f24c27d1aca0dce00eae22ee9c73"
     },
     {
       "path": "social/readme-dark.jpg",
       "format": "jpg",
-      "bytes": 24145,
+      "bytes": 24158,
       "width": 1280,
       "height": 320,
-      "sha256": "b0c1e7506467386fecae8b4478bb6904054a18cf3e4ed81eeebff5af559ab170"
+      "sha256": "d824d648e0da2e6d71cb73f968180ed175efc9fb499df0465ab94f25d369f2c5"
     },
     {
       "path": "social/readme-dark.png",
       "format": "png",
-      "bytes": 110421,
+      "bytes": 110498,
       "width": 1280,
       "height": 320,
-      "sha256": "52fb1813204d0b4b7c078cf31c9cedc3a7f5663397d2d785494afff16ecc3a6d"
+      "sha256": "ce61c7ef5aa7b94d0851ed0bf85828cad92ab142799777f0a788edd8c5490a72"
     },
     {
       "path": "social/readme-light.jpg",
       "format": "jpg",
-      "bytes": 25147,
+      "bytes": 25165,
       "width": 1280,
       "height": 320,
-      "sha256": "9bdf14a86396a035439c447581778db70c7eba5af97ae1ab4218dfb0b7af608b"
+      "sha256": "612fd4bcef609647c9bfaf678058d042acdd7ce29a7aebd3bfb125633d5342fc"
     },
     {
       "path": "social/readme-light.png",
       "format": "png",
-      "bytes": 109776,
+      "bytes": 109805,
       "width": 1280,
       "height": 320,
-      "sha256": "48222b62ffd1dac7948883bed812e554a2887bc02050568eeb74e84826cec309"
+      "sha256": "863f0aa57613dac001403f0c4775bc5ebf7ea48008ceb5b506dd5e3e8a3e1a24"
     },
     {
       "path": "social/square-dark.jpg",
       "format": "jpg",
-      "bytes": 66841,
+      "bytes": 66881,
       "width": 1200,
       "height": 1200,
-      "sha256": "73730f801fcf80945290f36f55fb069f97493a7edd996230864f58efd560b140"
+      "sha256": "5373394ee3965f9292bc0c4aefbbb90ddc98bebfce08d33c80b76adfb6060529"
     },
     {
       "path": "social/square-dark.png",
       "format": "png",
-      "bytes": 587702,
+      "bytes": 587771,
       "width": 1200,
       "height": 1200,
-      "sha256": "3dddbb3e389fae618ad071de007360f599fb1894b37942f6b5bf3d556c665294"
+      "sha256": "c477d9abe7374f16c430d78d8b3d024c657293772dff290d5cf077b88a917551"
     },
     {
       "path": "social/square-light.jpg",
       "format": "jpg",
-      "bytes": 68610,
+      "bytes": 68617,
       "width": 1200,
       "height": 1200,
-      "sha256": "9ccc1495134971a746355fc55d508a7ea6408e518ccc44bbf8721d68195522e0"
+      "sha256": "620887336ea9c7e563c3b82b310d5960d988aa9b6a6783d66a1522f9fb355805"
     },
     {
       "path": "social/square-light.png",
       "format": "png",
-      "bytes": 585136,
+      "bytes": 585216,
       "width": 1200,
       "height": 1200,
-      "sha256": "ca610c7fcab84502c272a1541a10470edbc672fad3dec10a38b83287c8bbd83c"
+      "sha256": "02fb2a857065fbec7fe1871b100396cc1f875be9c35aff6e282996b3c121244c"
     },
     {
       "path": "source/app-icon.png",
@@ -597,8 +597,8 @@
     {
       "path": "source/FONT-LICENSE.txt",
       "format": "txt",
-      "bytes": 4456,
-      "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+      "bytes": 4363,
+      "sha256": "37784b44044a4ffd9256702b7c0982c37e5c8887ba90c6dca0479aea93dc898d"
     },
     {
       "path": "source/mark.png",

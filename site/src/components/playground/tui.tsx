@@ -1,6 +1,6 @@
 'use client'
 
-import type { Category, DemoItem, Safety } from '@/content/demo'
+import type { Category, DemoItem } from '@/content/demo'
 import { formatBytes, formatCount, GiB, MiB } from '@/shared/helpers/bytes'
 import type { Action } from './reducer'
 import {
@@ -16,9 +16,21 @@ import {
   selectedIds,
   visibleItems,
   type DeleteMode,
+  type SortKey,
   type State,
   type ViewRow,
 } from './model'
+import { plural, uncommitted } from './text'
+import {
+  categoryTips,
+  columnTips,
+  confirmTips,
+  footerTips,
+  groupTip,
+  headerTips,
+  itemTips,
+  safetyTip,
+} from './tips'
 
 type Dispatch = (action: Action) => void
 
@@ -61,34 +73,10 @@ function sizeBar(bytes: number, largest: number): string {
   return '█'.repeat(filled) + '░'.repeat(barWidth - filled)
 }
 
-function explain(category: Category, safety: Safety): string {
-  if (safety === 'review') {
-    return 'Check first: this may hold data that cannot be regenerated. Look inside before deleting.'
-  }
-  switch (category) {
-    case 'dependencies':
-      return 'Installed packages. Deleting is safe, reinstall with your package manager.'
-    case 'build':
-      return 'Build output. Deleting is safe, the next build recreates it.'
-    case 'cache':
-      return 'Cache. Deleting is safe, it is rebuilt when needed.'
-    case 'temp':
-      return 'Temporary files. Deleting is safe.'
-  }
-}
-
-function uncommitted(changes: number): string {
-  return `${changes} uncommitted change${changes === 1 ? '' : 's'}`
-}
-
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? '' : 's'}`
-}
-
 export function Tui({ state, dispatch, flash }: Props) {
   return (
     <div className="screen-in relative flex min-h-0 flex-1 flex-col">
-      <Header state={state} />
+      <Header state={state} dispatch={dispatch} />
       <Table state={state} dispatch={dispatch} />
       <Detail state={state} />
       <Footer state={state} dispatch={dispatch} flash={flash} />
@@ -106,7 +94,29 @@ export function Tui({ state, dispatch, flash }: Props) {
   )
 }
 
-function Header({ state }: StateProps) {
+type HeaderButtonProps = {
+  keyName: string
+  tip: string
+  className: string
+  dispatch: Dispatch
+  children: React.ReactNode
+}
+
+function HeaderButton({ keyName, tip, className, dispatch, children }: HeaderButtonProps) {
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      data-tip={tip}
+      onClick={() => dispatch({ type: 'key', key: keyName })}
+      className={`${className} transition-colors duration-150 pointer-fine:hover:text-fg active:scale-96`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function Header({ state, dispatch }: Omit<Props, 'flash'>) {
   const status = state.scan.finished ? `done in ${state.scan.elapsed.toFixed(1)}s` : 'scanning'
   const statusKey = state.scan.finished ? 'done' : 'scanning'
   const selected = bytesOf(selectedIds(state))
@@ -116,10 +126,13 @@ function Header({ state }: StateProps) {
       : state.mode === 'permanent'
         ? `→ ${formatBytes(freeAfter(state, selected, 'permanent'))} after delete`
         : 'selection stays on disk in the trash'
+  const tips = headerTips(state)
   return (
     <div className="flex shrink-0 items-center gap-x-3 overflow-hidden whitespace-nowrap px-3 py-1.5">
-      <span className="font-semibold">kuizer</span>
-      <span className="text-muted">
+      <span className="font-semibold" data-tip={tips.root}>
+        kuizer
+      </span>
+      <span className="text-muted" data-tip={tips.status}>
         <span key={statusKey} className="animate-pop-icon inline-block">
           {status}
         </span>
@@ -128,18 +141,50 @@ function Header({ state }: StateProps) {
           {formatCount(state.scan.dirs)} dirs {formatCount(state.scan.files)} files 0 issues
         </span>
       </span>
-      <span>
+      <span data-tip={tips.found}>
         {foundIds(state).length} found {formatBytes(foundTotal(state))}
       </span>
-      <span className="text-muted">sort {state.sort}</span>
-      {state.grouping === 'project' && <span className="text-muted">by project</span>}
-      {state.category !== null && (
-        <span className={`${filterChip} ${categoryClass[state.category]}`}>{state.category}</span>
+      <HeaderButton keyName="s" tip={tips.sort} className="text-muted" dispatch={dispatch}>
+        sort {state.sort}
+      </HeaderButton>
+      {state.grouping === 'project' && (
+        <HeaderButton keyName="p" tip={tips.grouping} className="text-muted" dispatch={dispatch}>
+          by project
+        </HeaderButton>
       )}
-      {state.safeOnly && <span className={`${filterChip} text-t-green`}>safe only</span>}
-      {state.filter !== '' && <span className={filterChip}>&quot;{state.filter}&quot;</span>}
-      <span className="ml-auto hidden sm:inline">{formatBytes(state.free)} free</span>
-      {note && <span className="text-muted hidden md:inline">{note}</span>}
+      {state.category !== null && (
+        <HeaderButton
+          keyName="c"
+          tip={tips.category}
+          className={`${filterChip} ${categoryClass[state.category]}`}
+          dispatch={dispatch}
+        >
+          {state.category}
+        </HeaderButton>
+      )}
+      {state.safeOnly && (
+        <HeaderButton
+          keyName="f"
+          tip={tips.safeOnly}
+          className={`${filterChip} text-t-green`}
+          dispatch={dispatch}
+        >
+          safe only
+        </HeaderButton>
+      )}
+      {state.filter !== '' && (
+        <HeaderButton keyName="/" tip={tips.filter} className={filterChip} dispatch={dispatch}>
+          &quot;{state.filter}&quot;
+        </HeaderButton>
+      )}
+      <span className="ml-auto hidden sm:inline" data-tip={tips.free}>
+        {formatBytes(state.free)} free
+      </span>
+      {note && (
+        <span className="text-muted hidden md:inline" data-tip={tips.note}>
+          {note}
+        </span>
+      )}
     </div>
   )
 }
@@ -152,14 +197,36 @@ function Table({ state, dispatch }: Omit<Props, 'flash'>) {
     <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3" data-table>
       <span className="tui-cursor" aria-hidden="true" />
       <div className="tui-row text-muted sticky top-0 z-10 bg-raised">
-        <span />
-        <span className="text-right">SIZE</span>
-        <span className="hidden md:block" />
-        <span>SAFE?</span>
-        <span className="hidden md:block">CATEGORY</span>
-        <span className="hidden md:block">RULE</span>
-        <span className="hidden md:block">AGE</span>
-        <span>PATH</span>
+        <span data-tip={columnTips.mark} />
+        <ColumnButton
+          sortKey="size"
+          tip={columnTips.size}
+          state={state}
+          dispatch={dispatch}
+          className="text-right"
+        >
+          SIZE
+        </ColumnButton>
+        <span className="hidden md:block" data-tip={columnTips.bar} />
+        <span data-tip={columnTips.safe}>SAFE?</span>
+        <ColumnButton
+          sortKey="category"
+          tip={columnTips.category}
+          state={state}
+          dispatch={dispatch}
+          className="hidden md:block"
+        >
+          CATEGORY
+        </ColumnButton>
+        <span className="hidden md:block" data-tip={columnTips.rule}>
+          RULE
+        </span>
+        <span className="hidden md:block" data-tip={columnTips.age}>
+          AGE
+        </span>
+        <ColumnButton sortKey="path" tip={columnTips.path} state={state} dispatch={dispatch}>
+          PATH
+        </ColumnButton>
       </div>
       {rows.length === 0 && (
         <div className="text-muted py-2">
@@ -183,6 +250,31 @@ function Table({ state, dispatch }: Omit<Props, 'flash'>) {
   )
 }
 
+type ColumnButtonProps = {
+  sortKey: SortKey
+  tip: string
+  state: State
+  dispatch: Dispatch
+  className?: string
+  children: React.ReactNode
+}
+
+function ColumnButton({ sortKey, tip, state, dispatch, className = '', children }: ColumnButtonProps) {
+  const active = state.sort === sortKey
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      data-tip={tip}
+      aria-label={`Sort by ${sortKey}`}
+      onClick={() => dispatch({ type: 'sort', key: sortKey })}
+      className={`${className} ${active ? 'text-fg' : ''} transition-colors duration-150 pointer-fine:hover:text-fg`}
+    >
+      {children}
+    </button>
+  )
+}
+
 type RowProps = {
   row: ViewRow
   state: State
@@ -193,18 +285,23 @@ type RowProps = {
 function Row({ row, state, largest, dispatch }: RowProps) {
   if (row.kind === 'group') {
     return (
-      <div className={`tui-row text-muted font-semibold ${state.scan.finished ? '' : 'rise'}`}>
+      <button
+        type="button"
+        tabIndex={-1}
+        data-tip={groupTip(row)}
+        onClick={() => dispatch({ type: 'selectGroup', key: row.key })}
+        className={`tui-row w-full text-left text-muted font-semibold transition-colors pointer-fine:hover:text-fg ${state.scan.finished ? '' : 'rise'}`}
+      >
         <span className="col-span-full">
           {row.title}
           {`  · ${plural(row.count, 'item')}  · ${formatBytes(row.bytes)}`}
           {row.changes > 0 && <span className="text-t-yellow">{`  · ${uncommitted(row.changes)}`}</span>}
         </span>
-      </div>
+      </button>
     )
   }
   const { item, position } = row
   const entry = itemState(state, item.id)
-  const cursor = position === state.cursor
   const ready = entry.status === 'ready'
   const mark =
     entry.status === 'deleted' ? '  ✓' : entry.status === 'deleting' ? '  …' : entry.selected ? '[x]' : '[ ]'
@@ -213,8 +310,8 @@ function Row({ row, state, largest, dispatch }: RowProps) {
     : entry.status === 'deleted'
       ? 'relative text-faint row-deleted'
       : 'text-muted opacity-45'
-  const highlight =
-    entry.selected && ready ? `bg-(--t-selected) ${cursor ? 'inset-ring inset-ring-line-strong' : ''}` : ''
+  const highlight = entry.selected && ready ? 'bg-(--t-selected)' : ''
+  const tips = itemTips(state, item, entry, largest)
   function dim(name: string) {
     return ready ? name : 'text-muted'
   }
@@ -225,22 +322,36 @@ function Row({ row, state, largest, dispatch }: RowProps) {
       aria-pressed={entry.selected}
       aria-label={`${item.path}, ${formatBytes(item.bytes)}, ${item.safety}${entry.selected ? ', selected' : ''}`}
       onClick={() => dispatch({ type: 'row', position })}
+      onPointerMove={(event) => {
+        const moved = event.movementX !== 0 || event.movementY !== 0
+        if (event.pointerType === 'mouse' && moved) dispatch({ type: 'hover', position })
+      }}
       className={`tui-row w-full text-left ${state.scan.finished ? '' : 'rise'} ${tone} ${highlight}`}
     >
-      <span className="text-muted whitespace-pre">
+      <span className="text-muted whitespace-pre" data-tip={tips.mark}>
         <span key={mark} className={`inline-block ${ready ? '' : 'animate-pop-icon'}`}>
           {mark}
         </span>
       </span>
-      <span className={`text-right ${dim(sizeClass(item.bytes))}`}>{formatBytes(item.bytes)}</span>
-      <span className="hidden md:block text-faint">{sizeBar(item.bytes, largest)}</span>
-      <span className={dim(item.safety === 'safe' ? 'text-t-green' : 'text-t-yellow')}>
+      <span className={`text-right ${dim(sizeClass(item.bytes))}`} data-tip={tips.size}>
+        {formatBytes(item.bytes)}
+      </span>
+      <span className="hidden md:block text-faint" data-tip={tips.bar}>
+        {sizeBar(item.bytes, largest)}
+      </span>
+      <span className={dim(item.safety === 'safe' ? 'text-t-green' : 'text-t-yellow')} data-tip={tips.safety}>
         {item.safety === 'safe' ? '● safe' : '▲ check'}
       </span>
-      <span className={`hidden md:block ${dim(categoryClass[item.category])}`}>{item.category}</span>
-      <span className="hidden md:block">{item.rule}</span>
-      <span className="hidden md:block text-muted">{item.age}</span>
-      <span className="clip-left">
+      <span className={`hidden md:block ${dim(categoryClass[item.category])}`} data-tip={tips.category}>
+        {item.category}
+      </span>
+      <span className="hidden md:block" data-tip={tips.rule}>
+        {item.rule}
+      </span>
+      <span className="hidden md:block text-muted" data-tip={tips.age}>
+        {item.age}
+      </span>
+      <span className="clip-left" data-tip={tips.path}>
         <span>{item.path}</span>
       </span>
     </button>
@@ -261,13 +372,30 @@ function Detail({ state }: StateProps) {
   const changes = projectChanges(item.project)
   return (
     <div className="shrink-0 overflow-hidden whitespace-nowrap border-t border-line px-3 py-1.5 leading-normal">
-      <div className="truncate">{item.path}</div>
-      <div className={`truncate ${item.safety === 'safe' ? 'text-t-green' : 'text-t-yellow'}`}>
-        {explain(item.category, item.safety)}
+      <div className="truncate" data-tip={item.path}>
+        {item.path}
+      </div>
+      <div
+        className={`truncate ${item.safety === 'safe' ? 'text-t-green' : 'text-t-yellow'}`}
+        data-tip={categoryTips[item.category]}
+      >
+        {safetyTip(item.category, item.safety)}
       </div>
       <div className="text-muted truncate">
-        {`${item.rule} · ${item.ecosystem} · ${formatCount(item.entries)} entries · project ${item.project}`}
-        {changes > 0 && <span className="text-t-yellow">{` · ${uncommitted(changes)}`}</span>}
+        <span data-tip={columnTips.rule}>{item.rule}</span>
+        {` · ${item.ecosystem} · `}
+        <span data-tip="Files and directories inside, counted during the scan.">
+          {formatCount(item.entries)} entries
+        </span>
+        {` · project ${item.project}`}
+        {changes > 0 && (
+          <span
+            className="text-t-yellow"
+            data-tip="Git reports unsaved work in this project. Look before deleting."
+          >
+            {` · ${uncommitted(changes)}`}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -276,15 +404,17 @@ function Detail({ state }: StateProps) {
 type KeyProps = {
   keyName: string
   label: string
+  tip: string
   dispatch: Dispatch
   flash: Flash | null
 }
 
-function Key({ keyName, label, dispatch, flash }: KeyProps) {
+function Key({ keyName, label, tip, dispatch, flash }: KeyProps) {
   const flashed = flash !== null && flash.key === keyName
   return (
     <button
       type="button"
+      data-tip={tip}
       onClick={() => dispatch({ type: 'key', key: keyName })}
       className="group text-muted inline-flex items-center gap-1.5 rounded-sm transition-colors duration-150 hover:text-fg focus-visible:text-fg focus-visible:transition-none"
     >
@@ -301,39 +431,61 @@ function Key({ keyName, label, dispatch, flash }: KeyProps) {
 
 function Footer({ state, dispatch, flash }: KeysProps) {
   const selected = selectedIds(state)
+  const tips = footerTips(state)
   if (state.filtering) {
     return (
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-3 py-1.5">
-        <span className="font-semibold">filter</span>
+        <span
+          className="font-semibold"
+          data-tip="Keys type into the filter now. Motions are off until you leave it."
+        >
+          filter
+        </span>
         <span className="caret">{state.filter}</span>
-        <Key keyName="Enter" label="apply" dispatch={dispatch} flash={flash} />
-        <Key keyName="Escape" label="clear" dispatch={dispatch} flash={flash} />
+        <Key keyName="Enter" label="apply" tip={tips.apply} dispatch={dispatch} flash={flash} />
+        <Key keyName="Escape" label="clear" tip={tips.cancel} dispatch={dispatch} flash={flash} />
       </div>
     )
   }
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line px-3 py-1.5">
-      <Key keyName=" " label="select" dispatch={dispatch} flash={flash} />
-      <Key keyName="a" label="select all safe" dispatch={dispatch} flash={flash} />
+      <Key keyName=" " label="select" tip={tips.select} dispatch={dispatch} flash={flash} />
+      <Key keyName="a" label="select all safe" tip={tips.selectSafe} dispatch={dispatch} flash={flash} />
       {selected.length > 0 ? (
-        <Key keyName="Enter" label="delete selected" dispatch={dispatch} flash={flash} />
+        <Key
+          keyName="Enter"
+          label="delete selected"
+          tip={tips.deleteSelected}
+          dispatch={dispatch}
+          flash={flash}
+        />
       ) : (
-        <Key keyName="d" label="delete this" dispatch={dispatch} flash={flash} />
+        <Key keyName="d" label="delete this" tip={tips.deleteThis} dispatch={dispatch} flash={flash} />
       )}
-      <Key keyName="f" label="safe only" dispatch={dispatch} flash={flash} />
-      <Key keyName="c" label="category" dispatch={dispatch} flash={flash} />
-      <Key keyName="p" label="by project" dispatch={dispatch} flash={flash} />
-      <Key keyName="/" label="search" dispatch={dispatch} flash={flash} />
-      <Key keyName="?" label="help" dispatch={dispatch} flash={flash} />
-      <Key keyName="q" label="quit" dispatch={dispatch} flash={flash} />
-      {hasFilters(state) && <Key keyName="x" label="clear filters" dispatch={dispatch} flash={flash} />}
+      <Key keyName="f" label="safe only" tip={tips.safeOnly} dispatch={dispatch} flash={flash} />
+      <Key keyName="c" label="category" tip={tips.category} dispatch={dispatch} flash={flash} />
+      <Key keyName="p" label="by project" tip={tips.project} dispatch={dispatch} flash={flash} />
+      <Key keyName="/" label="search" tip={tips.search} dispatch={dispatch} flash={flash} />
+      <Key keyName="?" label="help" tip={tips.help} dispatch={dispatch} flash={flash} />
+      <Key keyName="q" label="quit" tip={tips.quit} dispatch={dispatch} flash={flash} />
+      {hasFilters(state) && (
+        <Key keyName="x" label="clear filters" tip={tips.clear} dispatch={dispatch} flash={flash} />
+      )}
       {selected.length > 0 && (
-        <span className="rise font-semibold">
-          {selected.length} selected {formatBytes(bytesOf(selected))}
-        </span>
+        <Key keyName="u" label="clear" tip={tips.unselect} dispatch={dispatch} flash={flash} />
       )}
-      {state.freed > 0 && <span>freed {formatBytes(state.freed)}</span>}
-      {state.trashed > 0 && <span>trashed {formatBytes(state.trashed)}</span>}
+      {selected.length > 0 && (
+        <button
+          type="button"
+          data-tip={tips.selected}
+          onClick={() => dispatch({ type: 'key', key: 'Enter' })}
+          className="rise font-semibold transition-colors pointer-fine:hover:text-fg active:scale-96"
+        >
+          {selected.length} selected {formatBytes(bytesOf(selected))}
+        </button>
+      )}
+      {state.freed > 0 && <span data-tip={tips.freed}>freed {formatBytes(state.freed)}</span>}
+      {state.trashed > 0 && <span data-tip={tips.trashed}>trashed {formatBytes(state.trashed)}</span>}
       {state.message && (
         <span key={state.message} className="text-muted rise">
           {state.message}
@@ -345,14 +497,19 @@ function Footer({ state, dispatch, flash }: KeysProps) {
 
 type OverlayProps = {
   title: string
+  onDismiss: () => void
   children: React.ReactNode
   rounded?: boolean
 }
 
-function Overlay({ title, children, rounded = false }: OverlayProps) {
+function Overlay({ title, onDismiss, children, rounded = false }: OverlayProps) {
   return (
     <>
-      <div className="absolute inset-0 z-15 animate-fade bg-bg/55 backdrop-blur-[1.5px]" aria-hidden="true" />
+      <div
+        className="absolute inset-0 z-15 animate-fade bg-bg/55 backdrop-blur-[1.5px]"
+        aria-hidden="true"
+        onClick={onDismiss}
+      />
       <div className="absolute inset-0 z-20 flex items-center justify-center p-3">
         <dialog
           open
@@ -390,13 +547,17 @@ function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
     mode === 'trash'
       ? 'Move to trash. Space is freed once the trash is emptied.'
       : 'Delete permanently. This cannot be undone.'
+  const tips = confirmTips(mode)
   return (
-    <Overlay title={`Delete ${plural(items.length, 'item')} · ${formatBytes(bytes)}`}>
+    <Overlay
+      title={`Delete ${plural(items.length, 'item')} · ${formatBytes(bytes)}`}
+      onDismiss={() => dispatch({ type: 'key', key: 'n' })}
+    >
       <div className="mt-1">
         {items.slice(0, shown).map((item) => (
           <div key={item.id} className="flex gap-3 whitespace-nowrap">
             <span className="w-amount shrink-0 text-right">{formatBytes(item.bytes)}</span>
-            <span className="clip-left">
+            <span className="clip-left" data-tip={`${item.path}\n${safetyTip(item.category, item.safety)}`}>
               <span>{item.path}</span>
             </span>
           </div>
@@ -421,14 +582,15 @@ function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
         </div>
       )}
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-        <Key keyName="y" label="confirm" dispatch={dispatch} flash={flash} />
+        <Key keyName="y" label="confirm" tip={tips.confirm} dispatch={dispatch} flash={flash} />
         <Key
           keyName="t"
           label={mode === 'trash' ? 'switch to permanent' : 'switch to trash'}
+          tip={tips.toggle}
           dispatch={dispatch}
           flash={flash}
         />
-        <Key keyName="n" label="cancel" dispatch={dispatch} flash={flash} />
+        <Key keyName="n" label="cancel" tip={tips.cancel} dispatch={dispatch} flash={flash} />
       </div>
     </Overlay>
   )
@@ -479,7 +641,7 @@ const helpSections: HelpSection[] = [
 
 function Help({ dispatch }: { dispatch: Dispatch }) {
   return (
-    <Overlay title="Keys" rounded>
+    <Overlay title="Keys" rounded onDismiss={() => dispatch({ type: 'key', key: 'Escape' })}>
       <button
         type="button"
         className="block w-full text-left focus-visible:text-fg"

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createMDX } from 'fumadocs-mdx/next'
 import type { NextConfig } from 'next'
 
 function readWorkspaceVersion() {
@@ -18,4 +19,4 @@ const config: NextConfig = {
   agentRules: false,
 }
 
-export default config
+export default createMDX()(config)

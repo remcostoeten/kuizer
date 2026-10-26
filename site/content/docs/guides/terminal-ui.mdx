@@ -1,0 +1,53 @@
+---
+title: Terminal UI
+description: The keys of the interactive list that opens when you run kuizer in a terminal.
+icon: Compass
+---
+
+Run `kuizer` with one or more folders to open the list. Results appear while the scan runs. Press `?` to see these keys in the app.
+
+```sh
+kuizer ~/projects
+kuizer ~/apps ~/work
+```
+
+## Navigate
+
+| Keys | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` | Move |
+| `J` `K` or shift with the arrow keys | Select while moving |
+| `g` `home` | First item |
+| `G` `end` | Last item |
+| `pgup` `pgdn` | Page |
+| `ctrl-d` `ctrl-u` | Half page |
+
+## Select
+
+| Keys | Action |
+| --- | --- |
+| `space` | Toggle and move down |
+| `a` | Select every safe item in view |
+| `P` | Select every item in the cursor's project |
+| `u` | Clear the selection |
+
+## Filter
+
+| Keys | Action |
+| --- | --- |
+| `f` | Show only items that are safe to delete |
+| `c` | Cycle the category |
+| `/` | Search by path or rule |
+| `x` | Clear all filters |
+
+## Act
+
+| Keys | Action |
+| --- | --- |
+| `d` `del` | Delete the selection, or the item under the cursor |
+| `enter` | Delete the selection |
+| `s` | Cycle the sort: size, path, category |
+| `p` | Group by rule or by project |
+| `q` `esc` `ctrl-c` | Quit and stop the scan |
+
+In the delete confirmation, `y` or `enter` confirms and `t` switches between the trash and permanent deletion.

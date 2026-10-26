@@ -43,6 +43,48 @@
   }
 }
 
+@keyframes sweep-in {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes sweep-out {
+  from {
+    transform: scaleX(1);
+  }
+
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes char-fall {
+  to {
+    opacity: 0;
+    translate: 0 0.6em;
+    rotate: var(--tilt);
+    filter: blur(2px);
+  }
+}
+
+@keyframes punch {
+  from {
+    opacity: 0;
+    scale: 0.5;
+  }
+
+  55% {
+    opacity: 1;
+    scale: 1.1;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
 @keyframes blink {
   to {
     visibility: hidden;
@@ -58,6 +100,12 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes roll-in {
+  from {
+    translate: 0 0;
   }
 }
 

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd site && bun install --frozen-lockfile",
+  "buildCommand": "cd site && bun run build",
+  "outputDirectory": "site/out",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- site Cargo.toml vercel.json",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "headers": [
+    {
+      "source": "/_next/static/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    },
+    {
+      "source": "/md/(.*)",
+      "headers": [{ "key": "Content-Type", "value": "text/markdown; charset=utf-8" }]
+    },
+    {
+      "source": "/(llms|llms-full).txt",
+      "headers": [{ "key": "Content-Type", "value": "text/markdown; charset=utf-8" }]
+    },
+    {
+      "source": "/api/search",
+      "headers": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }]
+    }
+  ]
+}

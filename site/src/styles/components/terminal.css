@@ -9,6 +9,7 @@
   --t-selected: color-mix(in srgb, var(--brand) 12%, transparent);
   --t-chip: color-mix(in srgb, var(--fg) 7%, transparent);
 
+  &:focus-visible,
   & input:focus-visible {
     outline: none;
   }
@@ -100,7 +101,6 @@
   height: var(--cursor-h, 0);
   border-radius: 3px;
   background: var(--t-cursor);
-  box-shadow: inset 2px 0 0 var(--brand);
   opacity: 0;
   pointer-events: none;
   translate: 0 var(--cursor-y, 0);
@@ -123,15 +123,5 @@
     opacity: 0;
     filter: blur(3px);
     transform: translateY(6px) scale(0.99);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tui-cursor {
-    transition: none;
-  }
-
-  .screen-in {
-    animation: none;
   }
 }

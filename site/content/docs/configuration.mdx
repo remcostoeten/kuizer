@@ -1,0 +1,87 @@
+---
+title: Configuration
+description: Every key of the kuizer config file, with its default. All keys are optional.
+icon: BookOpen
+---
+
+The config file is `~/.config/kuizer/config.toml`. Every key is optional. Use `--config <PATH>` to read another file.
+
+```sh
+kuizer config init
+kuizer config check
+kuizer config show
+kuizer config path
+```
+
+`init` writes a file with the defaults, `check` validates it, `show` prints the effective configuration and `path` prints the location. A complete example is in [docs/config.example.toml](https://github.com/remcostoeten/kuizer/blob/master/docs/config.example.toml).
+
+## scan
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `roots` | `[]` | Folders to scan when none are given |
+| `exclude` | `[]` | Glob patterns to skip |
+| `exclude_extensions` | `[]` | File extensions to skip |
+| `skip_dirs` | `[".git", ".hg", ".svn", ".jj"]` | Directory names skipped everywhere |
+| `ignore_file` | `".kuizerignore"` | Marker file that makes kuizer skip a directory and everything under it |
+| `min_size` | `0` | Smallest item to list, such as `"1MB"` |
+| `max_depth` | none | How deep to walk |
+| `one_file_system` | `true` | Stay on one file system |
+| `excluded_mounts` | `["/proc", "/sys", "/dev", "/run"]` | Mount points never entered |
+| `size_threads` | `0` | Threads used to measure sizes, `0` picks automatically |
+
+## detect
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `categories` | all four | Categories to list: `dependencies`, `build`, `cache`, `temp` |
+| `builtin_rules` | `true` | Use the built-in rules |
+| `disabled_rules` | `[]` | Built-in rules to turn off, by name |
+
+Custom rules are `[[rules]]` tables, described in [How detection works](/docs/concepts/detection).
+
+## delete
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `"trash"` | `"trash"` or `"permanent"` |
+| `confirm` | `false` | Ask before moving items to the trash |
+
+## duplicates
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Search for duplicates after every scan in the desktop app. `kuizer duplicates` is not affected |
+| `min_size` | `"4KiB"` | Smallest file to compare |
+| `threads` | `0` | Hashing threads, `0` picks automatically |
+| `verify` | `false` | Compare matches byte by byte |
+| `include_hidden` | `false` | Include files in hidden home folders and tool-managed folders |
+
+## git
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `min_gain` | `"1MiB"` | Smallest expected gain from `git gc` for a repository to be listed |
+| `aggressive` | `false` | Pass `--aggressive` to `git gc` |
+| `keep_branches` | `["main", "master", "develop", "trunk"]` | Branches never deleted |
+| `threads` | `0` | Threads used to inspect repositories |
+
+## appearance and route_shortcuts
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `appearance.motion` | `true` | Animate state changes in the desktop app |
+| `appearance.sidebar` | `"expanded"` | `"expanded"` or `"collapsed"` |
+| `appearance.theme` | `"dark"` | `"dark"` or `"light"` |
+| `route_shortcuts.enabled` | `true` | `Shift+1` to `Shift+9` open sidebar sections |
+| `route_shortcuts.hints` | `true` | Show the key badges in the sidebar and tooltips |
+
+## toolchains and docker
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `toolchains.tools` | all | Tools to list: `rustup`, `nvm`, `fnm`, `volta`, `pyenv`, `uv`, `sdkman`, `go` |
+| `toolchains.pins` | `true` | Mark versions a project pins as `review` |
+| `docker.engines` | `["docker", "podman"]` | Engines to query |
+| `docker.timeout_secs` | `10` | How long to wait for an engine |
+| `docker.recent_hours` | `24` | Containers stopped within this many hours are marked `review` |

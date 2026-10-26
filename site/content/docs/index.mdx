@@ -1,0 +1,36 @@
+---
+title: kuizer documentation
+sidebarTitle: Introduction
+description: kuizer finds build output, dependency folders, tool caches and duplicate files on a developer machine and removes the ones you select.
+icon: House
+---
+
+kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
+
+It ships as a command line tool with a terminal UI and as a desktop app. Both run the same scan and the same deletion checks.
+
+## What it finds
+
+- **Project artifacts.** Dependency folders, build output, caches and temporary files, matched by built-in rules for JavaScript and its frameworks, Rust, Python, .NET, Maven, Gradle, Swift, CocoaPods, Dart and Flutter, Elixir, Zig, Haskell, CMake, Terraform and Unity.
+- **Global caches.** The npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven and Playwright caches, among others.
+- **Toolchains.** Installed rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions, SDKMAN candidates and Go SDKs.
+- **Docker and Podman objects.** Dangling images, stopped containers, build cache and volumes no container uses.
+- **Git repositories.** Repositories with many loose objects and local branches already merged into the default branch.
+- **Duplicate files.** Files with identical contents, found by size and BLAKE3 hash. kuizer reports them and never deletes them.
+
+## Where to go next
+
+<Cards>
+  <Card title="Installation" href="/docs/installation">
+    Install the CLI and the desktop app.
+  </Card>
+  <Card title="Quick start" href="/docs/quick-start">
+    Scan a folder and clean it.
+  </Card>
+  <Card title="Safety" href="/docs/concepts/safety">
+    What kuizer checks before it removes anything.
+  </Card>
+  <Card title="Configuration" href="/docs/configuration">
+    Every key of the config file.
+  </Card>
+</Cards>

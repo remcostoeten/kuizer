@@ -7,27 +7,94 @@
   );
 }
 
-.bracket {
-  &::before,
-  &::after {
-    content: '';
+.hero-target {
+  .word {
     position: absolute;
-    width: 0.28em;
-    height: 0.28em;
-    border: 2px solid var(--brand);
+    top: 0;
+    left: 50%;
+    translate: -50% 0;
   }
 
-  &::before {
-    top: 0.04em;
-    left: -0.1em;
-    border-right: 0;
-    border-bottom: 0;
+  .char {
+    display: inline-block;
+    white-space: pre;
   }
 
-  &::after {
-    right: -0.1em;
-    bottom: 0.04em;
-    border-left: 0;
-    border-top: 0;
+  .sweep {
+    position: absolute;
+    inset: 0.04em -0.06em;
+    z-index: -1;
+    border-radius: 0.08em;
+    background: var(--brand);
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .tag {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--brand-light);
+    opacity: 0;
+    transition:
+      opacity 240ms var(--ease-out),
+      translate 240ms var(--ease-out);
+  }
+
+  &[data-phase='mark'] .sweep {
+    animation: sweep-in 180ms var(--ease-out) forwards;
+  }
+
+  &[data-phase='fall'] {
+    .sweep {
+      transform-origin: right;
+      animation: sweep-out 220ms var(--ease-in-out) forwards;
+    }
+
+    .char {
+      animation: char-fall 420ms var(--ease-in-out) both;
+      animation-delay: calc(var(--i) * 20ms);
+    }
+
+    .tag {
+      animation: punch 360ms var(--ease-out) 200ms both;
+    }
+  }
+
+  &[data-phase='enter'] {
+    .word {
+      animation: rise 320ms var(--ease-out) both;
+    }
+
+    .tag {
+      translate: -50% -130%;
+    }
+  }
+
+  &[data-motion='off'] {
+    .word,
+    .tag,
+    .char,
+    .sweep {
+      animation: none;
+      transition: none;
+    }
+
+    &[data-phase='mark'] .sweep {
+      transform: scaleX(1);
+    }
+
+    &[data-phase='fall'] {
+      .char {
+        opacity: 0;
+      }
+
+      .tag {
+        opacity: 1;
+      }
+    }
   }
 }

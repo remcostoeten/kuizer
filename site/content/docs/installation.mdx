@@ -1,0 +1,53 @@
+---
+title: Installation
+description: Install the kuizer CLI and desktop app on Linux or macOS with the installer script, npm or from source.
+icon: Download
+---
+
+kuizer runs on Linux and macOS, on x86_64 and ARM. Prebuilt binaries are attached to every [GitHub release](https://github.com/remcostoeten/kuizer/releases).
+
+## Installer script
+
+The script downloads the right archive for your system, checks it and puts the binary in `~/.cargo/bin`.
+
+```sh
+curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-installer.sh | sh
+```
+
+The desktop app installs the same way under its own name.
+
+```sh
+curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-gui-installer.sh | sh
+```
+
+Each release also has plain archives with a SHA-256 checksum. The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
+
+## npm
+
+With Node installed, the CLI runs from npm.
+
+```sh
+npx kuizer
+npm install -g kuizer
+```
+
+## From source
+
+Building needs Rust 1.88 or newer.
+
+```sh
+git clone https://github.com/remcostoeten/kuizer
+cargo install --path kuizer
+cargo install --path kuizer/crates/kuizer-gui
+```
+
+<Callout type="info" title="Linux dependencies for the desktop app">
+  The desktop app is built on GPUI, which needs the X11, Wayland, Vulkan and font development packages. On Arch they come with `libxkbcommon-x11 wayland vulkan-icd-loader fontconfig freetype2`. On Debian and Ubuntu install `libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev`.
+</Callout>
+
+## Check the install
+
+```sh
+kuizer --version
+kuizer config check
+```

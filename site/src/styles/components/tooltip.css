@@ -1,0 +1,57 @@
+.tip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-terminal);
+  line-height: 1.5;
+  white-space: pre-line;
+  text-wrap: pretty;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 1px light-dark(color-mix(in srgb, white 8%, transparent), color-mix(in srgb, black 8%, transparent)),
+    0 6px 18px -6px
+      light-dark(color-mix(in srgb, black 35%, transparent), color-mix(in srgb, black 60%, transparent));
+  transform-origin: var(--arrow-x, 50%) 100%;
+  animation: tip-in 140ms var(--ease-out) both;
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: var(--arrow-x, 50%);
+    bottom: -3px;
+    width: 7px;
+    height: 7px;
+    background: inherit;
+    border-radius: 1px;
+    transform: translateX(-50%) rotate(45deg);
+  }
+
+  &[data-side='bottom'] {
+    transform-origin: var(--arrow-x, 50%) 0;
+
+    &::after {
+      top: -3px;
+      bottom: auto;
+    }
+  }
+
+  &[data-warm] {
+    animation: none;
+    transition: translate 140ms var(--ease-out);
+  }
+}
+
+@keyframes tip-in {
+  from {
+    opacity: 0;
+    scale: 0.94;
+  }
+}

@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useReducer, useRef, useState, type KeyboardEvent } from 'react'
 import { demoCommand, discoveryOrder, scanTotals } from '@/content/demo'
+import { TooltipLayer } from '@/components/ui/tooltip-layer'
 import { DiskBar } from './disk-bar'
 import { initialState, onDiskIds } from './model'
 import { reduce } from './reducer'
@@ -131,7 +132,7 @@ export function Playground() {
       aria-label="kuizer demo. A terminal you can drive with the keyboard."
       onKeyDown={onKeyDown}
       onClick={onClick}
-      className="frame term flex min-h-0 flex-1 flex-col font-mono text-terminal outline-none transition-colors duration-200 ease-out focus-visible:border-fg focus-visible:transition-none md:text-terminal-wide"
+      className="frame term flex min-h-0 flex-1 flex-col font-mono text-terminal transition-colors duration-200 ease-out md:text-terminal-wide"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
         <span className="flex gap-1.5">
@@ -142,7 +143,7 @@ export function Playground() {
         <span className="text-muted ml-2 truncate">{title}</span>
         <span className="text-faint ml-auto hidden whitespace-nowrap text-micro sm:inline">
           {state.screen === 'tui'
-            ? 'keyboard works here, or tap the keys in the footer'
+            ? 'keyboard works here, and so does the mouse'
             : state.screen === 'shell'
               ? `type kuizer to reopen the list`
               : 'press any key to skip'}
@@ -154,6 +155,7 @@ export function Playground() {
       ) : (
         <ShellView state={state} dispatch={dispatch} />
       )}
+      <TooltipLayer rootRef={rootRef} />
     </div>
   )
 }

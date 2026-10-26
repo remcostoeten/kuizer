@@ -7,6 +7,7 @@
   --color-faint: var(--fg-faint);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
+  --color-tile: var(--tile);
   --color-accent: var(--accent);
   --color-accent-fg: var(--accent-fg);
   --color-brand: var(--brand);
@@ -25,7 +26,7 @@
   --color-traffic-green: #28c840;
   --color-nav: color-mix(in srgb, var(--bg) 82%, transparent);
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-space-grotesk), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-plex-mono), ui-monospace, 'SFMono-Regular', Menlo, monospace;
   --font-mono: var(--font-plex-mono), ui-monospace, 'SFMono-Regular', Menlo, monospace;
   --shadow-card: var(--shadow-card);
   --shadow-card-hover: var(--shadow-card-hover);
@@ -72,15 +73,15 @@
   --text-display-plain--letter-spacing: -0.025em;
   --text-display-plain-lg: 48px;
   --text-display-plain-lg--letter-spacing: -0.025em;
-  --text-hero: 36px;
+  --text-hero: 32px;
   --text-hero--line-height: 1.08;
-  --text-hero--letter-spacing: -0.025em;
+  --text-hero--letter-spacing: -0.04em;
   --text-hero-wide: 60px;
   --text-hero-wide--line-height: 1.08;
-  --text-hero-wide--letter-spacing: -0.025em;
+  --text-hero-wide--letter-spacing: -0.04em;
   --text-hero-xl: 72px;
   --text-hero-xl--line-height: 1.08;
-  --text-hero-xl--letter-spacing: -0.025em;
+  --text-hero-xl--letter-spacing: -0.04em;
   --text-lead: 18px;
   --text-lead--line-height: 1.4;
   --text-lead-lg: 20px;
@@ -108,16 +109,17 @@
 
 :root {
   color-scheme: dark;
-  --bg: light-dark(#ffffff, #111111);
-  --bg-raised: light-dark(#fafafa, #171717);
-  --bg-inset: light-dark(#f0f0f0, #262626);
-  --fg: light-dark(#111111, #fafafa);
-  --fg-muted: light-dark(#525252, #bebebe);
-  --fg-faint: #8a8a8a;
-  --line: color-mix(in srgb, var(--fg) 10%, transparent);
-  --line-strong: color-mix(in srgb, var(--fg) 18%, transparent);
-  --accent: light-dark(#171717, #e5e5e5);
-  --accent-fg: light-dark(#fafafa, #171717);
+  --bg: light-dark(#ffffff, #0f0f0f);
+  --bg-deep: light-dark(#ffffff, #0a0a0a);
+  --bg-raised: light-dark(#fafafa, #141414);
+  --bg-inset: light-dark(#f0f0f0, #1f1f1f);
+  --fg: light-dark(#111111, #e6e6e6);
+  --fg-muted: light-dark(#525252, #8c8c8c);
+  --fg-faint: light-dark(#8a8a8a, #6b6b6b);
+  --line: light-dark(color-mix(in srgb, var(--fg) 10%, transparent), #262626);
+  --line-strong: light-dark(color-mix(in srgb, var(--fg) 18%, transparent), #2e2e2e);
+  --accent: light-dark(#171717, #f5f5f5);
+  --accent-fg: light-dark(#fafafa, #111111);
   --brand: light-dark(#c84f0e, #d25611);
   --brand-light: light-dark(#b0450c, #e8804a);
   --brand-fg: #ffffff;

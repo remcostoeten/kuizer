@@ -1,0 +1,48 @@
+---
+title: Safety and deletion
+description: What kuizer checks before it removes anything, which paths it never touches and which deletions skip the trash.
+icon: Lightbulb
+---
+
+Scanning never deletes. Deletion is a separate step that revalidates every item first.
+
+## Checks before every removal
+
+Before each removal kuizer confirms that the item:
+
+- is the directory it scanned, not a symlink or a mount point,
+- sits inside a scanned root,
+- is not your home directory or a system directory.
+
+## Trash by default
+
+Items move to the trash. Set `delete.mode = "permanent"` in the [config file](/docs/configuration) or pass `--permanent` to `kuizer clean` to delete for good. A confirmation shows the item count and total size, and `delete.confirm` or `--confirm` asks before every move.
+
+## Safe and review
+
+Every result is marked `safe` or `review`. Anything found inside a hidden folder of your home directory is `review`, never `safe`. So are toolchain versions a project pins, Docker volumes and containers that stopped in the last 24 hours. `kuizer clean` selects `safe` items unless `--select all` says otherwise.
+
+Projects with uncommitted git changes get a warning in the list and in the delete confirmation.
+
+## What is never entered
+
+- Browser and app profiles: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code.
+- `~/.ssh`, `~/.gnupg` and the keyrings.
+- Globally installed tools and editor extensions, such as `~/.vscode/extensions` and the pnpm, bun and yarn global installs.
+
+## Deletions that skip the trash
+
+Some objects cannot be restored from a trash folder, and the confirmation says so.
+
+| Command | What goes | How |
+| --- | --- | --- |
+| `kuizer toolchain --clean` | Toolchain versions | `rustup toolchain uninstall` and `uv python uninstall`, or the version folder is deleted |
+| `kuizer docker --clean` | Images, containers, build cache, volumes | The engine's own `image rm`, `container rm`, `builder prune` and `volume rm`, without force |
+| `kuizer git --gc` | Loose objects | `git gc` |
+| `kuizer git --branches` | Merged local branches | Each deleted branch is printed with the `git branch NAME COMMIT` line that brings it back |
+
+A tool downloads a removed toolchain again when it is needed. A removed image or volume is gone.
+
+## Duplicates
+
+`kuizer duplicates` only reports. You choose which copy to keep and remove the others yourself.

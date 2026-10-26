@@ -6,7 +6,8 @@ description = "Desktop interface for kuizer, built on GPUI"
 license = "MIT"
 rust-version = "1.88"
 repository = "https://github.com/remcostoeten/kuizer"
-homepage = "https://github.com/remcostoeten/kuizer"
+homepage = "https://kuizer.app"
+documentation = "https://kuizer.app/docs"
 keywords = ["cleanup", "disk", "gui", "gpui"]
 categories = ["filesystem", "gui"]
 

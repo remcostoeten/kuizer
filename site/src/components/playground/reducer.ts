@@ -3,6 +3,7 @@ import {
   currentId,
   itemById,
   itemState,
+  itemsInGroup,
   keepCursor,
   selectedIds,
   startScan,
@@ -24,6 +25,9 @@ export type Action =
   | { type: 'deleted'; id: string }
   | { type: 'key'; key: string }
   | { type: 'row'; position: number }
+  | { type: 'hover'; position: number }
+  | { type: 'sort'; key: SortKey }
+  | { type: 'selectGroup'; key: string }
   | { type: 'focusItem'; id: string }
   | { type: 'shell'; line: string }
 
@@ -215,6 +219,18 @@ function clickRow(state: State, position: number): State {
   return updateItems(state, [item.id], { selected: !entry.selected })
 }
 
+function hoverRow(state: State, position: number): State {
+  if (state.cursor === position || !visibleItems(state)[position]) return state
+  return { ...state, cursor: position }
+}
+
+function selectGroup(state: State, key: string): State {
+  const ready = itemsInGroup(state, key).filter((item) => itemState(state, item.id).status === 'ready')
+  const ids = ready.map((item) => item.id)
+  const allSelected = ready.every((item) => itemState(state, item.id).selected)
+  return updateItems(state, ids, { selected: !allSelected })
+}
+
 /**
  * @name reduce
  * @description The playground reducer. Key actions follow the key map of the
@@ -248,6 +264,12 @@ export function reduce(state: State, action: Action): State {
       return state.screen === 'tui' ? handleKey(state, action.key) : state
     case 'row':
       return clickRow(state, action.position)
+    case 'hover':
+      return hoverRow(state, action.position)
+    case 'sort':
+      return withViewChange(state, { sort: action.key })
+    case 'selectGroup':
+      return selectGroup({ ...state, message: null }, action.key)
     case 'focusItem': {
       const position = visibleItems(state).findIndex((item) => item.id === action.id)
       return position >= 0 ? { ...state, cursor: position, message: null } : state

@@ -1,0 +1,15 @@
+{
+  "title": "Get Started",
+  "root": true,
+  "pages": [
+    "index",
+    "installation",
+    "quick-start",
+    "concepts",
+    "guides",
+    "configuration",
+    "---Links---",
+    "[GitHub](https://github.com/remcostoeten/kuizer)",
+    "[Releases](https://github.com/remcostoeten/kuizer/releases)"
+  ]
+}

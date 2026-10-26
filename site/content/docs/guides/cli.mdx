@@ -1,0 +1,79 @@
+---
+title: Command line
+description: The kuizer commands for scanning, cleaning, caches, toolchains, Docker, git, duplicates, reports and history.
+icon: FileText
+---
+
+Running `kuizer` with no command opens the [terminal UI](/docs/guides/terminal-ui) on the current directory. Every command takes `--json` for machine-readable output and `--config <PATH>` to use another config file.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `kuizer scan [PATH]...` | List artifacts and caches in projects |
+| `kuizer clean [PATH]...` | Remove them, after a confirmation |
+| `kuizer cache` | List and remove global tool caches |
+| `kuizer toolchain [PATH]...` | List and remove installed toolchain versions |
+| `kuizer docker` | List and remove unused Docker and Podman objects |
+| `kuizer git [PATH]...` | Pack loose git objects and delete merged branches |
+| `kuizer duplicates [PATH]...` | Find files with identical contents |
+| `kuizer dashboard [PATH]...` | Open a web overview of everything |
+| `kuizer history` | Show what kuizer deleted and the space it freed |
+| `kuizer restore [ID]...` | Put trashed items from a past run back |
+| `kuizer rules` | List the active detection rules |
+| `kuizer config` | Show, create and validate the config file |
+
+## Scan
+
+```sh
+kuizer scan ~/projects --min-size 50MB
+kuizer scan --category cache --safe-only
+kuizer scan ~/projects --idle 3mo --sort idle
+kuizer scan ~/projects --report
+```
+
+`--report` writes one HTML file with a zoomable treemap of every result, grouped by project, category or rule, and opens it in your browser. The file loads nothing from the network. `--sort` accepts `size`, `path`, `category` and `idle`.
+
+## Clean
+
+```sh
+kuizer clean ~/projects --dry-run
+kuizer clean ~/projects --select node-modules
+kuizer clean ~/projects --category build --yes
+kuizer clean ~/projects --select all --permanent
+```
+
+`--select` takes `safe`, `all` or a rule name, and can repeat. The default is `safe`. `--yes` skips the confirmation and `--permanent` skips the trash.
+
+## Caches, toolchains and Docker
+
+```sh
+kuizer cache --clean --select npm --select pip
+kuizer toolchain ~/projects --clean --dry-run
+kuizer docker --clean --select image --select build-cache
+```
+
+A toolchain version that is a tool's default, or that a project under the given path pins in `rust-toolchain.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.sdkmanrc`, `.tool-versions`, `go.mod` or the `volta` key of `package.json`, is marked `review`. Removal from `toolchain` and `docker` is always permanent.
+
+## Git
+
+```sh
+kuizer git ~/apps
+kuizer git --gc --dry-run
+kuizer git --branches
+```
+
+Repositories in the middle of a rebase, merge or another git command are skipped.
+
+## Duplicates
+
+```sh
+kuizer duplicates ~/Downloads --min-size 1MB
+kuizer duplicates ~/Pictures --verify
+```
+
+`--verify` compares matches byte by byte after the hash matches.
+
+## Dashboard
+
+`kuizer dashboard` writes one HTML page with tabs for an overview with insights, project artifacts, a folder drill-down, global caches, duplicates and the deletion history. Use `--no-duplicates` to skip the duplicate search, which reads every file, and `--out=<FILE> --no-open` to write the page without opening it.

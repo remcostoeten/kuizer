@@ -1,0 +1,48 @@
+---
+title: How detection works
+description: How kuizer decides that a folder is an artifact, what the four categories mean and how to add your own rules.
+icon: Lightbulb
+---
+
+kuizer matches folders and files against rules. `kuizer rules` lists the active ones.
+
+## Checked against the project
+
+A rule can require marker files next to the folder, so a name alone is never enough. A `dist` folder counts only next to a `package.json`. A `target` folder counts only next to a `Cargo.toml` and when Cargo's cache tag is inside.
+
+## Categories
+
+Every rule belongs to one category. Filter with `--category`, repeatable, or `detect.categories` in the config.
+
+| Category | Examples |
+| --- | --- |
+| `dependencies` | `node_modules` |
+| `build` | `.next`, `dist`, Cargo `target` |
+| `cache` | tool and framework caches |
+| `temp` | temporary files |
+
+## Idle projects
+
+`--idle 60d` keeps only projects you have not touched for that long. A project's activity is its newest file outside generated folders or its last git commit, whichever is later. Running `npm install` or `cargo build` in an abandoned project does not make it active. Accepted ages are days, weeks, months and years, such as `60d`, `8w`, `6mo` and `1y`.
+
+## Skipping folders
+
+A directory that contains a `.kuizerignore` file is skipped together with everything under it. `scan.exclude` takes glob patterns and `scan.skip_dirs` names directories to skip everywhere. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers.
+
+## Custom rules
+
+Add a rule to the config file with a `[[rules]]` table.
+
+```toml title="~/.config/kuizer/config.toml"
+[[rules]]
+name = "jekyll-site"
+kind = "dir"
+pattern = "_site"
+markers = ["_config.yml"]
+contains = ["index.html"]
+category = "build"
+safety = "review"
+ecosystem = "jekyll"
+```
+
+Turn off a built-in rule with `detect.disabled_rules`, or all of them with `detect.builtin_rules = false`.
