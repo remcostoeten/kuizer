@@ -192,6 +192,7 @@ impl Default for GitConfig {
 pub struct AppearanceConfig {
     pub motion: bool,
     pub sidebar: Sidebar,
+    pub theme: Theme,
 }
 
 impl Default for AppearanceConfig {
@@ -199,6 +200,7 @@ impl Default for AppearanceConfig {
         Self {
             motion: true,
             sidebar: Sidebar::default(),
+            theme: Theme::default(),
         }
     }
 }
@@ -219,6 +221,15 @@ impl Default for RouteShortcutsConfig {
             hints: true,
         }
     }
+}
+
+/// The colors the GUI draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
 }
 
 /// How wide the GUI sidebar opens: with labels, or as a narrow strip of icons.
@@ -502,6 +513,14 @@ mod tests {
         let config = parse("[appearance]\nmotion = false\n").expect("parses");
         assert!(!config.appearance.motion);
         assert!(Config::default().appearance.motion);
+    }
+
+    #[test]
+    fn theme_is_dark_unless_set() {
+        let config = parse("[appearance]\ntheme = \"light\"\n").expect("parses");
+        assert_eq!(config.appearance.theme, Theme::Light);
+        assert_eq!(Config::default().appearance.theme, Theme::Dark);
+        assert!(parse("[appearance]\ntheme = \"sepia\"\n").is_err());
     }
 
     #[test]

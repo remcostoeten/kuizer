@@ -2,6 +2,8 @@
 
 A terminal tool that finds build output, development caches and duplicate files on a developer machine, and removes the ones you select.
 
+Website and documentation: [kuizer.app](https://kuizer.app), [kuizer.app/docs](https://kuizer.app/docs).
+
 <p align="center">
   <img src="https://shieldcn.dev/badge/core-Rust-black.svg?font=jetbrains-mono&logo=rust" alt="core: Rust" />
   <img src="https://shieldcn.dev/badge/UI-ratatui-black.svg?font=jetbrains-mono" alt="UI: ratatui" />
@@ -43,7 +45,7 @@ kuizer duplicates ~/Downloads --verify     # duplicate files, compared byte by b
 kuizer --json scan ~/projects              # every command prints JSON with --json
 ```
 
-Configuration lives in `~/.config/kuizer/config.toml`; every key is optional. A directory containing a `.kuizerignore` file is skipped along with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. See [docs/config.example.toml](docs/config.example.toml) for the config keys, [docs/design.md](docs/design.md) for the design and roadmap, and [docs/kuizer-migration.md](docs/kuizer-migration.md) for the planned `kuizer code` dead-code command.
+Configuration lives in `~/.config/kuizer/config.toml`; every key is optional. A directory containing a `.kuizerignore` file is skipped along with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. See [kuizer.app/docs/configuration](https://kuizer.app/docs/configuration) and [docs/config.example.toml](docs/config.example.toml) for the config keys, [docs/design.md](docs/design.md) for the design and roadmap, and [docs/kuizer-migration.md](docs/kuizer-migration.md) for the planned `kuizer code` dead-code command.
 
 ## Desktop app
 

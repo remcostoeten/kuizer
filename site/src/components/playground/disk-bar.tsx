@@ -4,6 +4,7 @@ import { demoItems, type Category } from '@/content/demo'
 import { formatBytes } from '@/shared/helpers/bytes'
 import type { Action } from './reducer'
 import { currentId, itemState, type State } from './model'
+import { segmentTip } from './tips'
 
 type Props = {
   state: State
@@ -55,7 +56,7 @@ export function DiskBar({ state, dispatch }: Props) {
               key={item.id}
               type="button"
               tabIndex={-1}
-              title={`${item.path} · ${formatBytes(item.bytes)}`}
+              data-tip={segmentTip(item, entry)}
               aria-label={`${item.path}, ${formatBytes(item.bytes)}`}
               onClick={() => dispatch({ type: 'focusItem', id: item.id })}
               style={{ flex: `${item.bytes} 1 3px` }}

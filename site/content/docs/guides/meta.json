@@ -1,0 +1,5 @@
+{
+  "title": "Guides",
+  "icon": "Compass",
+  "pages": ["cli", "terminal-ui", "desktop-app", "history-and-restore"]
+}

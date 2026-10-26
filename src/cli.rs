@@ -18,6 +18,7 @@ const STYLES: Styles = Styles::styled()
 const HEADER: &str = "\x1b[1;32m";
 const LITERAL: &str = "\x1b[1;36m";
 const DIM: &str = "\x1b[90m";
+const WEBSITE: &str = "https://kuizer.app";
 const RESET: &str = "\x1b[0m";
 
 const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
@@ -115,7 +116,7 @@ fn top_template() -> String {
 }
 
 fn top_examples() -> String {
-    examples(&[
+    let mut out = examples(&[
         ("kuizer", "", "Browse the current directory"),
         ("kuizer", "~/apps ~/work", "Browse two folders at once"),
         (
@@ -147,7 +148,9 @@ fn top_examples() -> String {
             "Open a web overview of everything",
         ),
         ("kuizer", "<command> --help", "Show help for a command"),
-    ])
+    ]);
+    out.push_str(&format!("\n{DIM}Docs: {WEBSITE}/docs{RESET}\n"));
+    out
 }
 
 fn scan_examples() -> String {

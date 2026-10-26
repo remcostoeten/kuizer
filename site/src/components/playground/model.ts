@@ -242,6 +242,18 @@ export function buildRows(state: State): ViewRow[] {
 }
 
 /**
+ * @name itemsInGroup
+ * @description The visible items that sit under one group heading, found by
+ * the key the heading row carries.
+ *
+ * @example
+ * const ids = itemsInGroup(state, row.key).map((item) => item.id)
+ */
+export function itemsInGroup(state: State, key: string): DemoItem[] {
+  return visibleItems(state).filter((item) => groupKey(state, item) === key)
+}
+
+/**
  * @name currentId
  * @description The id of the item under the cursor, or null when the list is
  * empty.

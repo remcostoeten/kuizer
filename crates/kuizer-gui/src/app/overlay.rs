@@ -274,6 +274,7 @@ impl Kuizer {
     /// rows are graded. Sections add their own controls, a spacer and `tally` after it.
     pub(super) fn list_toolbar(&self, cx: &mut Context<Self>) -> Div {
         ui::toolbar()
+            .child(self.sidebar_toggle(cx))
             .child(self.render_filter(cx))
             .when(self.tab.grades(), |this| {
                 this.child(self.safety_segments(cx))

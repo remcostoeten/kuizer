@@ -593,6 +593,22 @@ fn the_sidebar_collapses_to_icons_and_back(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_sidebar_settings_item_opens_the_settings(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = project(dir.path());
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_scan(&view, cx);
+    cx.update(|window, cx| window.draw(cx).clear());
+    let settings = cx
+        .debug_bounds("sidebar-settings")
+        .expect("the settings item");
+    cx.simulate_click(settings.center(), Modifiers::default());
+    view.read_with(cx, |app, _| assert!(app.settings.is_some()));
+}
+
+#[gpui::test]
 fn the_sidebar_opens_collapsed_when_configured(cx: &mut TestAppContext) {
     let mut config = Config::default();
     config.appearance.sidebar = Sidebar::Collapsed;

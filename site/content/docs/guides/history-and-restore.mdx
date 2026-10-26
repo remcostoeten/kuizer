@@ -1,0 +1,34 @@
+---
+title: History and restore
+description: Every kuizer deletion is logged. List past runs, see what each one freed and put items back from the trash.
+icon: FileText
+---
+
+Every deletion is logged to `~/.kuizer-history.json`. The terminal UI, the CLI and the desktop app share it. kuizer still reads `~/.sweep-history.json` from before the rename.
+
+## List runs
+
+```sh
+kuizer history
+kuizer history show s4
+kuizer --json history
+```
+
+`kuizer history` lists past runs with ids like `s4`, shows what each freed and what is still in the trash. `history show` lists every item of one run.
+
+## Restore
+
+```sh
+kuizer restore --last
+kuizer restore s4
+kuizer restore s4.2 s4.5
+kuizer restore s4 --dry-run
+```
+
+A run id restores every item of the run. An item id like `s4.2` restores one. Items move from the trash back to where they were.
+
+<Callout type="warn" title="Restore never overwrites">
+  An item whose path exists again, or that already left the trash, is skipped and reported.
+</Callout>
+
+Permanent deletions are not in the trash and cannot be restored. See [Safety and deletion](/docs/concepts/safety).

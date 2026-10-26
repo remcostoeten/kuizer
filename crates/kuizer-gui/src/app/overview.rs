@@ -35,7 +35,14 @@ impl Kuizer {
             .map_or(0, |(_, candidate)| candidate.usage.allocated);
 
         scroll("overview")
-            .child(div().flex().child(self.overview_switch(cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::L))
+                    .child(self.sidebar_toggle(cx))
+                    .child(self.overview_switch(cx)),
+            )
             .child(
                 div()
                     .flex()

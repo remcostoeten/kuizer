@@ -1,0 +1,55 @@
+---
+title: Quick start
+description: Scan a folder, review what kuizer found and move the safe items to the trash.
+icon: Rocket
+---
+
+<Steps>
+<Step>
+
+### Browse a folder
+
+Run `kuizer` with a folder. It opens an interactive list that fills in while the scan runs. Press `?` for the keys.
+
+```sh
+kuizer ~/projects
+```
+
+</Step>
+<Step>
+
+### Select what to remove
+
+Move with `j` and `k`, press `space` to select an item and `a` to select every safe item in view. `/` filters by path or rule.
+
+</Step>
+<Step>
+
+### Delete the selection
+
+Press `d`. Selected items move to the trash by default, after kuizer checks each one again.
+
+</Step>
+</Steps>
+
+## Without the interface
+
+`kuizer scan` prints results and `kuizer clean` removes them. Use `--dry-run` to see what a clean would remove.
+
+```sh
+kuizer scan ~/projects --min-size 50MB
+kuizer clean ~/projects --dry-run
+kuizer clean ~/projects --idle 3mo
+```
+
+`--idle 3mo` keeps only projects you have not touched for three months, so the dependencies of what you work on today stay.
+
+## Undo a run
+
+Every deletion is logged. Put the last run back from the trash with:
+
+```sh
+kuizer restore --last
+```
+
+See [History and restore](/docs/guides/history-and-restore) for run ids and single items.

@@ -5,7 +5,7 @@ html {
 }
 
 body {
-  background: var(--bg);
+  background: linear-gradient(to bottom, var(--bg), var(--bg-deep));
   color: var(--fg);
   font-family: var(--font-sans);
   overflow-x: hidden;
@@ -34,8 +34,10 @@ samp {
   font-feature-settings: 'liga' 0;
 }
 
-:where(:focus-visible) {
-  outline: none;
+@layer base {
+  :where(:focus-visible) {
+    outline: none;
+  }
 }
 
 @utility wrap {
@@ -96,12 +98,11 @@ samp {
   @media (hover: hover) and (pointer: fine) {
     &:hover {
       background: var(--tile);
-      border-color: var(--line-strong);
     }
   }
 
   &:focus-visible {
-    border-color: var(--fg);
+    background: var(--tile);
     transition: none;
   }
 }
@@ -164,10 +165,22 @@ samp {
   &[aria-hidden='false'] {
     transition-delay: 70ms, 70ms, 0ms;
   }
+}
 
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-  }
+@utility roll-window {
+  vertical-align: baseline;
+  height: 1lh;
+  clip-path: inset(0);
+  mask-image: linear-gradient(to bottom, transparent, black 12%, black 88%, transparent);
+}
+
+@utility roll-strip {
+  display: flex;
+  flex-direction: column;
+  translate: 0 calc(var(--digit, 0) * -1lh);
+  transition: translate 900ms var(--ease-swap);
+  animation: roll-in 900ms var(--ease-swap) both;
+  animation-delay: calc(360ms + var(--delay, 0ms));
 }
 
 @utility pill {
@@ -183,19 +196,51 @@ samp {
   color: var(--fg-muted);
   transition:
     color 150ms ease,
-    border-color 150ms ease;
+    background-color 150ms ease;
 
   @media (hover: hover) and (pointer: fine) {
     &:hover {
       color: var(--fg);
-      border-color: var(--line-strong);
+      background: var(--tile);
     }
   }
 
   &:focus-visible {
     color: var(--fg);
-    border-color: var(--brand);
+    background: var(--tile);
     transition: none;
+  }
+
+  & .pill-arrow {
+    overflow: visible;
+  }
+
+  & .pill-arrow-shaft {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0.167;
+    transition: stroke-dashoffset 280ms var(--ease-out);
+  }
+
+  & .pill-arrow-head {
+    transition: transform 280ms var(--ease-out);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover .pill-arrow-shaft {
+      stroke-dashoffset: 0;
+    }
+
+    &:hover .pill-arrow-head {
+      transform: translateX(2px);
+    }
+  }
+
+  &:focus-visible .pill-arrow-shaft {
+    stroke-dashoffset: 0;
+  }
+
+  &:focus-visible .pill-arrow-head {
+    transform: translateX(2px);
   }
 }
 
@@ -252,7 +297,8 @@ samp {
   }
 
   &:focus-visible {
-    color: var(--brand);
+    color: var(--fg);
+    background: var(--tile);
     transition: none;
   }
 }

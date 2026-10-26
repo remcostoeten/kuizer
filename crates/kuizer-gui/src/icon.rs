@@ -29,6 +29,7 @@ pub enum Icon {
     Sidebar,
     Search,
     Folder,
+    Settings,
 }
 
 /// How a layer moves while its icon plays the hover animation. Shifts are in viewbox units,
@@ -45,7 +46,7 @@ pub enum Motion {
 type Layer = (&'static str, Motion);
 
 impl Icon {
-    pub const ALL: [Icon; 12] = [
+    pub const ALL: [Icon; 13] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
@@ -58,6 +59,7 @@ impl Icon {
         Self::Sidebar,
         Self::Search,
         Self::Folder,
+        Self::Settings,
     ];
 
     pub fn name(self) -> &'static str {
@@ -74,6 +76,7 @@ impl Icon {
             Self::Sidebar => "sidebar",
             Self::Search => "search",
             Self::Folder => "folder",
+            Self::Settings => "settings",
         }
     }
 
@@ -179,6 +182,13 @@ impl Icon {
                 r#"<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"#,
                 Motion::Still,
             )],
+            Self::Settings => &[
+                (
+                    r#"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>"#,
+                    Motion::Spin(360.),
+                ),
+                (r#"<circle cx="12" cy="12" r="3"/>"#, Motion::Still),
+            ],
         }
     }
 
