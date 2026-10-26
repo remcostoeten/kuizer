@@ -65,15 +65,18 @@ pub mod size {
     pub const ACTIONS: f32 = 196.;
     pub const LABEL: f32 = 240.;
     pub const KEYS: f32 = 250.;
-    pub const FILTER: f32 = 300.;
-    /// The narrowest the titlebar search shrinks to when the window runs out of room.
-    pub const SEARCH: f32 = 160.;
+    pub const FILTER: f32 = 240.;
     pub const LIST: f32 = 340.;
     pub const MENU: f32 = 220.;
     pub const DIALOG: f32 = 520.;
     pub const PALETTE: f32 = 560.;
     pub const PAGE: f32 = 760.;
     pub const SHORTCUTS: f32 = 820.;
+    pub const SETTINGS: f32 = 720.;
+    pub const SETTINGS_HEIGHT: f32 = 440.;
+    pub const SETTINGS_NAV: f32 = 192.;
+    pub const SWITCH: f32 = 32.;
+    pub const SWITCH_HEIGHT: f32 = 18.;
     /// How far below the titlebar the command palette opens.
     pub const DROP: f32 = 72.;
 }

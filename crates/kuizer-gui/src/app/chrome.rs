@@ -6,7 +6,8 @@ impl Kuizer {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let roots = if matches!(self.phase, Phase::Start) {
+        let start = matches!(self.phase, Phase::Start);
+        let roots = if start {
             "Choose what to scan".to_owned()
         } else {
             self.roots
@@ -152,16 +153,22 @@ impl Kuizer {
                                 .id("roots")
                                 .absolute()
                                 .inset_0()
-                                .truncate()
+                                .flex()
+                                .items_center()
+                                .gap(unit(space::S))
                                 .text_color(theme::muted())
-                                .when(!matches!(self.phase, Phase::Start), |this| {
-                                    this.tip(tooltip::plain(roots.clone()))
+                                .when(!start, |this| {
+                                    this.tip(tooltip::plain(roots.clone())).child(icon::view(
+                                        Icon::Folder,
+                                        theme::faint(),
+                                        None,
+                                        self.zoom.rem_size(),
+                                    ))
                                 })
-                                .child(roots),
+                                .child(div().flex_1().min_w_0().truncate().child(roots)),
                         ),
                     ),
             )
-            .child(self.render_search(cx))
             .child(
                 div()
                     .flex()
@@ -169,6 +176,7 @@ impl Kuizer {
                     .items_center()
                     .justify_end()
                     .gap(unit(space::L))
+                    .child(self.render_search(cx))
                     .children(partial)
                     .children(stale)
                     .child(actions)
@@ -374,12 +382,14 @@ impl Kuizer {
         let active = self.tab == tab;
         let collapsed = self.collapsed;
         let figure = self.tab_figure(tab);
+        let shortcuts = &self.config.route_shortcuts;
+        let hints = shortcuts.enabled && shortcuts.hints;
         let tip = Tooltip::new(tab.term().text())
             .title(match (collapsed, &figure) {
                 (true, Some(figure)) => format!("{}  {figure}", tab.label()),
                 _ => tab.label().to_owned(),
             })
-            .keys(tab.keys())
+            .keys(if hints { tab.keys() } else { &[] })
             .build();
         div()
             .id(tab.label())
@@ -432,13 +442,26 @@ impl Kuizer {
                                 theme::faint()
                             })
                     }))
+                    .children(
+                        tab.keys()
+                            .first()
+                            .filter(|_| hints)
+                            .map(|key| ui::kbd(commands::label(key))),
+                    )
             })
             .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
                 app.go_to(tab, cx);
             }))
     }
 
-    pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(confirm) = self.render_confirm(cx) {
+            return confirm;
+        }
+        self.render_selection_bar(cx).into_any_element()
+    }
+
+    fn render_selection_bar(&self, cx: &mut Context<Self>) -> Div {
         let stats = self.selection.stats();
         let total = stats.total();
         let empty = total.all.count == 0;

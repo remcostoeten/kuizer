@@ -1,4 +1,9 @@
+use gpui::{Animation, AnimationExt};
+
 use super::*;
+
+const INLINE_PATHS: usize = 3;
+const CONFIRM_IN: Duration = Duration::from_millis(120);
 
 impl Kuizer {
     pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
@@ -445,165 +450,7 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong());
         let body = match dialog {
-            Dialog::Confirm {
-                rule,
-                typed,
-                stats,
-                preview,
-                ..
-            } => {
-                let total = stats.total();
-                let count = total.all.count;
-                let bytes = total.all.bytes;
-                let review = total.review.count;
-                let accepted = rule.accepts(typed);
-                let permanent = stats.permanent();
-                let trashed = count - permanent;
-                let selected: Vec<(Source, &Candidate)> =
-                    preview.iter().filter_map(|&key| self.item(key)).collect();
-                let (title, verb, button) = match (permanent, trashed) {
-                    (0, count) => (
-                        format!("Move {count} items to the trash?"),
-                        "move",
-                        "Move to trash",
-                    ),
-                    (count, 0) => (
-                        format!("Delete {count} items for good?"),
-                        "delete",
-                        "Delete for good",
-                    ),
-                    _ => (
-                        format!("Remove {count} items?"),
-                        "remove",
-                        "Remove",
-                    ),
-                };
-                panel
-                    .child(
-                        div()
-                            .text_size(unit(font::TITLE))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(title),
-                    )
-                    .when(permanent == 0, |this| {
-                        this.child(div().text_color(theme::muted()).child(format!(
-                            "{} will be moved to the trash. Everything stays restorable with kuizer restore until the trash is emptied.",
-                            theme::bytes(bytes)
-                        )))
-                    })
-                    .when(permanent > 0, |this| {
-                        this.child(
-                            div()
-                                .debug_selector(|| "permanent-warning".to_owned())
-                                .text_color(theme::danger())
-                                .child(format!(
-                                    "{permanent} {} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.{}",
-                                    permanent_kinds(stats),
-                                    if stats.source(Source::Toolchain).all.count > 0 {
-                                        " The tool downloads a toolchain version again when it is needed."
-                                    } else {
-                                        ""
-                                    }
-                                )),
-                        )
-                        .child(div().text_color(theme::muted()).child(if trashed > 0 {
-                            format!(
-                                "{} in total. The other {trashed} items move to the trash and stay restorable.",
-                                theme::bytes(bytes)
-                            )
-                        } else {
-                            format!("{} in total.", theme::bytes(bytes))
-                        }))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(unit(space::XS))
-                            .p(unit(space::L))
-                            .rounded(theme::radius_panel())
-                            .bg(theme::panel())
-                            .children(selected.iter().take(LIST_LIMIT).map(|(_, candidate)| {
-                                div()
-                                    .flex()
-                                    .gap(unit(space::M))
-                                    .child(
-                                        div()
-                                            .id(("dialog-path", candidate.id))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .tip(tooltip::path(&candidate.path))
-                                            .child(self.dialog_path(candidate)),
-                                    )
-                                    .child(ui::safety_label(
-                                        ("dialog-safety", candidate.id),
-                                        candidate.rule.safety == Safety::Review,
-                                    ))
-                                    .child(
-                                        div()
-                                            .w(unit(col::M))
-                                            .text_right()
-                                            .text_color(theme::muted())
-                                            .font_weight(FontWeight::MEDIUM)
-.child(theme::bytes(candidate.usage.allocated)),
-                                    )
-                            }))
-                            .when(count > LIST_LIMIT, |this| {
-                                this.child(div().text_color(theme::faint()).child(format!(
-                                    "and {} more",
-                                    count - LIST_LIMIT
-                                )))
-                            }),
-                    )
-                    .when_some(
-                        match rule {
-                            Confirmation::TypeCount(count) => Some(*count),
-                            Confirmation::Simple => None,
-                        },
-                        |this, count| {
-                            this.child(div().text_color(theme::review()).child(format!(
-                                "{review} of these are marked review. Type {count} to {verb} all {count} items."
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .h(unit(size::ROW))
-                                    .px(unit(space::L))
-                                    .rounded(theme::radius_control())
-                                    .bg(theme::background())
-                                    .border_1()
-                                    .border_color(if accepted {
-                                        theme::primary()
-                                    } else {
-                                        theme::border_strong()
-                                    })
-                                    .child(typed.clone())
-                                    .child(div().w(unit(size::HAIR)).h(unit(size::CARET)).bg(theme::text())),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(unit(space::M))
-                            .child(
-                                ui::button("cancel", "Cancel", ButtonKind::Secondary, true).tip(Tooltip::new("Keep everything where it is").keys(&["Esc"]).build())
-                                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                        app.dialog = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                ui::button("confirm", button, ButtonKind::Primary, accepted).tip(Tooltip::new(if permanent > 0 { "Remove these items, toolchains for good" } else { "Move these items to the trash" }).keys(&["Enter"]).build())
-                                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                        app.accept(cx);
-                                    })),
-                            ),
-                    )
-            }
+            Dialog::Confirm { .. } => return None,
             Dialog::Branches(scope) => self.render_branch_dialog(scope, panel, cx),
             Dialog::Running { permanent } => panel
                 .child(
@@ -701,6 +548,207 @@ impl Kuizer {
                 .child(body)
                 .into_any_element(),
         )
+    }
+
+    /// The trash confirmation, drawn in place of the status bar.
+    pub(super) fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Dialog::Confirm {
+            rule,
+            typed,
+            stats,
+            preview,
+            ..
+        }) = &self.dialog
+        else {
+            return None;
+        };
+        let total = stats.total();
+        let count = total.all.count;
+        let bytes = total.all.bytes;
+        let review = total.review.count;
+        let accepted = rule.accepts(typed);
+        let permanent = stats.permanent();
+        let trashed = count - permanent;
+        let items = plural(count, "item");
+        let (title, verb, button) = match (permanent, trashed) {
+            (0, _) => (
+                format!("Move {items} to the trash?"),
+                "move",
+                "Move to trash",
+            ),
+            (_, 0) => (
+                format!("Delete {items} for good?"),
+                "delete",
+                "Delete for good",
+            ),
+            _ => (format!("Remove {items}?"), "remove", "Remove"),
+        };
+        let selected: Vec<(Source, &Candidate)> =
+            preview.iter().filter_map(|&key| self.item(key)).collect();
+        let panel = div()
+            .id("confirm-panel")
+            .debug_selector(|| "confirm-panel".to_owned())
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(unit(space::S))
+            .py(unit(space::M))
+            .px(unit(space::GUTTER))
+            .bg(theme::panel())
+            .border_t_1()
+            .border_color(theme::border_strong())
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(unit(space::M))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(div().text_color(theme::muted()).child(if permanent > 0 && trashed > 0 {
+                        format!(
+                            "{} in total, {trashed} of them restorable from the trash.",
+                            theme::bytes(bytes)
+                        )
+                    } else if permanent > 0 {
+                        format!("{} in total.", theme::bytes(bytes))
+                    } else {
+                        format!(
+                            "{} stays restorable with kuizer restore until the trash is emptied.",
+                            theme::bytes(bytes)
+                        )
+                    })),
+            )
+            .when(permanent > 0, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "permanent-warning".to_owned())
+                        .text_color(theme::danger())
+                        .child(format!(
+                            "{permanent} {} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.{}",
+                            permanent_kinds(stats),
+                            if stats.source(Source::Toolchain).all.count > 0 {
+                                " The tool downloads a toolchain version again when it is needed."
+                            } else {
+                                ""
+                            }
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .text_color(theme::muted())
+                    .children(selected.iter().take(INLINE_PATHS).map(|(_, candidate)| {
+                        div()
+                            .flex()
+                            .gap(unit(space::M))
+                            .child(
+                                div()
+                                    .id(("dialog-path", candidate.id))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .tip(tooltip::path(&candidate.path))
+                                    .child(self.dialog_path(candidate)),
+                            )
+                            .child(ui::safety_label(
+                                ("dialog-safety", candidate.id),
+                                candidate.rule.safety == Safety::Review,
+                            ))
+                            .child(
+                                div()
+                                    .w(unit(col::M))
+                                    .text_right()
+                                    .child(theme::bytes(candidate.usage.allocated)),
+                            )
+                    }))
+                    .when(count > INLINE_PATHS, |this| {
+                        this.child(
+                            div()
+                                .text_color(theme::faint())
+                                .child(format!("and {} more", count - INLINE_PATHS)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::M))
+                    .when_some(
+                        match rule {
+                            Confirmation::TypeCount(count) => Some(*count),
+                            Confirmation::Simple => None,
+                        },
+                        |this, count| {
+                            this.child(div().text_color(theme::review()).child(format!(
+                                "{review} marked review. Type {count} to {verb} all {count}:"
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .w(unit(col::M))
+                                    .h(unit(size::ROW))
+                                    .px(unit(space::L))
+                                    .rounded(theme::radius_control())
+                                    .bg(theme::background())
+                                    .border_1()
+                                    .border_color(if accepted {
+                                        theme::primary()
+                                    } else {
+                                        theme::border_strong()
+                                    })
+                                    .child(typed.clone())
+                                    .child(
+                                        div()
+                                            .w(unit(size::HAIR))
+                                            .h(unit(size::CARET))
+                                            .bg(theme::text()),
+                                    ),
+                            )
+                        },
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
+                            .tip(
+                                Tooltip::new("Keep everything where it is")
+                                    .keys(&["Esc"])
+                                    .build(),
+                            )
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.dialog = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::button("confirm", button, ButtonKind::Primary, accepted)
+                            .tip(
+                                Tooltip::new(if permanent > 0 {
+                                    "Remove these items, toolchains for good"
+                                } else {
+                                    "Move these items to the trash"
+                                })
+                                .keys(&["Enter"])
+                                .build(),
+                            )
+                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.accept(cx);
+                            })),
+                    ),
+            );
+        Some(if motion::reduced() {
+            panel.into_any_element()
+        } else {
+            panel
+                .with_animation(
+                    "confirm-in",
+                    Animation::new(CONFIRM_IN).with_easing(motion::ease_out),
+                    |panel, progress| panel.opacity(0.3 + 0.7 * progress),
+                )
+                .into_any_element()
+        })
     }
 
     pub(super) fn dialog_path(&self, candidate: &Candidate) -> String {

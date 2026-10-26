@@ -28,6 +28,7 @@ pub enum Icon {
     Issues,
     Sidebar,
     Search,
+    Folder,
 }
 
 /// How a layer moves while its icon plays the hover animation. Shifts are in viewbox units,
@@ -44,7 +45,7 @@ pub enum Motion {
 type Layer = (&'static str, Motion);
 
 impl Icon {
-    pub const ALL: [Icon; 11] = [
+    pub const ALL: [Icon; 12] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
@@ -56,6 +57,7 @@ impl Icon {
         Self::Issues,
         Self::Sidebar,
         Self::Search,
+        Self::Folder,
     ];
 
     pub fn name(self) -> &'static str {
@@ -71,6 +73,7 @@ impl Icon {
             Self::Issues => "issues",
             Self::Sidebar => "sidebar",
             Self::Search => "search",
+            Self::Folder => "folder",
         }
     }
 
@@ -171,6 +174,10 @@ impl Icon {
             Self::Search => &[(
                 r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#,
                 Motion::Wiggle(14.),
+            )],
+            Self::Folder => &[(
+                r#"<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"#,
+                Motion::Still,
             )],
         }
     }

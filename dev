@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import curses
+import hashlib
+import json
 import os
 import platform
 import re
@@ -9,9 +11,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
+import tempfile
 import termios
 import time
 import tty
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -19,6 +24,7 @@ from typing import Callable, Optional
 ROOT = Path(__file__).resolve().parent
 SITE = ROOT / "site"
 REPOSITORY_URL = "https://github.com/remcostoeten/kuizer"
+RELEASES_API = "https://api.github.com/repos/remcostoeten/kuizer/releases/latest"
 TEST_FLAGS = ("-j", "2", "--", "--test-threads=2")
 SITE_PORT = "4173"
 PACKAGES = ROOT / "target/packages"
@@ -195,13 +201,85 @@ def publish_version(extra: list[str]) -> None:
     print(f"{REPOSITORY_URL}/actions")
 
 
-def run_appimage(extra: list[str]) -> None:
-    images = sorted(PACKAGES.glob("*.AppImage"), key=lambda path: path.stat().st_mtime)
-    if not images:
-        raise FileNotFoundError(f"no AppImage in {PACKAGES.relative_to(ROOT)}")
-    code = subprocess.call([str(images[-1]), *extra])
-    if code != 0:
-        raise OSError(f"{images[-1].name} exited with {code}")
+def release_target() -> str:
+    machine = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(platform.machine().lower())
+    suffix = {"Linux": "unknown-linux-gnu", "Darwin": "apple-darwin"}.get(SYSTEM)
+    if machine is None or suffix is None:
+        raise OSError(f"no release build for {SYSTEM} {platform.machine()}")
+    return f"{machine}-{suffix}"
+
+
+def latest_release_tag() -> str:
+    request = urllib.request.Request(RELEASES_API, headers={"Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)["tag_name"]
+
+
+def download_release(tag: str, binary: Path) -> None:
+    name = f"kuizer-gui-{release_target()}"
+    base = f"{REPOSITORY_URL}/releases/download/{tag}/{name}.tar.xz"
+    print(f"downloading {base}")
+    with tempfile.TemporaryDirectory(prefix="kuizer-release-") as scratch:
+        archive = Path(scratch) / f"{name}.tar.xz"
+        with urllib.request.urlopen(base, timeout=30) as response, archive.open("wb") as out:
+            shutil.copyfileobj(response, out)
+        with urllib.request.urlopen(f"{base}.sha256", timeout=30) as response:
+            expected = response.read().decode().split()[0]
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+            raise OSError(f"checksum mismatch for {archive.name}")
+        unpacked = Path(scratch) / "unpacked"
+        unpacked.mkdir()
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(unpacked, filter="data")
+        found = next(unpacked.rglob("kuizer-gui"), None)
+        if found is None or not found.is_file():
+            raise OSError("kuizer-gui is missing from the release archive")
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(found, binary)
+        binary.chmod(0o755)
+
+
+def run_release(extra: list[str]) -> None:
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "kuizer/releases"
+    try:
+        tag = latest_release_tag()
+    except (OSError, KeyError, ValueError) as error:
+        cached = sorted(cache.glob("*/kuizer-gui"), key=lambda path: path.stat().st_mtime)
+        if not cached:
+            raise OSError(f"could not look up the latest release and nothing is cached: {error}") from error
+        print(f"could not look up the latest release ({error}), using cached {cached[-1].parent.name}")
+        tag = cached[-1].parent.name
+    binary = cache / tag / "kuizer-gui"
+    if not binary.is_file():
+        download_release(tag, binary)
+    print(f"running release {tag}")
+    code = wait_interruptibly(subprocess.Popen([str(binary), *extra]))
+    if code not in (0, 130, -signal.SIGINT):
+        raise OSError(f"release {tag} exited with {code}")
+
+
+def installed_packages() -> list[Item]:
+    binary = Path("/usr/bin/kuizer-gui")
+    queries = (
+        ("deb", ("dpkg-query", "-W", "-f=${Version}", "kuizer-gui")),
+        ("rpm", ("rpm", "-q", "--qf", "%{VERSION}", "kuizer-gui")),
+        ("pacman", ("pacman", "-Q", "kuizer-gui")),
+    )
+    found: list[Item] = []
+    for key, query in queries:
+        if shutil.which(query[0]) is None or not binary.is_file():
+            continue
+        result = subprocess.run(query, capture_output=True, text=True)
+        if result.returncode == 0:
+            version = result.stdout.split()[-1] if result.stdout.split() else ""
+            found.append(leaf(key, f"Installed {key}", Step((str(binary),)), hint=f"{binary} {version}".strip(), prompt=Prompt("folder to open", ".")))
+    home = Path.home()
+    folders = (PACKAGES, home / "Applications", home / ".local/bin", home / "Downloads")
+    images = [image for folder in folders if folder.is_dir() for image in folder.glob("*.AppImage") if "kuizer" in image.name.lower()]
+    if images:
+        newest = max(images, key=lambda image: image.stat().st_mtime)
+        found.append(leaf("appimage", "Installed AppImage", Step((str(newest),)), hint=str(newest), prompt=Prompt("folder to open", ".")))
+    return found
 
 
 def desktop_builds() -> Item:
@@ -250,11 +328,10 @@ def build_tree() -> Item:
     root = Item("", "kuizer", children=[
         Item("build", "Build", "binaries, packages, site", children=[build_all, build_desktop, build_cli, build_site]),
         Item("run", "Run", "start an app", children=[
-            Item("desktop", "Desktop app", "release, debug or AppImage", children=[
-                leaf("release", "Release", cargo("run", "--release", "-p", "kuizer-gui", "--"), prompt=Prompt("folder to open", ".")),
-                leaf("debug", "Debug", cargo("run", "-p", "kuizer-gui", "--"), prompt=Prompt("folder to open", ".")),
-                leaf("appimage", "AppImage", packager("appimage"), Step(action=run_appimage, label="run the newest AppImage", system="Linux"), prompt=Prompt("folder to open", "."), hint="package, then launch it"),
-            ]),
+            leaf("local", "Local code", cargo("run", "-p", "kuizer-gui", "--"), prompt=Prompt("folder to open", "."), hint="build and run the GUI from this checkout"),
+            *installed_packages(),
+            leaf("release", "Latest release", Step(action=run_release, label="download the latest GitHub release if needed, then run it"), prompt=Prompt("folder to open", "."), hint="cached after the first download"),
+            separator("other"),
             leaf("cli", "CLI", cargo("run", "--release", "-p", "kuizer", "--"), prompt=Prompt("kuizer arguments")),
             leaf("site", "Site dev server", bun("run", "dev")),
             leaf("site-preview", "Site static preview", bun("run", "build"), Step(("python3", "-m", "http.server", SITE_PORT, "--directory", str(SITE / "out"))), hint=f"build, then serve site/out on :{SITE_PORT}"),
@@ -298,6 +375,17 @@ def wait_for_key(message: str) -> None:
         print()
 
 
+def wait_interruptibly(process: "subprocess.Popen[bytes]") -> int:
+    interrupts = 0
+    while True:
+        try:
+            return process.wait()
+        except KeyboardInterrupt:
+            interrupts += 1
+            if interrupts > 1:
+                process.terminate()
+
+
 def run_step(step: Step, extra: list[str]) -> int:
     print(f"\n\033[2m$ {step.describe()}\033[0m\n", flush=True)
     if step.system and step.system != SYSTEM:
@@ -318,15 +406,7 @@ def run_step(step: Step, extra: list[str]) -> int:
             hint = ", install it with ./dev install packaging-tools" if tool == step.requires else ""
             print(f"\033[31m{tool} is not installed or not on PATH{hint}\033[0m")
             return 127
-    process = subprocess.Popen(step.argv + tuple(extra), cwd=step.cwd, env={**os.environ, **dict(step.env)})
-    interrupts = 0
-    while True:
-        try:
-            return process.wait()
-        except KeyboardInterrupt:
-            interrupts += 1
-            if interrupts > 1:
-                process.terminate()
+    return wait_interruptibly(subprocess.Popen(step.argv + tuple(extra), cwd=step.cwd, env={**os.environ, **dict(step.env)}))
 
 
 def run_item(item: Item, path: list[str], extra: list[str]) -> int:

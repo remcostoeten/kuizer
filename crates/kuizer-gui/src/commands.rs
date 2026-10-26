@@ -18,6 +18,7 @@ pub enum Command {
     Palette,
     Quit,
     Shortcuts,
+    Settings,
     GoTo(Tab),
     NextTab,
     PreviousTab,
@@ -181,6 +182,7 @@ fn build_table() -> Vec<Spec> {
             .keys(&["secondary-q"])
             .global(),
         Spec::new(Command::Shortcuts, "Keyboard shortcuts", General).keys(&["?"]),
+        Spec::new(Command::Settings, "Settings", General).keys(&["secondary-,"]),
         Spec::new(Command::Rescan, "Rescan", General).keys(&["secondary-r"]),
         Spec::new(Command::NewScan, "New scan", General).keys(&["secondary-n"]),
         Spec::new(
@@ -242,7 +244,7 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::SelectAll, "Select all in this list", Lists).keys(&["secondary-a"]),
         Spec::new(Command::SelectNone, "Select none in this list", Lists)
             .keys(&["secondary-shift-a"]),
-        Spec::new(Command::Trash, "Move selected to trash", Lists).keys(&["enter", "delete"]),
+        Spec::new(Command::Trash, "Move selected to trash", Lists).keys(&["enter", "delete", "d"]),
         Spec::new(Command::Reveal, "Reveal in file manager", Lists).keys(&["o"]),
         Spec::new(Command::CopyPath, "Copy path", Lists).keys(&["y"]),
         Spec::new(Command::OpenMenu, "Open item menu", Lists).keys(&["menu", "shift-f10"]),
@@ -405,6 +407,14 @@ fn names(want: &Keystroke, keystroke: &Keystroke) -> bool {
     if have.control != need.control || have.alt != need.alt || have.platform != need.platform {
         return false;
     }
+    if need.shift
+        && !need.control
+        && !need.platform
+        && !need.alt
+        && let Some(shifted) = shifted_digit(&want.key)
+    {
+        return (keystroke.key == want.key && have.shift) || keystroke.key == shifted;
+    }
     let symbol = want.key.chars().count() == 1 && !want.key.chars().all(char::is_alphanumeric);
     if symbol && !need.control && !need.platform && !need.alt {
         return match keystroke.key_char.as_deref() {
@@ -416,6 +426,23 @@ fn names(want: &Keystroke, keystroke: &Keystroke) -> bool {
         return keystroke.key == want.key;
     }
     keystroke.key == want.key && have.shift == need.shift
+}
+
+/// The symbol Shift+digit types on a US layout. Linux reports that key as the symbol with Shift
+/// dropped, so `shift-2` has to be recognised as `@` there.
+fn shifted_digit(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "1" => "!",
+        "2" => "@",
+        "3" => "#",
+        "4" => "$",
+        "5" => "%",
+        "6" => "^",
+        "7" => "&",
+        "8" => "*",
+        "9" => "(",
+        _ => return None,
+    })
 }
 
 /// @name label
@@ -497,6 +524,20 @@ mod tests {
         };
         assert!(matches("?", &shifted));
         assert!(!matches("/", &shifted));
+    }
+
+    #[test]
+    fn shift_digit_matches_the_digit_and_the_symbol_linux_reports() {
+        let digit = key("shift-2");
+        let symbol = Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "@".to_owned(),
+            key_char: Some("@".to_owned()),
+        };
+        assert!(matches("shift-2", &digit));
+        assert!(matches("shift-2", &symbol));
+        assert!(!matches("shift-2", &key("2")));
+        assert!(!matches("shift-3", &symbol));
     }
 
     #[test]

@@ -78,7 +78,11 @@ impl Kuizer {
                     .tip(tooltip::term(Term::Command))
                     .child("Command"),
             );
-        scroll("history")
+        let toolbar = self
+            .list_toolbar(cx)
+            .child(div().flex_1())
+            .child(self.tally(Tab::History, None));
+        let list = scroll("history")
             .debug_selector(|| "history-list".to_owned())
             .track_scroll(&self.scroll_for(Tab::History))
             .child(
@@ -223,7 +227,8 @@ impl Kuizer {
                             .child("Restores are counted in Items removed as restored")
                     }),
             )
-            .into_any_element()
+            .into_any_element();
+        framed(toolbar, list)
     }
 
     pub(super) fn restore_cell(

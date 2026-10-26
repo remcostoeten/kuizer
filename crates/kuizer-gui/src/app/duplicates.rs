@@ -218,7 +218,11 @@ impl Kuizer {
             .map_or(0, kuizer::dupes::Group::reclaimable);
         let cursor = self.cursor_target();
         let needle = self.needle(Tab::Duplicates);
-        scroll("duplicates")
+        let toolbar = self
+            .list_toolbar(cx)
+            .child(div().flex_1())
+            .child(self.tally(Tab::Duplicates, None));
+        let list = scroll("duplicates")
             .debug_selector(|| "duplicate-list".to_owned())
             .track_scroll(&self.scroll_for(Tab::Duplicates))
             .child(
@@ -350,7 +354,8 @@ impl Kuizer {
                     this.child(ui::empty("No duplicate files found"))
                 }),
             )
-            .into_any_element()
+            .into_any_element();
+        framed(toolbar, list)
     }
 }
 

@@ -845,7 +845,7 @@ mod tests {
                 "a modified click selects instead of opening"
             );
         });
-        cx.simulate_keystrokes("2");
+        cx.simulate_keystrokes("shift-2");
         view.read_with(cx, |app, _| {
             assert_eq!(app.tab, Tab::Artifacts);
             let listed: HashSet<(Source, u64)> = app

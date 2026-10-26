@@ -13,12 +13,14 @@ pub(super) type Slot = (usize, usize);
 pub(super) struct Listed {
     pub slots: Rc<[Slot]>,
     pub targets: Rc<[Target]>,
+    pub bytes: u64,
 }
 
 struct ListKey {
     generation: u64,
     len: usize,
     text: String,
+    safety: Option<Safety>,
 }
 
 #[derive(Default)]
@@ -91,44 +93,50 @@ fn list_len(report: &Report, tab: Tab) -> usize {
     }
 }
 
-fn list_rows(report: &Report, tab: Tab, needle: Option<&str>) -> Listed {
+fn list_rows(report: &Report, tab: Tab, needle: Option<&str>, safety: Option<Safety>) -> Listed {
     let mut slots: Vec<Slot> = Vec::new();
     let mut targets: Vec<Target> = Vec::new();
+    let mut bytes = 0;
+    let graded =
+        |candidate: &Candidate| safety.is_none_or(|safety| candidate.rule.safety == safety);
     match tab {
         Tab::Overview | Tab::Artifacts => {}
         Tab::Caches => {
             for (at, (cache, candidate)) in report.caches.iter().enumerate() {
-                if cache_matches(needle, cache, candidate) {
+                if graded(candidate) && cache_matches(needle, cache, candidate) {
                     slots.push((at, 0));
                     targets.push(Target::Item(
                         Source::Cache,
                         candidate.id,
                         candidate.path.clone(),
                     ));
+                    bytes += candidate.usage.allocated;
                 }
             }
         }
         Tab::Toolchains => {
             for (at, (toolchain, candidate)) in report.toolchains.iter().enumerate() {
-                if toolchain_matches(needle, toolchain, candidate) {
+                if graded(candidate) && toolchain_matches(needle, toolchain, candidate) {
                     slots.push((at, 0));
                     targets.push(Target::Item(
                         Source::Toolchain,
                         candidate.id,
                         candidate.path.clone(),
                     ));
+                    bytes += candidate.usage.allocated;
                 }
             }
         }
         Tab::Docker => {
             for (at, (item, candidate)) in report.docker.iter().enumerate() {
-                if docker_matches(needle, item, candidate) {
+                if graded(candidate) && docker_matches(needle, item, candidate) {
                     slots.push((at, 0));
                     targets.push(Target::Item(
                         Source::Docker,
                         candidate.id,
                         candidate.path.clone(),
                     ));
+                    bytes += candidate.usage.allocated;
                 }
             }
         }
@@ -178,6 +186,7 @@ fn list_rows(report: &Report, tab: Tab, needle: Option<&str>) -> Listed {
     Listed {
         slots: slots.into(),
         targets: targets.into(),
+        bytes,
     }
 }
 
@@ -187,20 +196,23 @@ impl Kuizer {
             return Listed::default();
         };
         let text = self.filters.get(&tab).map_or("", |text| text.trim());
+        let safety = self.safety.filter(|_| tab.grades());
         let (generation, len) = (self.report_generation, list_len(report, tab));
         if let Some((key, listed)) = self.lists.0.borrow().get(&tab)
             && key.generation == generation
             && key.len == len
             && key.text == text
+            && key.safety == safety
         {
             return listed.clone();
         }
         let needle = self.needle(tab);
-        let listed = list_rows(report, tab, needle.as_deref());
+        let listed = list_rows(report, tab, needle.as_deref(), safety);
         let key = ListKey {
             generation,
             len,
             text: text.to_owned(),
+            safety,
         };
         self.lists.0.borrow_mut().insert(tab, (key, listed.clone()));
         listed
@@ -260,7 +272,8 @@ impl Kuizer {
             .child(column(col::XXL).child("Cache"))
             .child(head(col::XS, "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("Path"));
-        let count = self.listed(Tab::Caches).slots.len();
+        let listed = self.listed(Tab::Caches);
+        let count = listed.slots.len();
         let list = self
             .table_list(
                 "caches",
@@ -275,37 +288,9 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                ui::toolbar()
-                    .child(format!(
-                        "{} in {} caches",
-                        theme::bytes(report.cache_total(None)),
-                        report.caches.len()
-                    ))
-                    .child(
-                        div()
-                            .id("caches-safe")
-                            .tip(tooltip::term(Term::Safe))
-                            .child(format!(
-                                "safe {}",
-                                theme::bytes(report.cache_total(Some(Safety::Safe)))
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("caches-review")
-                            .text_color(theme::review())
-                            .tip(tooltip::term(Term::Review))
-                            .child(format!(
-                                "review {}",
-                                theme::bytes(report.cache_total(Some(Safety::Review)))
-                            )),
-                    )
+                self.list_toolbar(cx)
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_color(theme::faint())
-                            .child("Safe caches are rebuilt on the next install or build"),
-                    ),
+                    .child(self.tally(Tab::Caches, Some(listed.bytes))),
             )
             .child(header)
             .child(if report.caches.is_empty() {
@@ -420,7 +405,8 @@ impl Kuizer {
             .child(head(col::S, "Tool", Term::Tool))
             .child(column(col::WIDE).child("Version"))
             .child(div().flex_1().child("Path"));
-        let count = self.listed(Tab::Toolchains).slots.len();
+        let listed = self.listed(Tab::Toolchains);
+        let count = listed.slots.len();
         let list = self
             .table_list(
                 "toolchains",
@@ -435,37 +421,9 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                ui::toolbar()
-                    .child(format!(
-                        "{} in {}",
-                        theme::bytes(report.toolchain_total(None)),
-                        plural(report.toolchains.len(), "version")
-                    ))
-                    .child(
-                        div()
-                            .id("toolchains-safe")
-                            .tip(tooltip::term(Term::Safe))
-                            .child(format!(
-                                "unused {}",
-                                theme::bytes(report.toolchain_total(Some(Safety::Safe)))
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("toolchains-review")
-                            .text_color(theme::review())
-                            .tip(tooltip::term(Term::Review))
-                            .child(format!(
-                                "default or pinned {}",
-                                theme::bytes(report.toolchain_total(Some(Safety::Review)))
-                            )),
-                    )
+                self.list_toolbar(cx)
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_color(theme::faint())
-                            .child("Removed for good, not moved to the trash"),
-                    ),
+                    .child(self.tally(Tab::Toolchains, Some(listed.bytes))),
             )
             .child(header)
             .child(if report.toolchains.is_empty() {
@@ -582,10 +540,11 @@ impl Kuizer {
             .child(div().w(unit(size::CHECK)))
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::S, "Safety", Term::Safety))
-            .child(column(col::S).child("Engine"))
+            .child(head(col::S, "Engine", Term::Engine))
             .child(column(col::L).child("Object"))
             .child(div().flex_1().child("Name"));
-        let count = self.listed(Tab::Docker).slots.len();
+        let listed = self.listed(Tab::Docker);
+        let count = listed.slots.len();
         let list = self
             .table_list(
                 "docker",
@@ -607,37 +566,9 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(
-                ui::toolbar()
-                    .child(format!(
-                        "{} in {}",
-                        theme::bytes(report.docker_total(None)),
-                        plural(report.docker.len(), "object")
-                    ))
-                    .child(
-                        div()
-                            .id("docker-safe")
-                            .tip(tooltip::term(Term::Safe))
-                            .child(format!(
-                                "safe {}",
-                                theme::bytes(report.docker_total(Some(Safety::Safe)))
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("docker-review")
-                            .text_color(theme::review())
-                            .tip(tooltip::term(Term::Review))
-                            .child(format!(
-                                "review {}",
-                                theme::bytes(report.docker_total(Some(Safety::Review)))
-                            )),
-                    )
+                self.list_toolbar(cx)
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_color(theme::faint())
-                            .child("Removed through the engine, not moved to the trash"),
-                    ),
+                    .child(self.tally(Tab::Docker, Some(listed.bytes))),
             )
             .when(
                 !report.docker.is_empty() && !report.docker_issues.is_empty(),

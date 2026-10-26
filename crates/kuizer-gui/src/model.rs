@@ -362,30 +362,6 @@ impl Report {
             .sum()
     }
 
-    pub fn cache_total(&self, safety: Option<Safety>) -> u64 {
-        self.caches
-            .iter()
-            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
-            .map(|(_, candidate)| candidate.usage.allocated)
-            .sum()
-    }
-
-    pub fn toolchain_total(&self, safety: Option<Safety>) -> u64 {
-        self.toolchains
-            .iter()
-            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
-            .map(|(_, candidate)| candidate.usage.allocated)
-            .sum()
-    }
-
-    pub fn docker_total(&self, safety: Option<Safety>) -> u64 {
-        self.docker
-            .iter()
-            .filter(|(_, candidate)| safety.is_none_or(|safety| candidate.rule.safety == safety))
-            .map(|(_, candidate)| candidate.usage.allocated)
-            .sum()
-    }
-
     pub fn by_category(&self) -> Vec<Bucket<Category>> {
         let mut buckets: Vec<Bucket<Category>> = Category::ALL
             .iter()

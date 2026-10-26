@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use super::{ConfigError, Excludes};
+use super::{Config, ConfigError, Excludes};
 use crate::platform;
 
 #[derive(Debug, thiserror::Error)]
@@ -53,23 +53,11 @@ pub fn exclude_pattern(path: &Path) -> String {
 /// @example
 /// add_exclude(&config_path, &exclude_pattern(Path::new("/p/site/node_modules")))?;
 pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
-    let text = match fs::read_to_string(file) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(source) => {
-            return Err(EditError::Read {
-                path: file.to_path_buf(),
-                source,
-            });
-        }
-    };
+    let mut document = read_document(file)?;
     let parse_error = |message: String| EditError::Parse {
         path: file.to_path_buf(),
         message,
     };
-    let mut document: DocumentMut = text
-        .parse()
-        .map_err(|error: toml_edit::TomlError| parse_error(error.to_string()))?;
     let scan = document
         .entry("scan")
         .or_insert_with(|| Item::Table(Table::new()))
@@ -88,7 +76,73 @@ pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
         source: Box::new(ConfigError::Exclude(source)),
     })?;
     exclude.push(pattern);
-    let updated = document.to_string();
+    write_document(file, &document)?;
+    Ok(true)
+}
+
+/// A value the settings view writes to the config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingValue {
+    Bool(bool),
+    Text(&'static str),
+}
+
+/// @name set_setting
+/// @description Sets `table.key` in the config file at `file`, creating the file and the table
+/// when they are missing. Comments and layout of the rest of the file are kept. Only the new
+/// setting is checked before it is written, so the rest of the file may hold settings that do not
+/// validate; a value the config would refuse is not written.
+///
+/// @example
+/// set_setting(&config_path, "appearance", "motion", SettingValue::Bool(false))?;
+pub fn set_setting(
+    file: &Path,
+    table: &str,
+    key: &str,
+    value: SettingValue,
+) -> Result<(), EditError> {
+    let value = match value {
+        SettingValue::Bool(on) => Value::from(on),
+        SettingValue::Text(text) => Value::from(text),
+    };
+    let snippet = format!("[{table}]\n{key} = {value}\n");
+    Config::parse(&snippet, file).map_err(|source| EditError::Invalid {
+        path: file.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    let mut document = read_document(file)?;
+    let parse_error = |message: String| EditError::Parse {
+        path: file.to_path_buf(),
+        message,
+    };
+    let section = document
+        .entry(table)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| parse_error(format!("`{table}` is not a table")))?;
+    section.insert(key, Item::Value(value));
+    write_document(file, &document)
+}
+
+fn read_document(file: &Path) -> Result<DocumentMut, EditError> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(EditError::Read {
+                path: file.to_path_buf(),
+                source,
+            });
+        }
+    };
+    text.parse()
+        .map_err(|error: toml_edit::TomlError| EditError::Parse {
+            path: file.to_path_buf(),
+            message: error.to_string(),
+        })
+}
+
+fn write_document(file: &Path, document: &DocumentMut) -> Result<(), EditError> {
     let write_error = |source| EditError::Write {
         path: file.to_path_buf(),
         source,
@@ -97,9 +151,8 @@ pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
         fs::create_dir_all(parent).map_err(write_error)?;
     }
     let partial = file.with_extension("toml.partial");
-    fs::write(&partial, updated).map_err(write_error)?;
-    fs::rename(&partial, file).map_err(write_error)?;
-    Ok(true)
+    fs::write(&partial, document.to_string()).map_err(write_error)?;
+    fs::rename(&partial, file).map_err(write_error)
 }
 
 #[cfg(test)]
@@ -171,5 +224,38 @@ mod tests {
         fs::write(&file, "scan = 3\n").expect("write");
         assert!(add_exclude(&file, "/p/a").is_err());
         assert_eq!(fs::read_to_string(&file).expect("read"), "scan = 3\n");
+    }
+
+    #[test]
+    fn a_setting_is_written_in_place_and_a_bad_one_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("kuizer").join("config.toml");
+        set_setting(
+            &file,
+            "route_shortcuts",
+            "enabled",
+            SettingValue::Bool(false),
+        )
+        .expect("creates the file");
+        let text = "# mine\n[appearance]\nmotion = true # keep\n";
+        fs::write(&file, text).expect("write");
+        set_setting(
+            &file,
+            "appearance",
+            "sidebar",
+            SettingValue::Text("collapsed"),
+        )
+        .expect("sets");
+        set_setting(&file, "appearance", "motion", SettingValue::Bool(false)).expect("sets");
+        let written = fs::read_to_string(&file).expect("read");
+        assert!(written.starts_with("# mine\n"));
+        let config = Config::parse(&written, &file).expect("still valid");
+        assert!(!config.appearance.motion);
+        assert_eq!(config.appearance.sidebar, crate::config::Sidebar::Collapsed);
+        assert!(matches!(
+            set_setting(&file, "appearance", "sidebar", SettingValue::Text("wide")),
+            Err(EditError::Invalid { .. })
+        ));
+        assert_eq!(fs::read_to_string(&file).expect("read"), written);
     }
 }
