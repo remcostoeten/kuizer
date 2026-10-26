@@ -1252,6 +1252,28 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_theme_row_picks_a_theme_and_writes_it_to_the_config(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(bind_keys);
+        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
+        let file = dir.path().join("config.toml");
+        view.update(cx, |app, _| app.config_path = Some(file.clone()));
+        cx.simulate_keystrokes("ctrl-, right");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.config.appearance.theme, kuizer::config::Theme::Light);
+        });
+        cx.run_until_parked();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("theme = \"light\""), "{written}");
+        draw(cx);
+        assert!(cx.debug_bounds("theme-card-Dark").is_some());
+        cx.simulate_keystrokes("left");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.config.appearance.theme, kuizer::config::Theme::Dark);
+        });
+    }
+
+    #[gpui::test]
     fn escape_closes_only_the_palette(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(bind_keys);

@@ -1,6 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use gpui::{Hsla, Pixels, Rems, Rgba, hsla, px, rems, rgb, rgba};
+use kuizer::config::Theme;
 use kuizer::detect::Category;
 use kuizer::units::ByteSize;
 
@@ -72,9 +74,12 @@ pub mod size {
     pub const PALETTE: f32 = 560.;
     pub const PAGE: f32 = 760.;
     pub const SHORTCUTS: f32 = 820.;
-    pub const SETTINGS: f32 = 720.;
-    pub const SETTINGS_HEIGHT: f32 = 440.;
-    pub const SETTINGS_NAV: f32 = 192.;
+    pub const SETTINGS: f32 = 840.;
+    pub const SETTINGS_HEIGHT: f32 = 560.;
+    pub const SETTINGS_CONTENT: f32 = 600.;
+    pub const CARD: f32 = 168.;
+    pub const PREVIEW: f32 = 72.;
+    pub const SETTINGS_NAV: f32 = 200.;
     pub const SWITCH: f32 = 32.;
     pub const SWITCH_HEIGHT: f32 = 18.;
     /// How far below the titlebar the command palette opens.
@@ -96,8 +101,72 @@ pub const DISABLED: f32 = 0.4;
 
 pub const DIM: f32 = 0.8;
 
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// @name configure
+/// @description Applies `appearance.theme` from the config. Every color below follows it on the
+/// next render.
+///
+/// @example
+/// configure(config.appearance.theme);
+pub fn configure(theme: Theme) {
+    LIGHT.store(theme == Theme::Light, Ordering::Relaxed);
+}
+
+fn light() -> bool {
+    LIGHT.load(Ordering::Relaxed)
+}
+
+fn current() -> Theme {
+    if light() { Theme::Light } else { Theme::Dark }
+}
+
+fn pick_in(theme: Theme, dark: u32, light_value: u32) -> Rgba {
+    rgb(if theme == Theme::Light {
+        light_value
+    } else {
+        dark
+    })
+}
+
+fn pick(dark: u32, light_value: u32) -> Rgba {
+    pick_in(current(), dark, light_value)
+}
+
+/// The colors of one theme, for drawing a preview of it while another theme is active.
+pub struct Swatch {
+    pub background: Rgba,
+    pub panel: Rgba,
+    pub text: Rgba,
+    pub muted: Rgba,
+    pub accent: Rgba,
+}
+
+/// @name swatch
+/// @description The main colors of `theme`, independent of the theme that is active.
+///
+/// @example
+/// let preview = swatch(Theme::Light);
+pub fn swatch(theme: Theme) -> Swatch {
+    Swatch {
+        background: background_in(theme),
+        panel: panel_in(theme),
+        text: text_in(theme),
+        muted: muted_in(theme),
+        accent: bar_in(theme),
+    }
+}
+
+fn pick_alpha(dark: u32, light_value: u32) -> Rgba {
+    rgba(if light() { light_value } else { dark })
+}
+
+fn background_in(theme: Theme) -> Rgba {
+    pick_in(theme, 0x0011_1111, 0x00f4_f4f1)
+}
+
 pub fn background() -> Rgba {
-    rgb(0x0011_1111)
+    background_in(current())
 }
 
 pub fn transparent() -> Rgba {
@@ -105,135 +174,151 @@ pub fn transparent() -> Rgba {
 }
 
 pub fn shadow() -> Hsla {
-    hsla(0., 0., 0., 0.4)
+    hsla(0., 0., 0., if light() { 0.16 } else { 0.4 })
 }
 
 pub fn scrim() -> Rgba {
-    rgba(0x0000_00a0)
+    pick_alpha(0x0000_00a0, 0x1a1a_1866)
+}
+
+fn panel_in(theme: Theme) -> Rgba {
+    pick_in(theme, 0x0017_1717, 0x00ec_ece8)
 }
 
 pub fn panel() -> Rgba {
-    rgb(0x0017_1717)
+    panel_in(current())
 }
 
 pub fn elevated() -> Rgba {
-    rgb(0x001c_1c1c)
+    pick(0x001c_1c1c, 0x00fa_faf8)
 }
 
 pub fn hover() -> Rgba {
-    rgb(0x0022_2222)
+    pick(0x0022_2222, 0x00e3_e3de)
 }
 
 pub fn selected() -> Rgba {
-    rgb(0x002d_1f16)
+    pick(0x002d_1f16, 0x00f2_e2d8)
 }
 
 /// The outline of whatever has the keyboard: the open section, a focused field.
 pub fn focus() -> Rgba {
-    rgb(0x00a8_a8a8)
+    pick(0x00a8_a8a8, 0x0055_5550)
 }
 
 /// The tint over the row that has the keyboard.
 pub fn cursor() -> Rgba {
-    rgba(0xffff_ff0a)
+    pick_alpha(0xffff_ff0a, 0x0000_000a)
 }
 
 pub fn border() -> Rgba {
-    rgb(0x0029_2929)
+    pick(0x0029_2929, 0x00dc_dcd6)
 }
 
 pub fn border_strong() -> Rgba {
-    rgb(0x0038_3838)
+    pick(0x0038_3838, 0x00c6_c6bf)
+}
+
+fn text_in(theme: Theme) -> Rgba {
+    pick_in(theme, 0x00fa_fafa, 0x001a_1a18)
 }
 
 pub fn text() -> Rgba {
-    rgb(0x00fa_fafa)
+    text_in(current())
+}
+
+fn muted_in(theme: Theme) -> Rgba {
+    pick_in(theme, 0x00a1_a1a1, 0x0060_605b)
 }
 
 pub fn muted() -> Rgba {
-    rgb(0x00a1_a1a1)
+    muted_in(current())
 }
 
 pub fn faint() -> Rgba {
-    rgb(0x0073_7373)
+    pick(0x0073_7373, 0x0080_807a)
+}
+
+fn bar_in(theme: Theme) -> Rgba {
+    pick_in(theme, 0x00d9_7757, 0x00cf_6a48)
 }
 
 pub fn bar() -> Rgba {
-    rgb(0x00d9_7757)
+    bar_in(current())
 }
 
 pub fn bar_strong() -> Rgba {
-    rgb(0x00c8_c8c8)
+    pick(0x00c8_c8c8, 0x003a_3a37)
 }
 
 pub fn bar_mid() -> Rgba {
-    rgb(0x0076_7676)
+    pick(0x0076_7676, 0x0089_8984)
 }
 
 pub fn bar_soft() -> Rgba {
-    rgb(0x0062_6262)
+    pick(0x0062_6262, 0x00a3_a39d)
 }
 
 pub fn bar_rest() -> Rgba {
-    rgb(0x0038_3838)
+    pick(0x0038_3838, 0x00c8_c8c2)
 }
 
 pub fn track() -> Rgba {
-    rgb(0x0026_2626)
+    pick(0x0026_2626, 0x00e1_e1dc)
 }
 
 pub fn review() -> Rgba {
-    rgba(0xffd2_36e6)
+    pick_alpha(0xffd2_36e6, 0x9a63_08f2)
 }
 
 pub fn review_soft() -> Rgba {
-    rgba(0xc2a3_6e24)
+    pick_alpha(0xc2a3_6e24, 0xb482_0a24)
 }
 
 pub fn danger() -> Rgba {
-    rgba(0xff66_7fbf)
+    pick_alpha(0xff66_7fbf, 0xc826_46e6)
 }
 
 pub fn primary() -> Rgba {
-    rgb(0x00fa_fafa)
+    pick(0x00fa_fafa, 0x001a_1a18)
 }
 
 pub fn on_primary() -> Rgba {
-    rgb(0x0011_1111)
+    pick(0x0011_1111, 0x00f4_f4f1)
 }
 
-/// A folder tile of the space map: darker than the items it holds.
+/// A folder tile of the space map: set back from the items it holds.
 pub fn tile_folder() -> Rgba {
-    rgb(0x0020_2020)
+    pick(0x0020_2020, 0x00e8_e8e3)
 }
 
 /// The "n smaller" tile of the space map.
 pub fn tile_rest() -> Rgba {
-    rgb(0x001c_1c1c)
+    pick(0x001c_1c1c, 0x00ec_ece7)
 }
 
 /// An item tile of the space map. Categories differ by a small step in grey, never by hue.
 pub fn tile(category: Category) -> Rgba {
     match category {
-        Category::Dependencies => rgb(0x002c_2c2c),
-        Category::Build => rgb(0x0029_2929),
-        Category::Cache => rgb(0x0026_2626),
-        Category::Temp => rgb(0x0023_2323),
+        Category::Dependencies => pick(0x002c_2c2c, 0x00cd_cdc7),
+        Category::Build => pick(0x0029_2929, 0x00d3_d3cd),
+        Category::Cache => pick(0x0026_2626, 0x00d9_d9d3),
+        Category::Temp => pick(0x0023_2323, 0x00df_dfd9),
     }
 }
 
 /// The thin top edge of an item tile, a second neutral cue for its category.
 pub fn tile_edge(category: Category) -> Rgba {
     match category {
-        Category::Dependencies => rgb(0x0070_7070),
-        Category::Build => rgb(0x0058_5858),
-        Category::Cache => rgb(0x0046_4646),
-        Category::Temp => rgb(0x0038_3838),
+        Category::Dependencies => pick(0x0070_7070, 0x008c_8c86),
+        Category::Build => pick(0x0058_5858, 0x00a1_a19b),
+        Category::Cache => pick(0x0046_4646, 0x00b3_b3ad),
+        Category::Temp => pick(0x0038_3838, 0x00c4_c4be),
     }
 }
 
 pub fn tile_selected() -> Rgba {
-    rgb(0x003c_3c3c)
+    pick(0x003c_3c3c, 0x00b9_b9b2)
 }
 
 pub fn radius_button() -> Pixels {

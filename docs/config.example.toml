@@ -56,6 +56,8 @@ motion = true
 # "expanded" shows the GUI sidebar with labels, "collapsed" opens it as a strip of icons.
 # Ctrl+B (Cmd+B on macOS) switches between the two while the app runs.
 sidebar = "expanded"
+# "dark" or "light". The light theme uses an off-white background.
+theme = "dark"
 
 # The keys that open a sidebar section in the GUI (Shift+1 to Shift+9). With enabled = false
 # they do nothing; the command palette still opens every section. hints = false hides the

@@ -396,6 +396,7 @@ impl Kuizer {
         Self::probe_recent(recent.paths.clone(), cx);
         cx.set_global(tooltip::Typeface(font.clone()));
         motion::configure(config.appearance.motion);
+        theme::configure(config.appearance.theme);
         let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
         let mut app = Self {
             options: ScanOptions::from_config(&config),
