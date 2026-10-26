@@ -278,6 +278,46 @@ impl Kuizer {
         }
     }
 
+    /// The button at the start of every section header that collapses the sidebar to icons and
+    /// back.
+    pub(super) fn sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let collapsed = self.collapsed;
+        div()
+            .id("sidebar-toggle")
+            .debug_selector(|| "sidebar-toggle".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(unit(size::CONTROL))
+            .rounded(theme::radius_control())
+            .cursor_pointer()
+            .text_color(theme::faint())
+            .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
+            .tip_hover(
+                Tooltip::new(if collapsed {
+                    "Show section names"
+                } else {
+                    "Show only icons"
+                })
+                .keys(&[hint(&Command::Sidebar)])
+                .build(),
+                cx.listener(|app, hovered: &bool, _, cx| {
+                    app.hover_icon(Icon::Sidebar, *hovered, cx);
+                }),
+            )
+            .child(icon::view(
+                Icon::Sidebar,
+                theme::faint(),
+                self.icon_epoch(Icon::Sidebar),
+                self.zoom.rem_size(),
+            ))
+            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                app.collapsed = !app.collapsed;
+                cx.notify();
+            }))
+    }
+
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
         let mut items: Vec<AnyElement> = Vec::new();
@@ -302,9 +342,9 @@ impl Kuizer {
             items.extend(heading);
             items.push(self.render_tab(tab, cx).into_any_element());
         }
-        let toggle = div()
-            .id("sidebar-toggle")
-            .debug_selector(|| "sidebar-toggle".to_owned())
+        let settings = div()
+            .id("sidebar-settings")
+            .debug_selector(|| "sidebar-settings".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -313,30 +353,28 @@ impl Kuizer {
             .px(unit(space::M))
             .rounded(theme::radius_control())
             .cursor_pointer()
-            .text_color(theme::faint())
-            .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
+            .text_color(theme::muted())
+            .hover(|style| style.bg(theme::hover()).text_color(theme::text()))
             .tip_hover(
-                Tooltip::new(if collapsed {
-                    "Show section names"
-                } else {
-                    "Show only icons"
-                })
-                .keys(&[hint(&Command::Sidebar)])
-                .build(),
+                Tooltip::new("Settings")
+                    .keys(&[hint(&Command::Settings)])
+                    .build(),
                 cx.listener(|app, hovered: &bool, _, cx| {
-                    app.hover_icon(Icon::Sidebar, *hovered, cx);
+                    app.hover_icon(Icon::Settings, *hovered, cx);
                 }),
             )
             .child(icon::view(
-                Icon::Sidebar,
-                theme::faint(),
-                self.icon_epoch(Icon::Sidebar),
+                Icon::Settings,
+                theme::muted(),
+                self.icon_epoch(Icon::Settings),
                 self.zoom.rem_size(),
             ))
-            .when(!collapsed, |this| this.child("Collapse"))
+            .when(!collapsed, |this| {
+                this.child(div().flex_1().min_w_0().truncate().child("Settings"))
+                    .child(ui::kbd(commands::label("secondary-,")))
+            })
             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                app.collapsed = !app.collapsed;
-                cx.notify();
+                app.open_settings(cx);
             }));
         div()
             .id("sidebar")
@@ -364,7 +402,7 @@ impl Kuizer {
                     .overflow_y_scroll()
                     .children(items),
             )
-            .child(toggle)
+            .child(settings)
     }
 
     pub(super) fn hover_icon(&mut self, icon: Icon, hovered: bool, cx: &mut Context<Self>) {

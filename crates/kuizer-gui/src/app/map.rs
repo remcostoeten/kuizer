@@ -323,6 +323,7 @@ impl Kuizer {
             .flex_none()
             .items_center()
             .gap(unit(space::L))
+            .child(self.sidebar_toggle(cx))
             .child(switch)
             .child(
                 div()
