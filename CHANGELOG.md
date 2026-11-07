@@ -2,7 +2,7 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The release workflow puts the section that matches the tagged version on the GitHub release.
 
-## [Unreleased]
+## [0.1.3] - 2026-11-07
 
 - GUI: settings in the sidebar footer and behind Ctrl+, with a light theme, a motion switch and sidebar options; one toolbar per section; Shift+1 to Shift+9 switch sections; Escape stops a scan and keeps the results found so far; tooltips anchor to their trigger.
 - Documentation at kuizer.app/docs.
