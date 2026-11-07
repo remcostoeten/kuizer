@@ -753,8 +753,9 @@ mod tests {
         tree(&root);
         let mut config = Config::default();
         config.scan.size_threads = 4;
-        let handle = start(&config, &[root], Cancel::new()).unwrap();
-        handle.cancel();
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let handle = start(&config, &[root], cancel).unwrap();
         let collected = collect(&handle, |_| {});
         assert!(collected.summary.cancelled);
     }

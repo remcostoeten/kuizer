@@ -109,16 +109,25 @@ fn excluded_files_do_not_keep_a_project_active() {
     let (_tmp, home, root) = setup();
     aged(&root, "old/scratch/notes.md", Duration::ZERO);
     aged(&root, "old/debug.log", Duration::ZERO);
+    let config = file(&home, "kuizer.toml", 0);
     fs::write(
-        file(&home, ".config/kuizer/config.toml", 0),
+        &config,
         "[scan]\nexclude = [\"scratch\"]\nexclude_extensions = [\"log\"]\n",
     )
     .unwrap();
+    let config = config.to_str().unwrap();
     let root_arg = root.to_str().unwrap();
-    let scanned = kuizer(&home, &["--json", "scan", root_arg, "--idle", "60d"]);
+    let scanned = kuizer(
+        &home,
+        &[
+            "--config", config, "--json", "scan", root_arg, "--idle", "60d",
+        ],
+    );
     let cleaned = kuizer(
         &home,
         &[
+            "--config",
+            config,
             "--json",
             "clean",
             root_arg,
