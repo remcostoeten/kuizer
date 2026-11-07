@@ -185,6 +185,8 @@ impl Kuizer {
         if self.map_active() && !self.map.path.is_empty() {
             self.map_back(self.map.path.len() - 1);
             cx.notify();
+        } else if self.search.is_some() {
+            self.stop_duplicates(cx);
         } else if self.refreshing() {
             self.cancel_scan(cx);
         } else if self.toast.is_some() && !self.restoring() {
@@ -414,6 +416,10 @@ impl Kuizer {
             Command::StopScan => (!matches!(self.phase, Phase::Loading(_)) && !self.refreshing())
                 .then_some("No scan is running"),
             Command::FindDuplicates => (!shown).then_some(NEEDS_SCAN),
+            Command::StopDuplicates => self
+                .search
+                .is_none()
+                .then_some("No duplicate search is running"),
             Command::Scan(path) => self.wait().or_else(|| {
                 self.recent
                     .is_gone(path)
@@ -548,6 +554,7 @@ impl Kuizer {
                 self.find_duplicates(cx);
                 self.go_to(Tab::Duplicates, cx);
             }
+            Command::StopDuplicates => self.stop_duplicates(cx),
             Command::Quit => cx.quit(),
             Command::Down => self.move_cursor(Motion::Down),
             Command::Up => self.move_cursor(Motion::Up),

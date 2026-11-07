@@ -39,8 +39,9 @@ pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
 
 /// @name keep_idle
 /// @description Measures project activity when `idle` is set or `annotate` asks for it, then
-/// keeps only candidates whose project has been inactive for at least `idle`. A candidate whose
-/// activity is unknown never matches `idle`.
+/// keeps only candidates whose project has been inactive for at least `idle`. Activity is measured
+/// within the same scope as the scan under `config`, so excluded folders and other filesystems
+/// never count. A candidate whose activity is unknown never matches `idle`.
 ///
 /// @example
 /// commands::scan::keep_idle(&config, &mut candidates, args.idle, false)?;
@@ -54,13 +55,7 @@ pub fn keep_idle(
         return Ok(());
     }
     let cutoff = idle.and_then(|Idle(age)| SystemTime::now().checked_sub(age));
-    scan::annotate(
-        candidates,
-        &config.detector()?,
-        &config.scan.skip_dirs,
-        cutoff,
-        scan::size_threads(config),
-    );
+    scan::annotate(candidates, config, cutoff)?;
     if let Some(cutoff) = cutoff {
         candidates.retain(|candidate| {
             candidate

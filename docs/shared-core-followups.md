@@ -6,11 +6,9 @@ Left over from the 2026-10-24 performance and architecture audit (released in 0.
 
 These change deletion behavior, so they need a product call before anyone implements them.
 
-1. **Lenient config can widen deletion scope.** A rejected scope key (`scan.exclude` with the wrong type, `scan.roots`, `detect.*`, `git.keep_branches`) falls back to its default, so an unattended `kuizer clean --yes` runs wider than before. A misspelled section such as `[delet]` also skips the delete failsafe. Proposed: treat a rejected scope key like a rejected `[delete]` key (force confirmation or refuse `--yes`), and warn on unknown sections. Files: `src/config/lenient.rs`.
-2. **`--idle` ignores user excludes.** `commands/scan.rs` `keep_idle` still calls `scan::annotate`, so excludes and `one_file_system` do not apply to activity. Switching to `annotate_in` makes more projects look idle, so more would be selected. Files: `src/commands/scan.rs`, `src/scan`.
-3. **History cannot record non-UTF-8 paths.** The item is deleted but the history write fails, so `restore` cannot bring it back, and a flush drops the whole pending batch (up to 64 entries). Needs a byte-preserving path encoding in the history format. Files: `src/history/mod.rs`, `src/scan/types.rs`.
-4. **Cross-device trash.** Add `delete.cross_device = refuse | copy` (default `refuse`) to the config, `docs/config.example.toml` and the GUI settings view, then enforce it in `src/delete` (P2-02).
-5. **GUI bulk select includes review items.** `Command::SelectAll` and the header checkbox select review items, which contradicts `docs/design.md` section 1 ("bulk actions select safe only"). Files: `crates/kuizer-gui/src/app/keys.rs`, `app.rs`.
+1. **History cannot record non-UTF-8 paths.** The item is deleted but the history write fails, so `restore` cannot bring it back, and a flush drops the whole pending batch (up to 64 entries). Needs a byte-preserving path encoding in the history format. Files: `src/history/mod.rs`, `src/scan/types.rs`.
+2. **Cross-device trash.** Add `delete.cross_device = refuse | copy` (default `refuse`) to the config, `docs/config.example.toml` and the GUI settings view, then enforce it in `src/delete` (P2-02).
+3. **GUI bulk select includes review items.** `Command::SelectAll` and the header checkbox select review items, which contradicts `docs/design.md` section 1 ("bulk actions select safe only"). Files: `crates/kuizer-gui/src/app/keys.rs`, `app.rs`.
 
 ## Shared core APIs to build
 

@@ -787,19 +787,27 @@ fn repin(entries: &mut [(Toolchain, Candidate)], pins: &[toolchains::Pin]) {
 /// @name find_duplicates
 /// @description Finds duplicate files under the roots with the start screen's options laid
 /// over the config, on request rather than as part of every scan. Groups are the same as a
-/// scan that collects files during its walk would find.
+/// scan that collects files during its walk would find. Setting `cancel` stops the walk and the
+/// hashing within one file or one MiB of reading and returns no groups.
 ///
 /// @example
-/// let found = find_duplicates(&config, &roots, &options, |stage| show(stage))?;
+/// let found = find_duplicates(&config, &roots, &options, &cancel, |stage| show(stage))?;
 pub fn find_duplicates(
     config: &Config,
     roots: &[PathBuf],
     options: &ScanOptions,
+    cancel: &Cancel,
     on_stage: impl FnMut(dupes::Stage),
 ) -> Result<Duplicates, String> {
     let config = options.apply(config);
-    dupes::find(&config, roots, Options::from_config(&config), on_stage)
-        .map_err(|error| error.to_string())
+    dupes::find_cancellable(
+        &config,
+        roots,
+        Options::from_config(&config),
+        cancel,
+        on_stage,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1091,7 +1099,8 @@ mod tests {
                 .collect()
         };
 
-        let lazy = groups(find_duplicates(&config, &roots, &options, |_| {}).unwrap());
+        let lazy =
+            groups(find_duplicates(&config, &roots, &options, &Cancel::new(), |_| {}).unwrap());
         let applied = options.apply(&config);
         let duplicate_options = Options::from_config(&applied);
         let (handle, walked) = repos::start_scan(

@@ -54,6 +54,7 @@ pub enum Command {
     Branches,
     BranchesAll,
     FindDuplicates,
+    StopDuplicates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +189,12 @@ fn build_table() -> Vec<Spec> {
         )
         .keys(&["s"]),
         Spec::new(Command::FindDuplicates, "Find duplicate files", General).keys(&["D"]),
+        Spec::new(
+            Command::StopDuplicates,
+            "Stop the duplicate search",
+            General,
+        )
+        .keys(&["escape"]),
     ];
     specs.extend(Tab::ALL.into_iter().map(|tab| {
         Spec::new(

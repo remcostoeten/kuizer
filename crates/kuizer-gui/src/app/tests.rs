@@ -1433,6 +1433,52 @@ fn duplicates_can_be_excluded_from_their_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_cancels_a_duplicate_search_and_a_new_one_can_start(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = project(dir.path());
+    for name in ["a", "b"] {
+        let folder = root.join("photos").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("same.bin"), vec![b'z'; 16 * 1024]).unwrap();
+    }
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    view.update(cx, |app, _| app.options.duplicates = false);
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_refresh(&view, cx);
+    let escape = Keystroke::parse("escape").unwrap();
+    let cancel = cx.update(|window, cx| {
+        let cancel = view.update(cx, |app, cx| {
+            app.run(Command::FindDuplicates, window, cx);
+            app.search.as_ref().map(|search| search.cancel.clone())
+        });
+        window.dispatch_keystroke(escape, cx);
+        cancel
+    });
+    let cancel = cancel.expect("the search started");
+    assert!(cancel.is_cancelled());
+    let duplicates = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |app, _| {
+            app.report()
+                .unwrap()
+                .duplicates
+                .as_ref()
+                .map(|found| found.groups.len())
+        })
+    };
+    cx.run_until_parked();
+    view.read_with(cx, |app, _| {
+        assert!(app.search.is_none());
+        assert!(app.search_error.is_none());
+    });
+    assert_eq!(duplicates(cx), None, "a cancelled search shows nothing");
+
+    cx.simulate_keystrokes("D");
+    wait_for_duplicates(&view, cx);
+    assert_eq!(duplicates(cx), Some(1));
+}
+
+#[gpui::test]
 fn a_broken_saved_scan_falls_back_to_a_normal_scan(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let root = project(dir.path());

@@ -4,13 +4,13 @@ impl Kuizer {
     /// @name Kuizer::find_duplicates
     /// @description Starts a duplicate search over the scanned folders beside the results on
     /// screen, and puts what it finds into the Duplicates section when it is done. Running it
-    /// while a search is going stops listening to that search.
+    /// while a search is going stops that search instead.
     ///
     /// @example
     /// app.find_duplicates(cx);
     pub(super) fn find_duplicates(&mut self, cx: &mut Context<Self>) {
-        if self.search.take().is_some() {
-            cx.notify();
+        if self.search.is_some() {
+            self.stop_duplicates(cx);
             return;
         }
         if self.report().is_none() {
@@ -22,16 +22,22 @@ impl Kuizer {
         let roots = self.roots.clone();
         let options = self.options.clone();
         let snapshots = self.snapshots.clone();
+        let cancel = Cancel::new();
+        let worker_cancel = cancel.clone();
         let spawned = spawn_worker("kuizer-gui-duplicates", move || {
             let mut told: Option<Instant> = None;
-            let found = model::find_duplicates(&config, &roots, &options, |stage| {
-                let quiet = matches!(stage, dupes::Stage::Walking { .. })
-                    && told.is_some_and(|told| told.elapsed() < POLL);
-                if !quiet {
-                    told = Some(Instant::now());
-                    let _ = sender.unbounded_send(Searched::Stage(stage));
-                }
-            });
+            let found =
+                model::find_duplicates(&config, &roots, &options, &worker_cancel, |stage| {
+                    let quiet = matches!(stage, dupes::Stage::Walking { .. })
+                        && told.is_some_and(|told| told.elapsed() < POLL);
+                    if !quiet {
+                        told = Some(Instant::now());
+                        let _ = sender.unbounded_send(Searched::Stage(stage));
+                    }
+                });
+            if worker_cancel.is_cancelled() {
+                return;
+            }
             let staged = found.as_ref().ok().map(|found| {
                 let duplicate_options = dupes::Options::from_config(&options.apply(&config));
                 snapshots.stage_duplicates(&roots, duplicate_options, found)
@@ -68,9 +74,22 @@ impl Kuizer {
         self.search = Some(Search {
             roots: self.roots.clone(),
             stage: None,
+            cancel,
             _task: task,
         });
         cx.notify();
+    }
+
+    /// @name Kuizer::stop_duplicates
+    /// @description Cancels the running duplicate search. Its worker stops reading within one
+    /// file or one MiB, saves nothing, and the Duplicates section goes back to offering a search.
+    ///
+    /// @example
+    /// app.stop_duplicates(cx);
+    pub(super) fn stop_duplicates(&mut self, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(super) fn searched(&mut self, searched: Searched, cx: &mut Context<Self>) {
@@ -182,9 +201,15 @@ impl Kuizer {
                 "Find duplicates",
             ),
         };
-        let tip = Tooltip::new("Hash files under the scanned folders to find identical copies")
-            .keys(&[hint(&Command::FindDuplicates)])
-            .build();
+        let tip = if self.search.is_some() {
+            Tooltip::new("Stop the search. Nothing it found so far is kept")
+                .keys(&[hint(&Command::StopDuplicates)])
+                .build()
+        } else {
+            Tooltip::new("Hash files under the scanned folders to find identical copies")
+                .keys(&[hint(&Command::FindDuplicates)])
+                .build()
+        };
         centered(
             div()
                 .debug_selector(|| "duplicate-search".to_owned())

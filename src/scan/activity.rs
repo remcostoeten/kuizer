@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use super::walk::Context;
 use super::{Cancel, Candidate};
-use crate::config::{Excludes, ScanConfig};
+use crate::config::{Config, ConfigError, Excludes, ScanConfig};
 use crate::detect::{Detector, Listing};
 use crate::git::{self, RootFinder};
 use crate::platform::MountTable;
@@ -27,41 +27,36 @@ pub struct ActivityScope<'a> {
 }
 
 /// @name annotate
-/// @description Fills `project_last_active` on every candidate with the activity of its project
-/// like [`annotate_in`], under the default scan limits and the given `skip_dirs`: no crossing
-/// filesystems, no excluded filesystem types, no protected folders. Prefer [`annotate_in`] with
-/// the configuration of the scan that produced the candidates.
+/// @description Fills `project_last_active` on every candidate like [`annotate_in`], within the
+/// scope of a scan run with `config`: its rules, ignore file, excludes, skipped folders,
+/// filesystem boundary, excluded mounts and protected folders. Runs on `scan.size_threads`.
 ///
 /// @example
-/// scan::annotate(&mut candidates, &detector, &config.scan.skip_dirs, Some(cutoff), 4);
+/// scan::annotate(&mut candidates, &config, Some(cutoff))?;
 pub fn annotate(
     candidates: &mut [Candidate],
-    detector: &Detector,
-    skip_dirs: &[String],
+    config: &Config,
     cutoff: Option<SystemTime>,
-    threads: usize,
-) {
-    let scan = ScanConfig {
-        skip_dirs: skip_dirs.to_vec(),
-        ..ScanConfig::default()
-    };
-    let excludes = Excludes::new(&[], &[]).expect("an empty exclude list is valid");
+) -> Result<(), ConfigError> {
+    let detector = config.detector()?;
+    let excludes = config.excludes()?;
     let mounts = MountTable::load();
     let protected = Protected::for_user();
     annotate_in(
         candidates,
         &ActivityScope {
-            detector,
-            scan: &scan,
+            detector: &detector,
+            scan: &config.scan,
             excludes: &excludes,
             mounts: &mounts,
             protected: &protected,
         },
         cutoff,
-        threads,
+        super::size_threads(config),
         &Cancel::new(),
         |_, _| {},
     );
+    Ok(())
 }
 
 /// @name annotate_in
@@ -411,7 +406,7 @@ mod tests {
             candidate(app.join("node_modules")),
             candidate(app.join("packages/web/node_modules")),
         ];
-        annotate(&mut candidates, &detector(), &[".git".to_owned()], None, 2);
+        annotate(&mut candidates, &Config::default(), None).expect("annotate");
         assert_eq!(days_idle(&candidates[0]), Some(100));
         assert_eq!(days_idle(&candidates[1]), Some(0));
     }
@@ -422,7 +417,7 @@ mod tests {
         let app = tmp.path().join("app");
         touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
         let mut candidates = [candidate(app.join("node_modules"))];
-        annotate(&mut candidates, &detector(), &[], None, 1);
+        annotate(&mut candidates, &Config::default(), None).expect("annotate");
         assert_eq!(candidates[0].project_last_active, None);
     }
 
@@ -435,11 +430,10 @@ mod tests {
         let mut candidates = [candidate(app.join("node_modules"))];
         annotate(
             &mut candidates,
-            &detector(),
-            &[],
+            &Config::default(),
             Some(SystemTime::now() - DAY * 30),
-            1,
-        );
+        )
+        .expect("annotate");
         assert_eq!(days_idle(&candidates[0]), Some(10));
     }
 
@@ -452,7 +446,7 @@ mod tests {
         touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
         touch(&app.join("tsconfig.tsbuildinfo"), Duration::ZERO);
         let mut candidates = [candidate(app.join("dist"))];
-        annotate(&mut candidates, &detector(), &[], None, 1);
+        annotate(&mut candidates, &Config::default(), None).expect("annotate");
         assert_eq!(days_idle(&candidates[0]), Some(90));
     }
 
@@ -493,6 +487,28 @@ mod tests {
         );
         assert_eq!(days_idle(&candidates[0]), Some(50));
         assert_eq!(reported.into_inner().unwrap(), [(app, true)]);
+    }
+
+    #[test]
+    fn follows_the_configured_scan_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path().join("app");
+        touch(&app.join("src/main.js"), DAY * 50);
+        touch(&app.join("vendored/lib.js"), Duration::ZERO);
+        touch(&app.join("debug.log"), Duration::ZERO);
+        touch(&app.join("mnt/backup.js"), Duration::ZERO);
+        touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
+        let mut config = Config::default();
+        config.scan.exclude = vec!["vendored".to_owned()];
+        config.scan.exclude_extensions = vec!["log".to_owned()];
+        config.scan.excluded_mounts = vec![app.join("mnt")];
+        let mut candidates = [candidate(app.join("node_modules"))];
+        annotate(&mut candidates, &config, None).expect("annotate");
+        assert_eq!(days_idle(&candidates[0]), Some(50));
+
+        let mut candidates = [candidate(app.join("node_modules"))];
+        annotate(&mut candidates, &Config::default(), None).expect("annotate");
+        assert_eq!(days_idle(&candidates[0]), Some(0));
     }
 
     #[test]

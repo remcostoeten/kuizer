@@ -10,15 +10,59 @@ use crate::detect::{Detector, builtin_rules};
 pub struct ConfigWarning {
     pub key: String,
     pub message: String,
+    pub widens_scope: bool,
+}
+
+const NARROWING_SECTIONS: [&str; 3] = ["appearance", "route_shortcuts", "rules"];
+
+fn widens_scope(key: &str) -> bool {
+    let section = key.split(['.', '[']).next().unwrap_or_default();
+    !NARROWING_SECTIONS.contains(&section)
 }
 
 impl ConfigWarning {
-    fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
+        let key = key.into();
         Self {
-            key: key.into(),
+            widens_scope: widens_scope(&key),
+            key,
             message: message.into(),
         }
     }
+
+    fn note(key: &str, message: String) -> Self {
+        Self {
+            key: key.to_owned(),
+            message,
+            widens_scope: false,
+        }
+    }
+}
+
+/// @name rejected_scope
+/// @description Lists the rejected settings whose fallback may make a removal reach further
+/// than the user configured: scan scope, detection, deletion, git, unknown sections and a file
+/// that could not be read or parsed at all. Unattended removal must refuse while this is not
+/// empty. A file-wide problem is named `the config file`.
+///
+/// @example
+/// let rejected = rejected_scope(&loaded.warnings);
+/// if !rejected.is_empty() {
+///     return Err(AppError::ScopeRejected(rejected.join(", ")));
+/// }
+pub fn rejected_scope(warnings: &[ConfigWarning]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for warning in warnings.iter().filter(|warning| warning.widens_scope) {
+        let key = if warning.key.is_empty() {
+            "the config file".to_owned()
+        } else {
+            format!("`{}`", warning.key)
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 impl fmt::Display for ConfigWarning {
@@ -214,9 +258,10 @@ impl Config {
     /// @name Config::parse_lenient
     /// @description Parses config text without ever failing. Every setting that does not parse,
     /// is unknown, or does not validate is dropped on its own and reported as a warning, and the
-    /// default stays in force for it; list entries are dropped one by one. When a `[delete]`
-    /// setting is rejected, or the file is not valid TOML at all, deletion falls back to asking
-    /// for confirmation so a typo can never make deletion less careful.
+    /// default stays in force for it; list entries are dropped one by one. When a rejected
+    /// setting could widen what a removal reaches (see `rejected_scope`), or the file is not
+    /// valid TOML at all, deletion falls back to asking for confirmation so a typo can never make
+    /// deletion less careful.
     ///
     /// @example
     /// let (config, warnings) = Config::parse_lenient("[scan]\nmin_size = 3.5\n");
@@ -235,16 +280,17 @@ impl Config {
         let mut root = Table::new();
         absorb(&mut root, &mut Vec::new(), user, &mut warnings);
         let mut config = root.try_into::<Self>().unwrap_or_default();
-        let rejected_delete = warnings
-            .iter()
-            .any(|warning| warning.key == "delete" || warning.key.starts_with("delete."));
         config.normalize();
         settle(&mut config, &mut warnings);
-        if rejected_delete {
+        let rejected = rejected_scope(&warnings);
+        if !rejected.is_empty() {
             cautious_delete(&mut config);
-            warnings.push(ConfigWarning::new(
+            warnings.push(ConfigWarning::note(
                 "delete",
-                "a delete setting was rejected, so deletion uses the trash with confirmation until it is fixed",
+                format!(
+                    "rejected settings may widen what gets removed ({}), so deletion asks for confirmation and `--yes` is refused until they are fixed",
+                    rejected.join(", ")
+                ),
             ));
         }
         if let Err(error) = config.validate() {
@@ -329,6 +375,7 @@ mod tests {
             keys,
             [
                 "apperance",
+                "delete",
                 "detect.categories[0]",
                 "detect.disabled_rules",
                 "rules.bad",
@@ -355,5 +402,37 @@ mod tests {
         assert!(config.delete.confirm);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("line 1"), "{warnings:?}");
+        assert_eq!(rejected_scope(&warnings), ["the config file"]);
+    }
+
+    #[test]
+    fn a_rejected_scope_setting_or_unknown_section_blocks_unattended_removal() {
+        let cases = [
+            ("[scan]\nexclude = \"web\"\n", "`scan.exclude`"),
+            ("[scan]\nroots = 3\n", "`scan.roots`"),
+            (
+                "[detect]\ndisabled_rules = [\"js-dsit\"]\n",
+                "`detect.disabled_rules`",
+            ),
+            ("[git]\nkeep_branches = \"main\"\n", "`git.keep_branches`"),
+            ("[delet]\nconfirm = false\n", "`delet`"),
+        ];
+        for (body, key) in cases {
+            let text = format!("[delete]\nconfirm = false\n{body}");
+            let (config, warnings) = Config::parse_lenient(&text);
+            assert!(config.delete.confirm, "{text}");
+            assert_eq!(rejected_scope(&warnings), [key], "{text}");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.key == "delete" && warning.message.contains(key)),
+                "{warnings:?}"
+            );
+        }
+
+        let (config, warnings) =
+            Config::parse_lenient("[delete]\nconfirm = false\n[appearance]\nmotion = \"no\"\n");
+        assert!(!config.delete.confirm);
+        assert!(rejected_scope(&warnings).is_empty(), "{warnings:?}");
     }
 }
