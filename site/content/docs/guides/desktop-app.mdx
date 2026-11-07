@@ -13,15 +13,17 @@ kuizer-gui ~/projects
 
 The first form opens the start screen. The second skips it and scans the folder right away.
 
+![The kuizer desktop app after scanning ~/projects: totals for project artifacts, caches and duplicates, with the largest projects and caches listed](/screenshots/overview.png)
+
 ## Start screen
 
 Type a folder, pick one with the system folder dialog, reopen one of the last eight folders or choose a full scan of your home folder. The same screen sets the scan options: which kinds of artifacts to list, the smallest item size, how deep to walk, and whether to measure global caches, toolchains and Docker, search for duplicate files and stay on one file system. `Escape` cancels a running scan. New scan in the title bar goes back to the start screen.
 
 ## Deleting
 
-A plain confirmation appears when every selected item is `safe`. When any item is `review`, you type the item count. Right after a cleanup a bar offers Undo (`Ctrl+Z`) for about ten seconds. The History section has a Restore button for every run that is still in the trash.
+![The project artifacts list with several rows selected and the inline confirmation showing the item count and total size before they are deleted](/screenshots/artifacts.png)
 
-Toolchain versions, Docker or Podman objects and merged git branches are deleted permanently. The confirmation says so and the Undo bar does not offer them.
+Deletion is permanent: nothing goes to the trash and there is no undo. A plain confirmation appears when every selected item is `safe`. When any item is `review`, you type the item count. The History section keeps a Restore button for runs from older versions that still sit in the trash.
 
 ## Keyboard
 
@@ -31,7 +33,7 @@ Everything works from the keyboard. `Ctrl+K` (`Cmd+K` on macOS) opens a command 
 | --- | --- |
 | `j` `k` or the arrow keys | Move the cursor row |
 | `space` | Select the item |
-| `enter` `delete` `d` | Move the selection, or the cursor item, to the trash |
+| `enter` `delete` `d` | Delete the selection, or the cursor item, for good |
 | `o` | Reveal the item in the file manager |
 | `y` | Copy the item's path |
 | `/` | Filter the list by path or name |
@@ -40,7 +42,7 @@ Everything works from the keyboard. `Ctrl+K` (`Cmd+K` on macOS) opens a command 
 | `Ctrl+,` (`Cmd+,`) | Open the settings popover |
 | `m` | Open the space map from any section |
 
-Right-click an item, or press the Menu key or `Shift+F10`, to reveal it, copy its path, select it, move only that item to the trash or exclude it from every later scan, which adds it to `scan.exclude` in the config file.
+Right-click an item, or press the Menu key or `Shift+F10`, to reveal it, copy its path, select it, delete only that item or exclude it from every later scan, which adds it to `scan.exclude` in the config file.
 
 ## Space map
 

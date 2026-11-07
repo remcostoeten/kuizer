@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use gpui::{
     point, prelude::*, px, uniform_list,
 };
 use kuizer::config::{Config, Sidebar};
-use kuizer::delete::{Removal, Status};
+use kuizer::delete::Status;
 use kuizer::detect::{Category, Safety};
 use kuizer::dupes::{self, Duplicates};
 use kuizer::history::Action;
@@ -27,14 +27,13 @@ use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::activity::{self, Activity, State, Step, Tracker, plural};
 use crate::chart::{self, Measure, Segment};
-use crate::commands::{self, Command, Quit, ResetZoom, TogglePalette, Undo, ZoomIn, ZoomOut};
+use crate::commands::{self, Command, Quit, ResetZoom, TogglePalette, ZoomIn, ZoomOut};
 use crate::field;
 use crate::frame;
 use crate::glossary::Term;
 use crate::icon::{self, Icon};
 use crate::model::{
-    self, Batch, Confirmation, HistoryView, Loaded, Outcome, Part, Report, Restored, Scope, Source,
-    TrashState,
+    self, Batch, HistoryView, Loaded, Outcome, Part, Report, Restored, Source, TrashState,
 };
 use crate::motion;
 use crate::palette::Palette;
@@ -70,6 +69,7 @@ mod overlay;
 mod overview;
 mod pane;
 mod repos;
+mod ring;
 mod session;
 mod settings;
 #[cfg(test)]
@@ -81,6 +81,7 @@ use lists::Lists;
 use map::SpaceMap;
 use pane::{Chrome, Pane};
 use repos::{GitJob, GitScope};
+use ring::{Region, Stops};
 use session::spawn_worker;
 
 pub use crate::commands::bind_keys;
@@ -95,7 +96,6 @@ enum Phase {
 struct Finished {
     removed: usize,
     removed_bytes: u64,
-    deleted: usize,
     failures: Vec<(String, String)>,
     history_error: Option<String>,
 }
@@ -121,14 +121,7 @@ struct Search {
 }
 
 enum Notice {
-    Trashed {
-        session: u64,
-        items: usize,
-        bytes: u64,
-    },
-    Restoring {
-        session: u64,
-    },
+    Restoring { session: u64 },
     Restored(Restored),
     Failed(String),
     Info(String),
@@ -137,7 +130,7 @@ enum Notice {
 impl Notice {
     fn lingers(&self) -> bool {
         match self {
-            Self::Trashed { .. } | Self::Info(_) => true,
+            Self::Info(_) => true,
             Self::Restored(restored) => {
                 restored.problems.is_empty() && restored.history_error.is_none()
             }
@@ -153,15 +146,11 @@ struct Toast {
 
 enum Dialog {
     Confirm {
-        rule: Confirmation,
-        typed: String,
         only: Option<(Source, u64)>,
         stats: SelectionStats,
         preview: Vec<(Source, u64)>,
     },
-    Running {
-        permanent: bool,
-    },
+    Running,
     Finished(Finished),
     Branches(GitScope),
 }
@@ -362,6 +351,11 @@ pub struct Kuizer {
     lists: Lists,
     scrolls: HashMap<Tab, ScrollHandle>,
     reveal_cursor: Rc<Cell<bool>>,
+    stops: RefCell<Stops>,
+    ring: Option<ElementId>,
+    reveal_ring: Rc<Cell<bool>>,
+    start_scroll: ScrollHandle,
+    sidebar_scroll: ScrollHandle,
     config_path: Option<PathBuf>,
     excluded: Vec<PathBuf>,
     excluding: HashSet<PathBuf>,
@@ -464,6 +458,11 @@ impl Kuizer {
                 .map(|tab| (tab, ScrollHandle::new()))
                 .collect(),
             reveal_cursor: Rc::new(Cell::new(false)),
+            stops: RefCell::default(),
+            ring: None,
+            reveal_ring: Rc::new(Cell::new(false)),
+            start_scroll: ScrollHandle::new(),
+            sidebar_scroll: ScrollHandle::new(),
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
             excluding: HashSet::new(),
@@ -523,7 +522,7 @@ impl Kuizer {
 
     fn busy(&self) -> bool {
         matches!(self.phase, Phase::Loading(_))
-            || matches!(self.dialog, Some(Dialog::Running { .. }))
+            || matches!(self.dialog, Some(Dialog::Running))
             || self.restoring()
     }
 
@@ -948,7 +947,7 @@ impl Kuizer {
         let all_checked = self.all_rows_checked();
         let chip = |category: Category| {
             let shown = !self.hidden.contains(&category);
-            div()
+            let chip = div()
                 .id(category.as_str())
                 .flex()
                 .items_center()
@@ -961,14 +960,14 @@ impl Kuizer {
                 .hover(|style| style.bg(theme::hover()))
                 .tip(tooltip::term(Term::category(category)))
                 .child(ui::checkbox(shown))
-                .child(category.as_str())
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    if !app.hidden.remove(&category) {
-                        app.hidden.insert(category);
-                    }
-                    app.refresh_rows();
-                    cx.notify();
-                }))
+                .child(category.as_str());
+            self.control(chip, cx, move |app, _, cx| {
+                if !app.hidden.remove(&category) {
+                    app.hidden.insert(category);
+                }
+                app.refresh_rows();
+                cx.notify();
+            })
         };
         let chips: Vec<Stateful<Div>> = Category::ALL.into_iter().map(chip).collect();
         let toolbar = self
@@ -978,16 +977,19 @@ impl Kuizer {
             .child(self.tally(Tab::Artifacts, Some(shown_bytes)));
         let header = table_header()
             .child(
-                div()
-                    .id("select-visible")
-                    .cursor_pointer()
-                    .tip(tooltip::plain("Select or clear every item in this list"))
-                    .child(ui::checkbox(all_checked))
-                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                self.control(
+                    div()
+                        .id("select-visible")
+                        .cursor_pointer()
+                        .tip(tooltip::plain("Select or clear every item in this list"))
+                        .child(ui::checkbox(all_checked)),
+                    cx,
+                    |app, _, cx| {
                         if !app.busy() {
                             app.toggle_visible(cx);
                         }
-                    })),
+                    },
+                ),
             )
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::S, "Safety", Term::Safety))
@@ -1192,13 +1194,19 @@ impl Render for Kuizer {
         let content = self.content_pane(cx);
         let chrome = self.chrome_view(cx);
         let dialog = self.render_dialog(cx);
+        self.region(Region::Toast);
         let toast = self.render_toast(cx);
         let menu = self.render_menu(cx);
         let palette = self.render_palette(cx);
         let shortcuts = self.render_shortcuts(cx);
         let settings = self.render_settings(cx);
         let start = matches!(self.phase, Phase::Start);
+        self.region(Region::Titlebar);
         let titlebar = self.render_titlebar(window, cx);
+        self.region(Region::Sidebar);
+        let sidebar = (!start).then(|| self.render_sidebar(cx));
+        self.region(Region::Statusbar);
+        let statusbar = (!start).then(|| self.render_statusbar(cx));
         let root = div()
             .relative()
             .flex()
@@ -1210,10 +1218,14 @@ impl Render for Kuizer {
             .text_size(unit(font::BODY))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .capture_any_mouse_down(cx.listener(|app, _: &MouseDownEvent, _, cx| {
+                if app.ring.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
-            .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::quit))
             .child(wheel)
@@ -1224,7 +1236,7 @@ impl Render for Kuizer {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .when(!start, |this| this.child(self.render_sidebar(cx)))
+                    .children(sidebar)
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content))
                     .when(self.busy() || self.refreshing(), |this| {
                         this.child(
@@ -1241,7 +1253,7 @@ impl Render for Kuizer {
                     )
                     .children(toast),
             )
-            .when(!start, |this| this.child(self.render_statusbar(cx)))
+            .children(statusbar)
             .children(dialog)
             .children(menu)
             .children(palette)

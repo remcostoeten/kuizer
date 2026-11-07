@@ -8,13 +8,14 @@ import { Nav } from '@/components/layout/nav'
 import { Playground } from '@/components/playground/playground'
 import { ReleasePill } from '@/components/landing/release-pill'
 import { RunLine } from '@/components/landing/run-line'
-import { DeletedWord } from '@/components/ui/deleted-word'
-import { principles } from '@/content/features'
-import { headline, headlineTargets, repoUrl, subtitle } from '@/content/site'
+import { finds, neverTouches, principles } from '@/content/features'
+import { headline, repoUrl, subtitle } from '@/content/site'
 import { softwareJsonLd } from '@/content/structured-data'
+import { pageOpenGraph } from '@/shared/config/open-graph'
 
 export const metadata: Metadata = {
   alternates: { canonical: '/' },
+  openGraph: pageOpenGraph('/'),
 }
 
 export default function HomePage() {
@@ -32,15 +33,15 @@ export default function HomePage() {
             <ReleasePill />
             <h1
               className="enter mt-10 font-display text-hero font-medium sm:text-hero-wide md:text-hero-xl"
-              style={{ '--delay': '120ms' } as React.CSSProperties}
+              style={{ '--delay': '60ms' } as React.CSSProperties}
             >
               {headline[0]}
               <br />
-              {headline[1]} <DeletedWord items={headlineTargets} interval={4000} className="hero-target" />
+              {headline[1]}
             </h1>
             <p
               className="enter mt-6 max-w-lead text-lead font-light text-muted md:text-lead-lg"
-              style={{ '--delay': '180ms' } as React.CSSProperties}
+              style={{ '--delay': '120ms' } as React.CSSProperties}
             >
               {subtitle.map((line) => (
                 <span key={line} className="sm:block">
@@ -50,14 +51,14 @@ export default function HomePage() {
             </p>
             <div
               className="enter mt-8 flex flex-wrap items-center justify-center gap-2"
-              style={{ '--delay': '240ms' } as React.CSSProperties}
+              style={{ '--delay': '180ms' } as React.CSSProperties}
             >
               <DownloadButton />
               <a href={repoUrl} aria-label="kuizer on GitHub" className="btn btn-secondary btn-icon">
                 <GithubIcon size={18} />
               </a>
             </div>
-            <div className="enter mt-5" style={{ '--delay': '300ms' } as React.CSSProperties}>
+            <div className="enter mt-5" style={{ '--delay': '240ms' } as React.CSSProperties}>
               <RunLine />
             </div>
           </div>
@@ -70,7 +71,7 @@ export default function HomePage() {
             </div>
             <p
               className="enter mx-auto mt-5 max-w-copy text-center text-caption text-faint"
-              style={{ '--delay': '500ms' } as React.CSSProperties}
+              style={{ '--delay': '360ms' } as React.CSSProperties}
             >
               This is the real key map of the interactive list. Try <kbd className="key-chip">space</kbd>,{' '}
               <kbd className="key-chip">a</kbd>, <kbd className="key-chip">enter</kbd>, then{' '}
@@ -89,6 +90,30 @@ export default function HomePage() {
               </li>
             ))}
           </ul>
+          <div className="mt-20 grid w-full max-w-hero gap-10 text-left md:grid-cols-2 md:gap-8">
+            <section className="border-t border-line pt-5" aria-labelledby="finds">
+              <h2 id="finds" className="text-card font-medium">
+                What it finds
+              </h2>
+              <ul className="mt-3 space-y-3 text-feature text-muted">
+                {finds.map((item) => (
+                  <li key={item.title}>
+                    <span className="text-fg">{item.title}.</span> {item.body}
+                  </li>
+                ))}
+              </ul>
+            </section>
+            <section className="border-t border-line pt-5" aria-labelledby="never-touches">
+              <h2 id="never-touches" className="text-card font-medium">
+                What it never touches
+              </h2>
+              <ul className="mt-3 space-y-3 text-feature text-muted">
+                {neverTouches.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          </div>
           <div className="mt-20 flex w-full justify-center">
             <InstallBox />
           </div>

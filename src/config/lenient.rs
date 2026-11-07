@@ -3,7 +3,7 @@ use std::fmt;
 
 use toml::{Table, Value};
 
-use super::{Config, DeleteConfig, DeleteMode, Excludes};
+use super::{Config, DeleteConfig, Excludes};
 use crate::detect::{Detector, builtin_rules};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,10 +192,7 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
 }
 
 fn cautious_delete(config: &mut Config) {
-    config.delete = DeleteConfig {
-        mode: DeleteMode::Trash,
-        confirm: true,
-    };
+    config.delete = DeleteConfig { confirm: true };
 }
 
 fn syntax_warning(text: &str, error: &toml::de::Error) -> ConfigWarning {
@@ -218,8 +215,8 @@ impl Config {
     /// @description Parses config text without ever failing. Every setting that does not parse,
     /// is unknown, or does not validate is dropped on its own and reported as a warning, and the
     /// default stays in force for it; list entries are dropped one by one. When a `[delete]`
-    /// setting is rejected, or the file is not valid TOML at all, deletion falls back to trash
-    /// mode with confirmation so a typo can never make deletion less careful.
+    /// setting is rejected, or the file is not valid TOML at all, deletion falls back to asking
+    /// for confirmation so a typo can never make deletion less careful.
     ///
     /// @example
     /// let (config, warnings) = Config::parse_lenient("[scan]\nmin_size = 3.5\n");
@@ -344,14 +341,17 @@ mod tests {
 
     #[test]
     fn a_rejected_delete_setting_makes_deletion_careful() {
-        let text = "[delete]\nmode = \"permanent\"\nconfirm = \"yes\"\n";
+        let text = "[delete]\nconfirm = false\nmode = \"permanent\"\n";
         let (config, warnings) = Config::parse_lenient(text);
-        assert_eq!(config.delete.mode, DeleteMode::Trash);
+        assert!(config.delete.confirm);
+        assert!(keys(&warnings).contains(&"delete.mode"));
+
+        let text = "[delete]\nconfirm = \"yes\"\n";
+        let (config, warnings) = Config::parse_lenient(text);
         assert!(config.delete.confirm);
         assert!(keys(&warnings).contains(&"delete.confirm"));
 
-        let (config, warnings) = Config::parse_lenient("[delete\nmode = 1\n");
-        assert_eq!(config.delete.mode, DeleteMode::Trash);
+        let (config, warnings) = Config::parse_lenient("[delete\nconfirm = false\n");
         assert!(config.delete.confirm);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("line 1"), "{warnings:?}");

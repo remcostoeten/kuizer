@@ -1,35 +1,51 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import type { ReactNode } from 'react'
-import { metaDescription, siteUrl, tagline } from '@/content/site'
+import {
+  authorName,
+  authorUrl,
+  keywords,
+  metaDescription,
+  metaTitle,
+  siteName,
+  siteUrl,
+} from '@/content/site'
 import { brandIcons } from '@/shared/config/brand-icons'
+import { socialImage } from '@/shared/config/open-graph'
 import { inter, plexMono } from '@/shared/fonts'
 import { themeScript } from '@/shared/helpers/theme'
 import './globals.css'
 
-const title = 'kuizer'
-
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: `${title}: ${tagline}`,
-    template: `%s | ${title}`,
+    default: metaTitle,
+    template: `%s | ${siteName}`,
   },
   description: metaDescription,
+  applicationName: siteName,
+  authors: [{ name: authorName, url: authorUrl }],
+  creator: authorName,
+  keywords,
   manifest: '/manifest.webmanifest',
   icons: brandIcons,
-  openGraph: {
-    type: 'website',
-    siteName: title,
-    title: `${title}: ${tagline}`,
-    description: metaDescription,
-    url: '/',
+  openGraph: { type: 'website', siteName, locale: 'en_US', images: [socialImage] },
+  twitter: { card: 'summary_large_image' },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      'max-image-preview': 'large',
+      'max-snippet': -1,
+      'max-video-preview': -1,
+    },
   },
-  twitter: {
-    card: 'summary_large_image',
-    title: `${title}: ${tagline}`,
-    description: metaDescription,
-    images: ['/brand/sweep/social/opengraph-dark.png'],
-  },
+}
+
+export const viewport: Viewport = {
+  themeColor: '#0f0f0f',
+  colorScheme: 'dark light',
 }
 
 type Props = {

@@ -67,7 +67,7 @@ export function Swap({ items, index, roll = false, className = '' }: SwapProps) 
             refs.current[position] = node
           }}
           aria-hidden={position !== index}
-          className={`absolute top-0 left-1/2 -translate-x-1/2 swap-item ${poseOf(poses, position, index, items.length)}`}
+          className={`absolute top-0 left-0 swap-item ${poseOf(poses, position, index, items.length)}`}
         >
           {item}
         </span>

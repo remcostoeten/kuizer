@@ -17,6 +17,7 @@ const config: NextConfig = {
   trailingSlash: false,
   images: { unoptimized: true },
   agentRules: false,
+  experimental: { globalNotFound: true },
 }
 
 export default createMDX()(config)

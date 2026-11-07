@@ -38,9 +38,10 @@ verify = false
 # are skipped unless this is true; a scan root inside one still looks there.
 include_hidden = false
 
+# Deletion is always permanent. With confirm = false the TUI deletes safe items straight
+# away; review items and projects with uncommitted changes still ask.
 [delete]
-mode = "trash"
-confirm = false
+confirm = true
 
 # Git repositories found under the scan roots. kuizer lists a repository when `git gc`
 # would free at least min_gain, or when it has local branches already merged into its

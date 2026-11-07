@@ -65,48 +65,70 @@ impl Kuizer {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
-                    ui::button("stop-scan", "Stop here", ButtonKind::Ghost, true)
-                        .tip(
-                            Tooltip::new("Stop the scan and keep what it found so far")
-                                .keys(&["S"])
-                                .build(),
-                        )
-                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                    self.button(
+                        "stop-scan",
+                        "Stop here",
+                        ButtonKind::Ghost,
+                        true,
+                        cx,
+                        |app, _, cx| {
                             app.stop_scan(cx);
-                        })),
+                        },
+                    )
+                    .tip(
+                        Tooltip::new("Stop the scan and keep what it found so far")
+                            .keys(&["S"])
+                            .build(),
+                    ),
                 )
                 .child(
-                    ui::button("cancel-scan", "Cancel scan", ButtonKind::Secondary, true)
-                        .tip(
-                            Tooltip::new("Stop the scan and go back to the start screen")
-                                .keys(&["Esc"])
-                                .build(),
-                        )
-                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                            app.cancel_scan(cx);
-                        })),
+                    self.button(
+                        "cancel-scan",
+                        "Cancel scan",
+                        ButtonKind::Secondary,
+                        true,
+                        cx,
+                        |app, _, cx| app.cancel_scan(cx),
+                    )
+                    .tip(
+                        Tooltip::new("Stop the scan and go back to the start screen")
+                            .keys(&["Esc"])
+                            .build(),
+                    ),
                 )
             })
             .when(finished, |this| {
                 this.child(
-                    ui::button("new-scan", "New scan", ButtonKind::Ghost, !busy)
-                        .tip(tooltip::plain(
-                            "Choose another folder or change the scan options",
-                        ))
-                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                    self.button(
+                        "new-scan",
+                        "New scan",
+                        ButtonKind::Ghost,
+                        !busy,
+                        cx,
+                        |app, _, cx| {
                             app.new_scan(cx);
-                        })),
+                        },
+                    )
+                    .tip(tooltip::plain(
+                        "Choose another folder or change the scan options",
+                    )),
                 )
                 .child(
-                    ui::button("rescan", "Rescan", ButtonKind::Secondary, !busy)
-                        .tip(tooltip::plain(
-                            "Scan the same folders again with the same options",
-                        ))
-                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                    self.button(
+                        "rescan",
+                        "Rescan",
+                        ButtonKind::Secondary,
+                        !busy,
+                        cx,
+                        |app, _, cx| {
                             if !app.busy() {
                                 app.rescan(cx);
                             }
-                        })),
+                        },
+                    )
+                    .tip(tooltip::plain(
+                        "Scan the same folders again with the same options",
+                    )),
                 )
             });
         div()
@@ -282,7 +304,7 @@ impl Kuizer {
     /// back.
     pub(super) fn sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
-        div()
+        let toggle = div()
             .id("sidebar-toggle")
             .debug_selector(|| "sidebar-toggle".to_owned())
             .flex()
@@ -311,15 +333,18 @@ impl Kuizer {
                 theme::faint(),
                 self.icon_epoch(Icon::Sidebar),
                 self.zoom.rem_size(),
-            ))
-            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                app.collapsed = !app.collapsed;
-                cx.notify();
-            }))
+            ));
+        self.control(toggle, cx, |app, _, cx| {
+            app.collapsed = !app.collapsed;
+            cx.notify();
+        })
     }
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
+        self.stops
+            .borrow_mut()
+            .within(Some(self.sidebar_scroll.clone()));
         let mut items: Vec<AnyElement> = Vec::new();
         for tab in Tab::ALL {
             let heading = tab.heading().map(|heading| {
@@ -342,6 +367,7 @@ impl Kuizer {
             items.extend(heading);
             items.push(self.render_tab(tab, cx).into_any_element());
         }
+        self.stops.borrow_mut().within(None);
         let settings = div()
             .id("sidebar-settings")
             .debug_selector(|| "sidebar-settings".to_owned())
@@ -372,10 +398,8 @@ impl Kuizer {
             .when(!collapsed, |this| {
                 this.child(div().flex_1().min_w_0().truncate().child("Settings"))
                     .child(ui::kbd(commands::label("secondary-,")))
-            })
-            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                app.open_settings(cx);
-            }));
+            });
+        let settings = self.control(settings, cx, |app, _, cx| app.open_settings(cx));
         div()
             .id("sidebar")
             .debug_selector(|| "sidebar".to_owned())
@@ -395,6 +419,7 @@ impl Kuizer {
             .child(
                 div()
                     .id("sidebar-items")
+                    .track_scroll(&self.sidebar_scroll)
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -429,7 +454,7 @@ impl Kuizer {
             })
             .keys(if hints { tab.keys() } else { &[] })
             .build();
-        div()
+        let item = div()
             .id(tab.label())
             .debug_selector(|| tab.label().to_owned())
             .relative()
@@ -486,10 +511,8 @@ impl Kuizer {
                             .filter(|_| hints)
                             .map(|key| ui::kbd(commands::label(key))),
                     )
-            })
-            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                app.go_to(tab, cx);
-            }))
+            });
+        self.control(item, cx, move |app, _, cx| app.go_to(tab, cx))
     }
 
     pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -516,7 +539,6 @@ impl Kuizer {
         let ready = self.report().is_some() && !self.busy();
         let refreshing = self.refreshing();
         let can_select = ready && self.tab.selects();
-        let permanent = stats.permanent() > 0;
         div()
             .flex()
             .flex_none()
@@ -544,45 +566,44 @@ impl Kuizer {
             })
             .child(div().flex_1())
             .child(
-                ui::button("select-safe", "Select safe", ButtonKind::Ghost, can_select)
-                    .tip(tooltip::term(Term::SelectSafe))
-                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                self.button(
+                    "select-safe",
+                    "Select safe",
+                    ButtonKind::Ghost,
+                    can_select,
+                    cx,
+                    |app, _, cx| {
                         if app.tab.selects() && !app.busy() {
                             app.select_safe(cx);
                         }
-                    })),
+                    },
+                )
+                .tip(tooltip::term(Term::SelectSafe)),
             )
             .child(
-                ui::button("clear", "Clear", ButtonKind::Ghost, ready && !empty)
-                .tip(tooltip::plain("Clear the selection in every tab"))
-                .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                self.button("clear", "Clear", ButtonKind::Ghost, ready && !empty, cx, |app, _, cx| {
                     if !app.busy() {
                         app.selection.clear();
                         cx.notify();
                     }
-                })),
+                })
+                .tip(tooltip::plain("Clear the selection in every tab")),
             )
             .child(
-                ui::button(
+                self.button(
                     "trash",
-                    if permanent { "Remove" } else { "Move to trash" },
+                    "Delete",
                     ButtonKind::Primary,
                     ready && !refreshing && !empty,
+                    cx,
+                    |app, window, cx| app.open_confirm(window, cx),
                 )
                 .when(refreshing, |this| {
                     this.tip(tooltip::plain(
                         "Available once the fresh scan finishes. These results come from an earlier scan, so every item is checked again first",
                     ))
                 })
-                .when(!refreshing && !permanent, |this| this.tip(tooltip::term(Term::Trash)))
-                .when(!refreshing && permanent, |this| {
-                    this.tip(tooltip::plain(
-                        "Toolchains and Docker objects in the selection are deleted for good, the rest moves to the trash",
-                    ))
-                })
-                .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
-                    app.open_confirm(window, cx);
-                })),
+                .when(!refreshing, |this| this.tip(tooltip::term(Term::Trash))),
             )
     }
 }

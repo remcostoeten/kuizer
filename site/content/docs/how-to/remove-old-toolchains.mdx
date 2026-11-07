@@ -1,0 +1,46 @@
+---
+title: Remove unused Node, Rust and Python toolchain versions
+description: List the Node, Rust, Python, Java and Go versions that nvm, fnm, volta, rustup, pyenv, uv, SDKMAN and the Go downloader keep, and remove the ones no project pins, by hand or with kuizer.
+icon: FileText
+---
+
+Version managers keep every version you ever installed, and each one holds a full runtime or compiler with its tools. Removing a version is cheap, because the manager downloads it again when a project asks for it.
+
+## By hand
+
+List and remove per tool:
+
+```sh
+rustup toolchain list
+rustup toolchain uninstall nightly-2025-03-01
+
+nvm ls
+nvm uninstall 18.20.4
+
+fnm list
+fnm uninstall 18.20.4
+
+pyenv versions
+pyenv uninstall 3.11.9
+
+uv python list --only-installed
+uv python uninstall 3.11
+
+sdk list java
+sdk uninstall java 17.0.2-tem
+```
+
+Volta keeps its Node versions under `~/.volta/tools/image/node`, and the Go downloader puts each SDK under `~/sdk`; both are removed by deleting the version's folder. Before removing anything, check which versions projects pin in `rust-toolchain.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.sdkmanrc`, `.tool-versions`, `go.mod` or the `volta` key of `package.json`, and which version each tool uses by default.
+
+## With kuizer
+
+`kuizer toolchain` lists the installed versions of all of these tools in one table and reads the pin files under the paths you give it. A version that is a tool's default, or that a project pins, is marked `review` and stays out of the default selection.
+
+```sh
+kuizer toolchain ~/projects
+kuizer toolchain ~/projects --clean --dry-run
+kuizer toolchain ~/projects --clean
+kuizer toolchain ~/projects --clean --select nvm
+```
+
+Removal is permanent, and the confirmation says so: rustup and uv versions go through their own uninstall command, the rest is deleted. A tool downloads a removed version again the next time a project needs it.

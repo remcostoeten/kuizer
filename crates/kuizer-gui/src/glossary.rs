@@ -109,7 +109,7 @@ impl Term {
         match self {
             Self::Overview => "Overview",
             Self::History => "History",
-            Self::Trash => "Move to trash",
+            Self::Trash => "Delete",
             Self::Safety => "Safety",
             Self::Category => "Category",
             Self::Safe => "safe",
@@ -159,7 +159,7 @@ impl Term {
                 "Every cleanup kuizer made on this machine, from this window and from the command line, and what is still in the trash."
             }
             Self::Trash => {
-                "Moves the selection to the trash after you confirm. Undo right after, Restore in History or kuizer restore puts it back until the trash is emptied. Nothing is deleted for good."
+                "Deletes the selection for good after you confirm. Nothing goes to the trash and nothing can be restored."
             }
             Self::Safety => {
                 "How sure kuizer is that removing an item is harmless. safe items are rebuilt by a tool, review items need a look first."
@@ -232,7 +232,7 @@ impl Term {
                 "All items removed over time. Items you put back with kuizer restore are counted as restored."
             }
             Self::Freed => {
-                "Space actually given back: items deleted permanently, or moved to the trash that has since been emptied."
+                "Space actually given back: items deleted permanently, or moved to the trash by an older version and since emptied."
             }
             Self::InTrash => {
                 "Removed items that are still in the trash. Restore in the table below or kuizer restore puts them back until the trash is emptied."

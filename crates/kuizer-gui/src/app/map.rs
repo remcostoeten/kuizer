@@ -246,16 +246,17 @@ impl Kuizer {
     pub(super) fn overview_switch(&self, cx: &mut Context<Self>) -> Div {
         let key = commands::shortcut(&Command::SpaceMap).unwrap_or_default();
         ui::segments()
-            .child(
+            .child(self.control(
                 ui::segment("view-summary", "Summary", !self.map.shown)
                     .debug_selector(|| "view-summary".to_owned())
-                    .tip(tooltip::plain("Totals and charts of the scan"))
-                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                        app.map.shown = false;
-                        cx.notify();
-                    })),
-            )
-            .child(
+                    .tip(tooltip::plain("Totals and charts of the scan")),
+                cx,
+                |app, _, cx| {
+                    app.map.shown = false;
+                    cx.notify();
+                },
+            ))
+            .child(self.control(
                 ui::segment("view-map", "Space map", self.map.shown)
                     .debug_selector(|| "view-map".to_owned())
                     .tip(
@@ -263,13 +264,14 @@ impl Kuizer {
                             .row(key, "show or hide")
                             .note("Every reclaimable item as a tile sized by its space, inside the folders that hold it. Click a folder to open it.")
                             .build(),
-                    )
-                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                        app.map.shown = true;
-                        app.ensure_map();
-                        cx.notify();
-                    })),
-            )
+                    ),
+                cx,
+                |app, _, cx| {
+                    app.map.shown = true;
+                    app.ensure_map();
+                    cx.notify();
+                },
+            ))
     }
 
     pub(super) fn render_map(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -304,16 +306,20 @@ impl Kuizer {
                 .when(!current, |this| {
                     this.cursor_pointer()
                         .hover(|style| style.bg(theme::hover()).text_color(theme::text()))
-                        .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                            app.map_back(index);
-                            cx.notify();
-                        }))
                 })
                 .when_some(node.path.as_ref(), |this, path| {
                     this.tip(tooltip::path(path))
                 })
-                .child(node.name.clone())
-                .into_any_element();
+                .child(node.name.clone());
+            let crumb = if current {
+                crumb.into_any_element()
+            } else {
+                self.control(crumb, cx, move |app, _, cx| {
+                    app.map_back(index);
+                    cx.notify();
+                })
+                .into_any_element()
+            };
             separator.into_iter().chain([crumb])
         });
         let crumbs: Vec<AnyElement> = crumbs.collect();

@@ -12,13 +12,8 @@ impl Kuizer {
             Target::Item(source, id, _) => {
                 let selected = self.selection.contains(&(*source, *id));
                 let external = *source == Source::Docker;
-                let remove = if source.permanent() {
-                    MenuItem::new(Choice::Trash, "Delete for good", "Del")
-                        .tip("Delete only this item, after a confirmation. It skips the trash")
-                } else {
-                    MenuItem::new(Choice::Trash, "Move to trash", "Del")
-                        .tip("Move only this item to the trash, after a confirmation")
-                };
+                let remove = MenuItem::new(Choice::Trash, "Delete", "Del")
+                    .tip("Delete only this item for good, after a confirmation");
                 vec![
                     reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,
@@ -154,7 +149,11 @@ impl Kuizer {
         let plain = !keystroke.modifiers.control
             && !keystroke.modifiers.alt
             && !keystroke.modifiers.platform;
-        let key = keystroke.key.as_str();
+        let key = match keystroke.key.as_str() {
+            "tab" if keystroke.modifiers.shift => "up",
+            "tab" => "down",
+            key => key,
+        };
         let next = match key {
             "escape" | "menu" => {
                 self.close_menu(cx);
@@ -232,7 +231,7 @@ impl Kuizer {
                 self.confirm(Some((source, id)), window, cx);
             }
             (Choice::Restore, Target::Run(session, _)) => {
-                self.restore(session, Scope::StillInTrash, cx);
+                self.restore(session, cx);
             }
             (Choice::CopyCommand, Target::Run(_, command)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(command));

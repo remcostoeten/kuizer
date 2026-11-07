@@ -31,15 +31,6 @@ impl Mode {
     }
 }
 
-impl From<crate::config::DeleteMode> for Mode {
-    fn from(mode: crate::config::DeleteMode) -> Self {
-        match mode {
-            crate::config::DeleteMode::Trash => Self::Trash,
-            crate::config::DeleteMode::Permanent => Self::Permanent,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteError {
     #[error("refused: {0}")]
@@ -48,6 +39,8 @@ pub enum DeleteError {
     Io(#[from] std::io::Error),
     #[error("trash: {0}")]
     Trash(String),
+    #[error("{0}")]
+    Permission(String),
     #[error("{0}")]
     Tool(String),
 }
@@ -165,18 +158,89 @@ impl Drop for Lane<'_> {
 
 /// @name delete
 /// @description Revalidates a scanned target against the guard right before acting, then
-/// moves it to the trash, removes it, or does nothing in dry-run mode.
+/// removes it, or does nothing in dry-run mode. `Mode::Trash` only remains for runs recorded by
+/// older versions; no frontend asks for it.
 ///
 /// @example
 /// let guard = Guard::new(&roots);
 /// delete(&guard, &target, Mode::Trash)?;
 pub fn delete(guard: &Guard, target: &Target, mode: Mode) -> Result<(), DeleteError> {
     guard.check(&target.path, target.identity)?;
+    if mode != Mode::DryRun {
+        writable(&target.path, mode)?;
+    }
     match mode {
         Mode::DryRun => Ok(()),
         Mode::Permanent => Ok(remove(&target.path, target.identity)?),
-        Mode::Trash => trash::delete(&target.path).map_err(|e| DeleteError::Trash(e.to_string())),
+        Mode::Trash => trash::delete(&target.path).map_err(|e| match e {
+            trash::Error::FileSystem { source, .. } => DeleteError::Io(source),
+            other => DeleteError::Trash(other.to_string()),
+        }),
     }
+}
+
+/// Removing an entry needs write access to its folder, and emptying or (on Linux) moving a
+/// folder needs write access to the folder itself. Checking up front turns a raw `EACCES` deep
+/// inside the trash or the tree walk into a reason the user can act on.
+#[cfg(unix)]
+fn writable(path: &Path, mode: Mode) -> Result<(), DeleteError> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{Access, access};
+
+    let blocked = |at: &Path| access(at, Access::WRITE_OK).is_err();
+    let metadata = std::fs::symlink_metadata(path)?;
+    let inner = metadata.is_dir() && (mode == Mode::Permanent || cfg!(target_os = "linux"));
+    let culprit = if inner && blocked(path) {
+        Some((path, metadata.uid()))
+    } else {
+        path.parent()
+            .filter(|parent| blocked(parent))
+            .and_then(|parent| Some((parent, std::fs::metadata(parent).ok()?.uid())))
+    };
+    let Some((at, uid)) = culprit else {
+        return Ok(());
+    };
+    let place = if at == path {
+        "it"
+    } else {
+        "its parent folder"
+    };
+    Err(DeleteError::Permission(
+        if uid == rustix::process::getuid().as_raw() {
+            format!("{place} is read-only. Make it writable and try again.")
+        } else {
+            format!(
+                "{place} belongs to {}, so your user cannot remove it. Remove it with sudo.",
+                owner(uid)
+            )
+        },
+    ))
+}
+
+#[cfg(not(unix))]
+fn writable(_path: &Path, _mode: Mode) -> Result<(), DeleteError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn owner(uid: u32) -> String {
+    let name = std::fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|passwd| {
+            passwd.lines().find_map(|line| {
+                let mut fields = line.split(':');
+                let name = fields.next()?;
+                (fields.nth(1)?.parse::<u32>().ok()? == uid).then(|| name.to_owned())
+            })
+        });
+    name.unwrap_or_else(|| {
+        if uid == 0 {
+            "root".into()
+        } else {
+            format!("user {uid}")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -203,5 +267,31 @@ mod tests {
             drop(parent);
             assert!(receiver.recv_timeout(Duration::from_secs(10)).is_ok());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_the_user_cannot_write_is_refused_before_anything_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::getuid().is_root() {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let locked = base.path().join("node_modules");
+        std::fs::create_dir_all(locked.join("pkg")).unwrap();
+        std::fs::write(locked.join("pkg/index.js"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let guard = Guard::new(&[base.path().to_path_buf()]).with_cwd(None);
+        let target = Target {
+            path: locked.clone(),
+            identity: None,
+        };
+
+        let outcome = delete(&guard, &target, Mode::Permanent);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(outcome, Err(DeleteError::Permission(_))));
+        assert!(locked.join("pkg/index.js").exists());
     }
 }

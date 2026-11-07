@@ -3,14 +3,14 @@ name = "kuizer"
 version.workspace = true
 edition = "2024"
 rust-version = "1.88"
-description = "Keyboard-driven disk cleanup for developers: generated artifacts, caches and duplicates"
+description = "Keyboard-driven disk cleanup for developers: finds node_modules, build output, tool caches and duplicate files, trashes only what you select"
 license = "MIT"
 repository = "https://github.com/remcostoeten/kuizer"
 homepage = "https://kuizer.app"
 documentation = "https://kuizer.app/docs"
 readme = "README.md"
-keywords = ["cleanup", "disk", "node-modules", "cache", "cli"]
-categories = ["command-line-utilities", "filesystem"]
+keywords = ["cleanup", "disk-usage", "node-modules", "cache", "duplicates"]
+categories = ["command-line-utilities", "filesystem", "development-tools"]
 include = ["/src/**", "/tests/**", "/examples/synth.rs", "/docs/config.example.toml", "/README.md", "/LICENSE"]
 
 [workspace]
@@ -58,7 +58,7 @@ inherits = "release"
 lto = "fat"
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs", "process"] }
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/kuizer-{ target }{ archive-suffix }"

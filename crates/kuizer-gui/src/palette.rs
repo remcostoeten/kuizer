@@ -144,12 +144,12 @@ mod tests {
 
     #[test]
     fn rank_puts_the_best_match_first_and_drops_the_rest() {
-        let ranked = rank("trash", table().to_vec());
+        let ranked = rank("delete sel", table().to_vec());
         assert_eq!(ranked[0].command, Command::Trash);
         assert!(
             ranked
                 .iter()
-                .all(|spec| score("trash", &spec.label).is_some())
+                .all(|spec| score("delete sel", &spec.label).is_some())
         );
         let all = rank("", table().to_vec());
         assert_eq!(all.len(), table().len());

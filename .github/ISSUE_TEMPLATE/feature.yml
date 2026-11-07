@@ -1,0 +1,16 @@
+name: Feature request
+description: Something kuizer should find, do or make configurable
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What takes space or gets in the way today, and how you deal with it now
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What kuizer could do
+      description: The command, key, setting or rule you have in mind. For a new artifact rule, the folder name and the marker files that identify the project.

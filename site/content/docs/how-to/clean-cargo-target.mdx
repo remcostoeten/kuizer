@@ -1,0 +1,47 @@
+---
+title: Clean every Cargo target directory
+description: Remove the target directories of all your Rust projects on Linux and macOS with cargo clean, find or kuizer, and what Cargo keeps in ~/.cargo.
+icon: FileText
+---
+
+Cargo writes every build into the project's `target` directory, and the debug and release builds of a mid-sized crate with its dependencies take gigabytes. `cargo build` recreates it, so the `target` directory of a project you are not working on is one full rebuild away from being free space.
+
+## By hand
+
+In one project:
+
+```sh
+cargo clean
+```
+
+For every project under a directory, run `cargo clean` next to each `Cargo.toml`:
+
+```sh
+find ~/projects -name Cargo.toml -not -path '*/target/*' -execdir cargo clean \;
+```
+
+To see the sizes first:
+
+```sh
+find ~/projects -name target -type d -prune -exec du -sh {} + | sort -h
+```
+
+That list goes by name, so it also shows Maven `target` directories and any other folder called `target`.
+
+## With kuizer
+
+kuizer counts a `target` directory only next to a `Cargo.toml` and only when Cargo's own `CACHEDIR.TAG` is inside it, so a Maven build or a folder you named `target` yourself is not on the list.
+
+```sh
+kuizer scan ~/projects --category build
+kuizer clean ~/projects --select cargo-target --dry-run
+kuizer clean ~/projects --select cargo-target
+```
+
+`--idle 3mo` limits the run to projects without changes for three months. The folders go to the trash, and `kuizer restore --last` brings the last run back.
+
+## The registry and git caches
+
+Downloaded crates and git checkouts live under `~/.cargo/registry` and `~/.cargo/git`, shared by every project. `kuizer cache` lists their size next to the other tool caches, and Cargo downloads what the next build needs again. Since Rust 1.88, Cargo also removes files it has not used for three months on its own, or one month for files that came from the local system, unless `cache.auto-clean-frequency = "never"` is set in its config.
+
+Old toolchains are a separate matter: `rustup toolchain list` shows them, and `kuizer toolchain` lists which ones no project under a path pins. See [Remove unused toolchain versions](/docs/how-to/remove-old-toolchains).

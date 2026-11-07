@@ -107,7 +107,6 @@ pub struct App {
     pub mode: Mode,
     pub confirm_before_delete: bool,
     pub freed: u64,
-    pub trashed: u64,
     pub free: Option<u64>,
     pub message: Option<String>,
     pub quit: bool,
@@ -156,7 +155,6 @@ impl App {
             mode,
             confirm_before_delete,
             freed: 0,
-            trashed: 0,
             free: None,
             message: None,
             quit: false,
@@ -668,8 +666,7 @@ impl App {
 
     pub fn delete(&mut self) -> Vec<Job> {
         self.open_confirm();
-        if self.confirm_before_delete || self.mode == Mode::Permanent || self.pending_needs_review()
-        {
+        if self.confirm_before_delete || self.pending_needs_review() {
             return Vec::new();
         }
         self.confirm()
@@ -691,15 +688,6 @@ impl App {
             return Vec::new();
         }
         self.delete()
-    }
-
-    pub fn toggle_confirm_mode(&mut self) {
-        if let Overlay::Confirm { mode, .. } = &mut self.overlay {
-            *mode = match mode {
-                Mode::Trash => Mode::Permanent,
-                Mode::Permanent | Mode::DryRun => Mode::Trash,
-            };
-        }
     }
 
     pub fn item(&self, id: u64) -> Option<&Item> {
@@ -762,18 +750,17 @@ impl App {
                 removed = bytes;
             }
         }
-        match mode {
-            Mode::Permanent => self.freed += removed,
-            Mode::Trash => self.trashed += removed,
-            Mode::DryRun => {}
+        if mode != Mode::DryRun {
+            self.freed += removed;
         }
     }
 
     pub fn free_after(&self, bytes: u64, mode: Mode) -> Option<u64> {
         let free = self.free?;
-        Some(match mode {
-            Mode::Permanent => free.saturating_add(bytes),
-            Mode::Trash | Mode::DryRun => free,
+        Some(if mode == Mode::DryRun {
+            free
+        } else {
+            free.saturating_add(bytes)
         })
     }
 
@@ -814,7 +801,7 @@ mod tests {
     }
 
     fn app() -> App {
-        app_with(Mode::Trash, true)
+        app_with(Mode::Permanent, true)
     }
 
     fn app_with(mode: Mode, confirm: bool) -> App {
@@ -893,19 +880,19 @@ mod tests {
     }
 
     #[test]
-    fn trash_skips_the_dialog_unless_confirmation_is_on() {
-        let mut app = app_with(Mode::Trash, false);
+    fn deleting_skips_the_dialog_when_confirmation_is_off() {
+        let mut app = app_with(Mode::Permanent, false);
         app.toggle();
         let jobs = app.delete_selected();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].2, Mode::Trash);
+        assert_eq!(jobs[0].2, Mode::Permanent);
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.item(2).unwrap().status, Status::Deleting);
     }
 
     #[test]
     fn review_items_always_ask() {
-        let mut app = app_with(Mode::Trash, false);
+        let mut app = app_with(Mode::Permanent, false);
         app.move_to(1);
         assert!(app.delete().is_empty());
         assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids == &[3]));
@@ -914,7 +901,7 @@ mod tests {
 
     #[test]
     fn projects_with_uncommitted_changes_always_ask() {
-        let mut app = app_with(Mode::Trash, false);
+        let mut app = app_with(Mode::Permanent, false);
         app.changes.insert(PathBuf::from("/p/a"), 2);
         app.select_safe();
         assert!(app.delete_selected().is_empty());
@@ -924,7 +911,7 @@ mod tests {
 
     #[test]
     fn a_project_still_being_checked_for_changes_asks() {
-        let mut app = app_with(Mode::Trash, false);
+        let mut app = app_with(Mode::Permanent, false);
         app.expect_status(PathBuf::from("/p/b"));
         app.toggle();
         assert!(app.delete_selected().is_empty());
@@ -981,7 +968,7 @@ mod tests {
         app.open_confirm();
         app.confirm();
         assert_eq!(counters(&app), recount(&app));
-        app.finish(2, Mode::Trash, Ok(()));
+        app.finish(2, Mode::Permanent, Ok(()));
         app.finish(1, Mode::Permanent, Err("refused".to_owned()));
         assert_eq!(counters(&app), recount(&app));
         app.select_project();
@@ -989,13 +976,6 @@ mod tests {
         assert_eq!(counters(&app), recount(&app));
         app.clear_selection();
         assert_eq!(counters(&app), recount(&app));
-    }
-
-    #[test]
-    fn permanent_mode_always_asks() {
-        let mut app = app_with(Mode::Permanent, false);
-        assert!(app.delete().is_empty());
-        assert!(matches!(&app.overlay, Overlay::Confirm { ids, .. } if ids == &[2]));
     }
 
     #[test]
@@ -1015,37 +995,21 @@ mod tests {
             app.overlay,
             Overlay::Confirm {
                 ids: vec![2],
-                mode: Mode::Trash
+                mode: Mode::Permanent
             }
         );
-        app.toggle_confirm_mode();
         let jobs = app.confirm();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].2, Mode::Permanent);
         assert_eq!(app.item(2).unwrap().status, Status::Deleting);
         app.finish(2, Mode::Permanent, Ok(()));
         assert_eq!(app.freed, 30);
-        assert_eq!(app.trashed, 0);
         assert_eq!(app.item(2).unwrap().status, Status::Deleted);
     }
 
     #[test]
-    fn only_permanent_deletion_adds_free_space() {
-        let mut app = app();
-        assert_eq!(app.free_after(10, Mode::Permanent), None);
-        app.free = Some(100);
-        assert_eq!(app.free_after(10, Mode::Permanent), Some(110));
-        assert_eq!(app.free_after(10, Mode::Trash), Some(100));
-        app.open_confirm();
-        app.confirm();
-        app.finish(2, Mode::Trash, Ok(()));
-        assert_eq!(app.trashed, 30);
-        assert_eq!(app.freed, 0);
-    }
-
-    #[test]
     fn project_grouping_orders_by_project_and_selects_whole_project() {
-        let mut app = App::new(Mode::Trash, true);
+        let mut app = App::new(Mode::Permanent, true);
         let mut cache = candidate(4, "/p/a/.cache", 50, Safety::Review);
         cache.project = Some(PathBuf::from("/p/a"));
         let mut modules = candidate(1, "/p/a/node_modules", 10, Safety::Safe);
@@ -1140,7 +1104,7 @@ mod tests {
             });
             ordered.iter().map(|candidate| candidate.id).collect()
         };
-        let mut app = App::new(Mode::Trash, true);
+        let mut app = App::new(Mode::Permanent, true);
         for batch in [1..41u64, 41..61, 61..64] {
             for id in batch {
                 app.push(build(id));
@@ -1182,8 +1146,8 @@ mod tests {
         let mut app = app();
         app.open_confirm();
         app.confirm();
-        app.finish(2, Mode::Trash, Err("refused".to_owned()));
-        assert_eq!(app.trashed, 0);
+        app.finish(2, Mode::Permanent, Err("refused".to_owned()));
+        assert_eq!(app.freed, 0);
         app.move_to(0);
         app.toggle();
         assert_eq!(app.selected().count(), 0);

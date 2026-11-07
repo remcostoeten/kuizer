@@ -1,0 +1,11 @@
+{
+  "title": "How-to",
+  "icon": "Route",
+  "pages": [
+    "delete-node-modules",
+    "clean-cargo-target",
+    "python-venv-cleanup",
+    "docker-disk-space",
+    "remove-old-toolchains"
+  ]
+}

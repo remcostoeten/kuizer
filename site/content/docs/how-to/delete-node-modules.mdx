@@ -1,0 +1,56 @@
+---
+title: Delete every node_modules folder
+description: Find all node_modules folders under your projects on Linux and macOS, see their sizes and remove them, by hand with find and du or with kuizer and the trash.
+icon: FileText
+---
+
+Every JavaScript project keeps its own `node_modules`, so a machine with a few dozen projects holds the same packages many times over. `npm install`, `pnpm install`, `yarn install` or `bun install` recreates the folder from `package.json` and the lockfile, so removing it from a project you are not working on costs one install later.
+
+## By hand
+
+List every `node_modules` folder under a directory with its size, largest last:
+
+```sh
+find ~/projects -name node_modules -type d -prune -exec du -sh {} + | sort -h
+```
+
+`-prune` keeps `find` out of the folders it already matched, so the `node_modules` of nested packages are not listed on their own.
+
+Remove them all:
+
+```sh
+find ~/projects -name node_modules -type d -prune -exec rm -rf {} +
+```
+
+`rm -rf` is permanent and asks nothing. It cannot tell a project you worked on this morning from one you abandoned last year, and it goes by the name alone, so a `node_modules` folder with no `package.json` next to it goes too.
+
+## With kuizer
+
+kuizer lists the same folders with their sizes and counts only a `node_modules` that sits next to a `package.json`. Nothing is removed until you confirm, and what you remove is deleted for good.
+
+```sh
+kuizer scan ~/projects --category dependencies
+kuizer clean ~/projects --select node-modules --dry-run
+kuizer clean ~/projects --select node-modules
+```
+
+`--dry-run` prints what the next command would remove. Without it, kuizer shows the item count and total size, asks once, and deletes the folders for good.
+
+To keep the projects you still touch, add `--idle`:
+
+```sh
+kuizer clean ~/projects --select node-modules --idle 60d
+```
+
+A project counts as idle when its newest file outside generated folders and its last commit are both older than that, so a stray `npm install` does not keep it. Run `kuizer ~/projects` to pick folders one by one in the [terminal UI](/docs/guides/terminal-ui), and `kuizer restore --last` to put a run back from the trash.
+
+## The npm, pnpm, yarn and bun caches
+
+The package managers also keep a global cache outside your projects. `kuizer cache` lists them with sizes and `kuizer cache --clean --select npm` removes one. Each tool has its own command too.
+
+```sh
+npm cache clean --force
+pnpm store prune
+yarn cache clean
+bun pm cache rm
+```

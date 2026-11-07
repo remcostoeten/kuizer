@@ -1,6 +1,6 @@
 ---
 title: Quick start
-description: Scan a folder, review what kuizer found and move the safe items to the trash.
+description: Scan a folder, review what kuizer found and delete the safe items.
 icon: Rocket
 ---
 
@@ -27,7 +27,7 @@ Move with `j` and `k`, press `space` to select an item and `a` to select every s
 
 ### Delete the selection
 
-Press `d`. Selected items move to the trash by default, after kuizer checks each one again.
+Press `d` and confirm. Selected items are deleted for good, after kuizer checks each one again.
 
 </Step>
 </Steps>
@@ -44,12 +44,6 @@ kuizer clean ~/projects --idle 3mo
 
 `--idle 3mo` keeps only projects you have not touched for three months, so the dependencies of what you work on today stay.
 
-## Undo a run
+## Past runs
 
-Every deletion is logged. Put the last run back from the trash with:
-
-```sh
-kuizer restore --last
-```
-
-See [History and restore](/docs/guides/history-and-restore) for run ids and single items.
+Every deletion is logged and `kuizer history` lists it. Deletion is permanent, so there is nothing to undo; see [History and restore](/docs/guides/history-and-restore) for runs from older versions that used the trash.

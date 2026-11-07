@@ -40,10 +40,10 @@ kuizer scan ~/projects --report
 kuizer clean ~/projects --dry-run
 kuizer clean ~/projects --select node-modules
 kuizer clean ~/projects --category build --yes
-kuizer clean ~/projects --select all --permanent
+kuizer clean ~/projects --select all
 ```
 
-`--select` takes `safe`, `all` or a rule name, and can repeat. The default is `safe`. `--yes` skips the confirmation and `--permanent` skips the trash.
+`--select` takes `safe`, `all` or a rule name, and can repeat. The default is `safe`. `--yes` skips the confirmation. Deletion is always permanent.
 
 ## Caches, toolchains and Docker
 
