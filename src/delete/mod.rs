@@ -172,10 +172,7 @@ pub fn delete(guard: &Guard, target: &Target, mode: Mode) -> Result<(), DeleteEr
     match mode {
         Mode::DryRun => Ok(()),
         Mode::Permanent => Ok(remove(&target.path, target.identity)?),
-        Mode::Trash => trash::delete(&target.path).map_err(|e| match e {
-            trash::Error::FileSystem { source, .. } => DeleteError::Io(source),
-            other => DeleteError::Trash(other.to_string()),
-        }),
+        Mode::Trash => trash::delete(&target.path).map_err(|e| DeleteError::Trash(e.to_string())),
     }
 }
 
