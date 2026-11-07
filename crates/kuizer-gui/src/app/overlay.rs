@@ -1,7 +1,7 @@
 //! The command palette, the shortcuts overlay, the list filter bar and the titlebar search field.
 
 use super::*;
-use crate::commands::{Group, HINTS};
+use crate::commands::{CONTROLS, Group, HINTS};
 
 impl Kuizer {
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -179,6 +179,11 @@ impl Kuizer {
                 .iter()
                 .map(|(label, keys)| row(SharedString::from(*label), keys)),
         );
+        let controls = column("Buttons and controls").children(
+            CONTROLS
+                .iter()
+                .map(|(label, keys)| row(SharedString::from(*label), keys)),
+        );
         let panel = div()
             .id("shortcuts")
             .debug_selector(|| "shortcuts".to_owned())
@@ -218,7 +223,8 @@ impl Kuizer {
                     .gap_x(unit(space::XXL))
                     .gap_y(unit(space::XL))
                     .children(groups)
-                    .child(fields),
+                    .child(fields)
+                    .child(controls),
             );
         Some(
             div()
@@ -253,19 +259,20 @@ impl Kuizer {
             .items_center()
             .gap(unit(space::M))
             .child(
-                field::view("filter-field", text, "Filter by path or name", active)
-                    .debug_selector(|| "filter".to_owned())
-                    .w(unit(size::FILTER))
-                    .tip(
-                        Tooltip::details("Filter this list")
-                            .row(key.clone(), "type to filter")
-                            .row("Enter", "keep the filter and go back to the list")
-                            .row("Esc", "clear the filter")
-                            .build(),
-                    )
-                    .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
-                        app.focus_filter(window, cx);
-                    })),
+                self.control(
+                    field::view("filter-field", text, "Filter by path or name", active)
+                        .debug_selector(|| "filter".to_owned())
+                        .w(unit(size::FILTER))
+                        .tip(
+                            Tooltip::details("Filter this list")
+                                .row(key.clone(), "type to filter")
+                                .row("Enter", "keep the filter and go back to the list")
+                                .row("Esc", "clear the filter")
+                                .build(),
+                        ),
+                    cx,
+                    |app, window, cx| app.focus_filter(window, cx),
+                ),
             )
             .when(!active && text.is_empty(), |this| this.child(ui::kbd(key)))
     }
@@ -290,8 +297,8 @@ impl Kuizer {
             _ => None,
         };
         let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
-            ui::segment(id, label, self.safety == value)
-                .when_some(value, |this, safety| {
+            let choice =
+                ui::segment(id, label, self.safety == value).when_some(value, |this, safety| {
                     let term = Term::safety(safety);
                     let tip = Tooltip::new(term.text()).title(term.title());
                     let tip = match totals {
@@ -306,12 +313,12 @@ impl Kuizer {
                         None => tip,
                     };
                     this.tip(tip.build())
-                })
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    app.safety = value;
-                    app.filtered();
-                    cx.notify();
-                }))
+                });
+            self.control(choice, cx, move |app, _, cx| {
+                app.safety = value;
+                app.filtered();
+                cx.notify();
+            })
         };
         ui::segments()
             .child(segment("safety-all", "All", None))
@@ -353,7 +360,7 @@ impl Kuizer {
     /// Opens the palette from the titlebar, and shows the key that does the same.
     pub(super) fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let key = hint(&Command::Palette);
-        div()
+        let search = div()
             .id("search")
             .debug_selector(|| "search".to_owned())
             .flex()
@@ -381,7 +388,7 @@ impl Kuizer {
                 self.icon_epoch(Icon::Search),
                 self.zoom.rem_size(),
             ))
-            .child(ui::kbd(key))
-            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.open_palette(cx)))
+            .child(ui::kbd(key));
+        self.control(search, cx, |app, _, cx| app.open_palette(cx))
     }
 }

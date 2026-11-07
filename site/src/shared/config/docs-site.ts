@@ -1,4 +1,4 @@
-import { authorUrl, description, repoUrl, siteUrl } from '@/content/site'
+import { authorName, authorUrl, description, keywords, repoUrl, siteUrl } from '@/content/site'
 
 export const docsSite = {
   name: 'kuizer',
@@ -6,15 +6,7 @@ export const docsSite = {
   description,
   url: siteUrl,
   basePath: '/docs',
-  author: { name: 'Remco Stoeten', url: authorUrl },
-  keywords: [
-    'kuizer',
-    'disk usage',
-    'disk cleaner',
-    'node_modules cleaner',
-    'cargo target cleaner',
-    'developer cache cleanup',
-    'terminal UI',
-  ],
+  author: { name: authorName, url: authorUrl },
+  keywords,
   repository: { url: repoUrl, branch: 'master', contentDir: 'site/content/docs' },
 }

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+use kuizer::delete::Mode;
+use kuizer::history::{self, Entry, Recorder};
 use serde_json::Value;
 use support::file;
 use tempfile::TempDir;
@@ -41,12 +43,59 @@ fn setup() -> (TempDir, PathBuf, PathBuf) {
     (tmp, home, root)
 }
 
+/// Trashes `dist` and `node_modules` the way kuizer did before deletion became permanent: a
+/// freedesktop trash move plus a history run recorded in trash mode.
 fn clean_all(home: &Path, root: &Path) {
-    let output = kuizer(
-        home,
-        &["clean", root.to_str().unwrap(), "--select", "all", "--yes"],
+    let trash = home.join(".local/share/Trash");
+    fs::create_dir_all(trash.join("files")).unwrap();
+    fs::create_dir_all(trash.join("info")).unwrap();
+    let mut recorder = Recorder::at(
+        home.join(".kuizer-history.json"),
+        home.join(".kuizer-history.json"),
+        history::now(),
+        &[root.to_path_buf()],
     );
-    assert!(output.status.success(), "{output:?}");
+    for (relative, rule, category) in [
+        ("web/dist", "dist", "build"),
+        ("web/node_modules", "node-modules", "dependencies"),
+    ] {
+        let path = root.join(relative);
+        if !path.exists() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let slot = (1..)
+            .map(|n| {
+                if n == 1 {
+                    name.clone()
+                } else {
+                    format!("{name}.{n}")
+                }
+            })
+            .find(|slot| !trash.join("files").join(slot).exists())
+            .unwrap();
+        fs::write(
+            trash.join("info").join(format!("{slot}.trashinfo")),
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate={}\n",
+                path.display(),
+                jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S")
+            ),
+        )
+        .unwrap();
+        fs::rename(&path, trash.join("files").join(&slot)).unwrap();
+        recorder.add(Entry {
+            deleted_at: history::now(),
+            path,
+            rule: rule.to_owned(),
+            category: category.to_owned(),
+            mode: Mode::Trash,
+            bytes: 100,
+            size: "100 B".to_owned(),
+            restores: None,
+        });
+    }
+    recorder.finish().unwrap();
 }
 
 fn states(home: &Path, run: &str) -> Vec<(String, String)> {
@@ -179,10 +228,7 @@ fn never_overwrites_a_reoccupied_path() {
 #[test]
 fn permanent_deletions_cannot_be_restored() {
     let (_tmp, home, root) = setup();
-    let output = kuizer(
-        &home,
-        &["clean", root.to_str().unwrap(), "--permanent", "--yes"],
-    );
+    let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
     assert!(output.status.success(), "{output:?}");
 
     let report = json(&kuizer(&home, &["--json", "restore", "s1"]));

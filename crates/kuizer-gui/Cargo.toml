@@ -2,14 +2,15 @@
 name = "kuizer-gui"
 version.workspace = true
 edition = "2024"
-description = "Desktop interface for kuizer, built on GPUI"
+description = "Desktop app for kuizer: keyboard-driven disk cleanup for developers, built on GPUI"
 license = "MIT"
 rust-version = "1.88"
 repository = "https://github.com/remcostoeten/kuizer"
 homepage = "https://kuizer.app"
 documentation = "https://kuizer.app/docs"
-keywords = ["cleanup", "disk", "gui", "gpui"]
-categories = ["filesystem", "gui"]
+readme = "../../README.md"
+keywords = ["cleanup", "disk-usage", "node-modules", "gpui", "desktop"]
+categories = ["filesystem", "development-tools", "gui"]
 
 [[bin]]
 name = "kuizer-gui"

@@ -1,0 +1,8 @@
+.git
+target
+site/node_modules
+site/.next
+site/out
+site/.source
+site/*.tsbuildinfo
+site/next-env.d.ts

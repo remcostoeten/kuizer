@@ -22,7 +22,7 @@ export const metadata: Metadata = {
   icons: brandIcons,
   openGraph: {
     type: 'website',
-    siteName: docsSite.title,
+    siteName: docsSite.name,
     locale: 'en_US',
   },
   twitter: { card: 'summary_large_image' },

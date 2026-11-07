@@ -1,0 +1,50 @@
+name: Bug report
+description: Something kuizer did wrong, or did not do
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what kuizer did, and what you expected instead. If something was deleted that should not have been, name the path.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. kuizer scan ~/projects
+        2. ...
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: Where
+      options:
+        - Command line
+        - Terminal UI
+        - Desktop app
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `kuizer --version`
+      placeholder: kuizer 0.1.2
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system and version. For the desktop app, also the desktop or window manager and whether it runs on Wayland or X11.
+      placeholder: Arch Linux, KDE Plasma on Wayland
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: The output of `kuizer config show`, if it differs from the defaults
+      render: toml

@@ -7,10 +7,7 @@ use kuizer::output::display_path;
 use crate::squarify::Direction;
 use crate::tab::Tab;
 
-actions!(
-    kuizer,
-    [ZoomIn, ZoomOut, ResetZoom, Undo, TogglePalette, Quit]
-);
+actions!(kuizer, [ZoomIn, ZoomOut, ResetZoom, TogglePalette, Quit]);
 
 /// Everything the keyboard, the command palette and the shortcuts overlay can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +22,6 @@ pub enum Command {
     Rescan,
     NewScan,
     StopScan,
-    Undo,
     Down,
     Up,
     ExtendDown,
@@ -192,9 +188,6 @@ fn build_table() -> Vec<Spec> {
         )
         .keys(&["s"]),
         Spec::new(Command::FindDuplicates, "Find duplicate files", General).keys(&["D"]),
-        Spec::new(Command::Undo, "Undo last cleanup", General)
-            .keys(&["secondary-z"])
-            .global(),
     ];
     specs.extend(Tab::ALL.into_iter().map(|tab| {
         Spec::new(
@@ -244,7 +237,7 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::SelectAll, "Select all in this list", Lists).keys(&["secondary-a"]),
         Spec::new(Command::SelectNone, "Select none in this list", Lists)
             .keys(&["secondary-shift-a"]),
-        Spec::new(Command::Trash, "Move selected to trash", Lists).keys(&["enter", "delete", "d"]),
+        Spec::new(Command::Trash, "Delete selected", Lists).keys(&["enter", "delete", "d"]),
         Spec::new(Command::Reveal, "Reveal in file manager", Lists).keys(&["o"]),
         Spec::new(Command::CopyPath, "Copy path", Lists).keys(&["y"]),
         Spec::new(Command::OpenMenu, "Open item menu", Lists).keys(&["menu", "shift-f10"]),
@@ -336,6 +329,15 @@ pub const HINTS: [(&str, &[&str]); 4] = [
     ("Close, clear the filter or cancel", &["escape"]),
 ];
 
+/// Keys that move the focus ring through the buttons, segments and sidebar items, listed in the
+/// shortcuts overlay next to the table.
+pub const CONTROLS: [(&str, &[&str]); 4] = [
+    ("Next or previous control", &["tab", "shift-tab"]),
+    ("Move along the controls", &["left", "right"]),
+    ("Press the control", &["enter", "space"]),
+    ("Back to the list", &["escape"]),
+];
+
 /// @name scans
 /// @description One palette entry per recent folder, labelled with the folder.
 ///
@@ -381,7 +383,6 @@ pub fn bind_keys(cx: &mut App) {
                 Command::ZoomIn => KeyBinding::new(key, ZoomIn, None),
                 Command::ZoomOut => KeyBinding::new(key, ZoomOut, None),
                 Command::ResetZoom => KeyBinding::new(key, ResetZoom, None),
-                Command::Undo => KeyBinding::new(key, Undo, None),
                 Command::Palette => KeyBinding::new(key, TogglePalette, None),
                 Command::Quit => KeyBinding::new(key, Quit, None),
                 _ => continue,

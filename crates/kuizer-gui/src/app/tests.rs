@@ -907,10 +907,17 @@ fn toast_is(view: &Entity<Kuizer>, cx: &mut VisualTestContext, check: fn(&Notice
     assert!(shown, "unexpected toast");
 }
 
-fn trash_the_project<'a>(
-    base: &Path,
-    cx: &'a mut TestAppContext,
-) -> (Entity<Kuizer>, &'a mut VisualTestContext, PathBuf) {
+#[test]
+fn deleting_the_selection_removes_it_for_good() {
+    isolated("deleting_the_selection_removes_it_for_good_inside");
+}
+
+#[gpui::test]
+#[ignore = "runs in its own process through deleting_the_selection_removes_it_for_good"]
+fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
+    let Some(base) = isolated_base() else {
+        return;
+    };
     cx.update(bind_keys);
     let root = project(&base.join("work"));
     let modules = std::fs::canonicalize(root.join("site").join("node_modules")).unwrap();
@@ -921,76 +928,30 @@ fn trash_the_project<'a>(
     let id = view.read_with(cx, |app, _| app.report().unwrap().candidates[0].id);
     view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
     cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
-    wait_until(&view, cx, "the trash", |app| {
+    wait_until(&view, cx, "the removal", |app| {
         matches!(
             &app.toast,
             Some(Toast {
-                notice: Notice::Trashed { .. },
+                notice: Notice::Info(_),
                 ..
             })
         )
     });
     assert!(!modules.exists());
+    assert!(
+        kuizer::history::trashed_paths().is_none_or(|trashed| !trashed.contains(&modules)),
+        "nothing goes to the trash"
+    );
     view.read_with(cx, |app, _| {
         assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
         assert!(app.report().unwrap().candidates.is_empty());
     });
-    (view, cx, modules)
-}
-
-fn restore_runs() -> Vec<kuizer::history::Run> {
     let path = kuizer::history::default_path().unwrap();
-    kuizer::history::load(&path)
-        .unwrap()
-        .runs
-        .into_iter()
-        .filter(|run| run.action == Action::Restore)
-        .collect()
-}
-
-#[test]
-fn undo_puts_the_trashed_items_back() {
-    isolated("undo_puts_the_trashed_items_back_inside");
-}
-
-#[gpui::test]
-#[ignore = "runs in its own process through undo_puts_the_trashed_items_back"]
-fn undo_puts_the_trashed_items_back_inside(cx: &mut TestAppContext) {
-    let Some(base) = isolated_base() else {
-        return;
-    };
-    let (view, cx, modules) = trash_the_project(&base, cx);
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("toast").is_some());
-    let undo = cx.debug_bounds("undo").expect("an Undo button");
-    cx.simulate_click(undo.center(), Modifiers::default());
-    toast_is(&view, cx, |notice| {
-        matches!(
-            notice,
-            Notice::Restoring { session: 1 } | Notice::Restored(_)
-        )
-    });
-
-    wait_until(&view, cx, "the restore", |app| !app.restoring());
-    toast_is(
-        &view,
-        cx,
-        |notice| matches!(notice, Notice::Restored(restored) if restored.items == 1 && restored.problems.is_empty()),
-    );
-    assert!(modules.join("left-pad").join("index.js").is_file());
-    let runs = restore_runs();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].deleted[0].restores.as_deref(), Some("s1.1"));
-
-    wait_for_refresh(&view, cx);
-    view.read_with(cx, |app, _| {
-        let report = app.report().unwrap();
-        assert_eq!(report.candidates.len(), 1, "the item is back in the list");
-        let history = report.history.as_ref().unwrap();
-        assert_eq!(history.history.cumulative.restored_items, 1);
-        assert_eq!(history.trash_state(0), TrashState::Restored);
-    });
+    let runs = kuizer::history::load(&path).unwrap().runs;
+    assert_eq!(runs[0].deleted[0].mode, kuizer::delete::Mode::Permanent);
 }
 
 #[test]
@@ -1060,24 +1021,24 @@ esac
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| {
-        matches!(app.dialog, Some(Dialog::Finished(_)))
+        !matches!(app.dialog, Some(Dialog::Running))
     });
     let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
     assert_eq!(calls.lines().last(), Some("image rm aaaaaaaaaaaaaaaa"));
     view.read_with(cx, |app, _| {
-        assert!(app.toast.is_none(), "nothing to undo");
+        assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
         assert_eq!(app.report().unwrap().docker.len(), 1);
     });
 }
 
 #[test]
-fn toolchains_are_deleted_for_good_without_undo() {
-    isolated("toolchains_are_deleted_for_good_without_undo_inside");
+fn toolchains_are_deleted_for_good() {
+    isolated("toolchains_are_deleted_for_good_inside");
 }
 
 #[gpui::test]
-#[ignore = "runs in its own process through toolchains_are_deleted_for_good_without_undo"]
-fn toolchains_are_deleted_for_good_without_undo_inside(cx: &mut TestAppContext) {
+#[ignore = "runs in its own process through toolchains_are_deleted_for_good"]
+fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
     };
@@ -1119,16 +1080,12 @@ fn toolchains_are_deleted_for_good_without_undo_inside(cx: &mut TestAppContext) 
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| {
-        matches!(app.dialog, Some(Dialog::Finished(_)))
+        !matches!(app.dialog, Some(Dialog::Running))
     });
     assert!(!old.exists());
     assert!(versions.join("v20.11.0").exists());
     view.read_with(cx, |app, _| {
-        assert!(app.toast.is_none(), "nothing to undo");
-        let Some(Dialog::Finished(finished)) = &app.dialog else {
-            unreachable!()
-        };
-        assert_eq!((finished.removed, finished.deleted), (1, 1));
+        assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
         assert_eq!(app.report().unwrap().toolchains.len(), 1);
     });
     let path = kuizer::history::default_path().unwrap();
@@ -1137,100 +1094,13 @@ fn toolchains_are_deleted_for_good_without_undo_inside(cx: &mut TestAppContext) 
     assert_eq!(runs[0].deleted[0].mode, kuizer::delete::Mode::Permanent);
 }
 
-#[test]
-fn restore_in_history_puts_a_run_back() {
-    isolated("restore_in_history_puts_a_run_back_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through restore_in_history_puts_a_run_back"]
-fn restore_in_history_puts_a_run_back_inside(cx: &mut TestAppContext) {
-    let Some(base) = isolated_base() else {
-        return;
-    };
-    let (view, cx, modules) = trash_the_project(&base, cx);
-    cx.simulate_keystrokes("escape");
-    view.read_with(cx, |app, _| assert!(app.toast.is_none()));
-    cx.update(|window, cx| window.draw(cx).clear());
-    let history = cx.debug_bounds("History").expect("a sidebar item");
-    cx.simulate_click(history.center(), Modifiers::default());
-    cx.update(|window, cx| window.draw(cx).clear());
-    let restore = cx.debug_bounds("restore-s1").expect("a Restore button");
-    cx.simulate_click(restore.center(), Modifiers::default());
-    wait_until(&view, cx, "the restore", |app| !app.restoring());
-    toast_is(
-        &view,
-        cx,
-        |notice| matches!(notice, Notice::Restored(restored) if restored.items == 1 && restored.problems.is_empty()),
-    );
-    assert!(modules.is_dir());
-    assert_eq!(restore_runs().len(), 1);
-    wait_for_refresh(&view, cx);
-    view.read_with(cx, |app, _| {
-        let report = app.report().unwrap();
-        assert_eq!(report.candidates.len(), 1);
-        let history = report.history.as_ref().unwrap();
-        assert_eq!(
-            history.trash_state(0),
-            TrashState::Restored,
-            "nothing is left to restore"
-        );
-    });
-}
-
-#[test]
-fn a_failed_undo_explains_why() {
-    isolated("a_failed_undo_explains_why_inside");
-}
-
-#[gpui::test]
-#[ignore = "runs in its own process through a_failed_undo_explains_why"]
-fn a_failed_undo_explains_why_inside(cx: &mut TestAppContext) {
-    let Some(base) = isolated_base() else {
-        return;
-    };
-    let (view, cx, modules) = trash_the_project(&base, cx);
-    std::fs::create_dir_all(&modules).unwrap();
-    cx.simulate_keystrokes("ctrl-z");
-    wait_until(&view, cx, "the restore", |app| !app.restoring());
-    toast_is(&view, cx, |notice| {
-        matches!(notice, Notice::Restored(restored) if restored.items == 0
-            && restored.problems.len() == 1
-            && restored.problems[0].1.ends_with("exists, not overwriting"))
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("toast-error").is_some());
-    assert!(
-        !modules.join("left-pad").exists(),
-        "nothing was overwritten"
-    );
-    assert!(restore_runs().is_empty());
-    let trashed = kuizer::history::trashed_paths().unwrap();
-    assert!(trashed.contains(&modules), "the item stays in the trash");
-
-    cx.executor().advance_clock(TOAST_TIME * 2);
-    cx.run_until_parked();
-    view.read_with(cx, |app, _| {
-        assert!(app.toast.is_some(), "an error stays until it is dismissed");
-        assert!(!app.refreshing());
-    });
-}
-
-#[gpui::test]
-fn the_undo_toast_hides_itself_and_waits_for_a_refresh(cx: &mut TestAppContext) {
-    cx.update(bind_keys);
+fn a_toast_hides_itself(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let root = project(dir.path());
     let (view, cx) = open(cx, dir.path().join("recent"));
-    type_text(cx, &root.display().to_string());
-    cx.simulate_keystrokes("enter");
-    wait_for_refresh(&view, cx);
-    let trashed = || Notice::Trashed {
-        session: 1,
-        items: 2,
-        bytes: 2048,
-    };
-    view.update(cx, |app, cx| app.show_toast(trashed(), cx));
+    view.update(cx, |app, cx| {
+        app.show_toast(Notice::Info("2 items deleted".to_owned()), cx);
+    });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("toast").is_some());
     cx.executor().advance_clock(TOAST_TIME - POLL * 2);
@@ -1239,15 +1109,6 @@ fn the_undo_toast_hides_itself_and_waits_for_a_refresh(cx: &mut TestAppContext) 
     cx.executor().advance_clock(POLL * 3);
     cx.run_until_parked();
     view.read_with(cx, |app, _| assert!(app.toast.is_none()));
-
-    view.update(cx, |app, cx| {
-        app.show_toast(trashed(), cx);
-        app.rescan(cx);
-        assert!(app.refreshing());
-    });
-    cx.simulate_keystrokes("ctrl-z");
-    toast_is(&view, cx, |notice| matches!(notice, Notice::Trashed { .. }));
-    view.update(cx, |app, cx| app.cancel_scan(cx));
 }
 
 pub(super) fn scanned<'a>(
@@ -1322,7 +1183,7 @@ fn right_clicking_a_row_opens_its_menu_there(cx: &mut TestAppContext) {
                 "Reveal in file manager",
                 "Copy path",
                 "Select",
-                "Move to trash",
+                "Delete",
                 "Always exclude"
             ]
         );

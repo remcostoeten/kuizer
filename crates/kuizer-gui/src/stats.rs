@@ -122,15 +122,6 @@ impl SelectionStats {
             .iter()
             .fold(Totals::default(), |sum, totals| sum.plus(*totals))
     }
-
-    /// How many items are deleted for good instead of moved to the trash.
-    pub fn permanent(&self) -> usize {
-        Source::ALL
-            .into_iter()
-            .filter(|source| source.permanent())
-            .map(|source| self.source(source).all.count)
-            .sum()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

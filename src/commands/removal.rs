@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use super::AppError;
 use super::scan::sort_candidates;
 use crate::cli::{RemovalArgs, Selection, SortKey};
-use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
 use crate::history::{self, Entry, Recorder};
@@ -32,13 +31,11 @@ pub fn files(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), Del
     delete::delete(guard, &target(candidate), mode)
 }
 
-pub fn mode(args: &RemovalArgs, config: &Config) -> Mode {
+pub fn mode(args: &RemovalArgs) -> Mode {
     if args.dry_run {
         Mode::DryRun
-    } else if args.permanent {
-        Mode::Permanent
     } else {
-        config.delete.mode.into()
+        Mode::Permanent
     }
 }
 

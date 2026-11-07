@@ -150,15 +150,20 @@ impl Kuizer {
             return;
         }
         if self.filtering {
-            self.filter_key(keystroke, cx);
+            if !ring::is_tab(keystroke) {
+                self.filter_key(keystroke, cx);
+                return;
+            }
+            self.filtering = false;
+        }
+        if self.ring_key(keystroke, window, cx) {
+            return;
+        }
+        if matches!(self.phase, Phase::Start) && self.type_folder(event, cx) {
             return;
         }
         let escape = keystroke.key == "escape";
         match self.phase {
-            Phase::Start => {
-                self.type_folder(event, cx);
-                return;
-            }
             Phase::Loading(_) if escape => {
                 self.cancel_scan(cx);
                 return;
@@ -193,23 +198,13 @@ impl Kuizer {
     fn dialog_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let key = keystroke.key.as_str();
         match &mut self.dialog {
-            Some(Dialog::Confirm { typed, .. }) => match key {
+            Some(Dialog::Confirm { .. }) => match key {
                 "escape" => self.dialog = None,
                 "enter" => {
                     self.accept(cx);
                     return;
                 }
-                "backspace" => {
-                    typed.pop();
-                }
-                _ => {
-                    if let Some(ch) = keystroke.key_char.as_deref()
-                        && ch.chars().all(|c| c.is_ascii_digit())
-                        && typed.len() < 9
-                    {
-                        typed.push_str(ch);
-                    }
-                }
+                _ => return,
             },
             Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
             Some(Dialog::Branches(_)) => match key {
@@ -294,6 +289,8 @@ impl Kuizer {
             }
             "down" => palette.step(1, count),
             "up" => palette.step(-1, count),
+            "tab" if modifiers.shift => palette.step(-1, count),
+            "tab" => palette.step(1, count),
             "n" if ctrl => palette.step(1, count),
             "p" if ctrl => palette.step(-1, count),
             _ => {
@@ -417,24 +414,6 @@ impl Kuizer {
             Command::StopScan => (!matches!(self.phase, Phase::Loading(_)) && !self.refreshing())
                 .then_some("No scan is running"),
             Command::FindDuplicates => (!shown).then_some(NEEDS_SCAN),
-            Command::Undo => {
-                let trashed = matches!(
-                    self.toast,
-                    Some(Toast {
-                        notice: Notice::Trashed { .. },
-                        ..
-                    })
-                );
-                if !trashed {
-                    Some("Nothing to undo right now")
-                } else if self.restoring() {
-                    Some(WAIT_FOR_RESTORE)
-                } else if !self.can_restore() {
-                    Some(WAIT_FOR_REFRESH)
-                } else {
-                    None
-                }
-            }
             Command::Scan(path) => self.wait().or_else(|| {
                 self.recent
                     .is_gone(path)
@@ -531,7 +510,7 @@ impl Kuizer {
     pub(super) fn wait(&self) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
-        } else if matches!(self.dialog, Some(Dialog::Running { .. })) {
+        } else if matches!(self.dialog, Some(Dialog::Running)) {
             Some(WAIT_FOR_CLEANUP)
         } else if self.git_running() {
             Some(repos::GIT_RUNNING)
@@ -570,7 +549,6 @@ impl Kuizer {
                 self.go_to(Tab::Duplicates, cx);
             }
             Command::Quit => cx.quit(),
-            Command::Undo => self.undo_last(cx),
             Command::Down => self.move_cursor(Motion::Down),
             Command::Up => self.move_cursor(Motion::Up),
             Command::ExtendDown => self.extend(Motion::Down),
@@ -1162,7 +1140,7 @@ mod tests {
             app.stale = Some(SystemTime::now());
         });
         cx.simulate_keystrokes("ctrl-k");
-        type_text(cx, "move selected");
+        type_text(cx, "delete selected");
         view.read_with(cx, |app, _| {
             let entry = &app.palette_entries()[0];
             assert_eq!(entry.spec.command, Command::Trash);
@@ -1170,7 +1148,7 @@ mod tests {
             assert!(entry.blocked.is_some());
         });
         draw(cx);
-        assert!(cx.debug_bounds("palette-Move selected to trash").is_some());
+        assert!(cx.debug_bounds("palette-Delete selected").is_some());
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| {
             assert!(app.dialog.is_none(), "a blocked command does not run");
@@ -1692,7 +1670,7 @@ mod tests {
                 spec.label
             );
         }
-        for (label, _) in commands::HINTS {
+        for (label, _) in commands::HINTS.iter().chain(&commands::CONTROLS) {
             assert!(
                 painted(cx, format!("shortcut-{label}")),
                 "{label} is listed"

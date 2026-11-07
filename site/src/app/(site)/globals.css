@@ -1,5 +1,6 @@
 @import 'tailwindcss' source(none);
 @source './**/*.{ts,tsx}';
+@source '../global-not-found.tsx';
 @source '../../components/**/*.{ts,tsx}';
 @source '../../content/**/*.{ts,tsx}';
 @source '../../shared/**/*.{ts,tsx}';

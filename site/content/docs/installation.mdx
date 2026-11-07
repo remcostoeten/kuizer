@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install the kuizer CLI and desktop app on Linux or macOS with the installer script, npm or from source.
+description: Install the kuizer CLI and desktop app on Linux or macOS with the installer script, npm, cargo or from source.
 icon: Download
 ---
 
@@ -29,6 +29,16 @@ With Node installed, the CLI runs from npm.
 ```sh
 npx kuizer
 npm install -g kuizer
+```
+
+## cargo
+
+With a Rust toolchain installed, `cargo binstall` downloads the release binary and `cargo install` builds from crates.io.
+
+```sh
+cargo binstall kuizer
+cargo install kuizer
+cargo install kuizer-gui
 ```
 
 ## From source

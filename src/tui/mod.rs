@@ -106,7 +106,6 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let batch = app.confirm();
             dispatch(app, jobs, batch);
         }
-        (Overlay::Confirm { .. }, KeyCode::Char('t')) => app.toggle_confirm_mode(),
         (Overlay::Confirm { .. }, _) => app.overlay = Overlay::None,
         (Overlay::Help, _) => app.overlay = Overlay::None,
         (Overlay::None, code) => match code {
@@ -167,7 +166,7 @@ pub fn run_with_notice(
     confirm: bool,
     notice: Option<String>,
 ) -> std::io::Result<()> {
-    let mut app = App::new(config.delete.mode.into(), confirm);
+    let mut app = App::new(Mode::Permanent, confirm);
     app.message = notice;
     let mut terminal = ratatui::try_init()?;
     let started = terminal
@@ -320,7 +319,7 @@ mod tests {
     }
 
     fn app() -> App {
-        let mut app = App::new(Mode::Trash, false);
+        let mut app = App::new(Mode::Permanent, false);
         for id in 1..=30 {
             app.push(candidate(id, &format!("/p/{id}/node_modules")));
         }

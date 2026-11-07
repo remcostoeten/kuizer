@@ -55,7 +55,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     },
     openGraph: {
       type: 'article',
-      siteName: docsSite.title,
+      siteName: docsSite.name,
       locale: 'en_US',
       title: page.data.title,
       description: page.data.description,

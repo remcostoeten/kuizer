@@ -1,0 +1,43 @@
+---
+title: Free Docker and Podman disk space
+description: See what Docker and Podman keep on disk, and remove dangling images, stopped containers, the build cache and unused volumes with the prune commands or with kuizer.
+icon: FileText
+---
+
+Images, stopped containers, the build cache and volumes stay on disk until something removes them. On macOS they all live inside the virtual machine disk of Docker Desktop or Podman, so the usual disk usage tools show one large file and not what is in it.
+
+## By hand
+
+See what the engine holds:
+
+```sh
+docker system df
+docker system df -v
+```
+
+Remove by kind:
+
+```sh
+docker image prune          # dangling images, the untagged layers left behind by rebuilds
+docker image prune -a       # every image no container uses
+docker container prune      # stopped containers
+docker builder prune        # the build cache
+docker volume prune         # volumes no container uses
+```
+
+`docker system prune` runs the first four at once, and `docker system prune -a --volumes` removes everything the engine is not using, volumes included. Podman takes the same commands: `podman system df`, `podman system prune`, `podman image prune` and `podman volume prune`.
+
+Everything here is permanent. A removed image is pulled or built again; a removed volume and its data are gone.
+
+## With kuizer
+
+`kuizer docker` lists dangling images, stopped containers, the build cache and unused volumes for every engine in `docker.engines`, with sizes. It runs only the engines' own commands, so `DOCKER_HOST` and contexts apply.
+
+```sh
+kuizer docker
+kuizer docker --clean --dry-run
+kuizer docker --clean --select image --select build-cache
+kuizer docker --clean --select all
+```
+
+Removal goes through `image rm`, `container rm`, `builder prune` and `volume rm` without force, so the engine refuses anything still in use. Volumes and containers that stopped in the last 24 hours are marked `review` and stay out of the default selection. The confirmation says that these removals skip the trash.

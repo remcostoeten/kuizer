@@ -96,7 +96,7 @@ fn refuses_without_confirmation_when_not_interactive() {
     let (_tmp, home, root) = setup();
     let before = snapshot(&root);
 
-    let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--permanent"]);
+    let output = kuizer(&home, &["clean", root.to_str().unwrap()]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
@@ -107,10 +107,7 @@ fn refuses_without_confirmation_when_not_interactive() {
 fn removes_only_safe_items_by_default_and_records_history() {
     let (_tmp, home, root) = setup();
 
-    let output = kuizer(
-        &home,
-        &["clean", root.to_str().unwrap(), "--permanent", "--yes"],
-    );
+    let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
 
     assert!(output.status.success(), "{output:?}");
     assert!(!root.join("web/node_modules").exists());
@@ -128,10 +125,7 @@ fn carries_legacy_sweep_history_into_the_new_file() {
     let legacy_text = r#"{"runs":[{"started_at":"2026-01-01T00:00:00+00:00","finished_at":"2026-01-01T00:00:01+00:00","command":"sweep clean","roots":[],"deleted":[],"total":{"items":0,"bytes":0,"size":"0 B"}}]}"#;
     fs::write(&legacy, legacy_text).unwrap();
 
-    let output = kuizer(
-        &home,
-        &["clean", root.to_str().unwrap(), "--permanent", "--yes"],
-    );
+    let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_text);
@@ -152,7 +146,6 @@ fn select_all_includes_review_items_and_reports_json() {
             root.to_str().unwrap(),
             "--select",
             "all",
-            "--permanent",
             "-y",
         ],
     );
@@ -173,14 +166,7 @@ fn select_by_rule_and_reject_unknown_rules() {
 
     let output = kuizer(
         &home,
-        &[
-            "clean",
-            root.to_str().unwrap(),
-            "--select",
-            "js-dist",
-            "--permanent",
-            "-y",
-        ],
+        &["clean", root.to_str().unwrap(), "--select", "js-dist", "-y"],
     );
     assert!(output.status.success(), "{output:?}");
     assert!(!root.join("web/dist").exists());
@@ -213,14 +199,7 @@ fn never_touches_browser_or_electron_profiles() {
 
     let output = kuizer(
         &home,
-        &[
-            "clean",
-            root.to_str().unwrap(),
-            "--select",
-            "all",
-            "--permanent",
-            "-y",
-        ],
+        &["clean", root.to_str().unwrap(), "--select", "all", "-y"],
     );
 
     assert!(output.status.success(), "{output:?}");
@@ -268,10 +247,7 @@ fn cache_lists_and_cleans_known_caches_only() {
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(names.contains(&"npm") && names.contains(&"pip"));
 
-    let output = kuizer(
-        &home,
-        &["cache", "--clean", "--select", "npm", "--permanent", "-y"],
-    );
+    let output = kuizer(&home, &["cache", "--clean", "--select", "npm", "-y"]);
     assert!(output.status.success(), "{output:?}");
     assert!(!home.join(".npm/_cacache").exists());
     assert!(home.join(".npm").exists());

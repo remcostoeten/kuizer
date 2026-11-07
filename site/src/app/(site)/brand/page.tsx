@@ -11,10 +11,12 @@ import {
   brandMedia,
   brandPalette,
 } from '@/content/brand'
+import { pageOpenGraph } from '@/shared/config/open-graph'
 
 export const metadata: Metadata = {
   title: 'Brand assets',
   alternates: { canonical: '/brand' },
+  openGraph: pageOpenGraph('/brand'),
   description:
     'The kuizer Sweep logo, app icons, wordmarks and media assets in color and single-color formats.',
 }

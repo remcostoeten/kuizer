@@ -147,7 +147,6 @@ fn disk(app: &App) -> Vec<Span<'static>> {
     }
     let note = match (app.mode, app.free_after(selected, app.mode)) {
         (Mode::Permanent, Some(after)) => format!("→ {} after delete ", ByteSize(after)),
-        (Mode::Trash, _) => "selection stays on disk in the trash ".to_owned(),
         _ => return spans,
     };
     spans.push(Span::styled(note, Style::new().fg(MUTED)));
@@ -375,9 +374,6 @@ fn footer(app: &App) -> Line<'static> {
     if app.freed > 0 {
         spans.push(Span::raw(format!(" freed {} ", ByteSize(app.freed))));
     }
-    if app.trashed > 0 {
-        spans.push(Span::raw(format!(" trashed {} ", ByteSize(app.trashed))));
-    }
     let deleting = app.deleting();
     if deleting > 0 {
         spans.push(Span::styled(
@@ -433,8 +429,9 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     }
     lines.push(Line::raw(""));
     let action = match mode {
-        crate::delete::Mode::Trash => "Move to trash. Space is freed once the trash is emptied.",
-        crate::delete::Mode::Permanent => "Delete permanently. This cannot be undone.",
+        crate::delete::Mode::Trash | crate::delete::Mode::Permanent => {
+            "Delete permanently. This cannot be undone."
+        }
         crate::delete::Mode::DryRun => "Dry run. Nothing is touched.",
     };
     lines.push(Line::styled(
@@ -483,7 +480,7 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  y confirm   t trash or permanent   n cancel",
+        "  y confirm   n cancel",
         Style::new().fg(MUTED),
     ));
     let title = format!(

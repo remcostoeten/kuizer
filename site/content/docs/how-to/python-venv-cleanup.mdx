@@ -1,0 +1,54 @@
+---
+title: Remove old Python virtual environments and caches
+description: Find every .venv and venv folder, the __pycache__ directories and the pip and uv caches on Linux and macOS, and remove the ones you no longer need by hand or with kuizer.
+icon: FileText
+---
+
+A Python project usually carries a virtual environment in `.venv` or `venv`, a `__pycache__` folder next to every module, and often a `.pytest_cache`, `.mypy_cache`, `.ruff_cache` or `.tox`. pip and uv keep a download cache outside the project as well.
+
+## By hand
+
+List the environments with their sizes:
+
+```sh
+find ~/projects -type d \( -name .venv -o -name venv \) -prune -exec du -sh {} + | sort -h
+```
+
+Remove the bytecode caches, which Python writes again on the next import:
+
+```sh
+find ~/projects -name __pycache__ -type d -prune -exec rm -rf {} +
+```
+
+An environment is recreated from the project's `requirements.txt`, `pyproject.toml` or lockfile:
+
+```sh
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+uv sync
+```
+
+Check that such a file exists before you remove an environment. If the packages inside were installed by hand, the environment is the only record of them.
+
+The caches outside your projects:
+
+```sh
+pip cache info
+pip cache purge
+uv cache prune
+uv cache clean
+```
+
+`uv cache prune` removes entries no current project uses, `uv cache clean` removes everything.
+
+## With kuizer
+
+kuizer recognises an environment by the `pyvenv.cfg` inside it and marks it `review`, not `safe`, so it is never part of the default selection. `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox` and `.nox` are `safe` and go with the default run.
+
+```sh
+kuizer scan ~/projects --category dependencies
+kuizer clean ~/projects
+kuizer clean ~/projects --select python-venv --dry-run
+kuizer clean ~/projects --select python-venv
+```
+
+The last command lists every environment, says how many are marked review, and asks before moving them to the trash. `kuizer cache` lists the pip and uv caches with the other tool caches, and `kuizer restore --last` puts a run back.

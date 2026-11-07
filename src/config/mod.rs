@@ -150,19 +150,16 @@ impl Default for DuplicateConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum DeleteMode {
-    #[default]
-    Trash,
-    Permanent,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeleteConfig {
-    pub mode: DeleteMode,
     pub confirm: bool,
+}
+
+impl Default for DeleteConfig {
+    fn default() -> Self {
+        Self { confirm: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -473,7 +470,7 @@ mod tests {
         assert_eq!(config.scan.min_size, ByteSize(1_000_000));
         assert_eq!(config.rules.len(), 1);
         assert_eq!(config.rules[0].safety, Safety::Review);
-        assert_eq!(config.delete.mode, DeleteMode::Trash);
+        assert!(config.delete.confirm);
         assert_eq!(config.git.min_gain, ByteSize(1024 * 1024));
         assert!(!config.git.aggressive);
         assert!(config.appearance.motion);

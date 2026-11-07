@@ -194,11 +194,17 @@ impl Kuizer {
                 .gap(unit(space::L))
                 .child(ui::empty(text))
                 .child(
-                    ui::button("find-duplicates", label, ButtonKind::Secondary, true)
-                        .tip(tip)
-                        .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                    self.button(
+                        "find-duplicates",
+                        label,
+                        ButtonKind::Secondary,
+                        true,
+                        cx,
+                        |app, _, cx| {
                             app.find_duplicates(cx);
-                        })),
+                        },
+                    )
+                    .tip(tip),
                 ),
         )
     }

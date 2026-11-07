@@ -1,0 +1,46 @@
+---
+title: Frequently asked questions
+sidebarTitle: FAQ
+description: Short answers on what kuizer deletes, what it never touches, the trash and restore, duplicate files, Windows support and the rename from sweep.
+icon: Lightbulb
+---
+
+## Does a scan change anything?
+
+No. Scanning only reads. Deletion is a separate step that revalidates every item first, and nothing leaves the disk until you confirm.
+
+## Is it safe to delete node_modules?
+
+Yes. `node_modules` holds packages your package manager downloaded, and `npm install`, `pnpm install`, `yarn install` or `bun install` recreates it from `package.json` and the lockfile. kuizer marks a `node_modules` folder `safe` only when a `package.json` sits next to it. Edits you made inside the folder by hand are lost with it. See [Delete every node_modules folder](/docs/how-to/delete-node-modules).
+
+## Is the Cargo target directory safe to delete?
+
+Yes. It holds build output that `cargo build` recreates, so the next build is a full one. kuizer counts a `target` directory only next to a `Cargo.toml` and only when Cargo's own `CACHEDIR.TAG` is inside, so Maven `target` directories and folders you named yourself are not on the list. See [Clean every Cargo target directory](/docs/how-to/clean-cargo-target).
+
+## Why is a Python virtual environment marked review?
+
+A `.venv` or `venv` is recreated from `requirements.txt`, `pyproject.toml` or a lockfile, but if the packages inside were installed by hand it is the only record of them. kuizer marks every environment `review`, so it is never part of the default selection. Select it with `--select python-venv` or tick it in the list.
+
+## Where do deleted items go?
+
+Nowhere: kuizer deletes for good, after a confirmation. Every run is logged and `kuizer history` lists past runs. Runs from older versions that moved items to the trash can still be put back with `kuizer restore`.
+
+## Does kuizer delete duplicate files?
+
+No. `kuizer duplicates` reports files with identical contents, found by size and BLAKE3 hash, and you choose which copy to keep.
+
+## What does kuizer never touch?
+
+Your home directory itself, system directories, mount points and symlinks. Browser and app profiles such as Chrome, Firefox, Discord, Slack and VS Code. `~/.ssh`, `~/.gnupg` and the keyrings. Globally installed tools and editor extensions. Anything else inside a hidden folder of your home directory is `review`, never `safe`. The full list is on the [safety page](/docs/concepts/safety).
+
+## How do I keep a folder out of every scan?
+
+Put a `.kuizerignore` file in it: the folder and everything under it is skipped. `scan.exclude` in the [config file](/docs/configuration) takes glob patterns, and `scan.skip_dirs` names directories to skip everywhere.
+
+## Does kuizer run on Windows?
+
+No. kuizer runs on Linux and macOS, on x86_64 and ARM, as a command line tool with a terminal UI and as a desktop app.
+
+## What happened to sweep?
+
+sweep became kuizer in October 2026. The tool still reads `.sweepignore` markers and `~/.sweep-history.json`, so nothing needs to change on a machine that used sweep.

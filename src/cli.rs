@@ -122,7 +122,7 @@ fn top_examples() -> String {
         (
             "kuizer",
             "--confirm",
-            "Show a dialog before every trash move",
+            "Ask before every delete, even with delete.confirm off",
         ),
         (
             "kuizer scan",
@@ -187,7 +187,7 @@ fn scan_examples() -> String {
 
 fn clean_help() -> String {
     format!(
-        "Selects safe items unless --select says otherwise, and moves them to the trash after a confirmation.\n\n{}",
+        "Selects safe items unless --select says otherwise, and deletes them permanently after a confirmation.\n\n{}",
         examples(&[
             (
                 "kuizer clean",
@@ -211,8 +211,8 @@ fn clean_help() -> String {
             ),
             (
                 "kuizer clean",
-                "~/apps --select all --permanent",
-                "Remove everything, skipping the trash"
+                "~/apps --select all",
+                "Remove everything, after a confirmation"
             ),
             (
                 "kuizer clean",
@@ -430,7 +430,7 @@ pub struct Cli {
     pub paths: Vec<PathBuf>,
     #[arg(
         long,
-        help = "Ask before moving items to the trash [config: delete.confirm]"
+        help = "Ask before deleting, even with delete.confirm off [config: delete.confirm]"
     )]
     pub confirm: bool,
     #[arg(
@@ -620,12 +620,6 @@ pub struct RemovalArgs {
     pub select: Vec<Selection>,
     #[arg(long, help = "Show what would be removed without removing it")]
     pub dry_run: bool,
-    #[arg(
-        long,
-        conflicts_with = "dry_run",
-        help = "Delete permanently instead of moving to the trash"
-    )]
-    pub permanent: bool,
     #[arg(short, long, help = "Remove without asking for confirmation")]
     pub yes: bool,
 }
@@ -972,7 +966,6 @@ mod tests {
             [Selection::All, Selection::Rule("node-modules".to_owned())]
         );
         assert!(args.removal.dry_run && args.removal.yes);
-        assert!(Cli::try_parse_from(["kuizer", "clean", "--dry-run", "--permanent"]).is_err());
     }
 
     #[test]

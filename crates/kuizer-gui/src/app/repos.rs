@@ -328,11 +328,13 @@ impl Kuizer {
                     .child(div().flex_1())
                     .child(self.tally(Tab::Repos, Some(gain)))
                     .child(
-                        ui::button(
+                        self.button(
                             "repos-gc-all",
                             "Run git gc in all",
                             ButtonKind::Secondary,
                             all_gc.is_none(),
+                            cx,
+                            |app, _, cx| app.collect_garbage(&GitScope::All, cx),
                         )
                         .debug_selector(|| "repos-gc-all".to_owned())
                         .tip(
@@ -344,19 +346,16 @@ impl Kuizer {
                                 }
                             }
                             .build(),
-                        )
-                        .on_click(cx.listener(
-                            |app, _: &ClickEvent, _, cx| {
-                                app.collect_garbage(&GitScope::All, cx);
-                            },
-                        )),
+                        ),
                     )
                     .child(
-                        ui::button(
+                        self.button(
                             "repos-branches-all",
                             "Delete merged branches",
                             ButtonKind::Ghost,
                             all_branches.is_none(),
+                            cx,
+                            |app, _, cx| app.ask_branches(GitScope::All, cx),
                         )
                         .debug_selector(|| "repos-branches-all".to_owned())
                         .tip(
@@ -368,12 +367,7 @@ impl Kuizer {
                                 .keys(&[hint(&Command::BranchesAll)]),
                             }
                             .build(),
-                        )
-                        .on_click(cx.listener(
-                            |app, _: &ClickEvent, _, cx| {
-                                app.ask_branches(GitScope::All, cx);
-                            },
-                        )),
+                        ),
                     ),
             )
             .child(header)
@@ -587,7 +581,7 @@ impl Kuizer {
                     .debug_selector(|| "permanent-warning".to_owned())
                     .text_color(theme::danger())
                     .child(format!(
-                        "{} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.",
+                        "{} deleted permanently. They cannot be restored.",
                         count(total, "merged branch is", "merged branches are")
                     )),
             )

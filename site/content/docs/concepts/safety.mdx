@@ -1,6 +1,6 @@
 ---
 title: Safety and deletion
-description: What kuizer checks before it removes anything, which paths it never touches and which deletions skip the trash.
+description: What kuizer checks before it removes anything, which paths it never touches and why every deletion is permanent.
 icon: Lightbulb
 ---
 
@@ -16,7 +16,7 @@ Before each removal kuizer confirms that the item:
 
 ## Trash by default
 
-Items move to the trash. Set `delete.mode = "permanent"` in the [config file](/docs/configuration) or pass `--permanent` to `kuizer clean` to delete for good. A confirmation shows the item count and total size, and `delete.confirm` or `--confirm` asks before every move.
+Deletion is permanent: nothing goes to the trash. A confirmation shows the item count and total size first. Set `delete.confirm = false` in the [config file](/docs/configuration) to skip it in the terminal UI; `review` items and projects with uncommitted changes always ask.
 
 ## Safe and review
 

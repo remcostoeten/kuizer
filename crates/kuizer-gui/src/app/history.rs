@@ -263,7 +263,7 @@ impl Kuizer {
                         )
                     })
                     .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                        app.restore(session, Scope::StillInTrash, cx);
+                        app.restore(session, cx);
                     }))
                     .into_any_element()
             }

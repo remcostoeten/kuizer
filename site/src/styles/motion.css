@@ -139,11 +139,11 @@
 
 .enter {
   opacity: 0;
-  animation: enter 800ms var(--ease-out) both;
+  animation: enter 480ms var(--ease-out) both;
   animation-delay: var(--delay, 0ms);
 }
 
 .enter-frame {
   opacity: 0;
-  animation: enter-frame 900ms var(--ease-out) 180ms both;
+  animation: enter-frame 560ms var(--ease-out) 120ms both;
 }

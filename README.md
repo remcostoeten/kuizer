@@ -1,31 +1,45 @@
+<p align="center">
+  <img src="packaging/icons/512x512.png" width="88" alt="kuizer logo" />
+</p>
+
 <h1 align="center">kuizer</h1>
 
-A terminal tool that finds build output, development caches and duplicate files on a developer machine, and removes the ones you select.
+A disk cleanup tool for developers, written in Rust. It finds `node_modules`, Cargo `target` directories, build output, tool caches and duplicate files under your projects, and deletes the ones you select.
 
 Website and documentation: [kuizer.app](https://kuizer.app), [kuizer.app/docs](https://kuizer.app/docs).
 
 <p align="center">
+  <img src="https://shieldcn.dev/github/remcostoeten/kuizer/release.svg?font=jetbrains-mono" alt="release" />
+  <img src="https://shieldcn.dev/github/remcostoeten/kuizer/ci.svg?font=jetbrains-mono" alt="CI" />
+  <img src="https://shieldcn.dev/github/remcostoeten/kuizer/license.svg?font=jetbrains-mono" alt="license" />
+  <img src="https://shieldcn.dev/crates/kuizer.svg?font=jetbrains-mono" alt="crates.io" />
   <img src="https://shieldcn.dev/badge/core-Rust-black.svg?font=jetbrains-mono&logo=rust" alt="core: Rust" />
-  <img src="https://shieldcn.dev/badge/UI-ratatui-black.svg?font=jetbrains-mono" alt="UI: ratatui" />
   <img src="https://shieldcn.dev/badge/deletes%20to-trash-black.svg?font=jetbrains-mono" alt="deletes to: trash" />
   <img src="https://shieldcn.dev/badge/platform-Linux%20%7C%20macOS-black.svg?font=jetbrains-mono" alt="platform: Linux and macOS" />
 </p>
 
-kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. Built-in rules cover JavaScript and its frameworks, Rust, Python, .NET, Maven, Gradle, Swift, CocoaPods, Dart and Flutter, Elixir, Zig, Haskell, CMake, Terraform and Unity; `kuizer rules` lists them. You select what to remove in an interactive list or with `kuizer clean`. A scan on its own never deletes anything.
+<p align="center">
+  <img src="docs/gui/overview.png" width="100%" alt="The kuizer desktop app after scanning ~/projects: totals for project artifacts, caches and duplicates, with the largest projects and caches listed" />
+</p>
+<p align="center">
+  <sub>The desktop app on Linux. The same scan runs in the terminal as <code>kuizer</code>.</sub>
+</p>
+
+kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `target` directories and other generated folders with their sizes. Built-in rules cover JavaScript and its frameworks, Rust, Python, .NET, Maven, Gradle, Swift, CocoaPods, Dart and Flutter, Elixir, Zig, Haskell, CMake, Terraform and Unity; `kuizer rules` lists them. A scan on its own never deletes anything.
+
+It ships as a terminal tool with an interactive list, and as a desktop app built on [GPUI](https://gpui.rs). Both run the same scan, the same checks and the same deletion, and share one config file and one history.
 
 - **Each artifact is checked against its project.** A `dist` folder counts only next to a `package.json`, and a `target` folder only next to a `Cargo.toml` with Cargo's cache tag inside. Every result is marked `safe` or `review`.
-- Deleted items go to the trash by default. Before each removal kuizer checks again that the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home directory or a system directory.
-- Browser and app profiles are never entered or deleted: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code. The same goes for `~/.ssh`, `~/.gnupg` and the keyrings, and for globally installed tools and editor extensions (`~/.vscode/extensions`, pnpm, bun and yarn global installs). Anything else found inside a hidden folder of your home directory is marked `review`, never `safe`.
-- Projects with uncommitted git changes get a warning in the list and in the delete confirmation.
-- `--idle 60d` keeps only projects you have not touched for that long, so the dependencies of what you work on today stay. A project's activity is its newest file outside generated folders or its last git commit, whichever is later; `npm install` or `cargo build` in an abandoned project does not make it active. `--sort idle` lists the longest idle first.
-- Every deletion is logged to `~/.kuizer-history.json`. `kuizer history` lists past runs with ids like `s4`, shows what was freed and what is still in the trash, and `kuizer restore s4` puts a run back from the trash without overwriting anything.
-- `kuizer scan --report` writes a single HTML file with a zoomable treemap of every result, grouped by project, category or rule, and opens it in your browser. The file loads nothing from the network.
-- `kuizer dashboard` writes one HTML page with tabs for an overview with insights, project artifacts, a folder drill-down, global caches, duplicates and the deletion history with charts per week or month. Like the report, it loads nothing from the network.
-- `kuizer cache` lists global caches for npm, pnpm, yarn, bun, deno, cargo, pip, uv, Go, Gradle, Maven, Playwright and others.
-- `kuizer toolchain` lists installed rustup toolchains, nvm, fnm and volta Node versions, pyenv and uv Python versions, SDKMAN candidates and Go SDKs in `~/sdk`, with their size. A tool's default version and any version a project pins (`rust-toolchain.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.sdkmanrc`, `.tool-versions`, the `toolchain` line in `go.mod`, the `volta` key in `package.json`) is marked `review`. `--clean` removes the selected versions for good, not to the trash: rustup and uv versions through `rustup toolchain uninstall` and `uv python uninstall`, the others by deleting the version folder.
-- `kuizer docker` lists dangling images, stopped containers, the build cache and orphaned volumes of Docker and Podman, with the sizes the engine reports. Containers that stopped in the last 24 hours and every volume are marked `review`. `--clean` removes the selected objects through the engine itself (`image rm`, `container rm`, `builder prune`, `volume rm`), never by touching its data folder, and always for good. A stopped daemon is reported as one issue, not an error.
-- `kuizer git` finds git repositories with many loose objects and local branches already merged into the default branch. It shows what `git gc` would free before it runs, then packs (`--gc`) or deletes the merged branches (`--branches`) after one confirmation. Neither goes through the trash; every deleted branch is printed with the `git branch NAME COMMIT` line that brings it back. Repositories in the middle of a rebase, merge or another git command are skipped.
-- `kuizer duplicates` finds files with identical contents by size and BLAKE3 hash. It never deletes them: you choose which copy to keep.
+- **Deletion goes to the trash and is checked twice.** Right before removal, kuizer confirms the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home or a system directory.
+- **Profiles and secrets are never entered.** Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code, plus `~/.ssh`, `~/.gnupg`, the keyrings and global tool installs are skipped. Anything else in a hidden home folder is `review`, never `safe`.
+- **Beyond project folders** it lists global caches (npm, pnpm, yarn, bun, cargo, pip, uv, Go, Gradle, Maven, Playwright and more), installed toolchain versions (rustup, nvm, fnm, volta, pyenv, uv, SDKMAN, Go), Docker and Podman leftovers, git repositories that `git gc` would shrink, and duplicate files by size and BLAKE3 hash.
+- **Idle projects only, if you want.** `--idle 60d` keeps the dependencies of what you work on today; a project's activity is its newest source file or last commit, so a stray `npm install` does not count.
+- **Every deletion is logged.** `kuizer history` lists past runs with ids like `s4`, and `kuizer restore s4` puts a run back from the trash without overwriting anything.
+- **Reports stay on your machine.** `kuizer scan --report` writes one HTML file with a zoomable treemap, and `kuizer dashboard` one page with charts and drill-downs. Neither loads anything from the network.
+
+Configuration lives in `~/.config/kuizer/config.toml`; every key is optional and [docs/config.example.toml](docs/config.example.toml) lists them all. A folder containing a `.kuizerignore` file is skipped with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. The design and module boundaries are in [docs/design.md](docs/design.md).
+
+## Command line
 
 ```sh
 kuizer                                     # interactive list of the current directory
@@ -45,75 +59,81 @@ kuizer duplicates ~/Downloads --verify     # duplicate files, compared byte by b
 kuizer --json scan ~/projects              # every command prints JSON with --json
 ```
 
-Configuration lives in `~/.config/kuizer/config.toml`; every key is optional. A directory containing a `.kuizerignore` file is skipped along with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. See [kuizer.app/docs/configuration](https://kuizer.app/docs/configuration) and [docs/config.example.toml](docs/config.example.toml) for the config keys, [docs/design.md](docs/design.md) for the design and roadmap, and [docs/kuizer-migration.md](docs/kuizer-migration.md) for the planned `kuizer code` dead-code command.
+Deletion is permanent: nothing goes to the trash. Every command shows what it will remove and asks first. A tool downloads a toolchain version again when needed, and a merged branch's commits stay in the default branch.
 
 ## Desktop app
 
-`kuizer-gui` is a desktop window for the same scan, built on [GPUI](https://gpui.rs), the framework Zed is built on. It shows the dashboard's overview, project artifacts, global caches, toolchains, Docker objects, git repositories, duplicates, history and scan issues, and moves the items you select to the trash with the same checks as `kuizer clean`: a plain confirmation when everything is `safe`, and typing the item count when any item is `review`. Each cleanup lands in the history, so `kuizer history` and `kuizer restore` work on it. Right after a cleanup a bar offers Undo (Ctrl+Z) for about ten seconds, and the History section has a Restore button for every run that is still in the trash; both use the same restore as `kuizer restore` and never overwrite a path that is taken again. Right-click an item, or press the Menu key or Shift+F10, to reveal it in the file manager, copy its path, select it, move only that item to the trash, or exclude it from every later scan, which adds it to `scan.exclude` in the config file. Everything works from the keyboard: Ctrl+K (Cmd+K on macOS) opens a command palette with every action, section and recent folder, and `?` lists all shortcuts. In a list, j/k or the arrow keys move a cursor row, Space selects it, Enter, Delete or `d` moves the selection (or the cursor item) to the trash, `o` reveals it, `y` copies its path, `/` filters the list by path or name, and Shift+1 to Shift+9 switch sections. Ctrl+, (Cmd+, on macOS) opens a settings popover for motion, the sidebar and the section shortcuts, and writes them to the config file. Ctrl+B (Cmd+B) collapses the sidebar to a strip of icons; `appearance.sidebar` in the config picks how it opens. The only things it deletes permanently are toolchain versions, Docker or Podman objects and merged git branches: the confirmation says so, they skip the trash and the Undo bar does not offer them. A tool downloads a toolchain version again when it is needed; a removed image or volume is gone; a merged branch's commits stay in the default branch.
+`kuizer-gui` opens on a start screen. Type a folder, pick one with the system dialog, reopen one of the last eight, or scan your whole home folder. The same screen sets the scan options: which kinds of artifacts to list, the smallest item size, how deep to walk, and whether to measure global caches, toolchains and Docker, look for duplicates and stay on one file system. The scan streams results in as it runs, and Escape stops it and keeps what it found.
 
-The Git repositories section lists every repository under the scanned folders where `git gc` would free at least `git.min_gain`, with the expected gain up front, and the local branches already merged into its default branch. Run git gc packs one repository with one click (`c`, or Shift+C for all of them); it only packs what git would pack on its own, so it asks nothing. Deleting merged branches (`b` or Shift+B) asks first. Repositories in the middle of a rebase, merge or another git command are skipped.
+The sidebar lists the sections: Overview, Project artifacts, Global caches, Toolchains, Docker, Git repositories, Duplicates, History and Issues. Shift+1 to Shift+9 jump between them, and `m` opens the space map: the scanned folders and the global caches as tiles sized by what they hold. Enter or a click opens a folder and shows each item inside as its own tile; Backspace goes back.
 
-The Overview also has a space map (press `m` from any section): every reclaimable item as a tile sized by the space it takes, inside the folders that hold it, with the global caches as a group of their own. Click a folder tile or press Enter to zoom in, and use the breadcrumb, Backspace or Escape to zoom out. The arrow keys move between tiles, Space or Ctrl+click selects an item (the same selection as the lists), and right-click opens the item menu. Hover a tile for its full path, size and category.
+<p align="center">
+  <img src="docs/gui/artifacts.png" width="100%" alt="The project artifacts list with several rows selected and the inline confirmation showing the item count and total size before they are deleted" />
+</p>
 
-It opens on a start screen. Type a folder, pick one with the system folder dialog, reopen one of the last eight folders or choose a full scan of your home folder. The same screen sets the scan options: which kinds of artifacts to list, the smallest item size, how deep to walk, and whether to measure global caches, toolchains and Docker, search for duplicate files and stay on one file system. The scan shows its progress and Escape cancels it. New scan in the title bar goes back to the start screen.
+In a list, `j`/`k` or the arrow keys move the cursor, Space selects a row, Shift-click selects a range, and `/` filters by path or name. Enter, Delete or `d` deletes the selection for good after an inline confirmation that shows the item count, total size and how many items are marked `review`. Right-click a row, or press the Menu key or Shift+F10, to reveal it in the file manager, copy its path, delete only that item, or exclude it from every later scan.
+
+Ctrl+K (Cmd+K on macOS) opens a command palette with every action, section and recent folder, and `?` lists all shortcuts. Settings sit in the sidebar footer and behind Ctrl+, (Cmd+,): a dark or light theme, motion on or off, how the sidebar opens and whether the section keys show. They write to the same config file the CLI reads. Ctrl+B collapses the sidebar to a strip of icons. Tab and Shift+Tab move a focus ring through every button, toggle and sidebar item, Enter or Space presses it and Esc goes back to the list.
+
+<p align="center">
+  <img src="docs/gui/light.png" width="100%" alt="The desktop app in the light theme with the settings panel open over the overview" />
+</p>
 
 ```sh
 kuizer-gui                                         # open the start screen
-cargo run --release -p kuizer-gui -- ~/projects    # skip the start screen and scan this folder right away
+kuizer-gui ~/projects                              # skip the start screen and scan this folder
 ```
-
-![Start screen](docs/gui/start.png)
-
-![Overview](docs/gui/overview.png)
-
-On Linux GPUI needs the X11, Wayland, Vulkan and font development packages. On Arch they come with `libxkbcommon-x11 wayland vulkan-icd-loader fontconfig freetype2`; on Debian and Ubuntu install `libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev`.
 
 ## Install
 
-Prebuilt binaries for Linux and macOS, on x86_64 and ARM, are attached to every [GitHub release](https://github.com/remcostoeten/kuizer/releases). The installer script downloads the right one, checks it and puts it in `~/.cargo/bin`:
+Prebuilt binaries for Linux and macOS, on x86_64 and ARM, are attached to every [GitHub release](https://github.com/remcostoeten/kuizer/releases), as plain archives with a SHA-256 checksum next to the installers below. The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
 
-```sh
+### Installer script
+
+Downloads the right binary, checks it and puts it in `~/.cargo/bin`.
+
+```bash
 curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-installer.sh | sh
-```
-
-With Node, the CLI also runs from npm:
-
-```sh
-npx kuizer                                          # run without installing
-npm install -g kuizer                               # or keep it installed
-```
-
-The desktop app installs the same way under its own name:
-
-```sh
 curl -LsSf https://github.com/remcostoeten/kuizer/releases/latest/download/kuizer-gui-installer.sh | sh
 ```
 
-Each release also has plain archives with a SHA-256 checksum. The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
+### npm
+
+```bash
+npx kuizer                                          # run the CLI without installing
+npm install -g kuizer                               # or keep it installed
+```
+
+### cargo
+
+```bash
+cargo binstall kuizer                               # the prebuilt binary through cargo-binstall
+cargo install kuizer                                # or build from crates.io
+```
 
 ### From source
 
-```sh
+```bash
 git clone https://github.com/remcostoeten/kuizer
 cargo install --path kuizer
 cargo install --path kuizer/crates/kuizer-gui
 ```
+
+On Linux the desktop app needs the X11, Wayland, Vulkan and font development packages to build. On Arch: `libxkbcommon-x11 wayland vulkan-icd-loader fontconfig freetype2`. On Debian and Ubuntu: `libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev`.
 
 ## Development
 
 Requires Rust 1.88 or newer (edition 2024).
 
 ```sh
-cargo test                                          # unit and filesystem tests in temp dirs
-cargo test -p kuizer-gui                            # desktop app tests
-cargo clippy --all-targets -- -D warnings           # lint, as CI runs it
-cargo fmt --check                                   # formatting, as CI runs it
-cargo deny check                                    # advisories, licenses and duplicate crates
-dist plan                                           # list what a release builds, see dist-workspace.toml
-cargo run --release --example synth -- /tmp/kuizer-bench 200 100   # build a synthetic tree to scan
+cargo test --workspace --all-targets -j 2 -- --test-threads=2   # unit and filesystem tests, in temp dirs only
+cargo clippy --workspace --all-targets -- -D warnings            # lint, as CI runs it
+cargo fmt --all --check                                          # formatting, as CI runs it
+cargo deny check                                                 # advisories, licenses and duplicate crates
+cargo run --release --example synth -- /tmp/kuizer-bench 200 100 # build a synthetic tree to scan
 ```
 
-To release, bump `version` under `[workspace.package]` in `Cargo.toml`, commit, and push a matching tag such as `v0.1.0`. The release workflow builds both binaries, packages them and publishes the GitHub release.
+`./dev` is a keyboard menu for building, running and testing. To release, bump `version` under `[workspace.package]` in `Cargo.toml`, commit, and push a matching tag such as `v0.1.3`; the release workflow builds both binaries, packages them and publishes the GitHub release with the matching section of [CHANGELOG.md](CHANGELOG.md) as its notes. Contribution notes are in [CONTRIBUTING.md](.github/CONTRIBUTING.md) and the security policy in [SECURITY.md](.github/SECURITY.md).
 
 <br/>
 

@@ -11,7 +11,7 @@ use kuizer::cli::SortKey;
 use kuizer::commands::{measure_caches_with, sort_candidates};
 use kuizer::config::Config;
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
-use kuizer::detect::{Category, RuleInfo, Safety};
+use kuizer::detect::{Category, RuleInfo};
 use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
 use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
@@ -354,7 +354,7 @@ impl Report {
     }
 
     #[cfg(test)]
-    pub fn total(&self, safety: Option<Safety>) -> u64 {
+    pub fn total(&self, safety: Option<kuizer::detect::Safety>) -> u64 {
         self.candidates
             .iter()
             .filter(|candidate| safety.is_none_or(|safety| candidate.rule.safety == safety))
@@ -812,46 +812,6 @@ pub enum Source {
 
 impl Source {
     pub const ALL: [Source; 4] = [Self::Artifact, Self::Cache, Self::Toolchain, Self::Docker];
-
-    /// Toolchains and Docker objects are deleted for good; everything else goes to the trash.
-    pub fn permanent(self) -> bool {
-        matches!(self, Self::Toolchain | Self::Docker)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Confirmation {
-    Simple,
-    TypeCount(usize),
-}
-
-impl Confirmation {
-    /// @name Confirmation::for_items
-    /// @description Applies the same rule as `kuizer clean`: a plain yes when every item is
-    /// marked safe, and typing the item count when any of them is marked review.
-    ///
-    /// @example
-    /// let rule = Confirmation::for_items(selected.iter().copied());
-    pub fn for_items<'a>(candidates: impl Iterator<Item = &'a Candidate>) -> Self {
-        let mut count = 0;
-        let mut review = false;
-        for candidate in candidates {
-            count += 1;
-            review |= candidate.rule.safety == Safety::Review;
-        }
-        if review {
-            Self::TypeCount(count)
-        } else {
-            Self::Simple
-        }
-    }
-
-    pub fn accepts(self, typed: &str) -> bool {
-        match self {
-            Self::Simple => true,
-            Self::TypeCount(count) => typed.trim() == count.to_string(),
-        }
-    }
 }
 
 pub struct Batch {
@@ -878,7 +838,6 @@ pub fn cache_roots(candidates: &[Candidate]) -> Vec<PathBuf> {
 
 pub struct Outcome {
     pub removals: Vec<(Source, Removal)>,
-    pub session: Option<u64>,
     pub history_error: Option<String>,
 }
 
@@ -887,13 +846,6 @@ impl Outcome {
         self.removals
             .iter()
             .filter(|(_, removal)| removal.status == Status::Removed)
-    }
-
-    /// Items that were deleted for good, which the undo bar cannot bring back.
-    pub fn deleted(&self) -> usize {
-        self.removed()
-            .filter(|(source, _)| source.permanent())
-            .count()
     }
 
     pub fn failed(&self) -> impl Iterator<Item = &(Source, Removal)> {
@@ -907,7 +859,7 @@ fn run_batches(
     batches: Vec<Batch>,
     mode: Mode,
     removals: &mut Vec<(Source, Removal)>,
-) -> (Option<u64>, Option<String>) {
+) -> Option<String> {
     let mut roots: Vec<PathBuf> = batches
         .iter()
         .flat_map(|batch| batch.roots.iter().cloned())
@@ -947,40 +899,22 @@ fn run_batches(
             removals.push((batch.source, removal));
         }
     }
-    let session = recorder.session();
-    (
-        session,
-        recorder.finish().err().map(|error| error.to_string()),
-    )
+    recorder.finish().err().map(|error| error.to_string())
 }
 
 /// @name clean
-/// @description Moves artifacts and caches to the trash and deletes toolchains and Docker
-/// objects for good. Each
-/// batch is checked against its own guard right before acting, exactly like the CLI. Trashed
-/// items are recorded as one run in the history file, so `kuizer restore` and the undo bar see
-/// it; permanent removals are recorded as a separate run that nothing offers to undo.
+/// @description Deletes every selected item for good. Each batch is checked against its own
+/// guard right before acting, exactly like the CLI, and the run is recorded in the history file.
 ///
 /// @example
 /// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }]);
 pub fn clean(batches: Vec<Batch>) -> Outcome {
-    let (permanent, trashed): (Vec<Batch>, Vec<Batch>) = batches
-        .into_iter()
-        .partition(|batch| batch.source.permanent());
     let mut removals = Vec::new();
-    let (session, trash_error) = run_batches(trashed, Mode::Trash, &mut removals);
-    let (_, permanent_error) = run_batches(permanent, Mode::Permanent, &mut removals);
+    let history_error = run_batches(batches, Mode::Permanent, &mut removals);
     Outcome {
         removals,
-        session,
-        history_error: trash_error.or(permanent_error),
+        history_error,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    Undo,
-    StillInTrash,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -993,32 +927,23 @@ pub struct Restored {
 
 /// @name restore
 /// @description Puts one cleanup run back from the trash with the library's restore, exactly like
-/// `kuizer restore s4`, and records the restore in the history. `Scope::Undo` asks for every item
-/// of the run, so anything that cannot come back is reported; `Scope::StillInTrash` only asks for
-/// the items that are still in the trash and not restored yet.
+/// `kuizer restore s4`, for the items that are still in the trash and not restored yet, and
+/// records the restore in the history.
 ///
 /// @example
-/// let restored = restore(4, Scope::Undo)?;
-pub fn restore(session: u64, scope: Scope) -> Result<Restored, String> {
+/// let restored = restore(4)?;
+pub fn restore(session: u64) -> Result<Restored, String> {
     let path = history::default_path().map_err(|error| error.to_string())?;
     let history = history::load(&path).map_err(|error| error.to_string())?;
     let id = format!("s{session}");
-    let targets = match scope {
-        Scope::Undo => history
-            .find(&id)
-            .ok_or_else(|| format!("the history has no cleanup {id}"))?,
-        Scope::StillInTrash => {
-            let run = history
-                .runs
-                .iter()
-                .position(|run| run.id == session)
-                .ok_or_else(|| format!("the history has no cleanup {id}"))?;
-            let trashed =
-                history::trashed_paths().ok_or_else(|| RestoreError::Unsupported.to_string())?;
-            let kept = history::still_in_trash(&history, &trashed);
-            history::restorable(&history, &kept, run)
-        }
-    };
+    let run = history
+        .runs
+        .iter()
+        .position(|run| run.id == session)
+        .ok_or_else(|| format!("the history has no cleanup {id}"))?;
+    let trashed = history::trashed_paths().ok_or_else(|| RestoreError::Unsupported.to_string())?;
+    let kept = history::still_in_trash(&history, &trashed);
+    let targets = history::restorable(&history, &kept, run);
     if targets.is_empty() {
         return Err(format!("nothing from {id} is still in the trash"));
     }
@@ -1046,7 +971,7 @@ pub fn restore(session: u64, scope: Scope) -> Result<Restored, String> {
 mod tests {
     use std::sync::Arc;
 
-    use kuizer::detect::{Kind, RuleInfo};
+    use kuizer::detect::{Kind, RuleInfo, Safety};
     use kuizer::scan::Usage;
 
     use super::*;
@@ -1182,33 +1107,6 @@ mod tests {
         let walked = groups(dupes::group(files, duplicate_options, |_| {}));
         assert_eq!(lazy.len(), 2);
         assert_eq!(lazy, walked);
-    }
-
-    #[test]
-    fn safe_items_need_a_plain_yes() {
-        let items = [
-            candidate(1, "/p/a", Safety::Safe),
-            candidate(2, "/p/b", Safety::Safe),
-        ];
-        let rule = Confirmation::for_items(items.iter());
-        assert_eq!(rule, Confirmation::Simple);
-        assert!(rule.accepts(""));
-    }
-
-    #[test]
-    fn any_review_item_requires_typing_the_count() {
-        let items = [
-            candidate(1, "/p/a", Safety::Safe),
-            candidate(2, "/p/b", Safety::Review),
-            candidate(3, "/p/c", Safety::Safe),
-        ];
-        let rule = Confirmation::for_items(items.iter());
-        assert_eq!(rule, Confirmation::TypeCount(3));
-        assert!(!rule.accepts(""));
-        assert!(!rule.accepts("2"));
-        assert!(!rule.accepts("y"));
-        assert!(rule.accepts("3"));
-        assert!(rule.accepts(" 3 "));
     }
 
     #[test]

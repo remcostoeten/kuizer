@@ -33,7 +33,7 @@ pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<
     let request = Request {
         command: "clean",
         roots: &roots,
-        mode: removal::mode(&args.removal, &config),
+        mode: removal::mode(&args.removal),
         yes: args.removal.yes,
         json,
         remove: removal::files,

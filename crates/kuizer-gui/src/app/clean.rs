@@ -6,28 +6,12 @@ const INLINE_PATHS: usize = 3;
 const CONFIRM_IN: Duration = Duration::from_millis(120);
 
 impl Kuizer {
-    pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.typing() {
-            self.undo_last(cx);
-        }
-    }
-
-    pub(super) fn undo_last(&mut self, cx: &mut Context<Self>) {
-        if let Some(Toast {
-            notice: Notice::Trashed { session, .. },
-            ..
-        }) = self.toast
-        {
-            self.restore(session, Scope::Undo, cx);
-        }
-    }
-
-    pub(super) fn restore(&mut self, session: u64, scope: Scope, cx: &mut Context<Self>) {
+    pub(super) fn restore(&mut self, session: u64, cx: &mut Context<Self>) {
         if !self.can_restore() {
             return;
         }
         let spawned = spawn_worker("kuizer-gui-restore", move || {
-            let restored = model::restore(session, scope);
+            let restored = model::restore(session);
             let history = HistoryView::load();
             (restored, history)
         });
@@ -77,7 +61,7 @@ impl Kuizer {
         self.confirm(None, window, cx);
     }
 
-    /// Opens the trash confirmation for the selection, or for one item when `only` is set.
+    /// Opens the delete confirmation for the selection, or for one item when `only` is set.
     pub(super) fn confirm(
         &mut self,
         only: Option<(Source, u64)>,
@@ -91,7 +75,6 @@ impl Kuizer {
         if items.is_empty() || self.busy() || self.refreshing() {
             return;
         }
-        let rule = Confirmation::for_items(items.iter().map(|(_, candidate)| *candidate));
         let stats = SelectionStats::of(items.iter().copied());
         let preview = items
             .iter()
@@ -99,8 +82,6 @@ impl Kuizer {
             .map(|(source, candidate)| (*source, candidate.id))
             .collect();
         self.dialog = Some(Dialog::Confirm {
-            rule,
-            typed: String::new(),
             only,
             stats,
             preview,
@@ -120,10 +101,7 @@ impl Kuizer {
     }
 
     pub(super) fn accept(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Confirm { rule, typed, .. }) = &self.dialog else {
-            return;
-        };
-        if !rule.accepts(typed) || self.refreshing() {
+        if !matches!(self.dialog, Some(Dialog::Confirm { .. })) || self.refreshing() {
             return;
         }
         let Some(report) = self.report() else {
@@ -170,7 +148,6 @@ impl Kuizer {
                 candidates: docker,
             });
         }
-        let permanent = batches.iter().any(|batch| batch.source.permanent());
         let spawned = spawn_worker("kuizer-gui-clean", move || {
             let outcome = model::clean(batches);
             let history = HistoryView::load();
@@ -182,7 +159,6 @@ impl Kuizer {
                 self.dialog = Some(Dialog::Finished(Finished {
                     removed: 0,
                     removed_bytes: 0,
-                    deleted: 0,
                     failures: vec![(String::new(), error)],
                     history_error: None,
                 }));
@@ -190,7 +166,7 @@ impl Kuizer {
                 return;
             }
         };
-        self.dialog = Some(Dialog::Running { permanent });
+        self.dialog = Some(Dialog::Running);
         cx.notify();
         self.task = Some(cx.spawn(async move |this, cx| {
             let message = receiver.await.ok();
@@ -207,7 +183,6 @@ impl Kuizer {
             self.dialog = Some(Dialog::Finished(Finished {
                 removed: 0,
                 removed_bytes: 0,
-                deleted: 0,
                 failures: vec![(String::new(), "the cleanup stopped unexpectedly".to_owned())],
                 history_error: None,
             }));
@@ -224,7 +199,6 @@ impl Kuizer {
                 .removed()
                 .map(|(_, removal)| removal.candidate.usage.allocated)
                 .sum(),
-            deleted: outcome.deleted(),
             failures: outcome
                 .failed()
                 .map(|(_, removal)| {
@@ -259,38 +233,36 @@ impl Kuizer {
         self.refresh_stats();
         self.refresh_rows();
         self.refresh_map();
-        let clean = finished.failures.is_empty()
-            && finished.history_error.is_none()
-            && finished.deleted == 0;
-        let trashed: Vec<&Removal> = outcome
-            .removed()
-            .filter(|(source, _)| !source.permanent())
-            .map(|(_, removal)| removal)
-            .collect();
-        if let Some(session) = outcome.session.filter(|_| !trashed.is_empty()) {
+        let clean = finished.failures.is_empty() && finished.history_error.is_none();
+        if clean && finished.removed > 0 {
             self.show_toast(
-                Notice::Trashed {
-                    session,
-                    items: trashed.len(),
-                    bytes: trashed
-                        .iter()
-                        .map(|removal| removal.candidate.usage.allocated)
-                        .sum(),
-                },
+                Notice::Info(format!(
+                    "{} deleted, {} freed",
+                    plural(finished.removed, "item"),
+                    theme::bytes(finished.removed_bytes)
+                )),
                 cx,
             );
         }
-        self.dialog = (!clean || outcome.session.is_none()).then_some(Dialog::Finished(finished));
+        self.dialog = (!clean).then_some(Dialog::Finished(finished));
         cx.notify();
     }
 
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toast = self.toast.as_ref()?;
         let dismiss = || {
-            ui::button("dismiss-toast", "Dismiss", ButtonKind::Ghost, true)
-                .debug_selector(|| "dismiss-toast".to_owned())
-                .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
-                .on_click(cx.listener(|app, _: &ClickEvent, _, cx| app.dismiss_toast(cx)))
+            self.button(
+                "dismiss-toast",
+                "Dismiss",
+                ButtonKind::Ghost,
+                true,
+                cx,
+                |app, _, cx| {
+                    app.dismiss_toast(cx);
+                },
+            )
+            .debug_selector(|| "dismiss-toast".to_owned())
+            .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
         };
         let line = div().flex().items_center().gap(unit(space::L));
         let panel = div()
@@ -308,43 +280,6 @@ impl Kuizer {
             .border_color(theme::border_strong())
             .occlude();
         let panel = match &toast.notice {
-            Notice::Trashed {
-                session,
-                items,
-                bytes,
-            } => {
-                let session = *session;
-                let enabled = self.can_restore();
-                let refreshing = self.refreshing();
-                panel.child(
-                    line.child(div().flex_1().child(format!(
-                        "{}, {} moved to trash",
-                        plural(*items, "item"),
-                        theme::bytes(*bytes)
-                    )))
-                    .child(
-                        ui::button("undo", "Undo", ButtonKind::Secondary, enabled)
-                            .debug_selector(|| "undo".to_owned())
-                            .when(refreshing, |this| {
-                                this.tip(tooltip::plain("Available once the fresh scan finishes"))
-                            })
-                            .when(!refreshing, |this| {
-                                this.tip(
-                                    Tooltip::new(format!(
-                                        "Put cleanup s{session} back from the trash"
-                                    ))
-                                    .keys(&[hint(&Command::Undo)])
-                                    .build(),
-                                )
-                            })
-                            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                                app.restore(session, Scope::Undo, cx);
-                            })),
-                    )
-                    .child(ui::kbd(hint(&Command::Undo)))
-                    .child(dismiss()),
-                )
-            }
             Notice::Restoring { session } => panel.child(
                 line.child(
                     div()
@@ -452,15 +387,11 @@ impl Kuizer {
         let body = match dialog {
             Dialog::Confirm { .. } => return None,
             Dialog::Branches(scope) => self.render_branch_dialog(scope, panel, cx),
-            Dialog::Running { permanent } => panel
+            Dialog::Running => panel
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(if *permanent {
-                            "Removing items"
-                        } else {
-                            "Moving items to the trash"
-                        }),
+                        .child("Deleting items"),
                 )
                 .child(
                     div()
@@ -472,30 +403,22 @@ impl Kuizer {
                     div()
                         .text_size(unit(font::TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!(
-                            "{} {} items, {}",
-                            if finished.deleted == 0 { "Moved" } else { "Removed" },
-                            finished.removed,
-                            theme::bytes(finished.removed_bytes)
-                        )),
+                        .child(if finished.removed == 0 {
+                            "Nothing was deleted".to_owned()
+                        } else {
+                            format!(
+                                "Deleted {}, {}",
+                                plural(finished.removed, "item"),
+                                theme::bytes(finished.removed_bytes)
+                            )
+                        }),
                 )
-                .child(div().text_color(theme::muted()).child(
-                    match (finished.deleted, finished.removed - finished.deleted) {
-                        (0, _) => "kuizer history lists this run and kuizer restore brings it back."
-                            .to_owned(),
-                        (deleted, 0) => format!(
-                            "{deleted} items were deleted for good. kuizer history lists them."
-                        ),
-                        (deleted, trashed) => format!(
-                            "{deleted} items were deleted for good. The other {trashed} items are in the trash and kuizer restore brings them back."
-                        ),
-                    },
-                ))
                 .when(!finished.failures.is_empty(), |this| {
-                    this.child(div().text_color(theme::danger()).child(format!(
-                        "{} items could not be removed",
-                        finished.failures.len()
-                    )))
+                    this.child(
+                        div()
+                            .text_color(theme::danger())
+                            .child(format!("{} could not be deleted", finished.failures.len())),
+                    )
                     .children(
                         finished.failures.iter().take(LIST_LIMIT).enumerate().map(
                             |(index, (path, error))| {
@@ -550,39 +473,16 @@ impl Kuizer {
         )
     }
 
-    /// The trash confirmation, drawn in place of the status bar.
+    /// The delete confirmation, drawn in place of the status bar.
     pub(super) fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Dialog::Confirm {
-            rule,
-            typed,
-            stats,
-            preview,
-            ..
-        }) = &self.dialog
-        else {
+        let Some(Dialog::Confirm { stats, preview, .. }) = &self.dialog else {
             return None;
         };
         let total = stats.total();
         let count = total.all.count;
         let bytes = total.all.bytes;
         let review = total.review.count;
-        let accepted = rule.accepts(typed);
-        let permanent = stats.permanent();
-        let trashed = count - permanent;
-        let items = plural(count, "item");
-        let (title, verb, button) = match (permanent, trashed) {
-            (0, _) => (
-                format!("Move {items} to the trash?"),
-                "move",
-                "Move to trash",
-            ),
-            (_, 0) => (
-                format!("Delete {items} for good?"),
-                "delete",
-                "Delete for good",
-            ),
-            _ => (format!("Remove {items}?"), "remove", "Remove"),
-        };
+        let title = format!("Delete {} for good?", plural(count, "item"));
         let selected: Vec<(Source, &Candidate)> =
             preview.iter().filter_map(|&key| self.item(key)).collect();
         let panel = div()
@@ -603,36 +503,25 @@ impl Kuizer {
                     .items_baseline()
                     .gap(unit(space::M))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().text_color(theme::muted()).child(if permanent > 0 && trashed > 0 {
-                        format!(
-                            "{} in total, {trashed} of them restorable from the trash.",
-                            theme::bytes(bytes)
-                        )
-                    } else if permanent > 0 {
-                        format!("{} in total.", theme::bytes(bytes))
-                    } else {
-                        format!(
-                            "{} stays restorable with kuizer restore until the trash is emptied.",
-                            theme::bytes(bytes)
-                        )
-                    })),
+                    .child(
+                        div()
+                            .text_color(theme::muted())
+                            .child(format!("{} in total.", theme::bytes(bytes))),
+                    ),
             )
-            .when(permanent > 0, |this| {
-                this.child(
-                    div()
-                        .debug_selector(|| "permanent-warning".to_owned())
-                        .text_color(theme::danger())
-                        .child(format!(
-                            "{permanent} {} deleted permanently. They skip the trash, cannot be restored and the undo bar cannot bring them back.{}",
-                            permanent_kinds(stats),
-                            if stats.source(Source::Toolchain).all.count > 0 {
-                                " The tool downloads a toolchain version again when it is needed."
-                            } else {
-                                ""
-                            }
-                        )),
-                )
-            })
+            .child(
+                div()
+                    .debug_selector(|| "permanent-warning".to_owned())
+                    .text_color(theme::danger())
+                    .child(format!(
+                        "This cannot be undone.{}",
+                        if stats.source(Source::Toolchain).all.count > 0 {
+                            " The tool downloads a toolchain version again when it is needed."
+                        } else {
+                            ""
+                        }
+                    )),
+            )
             .child(
                 div()
                     .flex()
@@ -675,40 +564,13 @@ impl Kuizer {
                     .flex()
                     .items_center()
                     .gap(unit(space::M))
-                    .when_some(
-                        match rule {
-                            Confirmation::TypeCount(count) => Some(*count),
-                            Confirmation::Simple => None,
-                        },
-                        |this, count| {
-                            this.child(div().text_color(theme::review()).child(format!(
-                                "{review} marked review. Type {count} to {verb} all {count}:"
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .w(unit(col::M))
-                                    .h(unit(size::ROW))
-                                    .px(unit(space::L))
-                                    .rounded(theme::radius_control())
-                                    .bg(theme::background())
-                                    .border_1()
-                                    .border_color(if accepted {
-                                        theme::primary()
-                                    } else {
-                                        theme::border_strong()
-                                    })
-                                    .child(typed.clone())
-                                    .child(
-                                        div()
-                                            .w(unit(size::HAIR))
-                                            .h(unit(size::CARET))
-                                            .bg(theme::text()),
-                                    ),
-                            )
-                        },
-                    )
+                    .when(review > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(theme::review())
+                                .child(format!("{review} marked review.")),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(
                         ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
@@ -723,15 +585,11 @@ impl Kuizer {
                             })),
                     )
                     .child(
-                        ui::button("confirm", button, ButtonKind::Primary, accepted)
+                        ui::button("confirm", "Delete", ButtonKind::Primary, true)
                             .tip(
-                                Tooltip::new(if permanent > 0 {
-                                    "Remove these items, toolchains for good"
-                                } else {
-                                    "Move these items to the trash"
-                                })
-                                .keys(&["Enter"])
-                                .build(),
+                                Tooltip::new("Delete these items for good")
+                                    .keys(&["Enter"])
+                                    .build(),
                             )
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.accept(cx);
@@ -753,16 +611,6 @@ impl Kuizer {
 
     pub(super) fn dialog_path(&self, candidate: &Candidate) -> String {
         self.shown_path(&candidate.path)
-    }
-}
-
-pub(super) fn permanent_kinds(stats: &SelectionStats) -> &'static str {
-    let toolchains = stats.source(Source::Toolchain).all.count > 0;
-    let docker = stats.source(Source::Docker).all.count > 0;
-    match (toolchains, docker) {
-        (true, true) => "toolchain versions and Docker objects are",
-        (true, false) => "toolchain versions are",
-        _ => "Docker objects are",
     }
 }
 

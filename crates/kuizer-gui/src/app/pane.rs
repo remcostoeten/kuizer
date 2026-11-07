@@ -38,6 +38,7 @@ impl Render for Pane {
         };
         app.update(cx, |app, cx| {
             app.cursor_bounds.set(None);
+            app.region(Region::Content);
             app.render_content(cx)
         })
     }

@@ -8,6 +8,10 @@ impl Kuizer {
         } else {
             self.folder.clone()
         };
+        let typing = !self.whole_home && self.ring.is_none();
+        self.stops
+            .borrow_mut()
+            .within(Some(self.start_scroll.clone()));
         let field = div()
             .id("folder-field")
             .flex()
@@ -22,10 +26,10 @@ impl Kuizer {
             .border_1()
             .border_color(if self.folder_error.is_some() {
                 theme::danger()
-            } else if self.whole_home {
-                theme::border_strong()
-            } else {
+            } else if typing {
                 theme::focus()
+            } else {
+                theme::border_strong()
             })
             .cursor(CursorStyle::IBeam)
             .tip(
@@ -37,12 +41,14 @@ impl Kuizer {
                     .build(),
             )
             .when(field_text.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w(unit(size::HAIR))
-                        .h(unit(size::CARET))
-                        .bg(theme::text()),
-                )
+                this.when(typing, |this| {
+                    this.child(
+                        div()
+                            .w(unit(size::HAIR))
+                            .h(unit(size::CARET))
+                            .bg(theme::text()),
+                    )
+                })
                 .child(
                     div()
                         .pl(unit(space::XXS))
@@ -61,7 +67,7 @@ impl Kuizer {
                         })
                         .child(field_text),
                 )
-                .when(!self.whole_home, |this| {
+                .when(typing, |this| {
                     this.child(
                         div()
                             .flex_none()
@@ -77,29 +83,28 @@ impl Kuizer {
                 cx.notify();
             }));
         let scope = ui::segments()
-            .child(
+            .child(self.control(
                 ui::segment("scope-folder", "One folder", !self.whole_home)
-                    .tip(tooltip::plain("Scan one folder and everything below it"))
-                    .on_click(cx.listener(
-                    |app, _: &ClickEvent, _, cx| {
-                        app.whole_home = false;
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(
-                ui::segment("scope-home", "Whole home folder", self.whole_home)
-                    .tip(tooltip::plain(
+                    .tip(tooltip::plain("Scan one folder and everything below it")),
+                cx,
+                |app, _, cx| {
+                    app.whole_home = false;
+                    cx.notify();
+                },
+            ))
+            .child(self.control(
+                ui::segment("scope-home", "Whole home folder", self.whole_home).tip(
+                    tooltip::plain(
                         "Scan everything under your home folder. This takes longer than one project folder",
-                    ))
-                    .on_click(
-                    cx.listener(|app, _: &ClickEvent, _, cx| {
-                        app.whole_home = true;
-                        app.folder_error = None;
-                        cx.notify();
-                    }),
+                    ),
                 ),
-            );
+                cx,
+                |app, _, cx| {
+                    app.whole_home = true;
+                    app.folder_error = None;
+                    cx.notify();
+                },
+            ));
         let folder_card = ui::card("What to scan")
             .child(div().flex().child(scope))
             .child(
@@ -109,16 +114,16 @@ impl Kuizer {
                     .gap(unit(space::M))
                     .child(field)
                     .child(
-                        ui::button("browse", "Choose folder", ButtonKind::Secondary, true).tip(tooltip::plain("Pick a folder with the system dialog"))
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                app.choose_folder(cx);
-                            })),
+                        self.button("browse", "Choose folder", ButtonKind::Secondary, true, cx, |app, _, cx| {
+                            app.choose_folder(cx);
+                        })
+                        .tip(tooltip::plain("Pick a folder with the system dialog")),
                     )
                     .child(
-                        ui::button("start-scan", "Start scan", ButtonKind::Primary, true).tip(Tooltip::new("Scan the chosen folder").keys(&["Enter"]).build())
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                app.start_scan(cx);
-                            })),
+                        self.button("start-scan", "Start scan", ButtonKind::Primary, true, cx, |app, _, cx| {
+                            app.start_scan(cx);
+                        })
+                        .tip(Tooltip::new("Scan the chosen folder").keys(&["Enter"]).build()),
                     ),
             )
             .children(
@@ -144,7 +149,8 @@ impl Kuizer {
                     let label = display_path(&path);
                     let missing = self.recent.is_gone(&path);
                     let full = tooltip::path(&path);
-                    div()
+                    let pressed = path.clone();
+                    let row = div()
                         .id(("recent", index))
                         .flex()
                         .items_center()
@@ -183,91 +189,101 @@ impl Kuizer {
                             if event.click_count() >= 2 {
                                 app.start_scan(cx);
                             }
-                        }))
+                        }));
+                    self.reachable(row, move |app, _, cx| {
+                        app.pick_recent(&pressed, cx);
+                        app.start_scan(cx);
+                    })
                 }),
             ))
         });
 
         let options = &self.options;
-        let size_segments = start::SIZE_STEPS.into_iter().enumerate().fold(
-            ui::segments(),
-            |row, (index, bytes)| {
-                row.child(
-                    ui::segment(
-                        ("min-size", index),
-                        start::size_label(bytes),
-                        options.min_size == bytes,
-                    )
-                    .on_click(cx.listener(
-                        move |app, _: &ClickEvent, _, cx| {
-                            app.options.min_size = bytes;
-                            cx.notify();
-                        },
-                    )),
-                )
-            },
-        );
-        let depth_segments = start::DEPTH_STEPS.into_iter().enumerate().fold(
-            ui::segments(),
-            |row, (index, depth)| {
-                row.child(
-                    ui::segment(
-                        ("depth", index),
-                        start::depth_label(depth),
-                        options.max_depth == depth,
-                    )
-                    .on_click(cx.listener(
-                        move |app, _: &ClickEvent, _, cx| {
-                            app.options.max_depth = depth;
-                            cx.notify();
-                        },
-                    )),
-                )
-            },
-        );
         let categories =
             Category::ALL
                 .into_iter()
                 .fold(div().flex().gap(unit(space::XXS)), |row, category| {
                     let on = options.categories.contains(&category);
                     row.child(
-                        div()
-                            .id(("category", category as usize))
-                            .flex()
-                            .items_center()
-                            .gap(unit(space::S))
-                            .px(unit(space::M))
-                            .h(unit(size::SEGMENT))
-                            .rounded(theme::radius_control())
-                            .cursor_pointer()
-                            .text_color(if on { theme::text() } else { theme::faint() })
-                            .hover(|style| style.bg(theme::hover()))
-                            .tip(tooltip::term(Term::category(category)))
-                            .child(ui::checkbox(on))
-                            .child(category.as_str())
-                            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        self.control(
+                            div()
+                                .id(("category", category as usize))
+                                .flex()
+                                .items_center()
+                                .gap(unit(space::S))
+                                .px(unit(space::M))
+                                .h(unit(size::SEGMENT))
+                                .rounded(theme::radius_control())
+                                .cursor_pointer()
+                                .text_color(if on { theme::text() } else { theme::faint() })
+                                .hover(|style| style.bg(theme::hover()))
+                                .tip(tooltip::term(Term::category(category)))
+                                .child(ui::checkbox(on))
+                                .child(category.as_str()),
+                            cx,
+                            move |app, _, cx| {
                                 app.options.toggle_category(category);
                                 cx.notify();
-                            })),
+                            },
+                        ),
                     )
                 });
+        let size_segments = start::SIZE_STEPS.into_iter().enumerate().fold(
+            ui::segments(),
+            |row, (index, bytes)| {
+                row.child(self.control(
+                    ui::segment(
+                        ("min-size", index),
+                        start::size_label(bytes),
+                        options.min_size == bytes,
+                    ),
+                    cx,
+                    move |app, _, cx| {
+                        app.options.min_size = bytes;
+                        cx.notify();
+                    },
+                ))
+            },
+        );
+        let depth_segments = start::DEPTH_STEPS.into_iter().enumerate().fold(
+            ui::segments(),
+            |row, (index, depth)| {
+                row.child(self.control(
+                    ui::segment(
+                        ("depth", index),
+                        start::depth_label(depth),
+                        options.max_depth == depth,
+                    ),
+                    cx,
+                    move |app, _, cx| {
+                        app.options.max_depth = depth;
+                        cx.notify();
+                    },
+                ))
+            },
+        );
         let toggle = |id: &'static str, on: bool, flip: fn(&mut ScanOptions)| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(unit(space::S))
-                .cursor_pointer()
-                .child(ui::checkbox(on))
-                .child(
-                    div()
-                        .text_color(theme::muted())
-                        .child(if on { "On" } else { "Off" }),
-                )
-                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+            self.control(
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::S))
+                    .px(unit(space::M))
+                    .h(unit(size::SEGMENT))
+                    .cursor_pointer()
+                    .child(ui::checkbox(on))
+                    .child(
+                        div()
+                            .text_color(theme::muted())
+                            .child(if on { "On" } else { "Off" }),
+                    ),
+                cx,
+                move |app, _, cx| {
                     flip(&mut app.options);
                     cx.notify();
-                }))
+                },
+            )
         };
         let options_card = ui::card("Scan options")
             .child(
@@ -339,6 +355,7 @@ impl Kuizer {
 
         div()
             .id("start")
+            .track_scroll(&self.start_scroll)
             .flex()
             .flex_col()
             .items_center()
@@ -490,19 +507,22 @@ impl Kuizer {
         cx.notify();
     }
 
-    pub(super) fn type_folder(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// Types a key into the folder field, or starts the scan on Enter. Returns false for a key
+    /// the field does not take, so it can run a command instead.
+    pub(super) fn type_folder(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let keystroke = &event.keystroke;
         if keystroke.key == "enter" {
             self.start_scan(cx);
-            return;
+            return true;
         }
         let paste = || cx.read_from_clipboard().and_then(|item| item.text());
         if !field::edit(&mut self.folder, keystroke, field::PATH, paste) {
-            return;
+            return false;
         }
         self.whole_home = false;
         self.folder_error = None;
         cx.notify();
+        true
     }
 
     pub(super) fn render_loading(&self, activity: &Activity) -> AnyElement {
