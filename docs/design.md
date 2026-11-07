@@ -241,7 +241,7 @@ A source other than projects is a subcommand whose bare form lists and whose `cl
 
 ### 6.3 Idle time
 
-`--idle 60d` keeps items whose project has had no activity for 60 days. Project activity is the later of the newest modification time outside the project's artifacts and the last commit in its git repository. An artifact's own modification time is not used, because `npm install` and `cargo build` refresh it in a project that is otherwise abandoned. Other sources use their own signal: a toolchain's last use from its shims or tool metadata, a cache's newest entry, an image's last use by a container. An item whose activity cannot be determined never matches `--idle`.
+`--idle 60d` keeps items whose project has had no activity for 60 days. Project activity is the later of the newest modification time outside the project's artifacts and the last commit in its git repository. An artifact's own modification time is not used, because `npm install` and `cargo build` refresh it in a project that is otherwise abandoned. Activity only counts what the scan itself would enter: `scan.exclude`, `scan.exclude_extensions`, skipped folders, ignore files, excluded mounts and `scan.one_file_system` apply to it the same way. Other sources use their own signal: a toolchain's last use from its shims or tool metadata, a cache's newest entry, an image's last use by a container. An item whose activity cannot be determined never matches `--idle`.
 
 Durations accept `d`, `w`, `mo` (30 days) and `y` (365 days).
 

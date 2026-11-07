@@ -15,8 +15,8 @@ mod ui;
 
 use std::path::PathBuf;
 
-use crate::cli::{Cli, Command, HistoryAction, NestedCommand, ScanArgs};
-use crate::config::{Config, ConfigError, Loaded};
+use crate::cli::{Cli, Command, HistoryAction, NestedCommand, RemovalArgs, ScanArgs};
+use crate::config::{Config, ConfigError, Loaded, rejected_scope};
 use crate::history::HistoryError;
 use clap::CommandFactory;
 
@@ -41,6 +41,10 @@ pub enum AppError {
     UnknownSelection { name: String, known: String },
     #[error("refusing to remove without confirmation: stdin is not a terminal, pass --yes")]
     NeedsConfirmation,
+    #[error(
+        "refusing to remove with --yes: the config rejected {0}, which may widen what gets removed; fix the config or run without --yes to confirm"
+    )]
+    ScopeRejected(String),
     #[error("{0} items could not be removed")]
     RemovalFailed(usize),
     #[error("no home directory is known for this platform")]
@@ -99,6 +103,21 @@ fn print_subcommand_help(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn unattended(clean: bool, removal: &RemovalArgs) -> bool {
+    clean && removal.yes && !removal.dry_run
+}
+
+fn removes_unattended(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Clean(args)) => unattended(true, &args.removal),
+        Some(Command::Cache(args)) => unattended(args.clean, &args.removal),
+        Some(Command::Toolchain(args)) => unattended(args.clean, &args.removal),
+        Some(Command::Docker(args)) => unattended(args.clean, &args.removal),
+        Some(Command::Git(args)) => args.yes && !args.dry_run && (args.gc || args.branches),
+        _ => false,
+    }
+}
+
 fn config_notice(loaded: &Loaded) -> Option<String> {
     let first = loaded.warnings.first()?;
     let more = loaded.warnings.len() - 1;
@@ -119,6 +138,10 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     };
     for warning in &loaded.warnings {
         eprintln!("kuizer: config: {warning}");
+    }
+    let rejected = rejected_scope(&loaded.warnings);
+    if !rejected.is_empty() && removes_unattended(cli.command.as_ref()) {
+        return Err(AppError::ScopeRejected(rejected.join(", ")));
     }
     match cli.command {
         None if !cli.json && interactive() => ui::run(

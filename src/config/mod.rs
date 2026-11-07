@@ -14,7 +14,7 @@ use crate::units::ByteSize;
 
 pub use edit::{EditError, SettingValue, add_exclude, exclude_pattern, set_setting};
 pub use exclude::{ExcludeError, Excludes};
-pub use lenient::ConfigWarning;
+pub use lenient::{ConfigWarning, rejected_scope};
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
 
@@ -356,10 +356,10 @@ impl Config {
                 config.delete.confirm = true;
                 return Ok(Loaded {
                     config,
-                    warnings: vec![ConfigWarning {
-                        key: String::new(),
-                        message: format!("cannot read {}: {source}", path.display()),
-                    }],
+                    warnings: vec![ConfigWarning::new(
+                        "",
+                        format!("cannot read {}: {source}", path.display()),
+                    )],
                     source: Some(path),
                 });
             }

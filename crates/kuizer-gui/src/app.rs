@@ -113,11 +113,18 @@ enum Searched {
 }
 
 /// A duplicate search running beside the results: how far it got and the task that hears
-/// from it. Dropping it stops listening.
+/// from it. Dropping it stops listening and cancels the search.
 struct Search {
     roots: Vec<PathBuf>,
     stage: Option<dupes::Stage>,
+    cancel: Cancel,
     _task: Task<()>,
+}
+
+impl Drop for Search {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 enum Notice {

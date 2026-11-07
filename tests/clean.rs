@@ -104,6 +104,34 @@ fn refuses_without_confirmation_when_not_interactive() {
 }
 
 #[test]
+fn refuses_yes_when_the_config_rejects_a_scope_setting() {
+    let (_tmp, home, root) = setup();
+    let config = home.join(".config/kuizer/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let before = snapshot(&root);
+
+    for (text, key) in [
+        ("[scan]\nexclude = \"node_modules\"\n", "`scan.exclude`"),
+        ("[delet]\nconfirm = false\n", "`delet`"),
+    ] {
+        fs::write(&config, text).unwrap();
+        let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("refusing to remove with --yes"), "{stderr}");
+        assert!(stderr.contains(key), "{stderr}");
+        assert_eq!(snapshot(&root), before);
+    }
+
+    let output = kuizer(
+        &home,
+        &["clean", root.to_str().unwrap(), "--yes", "--dry-run"],
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn removes_only_safe_items_by_default_and_records_history() {
     let (_tmp, home, root) = setup();
 

@@ -105,6 +105,36 @@ fn scan_and_clean_list_the_same_idle_projects() {
 }
 
 #[test]
+fn excluded_files_do_not_keep_a_project_active() {
+    let (_tmp, home, root) = setup();
+    aged(&root, "old/scratch/notes.md", Duration::ZERO);
+    aged(&root, "old/debug.log", Duration::ZERO);
+    fs::write(
+        file(&home, ".config/kuizer/config.toml", 0),
+        "[scan]\nexclude = [\"scratch\"]\nexclude_extensions = [\"log\"]\n",
+    )
+    .unwrap();
+    let root_arg = root.to_str().unwrap();
+    let scanned = kuizer(&home, &["--json", "scan", root_arg, "--idle", "60d"]);
+    let cleaned = kuizer(
+        &home,
+        &[
+            "--json",
+            "clean",
+            root_arg,
+            "--idle",
+            "60d",
+            "--dry-run",
+            "--select",
+            "all",
+        ],
+    );
+    let expected = vec![root.join("old/node_modules").display().to_string()];
+    assert_eq!(paths(&scanned, "candidates"), expected);
+    assert_eq!(paths(&cleaned, "items"), expected);
+}
+
+#[test]
 fn reports_project_activity_and_sorts_by_it() {
     let (_tmp, home, root) = setup();
     let output = kuizer(
