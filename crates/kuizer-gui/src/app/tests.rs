@@ -196,9 +196,19 @@ fn escape_cancels_a_running_scan(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let root = project(dir.path());
     let (view, cx) = open(cx, dir.path().join("recent"));
-    type_text(cx, &root.display().to_string());
-    cx.simulate_keystrokes("enter");
-    cx.simulate_keystrokes("escape");
+    let escape = Keystroke::parse("escape").unwrap();
+    let cancel = cx.update(|window, cx| {
+        let cancel = view.update(cx, |app, cx| {
+            app.roots = vec![root];
+            app.rescan(cx);
+            assert!(matches!(app.phase, Phase::Loading(_)));
+            app.cancel.clone()
+        });
+        window.dispatch_keystroke(escape, cx);
+        cancel
+    });
+    assert!(cancel.expect("the scan started").is_cancelled());
+    cx.run_until_parked();
     view.read_with(cx, |app, _| {
         assert!(matches!(app.phase, Phase::Start));
         assert!(app.cancel.is_none());

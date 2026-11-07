@@ -106,8 +106,8 @@ fn refuses_without_confirmation_when_not_interactive() {
 #[test]
 fn refuses_yes_when_the_config_rejects_a_scope_setting() {
     let (_tmp, home, root) = setup();
-    let config = home.join(".config/kuizer/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let config = home.join("kuizer.toml");
+    let config_arg = config.to_str().unwrap();
     let before = snapshot(&root);
 
     for (text, key) in [
@@ -115,7 +115,16 @@ fn refuses_yes_when_the_config_rejects_a_scope_setting() {
         ("[delet]\nconfirm = false\n", "`delet`"),
     ] {
         fs::write(&config, text).unwrap();
-        let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
+        let output = kuizer(
+            &home,
+            &[
+                "--config",
+                config_arg,
+                "clean",
+                root.to_str().unwrap(),
+                "--yes",
+            ],
+        );
 
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -126,7 +135,14 @@ fn refuses_yes_when_the_config_rejects_a_scope_setting() {
 
     let output = kuizer(
         &home,
-        &["clean", root.to_str().unwrap(), "--yes", "--dry-run"],
+        &[
+            "--config",
+            config_arg,
+            "clean",
+            root.to_str().unwrap(),
+            "--yes",
+            "--dry-run",
+        ],
     );
     assert!(output.status.success(), "{output:?}");
 }
