@@ -19,7 +19,7 @@ Running `kuizer` with no command opens the [terminal UI](/docs/guides/terminal-u
 | `kuizer duplicates [PATH]...` | Find files with identical contents |
 | `kuizer dashboard [PATH]...` | Open a web overview of everything |
 | `kuizer history` | Show what kuizer deleted and the space it freed |
-| `kuizer restore [ID]...` | Put trashed items from a past run back |
+| `kuizer restore [ID]...` | Put items from a past run back, for runs made with `delete.mode = "trash"` |
 | `kuizer rules` | List the active detection rules |
 | `kuizer config` | Show, create and validate the config file |
 
@@ -43,7 +43,7 @@ kuizer clean ~/projects --category build --yes
 kuizer clean ~/projects --select all
 ```
 
-`--select` takes `safe`, `all` or a rule name, and can repeat. The default is `safe`. `--yes` skips the confirmation. Deletion is always permanent.
+`--select` takes `safe`, `all` or a rule name, and can repeat. The default is `safe`. `--yes` skips the confirmation. Deletion is permanent by default; `delete.mode = "trash"` in the config file moves project artifacts and global caches to the trash instead.
 
 ## Caches, toolchains and Docker
 

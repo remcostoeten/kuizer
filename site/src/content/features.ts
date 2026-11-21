@@ -9,8 +9,8 @@ export const principles: Principle[] = [
     body: 'Nothing leaves the disk until you tick it and confirm.',
   },
   {
-    title: 'Trash, not rm',
-    body: 'Every deletion is reversible, and kuizer restore puts a whole run back.',
+    title: 'Confirmed and logged',
+    body: 'A confirmation shows the item count and total size, and every run is logged. Deletion is permanent unless you turn on trash mode.',
   },
   {
     title: 'Checked against the project',
@@ -55,5 +55,5 @@ export const neverTouches = [
   'Browser and app profiles: Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code.',
   '~/.ssh, ~/.gnupg and the keyrings.',
   'Globally installed tools and editor extensions. Anything else in a hidden home folder is review, never safe.',
-  'Deletions go to the trash, every run is logged, and kuizer restore puts a run back.',
+  'Anything you did not select. Deletion is permanent by default, every run is logged, and trash mode is optional.',
 ]

@@ -9,14 +9,10 @@ import {
 
 export type SortKey = 'size' | 'path' | 'category'
 export type Grouping = 'rule' | 'project'
-export type DeleteMode = 'trash' | 'permanent'
 export type ItemStatus = 'ready' | 'deleting' | 'deleted'
 export type Screen = 'boot' | 'shell' | 'tui'
 
-export type Overlay =
-  | { kind: 'none' }
-  | { kind: 'help' }
-  | { kind: 'confirm'; ids: string[]; mode: DeleteMode }
+export type Overlay = { kind: 'none' } | { kind: 'help' } | { kind: 'confirm'; ids: string[] }
 
 export type ItemState = {
   found: boolean
@@ -28,11 +24,9 @@ export type HistoryRun = {
   id: string
   at: string
   ids: string[]
-  mode: DeleteMode
-  restored: boolean
 }
 
-export type ShellTone = 'plain' | 'muted' | 'warn' | 'ok' | 'prompt'
+export type ShellTone = 'plain' | 'muted' | 'warn' | 'prompt'
 
 export type ShellLine = {
   text: string
@@ -54,9 +48,7 @@ export type State = {
   category: Category | null
   safeOnly: boolean
   overlay: Overlay
-  mode: DeleteMode
   freed: number
-  trashed: number
   free: number
   message: string | null
   runs: HistoryRun[]
@@ -120,9 +112,7 @@ export function initialState(): State {
     category: null,
     safeOnly: false,
     overlay: { kind: 'none' },
-    mode: 'trash',
     freed: 0,
-    trashed: 0,
     free: diskFree,
     message: null,
     runs: [],
@@ -361,14 +351,14 @@ export function hasFilters(state: State): boolean {
 
 /**
  * @name freeAfter
- * @description Free disk space after removing the given bytes in the given
- * mode. Moving to the trash frees nothing until the trash is emptied.
+ * @description Free disk space after deleting the given bytes. Deletion is
+ * permanent, so the space comes back as soon as the run finishes.
  *
  * @example
- * freeAfter(state, bytesOf(ids), 'permanent')
+ * freeAfter(state, bytesOf(ids))
  */
-export function freeAfter(state: State, bytes: number, mode: DeleteMode): number {
-  return mode === 'permanent' ? state.free + bytes : state.free
+export function freeAfter(state: State, bytes: number): number {
+  return state.free + bytes
 }
 
 /**

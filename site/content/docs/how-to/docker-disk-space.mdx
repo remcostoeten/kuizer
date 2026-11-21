@@ -40,4 +40,4 @@ kuizer docker --clean --select image --select build-cache
 kuizer docker --clean --select all
 ```
 
-Removal goes through `image rm`, `container rm`, `builder prune` and `volume rm` without force, so the engine refuses anything still in use. Volumes and containers that stopped in the last 24 hours are marked `review` and stay out of the default selection. The confirmation says that these removals skip the trash.
+Removal goes through `image rm`, `container rm`, `builder prune` and `volume rm` without force, so the engine refuses anything still in use. Volumes and containers that stopped in the last 24 hours are marked `review` and stay out of the default selection. The confirmation says that these removals are permanent, also when `delete.mode` is `"trash"`.

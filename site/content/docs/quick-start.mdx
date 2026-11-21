@@ -27,7 +27,7 @@ Move with `j` and `k`, press `space` to select an item and `a` to select every s
 
 ### Delete the selection
 
-Press `d` and confirm. Selected items are deleted for good, after kuizer checks each one again.
+Press `d` and confirm. Selected items are deleted for good by default, after kuizer checks each one again.
 
 </Step>
 </Steps>
@@ -46,4 +46,4 @@ kuizer clean ~/projects --idle 3mo
 
 ## Past runs
 
-Every deletion is logged and `kuizer history` lists it. Deletion is permanent, so there is nothing to undo; see [History and restore](/docs/guides/history-and-restore) for runs from older versions that used the trash.
+Every deletion is logged and `kuizer history` lists it. Deletion is permanent by default. With `delete.mode = "trash"` in the config file, items move to the trash and `kuizer restore --last` puts the last run back; see [History and restore](/docs/guides/history-and-restore).

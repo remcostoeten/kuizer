@@ -38,7 +38,7 @@ kuizer clean ~/projects --select cargo-target --dry-run
 kuizer clean ~/projects --select cargo-target
 ```
 
-`--idle 3mo` limits the run to projects without changes for three months. The folders go to the trash, and `kuizer restore --last` brings the last run back.
+`--idle 3mo` limits the run to projects without changes for three months. The folders are deleted for good by default. With `delete.mode = "trash"` in the [config file](/docs/configuration) they move to the trash, and `kuizer restore --last` brings the last run back.
 
 ## The registry and git caches
 

@@ -1,6 +1,6 @@
 ---
 title: History and restore
-description: Every kuizer deletion is logged. List past runs, see what each one freed and put items back from the trash.
+description: Every kuizer deletion is logged. List past runs, see what each one freed and, in trash mode, put items back.
 icon: FileText
 ---
 
@@ -14,9 +14,11 @@ kuizer history show s4
 kuizer --json history
 ```
 
-`kuizer history` lists past runs with ids like `s4`, shows what each freed and what is still in the trash. `history show` lists every item of one run.
+`kuizer history` lists past runs with ids like `s4`, shows what each freed and, for runs made in trash mode, what is still in the trash. `history show` lists every item of one run.
 
 ## Restore
+
+Deletion is permanent by default, and a permanent run cannot be restored. With `delete.mode = "trash"` in the [config file](/docs/configuration), project artifacts and global caches move to the trash and `kuizer restore` puts them back. `kuizer restore` works on Linux and is not supported on macOS.
 
 ```sh
 kuizer restore --last
@@ -31,4 +33,4 @@ A run id restores every item of the run. An item id like `s4.2` restores one. It
   An item whose path exists again, or that already left the trash, is skipped and reported.
 </Callout>
 
-Permanent deletions are not in the trash and cannot be restored. See [Safety and deletion](/docs/concepts/safety).
+Toolchains, Docker objects and git branches are removed for good in either mode. See [Safety and deletion](/docs/concepts/safety).

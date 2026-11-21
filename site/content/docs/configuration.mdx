@@ -44,8 +44,8 @@ Custom rules are `[[rules]]` tables, described in [How detection works](/docs/co
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `"trash"` | `"trash"` or `"permanent"` |
-| `confirm` | `false` | Ask before moving items to the trash |
+| `mode` | `"permanent"` | `"permanent"` deletes for good. `"trash"` moves project artifacts and global caches to the trash, so `kuizer restore` can put a run back. Toolchains, Docker objects and git branches are removed for good in either mode |
+| `confirm` | `true` | Ask before deleting in the terminal UI. `review` items and projects with uncommitted changes always ask |
 
 ## duplicates
 
@@ -73,6 +73,8 @@ Custom rules are `[[rules]]` tables, described in [How detection works](/docs/co
 | `appearance.motion` | `true` | Animate state changes in the desktop app |
 | `appearance.sidebar` | `"expanded"` | `"expanded"` or `"collapsed"` |
 | `appearance.theme` | `"dark"` | `"dark"` or `"light"` |
+| `appearance.accent` | `"purple"` | `"purple"`, `"blue"`, `"teal"` or `"pink"`: the color of the selection, the focus outline and the bars in the desktop app |
+| `appearance.density` | `"comfortable"` | `"comfortable"` or `"compact"`: compact uses shorter list rows and less vertical padding in the desktop app |
 | `route_shortcuts.enabled` | `true` | `Shift+1` to `Shift+9` open sidebar sections |
 | `route_shortcuts.hints` | `true` | Show the key badges in the sidebar and tooltips |
 

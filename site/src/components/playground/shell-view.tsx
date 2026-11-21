@@ -14,7 +14,6 @@ const toneClass: Record<ShellTone, string> = {
   plain: '',
   muted: 'text-muted',
   warn: 'text-t-yellow',
-  ok: 'text-t-green',
   prompt: 'mt-2 font-semibold',
 }
 

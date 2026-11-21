@@ -1,6 +1,6 @@
 ---
 title: Safety and deletion
-description: What kuizer checks before it removes anything, which paths it never touches and why every deletion is permanent.
+description: What kuizer checks before it removes anything, which paths it never touches, and how permanent deletion and the optional trash mode work.
 icon: Lightbulb
 ---
 
@@ -14,9 +14,15 @@ Before each removal kuizer confirms that the item:
 - sits inside a scanned root,
 - is not your home directory or a system directory.
 
-## Trash by default
+## Permanent by default
 
-Deletion is permanent: nothing goes to the trash. A confirmation shows the item count and total size first. Set `delete.confirm = false` in the [config file](/docs/configuration) to skip it in the terminal UI; `review` items and projects with uncommitted changes always ask.
+Deletion is permanent unless you opt in to the trash. A confirmation shows the item count and total size first. Set `delete.confirm = false` in the [config file](/docs/configuration) to skip it in the terminal UI; `review` items and projects with uncommitted changes always ask. When a selection contains `review` items, the CLI and the desktop app ask you to type the item count.
+
+## Trash mode
+
+Set `delete.mode = "trash"` in the config file, or turn on "Move to the trash" under Settings > Deleting in the desktop app, which writes the same key. Project artifacts and global caches then move to the trash, and `kuizer restore` puts a run back. Trashed items free space only once the trash is emptied. `kuizer restore` works on Linux and is not supported on macOS.
+
+Every run is logged in both modes, and `kuizer history` lists them.
 
 ## Safe and review
 
@@ -30,9 +36,9 @@ Projects with uncommitted git changes get a warning in the list and in the delet
 - `~/.ssh`, `~/.gnupg` and the keyrings.
 - Globally installed tools and editor extensions, such as `~/.vscode/extensions` and the pnpm, bun and yarn global installs.
 
-## Deletions that skip the trash
+## What never goes to the trash
 
-Some objects cannot be restored from a trash folder, and the confirmation says so.
+Toolchains, Docker objects and git branches are removed for good in either mode, and the confirmation says so.
 
 | Command | What goes | How |
 | --- | --- | --- |

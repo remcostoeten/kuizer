@@ -75,8 +75,8 @@ export default function HomePage() {
             >
               This is the real key map of the interactive list. Try <kbd className="key-chip">space</kbd>,{' '}
               <kbd className="key-chip">a</kbd>, <kbd className="key-chip">enter</kbd>, then{' '}
-              <kbd className="key-chip">q</kbd> for a shell with <code>kuizer history</code> and{' '}
-              <code>kuizer restore</code>. Nothing on this page touches your disk.
+              <kbd className="key-chip">q</kbd> for a shell with <code>kuizer history</code>. Nothing on this
+              page touches your disk.
             </p>
           </div>
         </section>

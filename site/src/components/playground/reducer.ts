@@ -9,7 +9,6 @@ import {
   startScan,
   updateItems,
   visibleItems,
-  type DeleteMode,
   type HistoryRun,
   type SortKey,
   type State,
@@ -75,21 +74,19 @@ function clearSelection(state: State): State {
 
 function requestDelete(state: State): State {
   const selected = selectedIds(state)
-  if (selected.length > 0) return { ...state, overlay: { kind: 'confirm', ids: selected, mode: state.mode } }
+  if (selected.length > 0) return { ...state, overlay: { kind: 'confirm', ids: selected } }
   const id = currentId(state)
   if (id === null || itemState(state, id).status !== 'ready') return state
-  return { ...state, overlay: { kind: 'confirm', ids: [id], mode: state.mode } }
+  return { ...state, overlay: { kind: 'confirm', ids: [id] } }
 }
 
-function confirmDelete(state: State, ids: string[], mode: DeleteMode): State {
+function confirmDelete(state: State, ids: string[]): State {
   const ready = ids.filter((id) => itemState(state, id).status === 'ready')
   if (ready.length === 0) return { ...state, overlay: { kind: 'none' } }
   const run: HistoryRun = {
     id: `s${state.runs.length + 1}`,
     at: new Date().toISOString(),
     ids: ready,
-    mode,
-    restored: false,
   }
   const next = updateItems(state, ready, { status: 'deleting', selected: false })
   return { ...next, overlay: { kind: 'none' }, runs: [...state.runs, run], message: null }
@@ -100,16 +97,12 @@ function markDeleted(state: State, id: string): State {
   if (!run || itemState(state, id).status !== 'deleting') return state
   const bytes = itemById(id).bytes
   const next = updateItems(state, [id], { status: 'deleted' })
-  const permanent = run.mode === 'permanent'
   const remaining = run.ids.filter((other) => itemState(next, other).status === 'deleting').length
-  const done = permanent
-    ? `${run.ids.length} deleted permanently, logged as ${run.id}`
-    : `${run.ids.length} moved to the trash, kuizer restore ${run.id} puts them back`
+  const done = `${run.ids.length} deleted permanently, logged as ${run.id}`
   return {
     ...next,
-    freed: permanent ? state.freed + bytes : state.freed,
-    trashed: permanent ? state.trashed : state.trashed + bytes,
-    free: permanent ? state.free + bytes : state.free,
+    freed: state.freed + bytes,
+    free: state.free + bytes,
     message: remaining === 0 ? done : state.message,
   }
 }
@@ -150,11 +143,7 @@ function handleKey(state: State, key: string): State {
   const cleared = { ...state, message: null }
   if (state.filtering) return handleFilterKey(cleared, key)
   if (state.overlay.kind === 'confirm') {
-    if (key === 'y' || key === 'Enter') return confirmDelete(cleared, state.overlay.ids, state.overlay.mode)
-    if (key === 't') {
-      const mode: DeleteMode = state.overlay.mode === 'trash' ? 'permanent' : 'trash'
-      return { ...cleared, mode, overlay: { ...state.overlay, mode } }
-    }
+    if (key === 'y' || key === 'Enter') return confirmDelete(cleared, state.overlay.ids)
     return { ...cleared, overlay: { kind: 'none' } }
   }
   if (state.overlay.kind === 'help') return { ...cleared, overlay: { kind: 'none' } }

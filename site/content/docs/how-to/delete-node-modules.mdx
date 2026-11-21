@@ -1,6 +1,6 @@
 ---
 title: Delete every node_modules folder
-description: Find all node_modules folders under your projects on Linux and macOS, see their sizes and remove them, by hand with find and du or with kuizer and the trash.
+description: Find all node_modules folders under your projects on Linux and macOS, see their sizes and remove them, by hand with find and du or with kuizer.
 icon: FileText
 ---
 
@@ -26,7 +26,7 @@ find ~/projects -name node_modules -type d -prune -exec rm -rf {} +
 
 ## With kuizer
 
-kuizer lists the same folders with their sizes and counts only a `node_modules` that sits next to a `package.json`. Nothing is removed until you confirm, and what you remove is deleted for good.
+kuizer lists the same folders with their sizes and counts only a `node_modules` that sits next to a `package.json`. Nothing is removed until you confirm. Deletion is permanent by default; with `delete.mode = "trash"` in the [config file](/docs/configuration) the folders move to the trash.
 
 ```sh
 kuizer scan ~/projects --category dependencies
@@ -34,7 +34,7 @@ kuizer clean ~/projects --select node-modules --dry-run
 kuizer clean ~/projects --select node-modules
 ```
 
-`--dry-run` prints what the next command would remove. Without it, kuizer shows the item count and total size, asks once, and deletes the folders for good.
+`--dry-run` prints what the next command would remove. Without it, kuizer shows the item count and total size, asks once, and deletes the folders.
 
 To keep the projects you still touch, add `--idle`:
 
@@ -42,7 +42,7 @@ To keep the projects you still touch, add `--idle`:
 kuizer clean ~/projects --select node-modules --idle 60d
 ```
 
-A project counts as idle when its newest file outside generated folders and its last commit are both older than that, so a stray `npm install` does not keep it. Run `kuizer ~/projects` to pick folders one by one in the [terminal UI](/docs/guides/terminal-ui), and `kuizer restore --last` to put a run back from the trash.
+A project counts as idle when its newest file outside generated folders and its last commit are both older than that, so a stray `npm install` does not keep it. Run `kuizer ~/projects` to pick folders one by one in the [terminal UI](/docs/guides/terminal-ui). In trash mode, `kuizer restore --last` puts the last run back.
 
 ## The npm, pnpm, yarn and bun caches
 
