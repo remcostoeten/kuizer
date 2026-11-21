@@ -147,6 +147,7 @@ fn disk(app: &App) -> Vec<Span<'static>> {
     }
     let note = match (app.mode, app.free_after(selected, app.mode)) {
         (Mode::Permanent, Some(after)) => format!("→ {} after delete ", ByteSize(after)),
+        (Mode::Trash, _) => "selection stays on disk in the trash ".to_owned(),
         _ => return spans,
     };
     spans.push(Span::styled(note, Style::new().fg(MUTED)));
@@ -336,17 +337,30 @@ fn key_hints(hints: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
     spans
 }
 
+fn mode_chip(app: &App) -> Span<'static> {
+    let (label, fill) = match app.overlay {
+        Overlay::Confirm { .. } => ("Confirm", WARNING),
+        Overlay::Help => ("Help", MUTED),
+        Overlay::None if app.filtering => ("Filter", MUTED),
+        Overlay::None => ("Normal", MUTED),
+    };
+    Span::styled(
+        format!(" {label} "),
+        Style::new()
+            .fg(ON_FILL)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 fn footer(app: &App) -> Line<'static> {
     if app.filtering {
-        let mut spans = vec![
-            Span::styled(" filter ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{}█   ", app.filter)),
-        ];
+        let mut spans = vec![mode_chip(app), Span::raw(format!(" {}█   ", app.filter))];
         spans.extend(key_hints(&[("enter", "apply"), ("esc", "clear")]));
         return Line::from(spans);
     }
     let selected = app.selected_count();
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = vec![mode_chip(app), Span::raw(" ")];
     let delete_hint = if selected > 0 {
         ("enter", "delete selected")
     } else {
@@ -373,6 +387,9 @@ fn footer(app: &App) -> Line<'static> {
     }
     if app.freed > 0 {
         spans.push(Span::raw(format!(" freed {} ", ByteSize(app.freed))));
+    }
+    if app.trashed > 0 {
+        spans.push(Span::raw(format!(" trashed {} ", ByteSize(app.trashed))));
     }
     let deleting = app.deleting();
     if deleting > 0 {
@@ -429,9 +446,8 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     }
     lines.push(Line::raw(""));
     let action = match mode {
-        crate::delete::Mode::Trash | crate::delete::Mode::Permanent => {
-            "Delete permanently. This cannot be undone."
-        }
+        crate::delete::Mode::Trash => "Move to trash. Space is freed once the trash is emptied.",
+        crate::delete::Mode::Permanent => "Delete permanently. This cannot be undone.",
         crate::delete::Mode::DryRun => "Dry run. Nothing is touched.",
     };
     lines.push(Line::styled(

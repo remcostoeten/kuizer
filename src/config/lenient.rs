@@ -3,7 +3,7 @@ use std::fmt;
 
 use toml::{Table, Value};
 
-use super::{Config, DeleteConfig, Excludes};
+use super::{Config, DeleteConfig, DeleteMode, Excludes};
 use crate::detect::{Detector, builtin_rules};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,10 +235,6 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
     );
 }
 
-fn cautious_delete(config: &mut Config) {
-    config.delete = DeleteConfig { confirm: true };
-}
-
 fn syntax_warning(text: &str, error: &toml::de::Error) -> ConfigWarning {
     let line = error.span().map(|span| {
         text.as_bytes()[..span.start.min(text.len())]
@@ -261,7 +257,8 @@ impl Config {
     /// default stays in force for it; list entries are dropped one by one. When a rejected
     /// setting could widen what a removal reaches (see `rejected_scope`), or the file is not
     /// valid TOML at all, deletion falls back to asking for confirmation so a typo can never make
-    /// deletion less careful.
+    /// deletion less careful. A `delete.mode` that does not parse, or a file that cannot be read
+    /// as a whole, also falls back to the trash, since the user may have asked for it.
     ///
     /// @example
     /// let (config, warnings) = Config::parse_lenient("[scan]\nmin_size = 3.5\n");
@@ -271,8 +268,10 @@ impl Config {
         let user = match text.parse::<Table>() {
             Ok(user) => user,
             Err(error) => {
-                let mut config = Self::default();
-                cautious_delete(&mut config);
+                let config = Self {
+                    delete: DeleteConfig::cautious(),
+                    ..Self::default()
+                };
                 return (config, vec![syntax_warning(text, &error)]);
             }
         };
@@ -282,9 +281,12 @@ impl Config {
         let mut config = root.try_into::<Self>().unwrap_or_default();
         config.normalize();
         settle(&mut config, &mut warnings);
+        if warnings.iter().any(|warning| warning.key == "delete.mode") {
+            config.delete.mode = DeleteMode::Trash;
+        }
         let rejected = rejected_scope(&warnings);
         if !rejected.is_empty() {
-            cautious_delete(&mut config);
+            config.delete.confirm = true;
             warnings.push(ConfigWarning::note(
                 "delete",
                 format!(
@@ -294,8 +296,10 @@ impl Config {
             ));
         }
         if let Err(error) = config.validate() {
-            let mut fallback = Self::default();
-            cautious_delete(&mut fallback);
+            let fallback = Self {
+                delete: DeleteConfig::cautious(),
+                ..Self::default()
+            };
             warnings.push(ConfigWarning::new(
                 "",
                 format!("the settings do not work together ({error}), using the defaults"),
@@ -388,9 +392,8 @@ mod tests {
 
     #[test]
     fn a_rejected_delete_setting_makes_deletion_careful() {
-        let text = "[delete]\nconfirm = false\nmode = \"permanent\"\n";
-        let (config, warnings) = Config::parse_lenient(text);
-        assert!(config.delete.confirm);
+        let (config, warnings) = Config::parse_lenient("[delete]\nmode = \"trsh\"\n");
+        assert_eq!(config.delete.mode, DeleteMode::Trash);
         assert!(keys(&warnings).contains(&"delete.mode"));
 
         let text = "[delete]\nconfirm = \"yes\"\n";
@@ -399,7 +402,7 @@ mod tests {
         assert!(keys(&warnings).contains(&"delete.confirm"));
 
         let (config, warnings) = Config::parse_lenient("[delete\nconfirm = false\n");
-        assert!(config.delete.confirm);
+        assert_eq!(config.delete, DeleteConfig::cautious());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("line 1"), "{warnings:?}");
         assert_eq!(rejected_scope(&warnings), ["the config file"]);

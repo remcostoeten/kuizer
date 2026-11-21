@@ -31,6 +31,15 @@ impl Mode {
     }
 }
 
+impl From<crate::config::DeleteMode> for Mode {
+    fn from(mode: crate::config::DeleteMode) -> Self {
+        match mode {
+            crate::config::DeleteMode::Trash => Self::Trash,
+            crate::config::DeleteMode::Permanent => Self::Permanent,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteError {
     #[error("refused: {0}")]
@@ -158,8 +167,7 @@ impl Drop for Lane<'_> {
 
 /// @name delete
 /// @description Revalidates a scanned target against the guard right before acting, then
-/// removes it, or does nothing in dry-run mode. `Mode::Trash` only remains for runs recorded by
-/// older versions; no frontend asks for it.
+/// removes it for good, moves it to the trash, or does nothing in dry-run mode.
 ///
 /// @example
 /// let guard = Guard::new(&roots);

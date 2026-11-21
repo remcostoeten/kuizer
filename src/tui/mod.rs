@@ -166,7 +166,7 @@ pub fn run_with_notice(
     confirm: bool,
     notice: Option<String>,
 ) -> std::io::Result<()> {
-    let mut app = App::new(Mode::Permanent, confirm);
+    let mut app = App::new(config.delete.mode.into(), confirm);
     app.message = notice;
     let mut terminal = ratatui::try_init()?;
     let started = terminal

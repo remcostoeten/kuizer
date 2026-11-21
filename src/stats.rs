@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+use crate::detect::Safety;
 use crate::history::{Action, History};
 use crate::scan::Candidate;
 
@@ -163,6 +164,36 @@ pub fn removed_by_month(history: &History, current: &str, months: usize) -> Vec<
     buckets
 }
 
+/// How many items `biggest_safe` picks at most.
+pub const WINS: usize = 10;
+
+/// @name biggest_safe
+/// @description The ids of the largest `safe` artifacts, largest first, at most `cap` of them,
+/// and their total size. `review` items and empty ones are never picked, so the result is a
+/// selection the user can remove without reading each row.
+///
+/// @example
+/// let (ids, bytes) = biggest_safe(&report.candidates, WINS);
+pub fn biggest_safe(candidates: &[Candidate], cap: usize) -> (Vec<u64>, u64) {
+    let mut safe: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.rule.safety == Safety::Safe && candidate.usage.allocated > 0)
+        .collect();
+    let largest = |a: &&Candidate, b: &&Candidate| {
+        b.usage
+            .allocated
+            .cmp(&a.usage.allocated)
+            .then_with(|| a.path.cmp(&b.path))
+    };
+    if safe.len() > cap && cap > 0 {
+        safe.select_nth_unstable_by(cap - 1, largest);
+    }
+    safe.truncate(cap);
+    safe.sort_unstable_by(largest);
+    let bytes = safe.iter().map(|candidate| candidate.usage.allocated).sum();
+    (safe.iter().map(|candidate| candidate.id).collect(), bytes)
+}
+
 fn month_of(stamp: &str) -> Option<(i32, u32)> {
     let year = stamp.get(..4)?.parse().ok()?;
     let month = stamp.get(5..7)?.parse().ok()?;
@@ -175,7 +206,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::detect::{Category, Kind, RuleInfo, Safety};
+    use crate::detect::{Category, Kind, RuleInfo};
     use crate::history::{Run, Total};
     use crate::scan::Usage;
 
@@ -291,5 +322,24 @@ mod tests {
         assert_eq!(last.label, "Oct 2026");
         assert_eq!((last.bytes, last.count), (150, 3));
         assert!(removed_by_month(&history, "bad", 12).is_empty());
+    }
+
+    #[test]
+    fn biggest_safe_skips_review_and_keeps_the_largest() {
+        let now = SystemTime::now();
+        let mut review = candidate(500, "node", None, now);
+        review.rule = Arc::new(RuleInfo {
+            safety: Safety::Review,
+            ..(*review.rule).clone()
+        });
+        let candidates = [
+            candidate(10, "node", None, now),
+            review,
+            candidate(0, "node", None, now),
+            candidate(300, "rust", None, now),
+            candidate(40, "node", None, now),
+        ];
+        assert_eq!(biggest_safe(&candidates, 2), (vec![300, 40], 340));
+        assert_eq!(biggest_safe(&candidates, WINS), (vec![300, 40, 10], 350));
     }
 }
