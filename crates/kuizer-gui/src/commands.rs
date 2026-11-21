@@ -26,6 +26,7 @@ pub enum Command {
     Up,
     ExtendDown,
     ExtendUp,
+    Visual,
     First,
     Last,
     PageDown,
@@ -33,6 +34,7 @@ pub enum Command {
     Toggle,
     SelectAll,
     SelectNone,
+    SelectWins,
     Trash,
     Reveal,
     CopyPath,
@@ -224,6 +226,7 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::ExtendUp, "Extend the selection up", Lists)
             .keys(&["K", "shift-up"])
             .hidden(),
+        Spec::new(Command::Visual, "Visual mode: motions select rows", Lists).keys(&["v"]),
         Spec::new(Command::First, "First row", Lists)
             .keys(&["g", "home"])
             .hidden(),
@@ -244,6 +247,12 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::SelectAll, "Select all in this list", Lists).keys(&["secondary-a"]),
         Spec::new(Command::SelectNone, "Select none in this list", Lists)
             .keys(&["secondary-shift-a"]),
+        Spec::new(
+            Command::SelectWins,
+            "Select the biggest safe artifacts",
+            Lists,
+        )
+        .keys(&["w"]),
         Spec::new(Command::Trash, "Delete selected", Lists).keys(&["enter", "delete", "d"]),
         Spec::new(Command::Reveal, "Reveal in file manager", Lists).keys(&["o"]),
         Spec::new(Command::CopyPath, "Copy path", Lists).keys(&["y"]),

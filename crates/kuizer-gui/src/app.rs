@@ -11,13 +11,12 @@ use futures::channel::{mpsc, oneshot};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div,
-    ElementId, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored, canvas, deferred, div,
-    point, prelude::*, px, uniform_list,
+    ElementId, Entity, FocusHandle, FontWeight, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored,
+    canvas, deferred, div, point, prelude::*, px, uniform_list,
 };
-use kuizer::config::{Config, Sidebar};
-use kuizer::delete::Status;
+use kuizer::config::{Config, DeleteMode, Sidebar};
 use kuizer::detect::{Category, Safety};
 use kuizer::dupes::{self, Duplicates};
 use kuizer::history::Action;
@@ -38,7 +37,7 @@ use crate::model::{
 use crate::motion;
 use crate::palette::Palette;
 use crate::reveal;
-use crate::snapshot::{self, Recorder, Snapshots};
+use crate::snapshot::{self, Forgotten, Recorder, Snapshots};
 use crate::start::{self, Recent, ScanOptions};
 use crate::stats::{Charts, Index, ReportStats, Selection, SelectionStats, Tally};
 use crate::tab::Tab;
@@ -49,8 +48,6 @@ use crate::zoom::Zoom;
 
 const POLL: Duration = Duration::from_millis(100);
 const LIST_LIMIT: usize = 6;
-const DUPLICATE_GROUPS: usize = 200;
-const ISSUE_LIMIT: usize = 500;
 const HISTORY_BARS: usize = 24;
 const WHEEL_NOTCH: Pixels = px(20.);
 
@@ -59,6 +56,7 @@ const TOAST_PROBLEMS: usize = 3;
 mod chrome;
 mod clean;
 mod duplicates;
+mod flow;
 mod history;
 mod keys;
 mod launch;
@@ -77,7 +75,7 @@ mod tests;
 
 use clean::selection_details;
 use keys::{found, found_path, keep_visible, shows_run};
-use lists::Lists;
+use lists::{Line, Lists};
 use map::SpaceMap;
 use pane::{Chrome, Pane};
 use repos::{GitJob, GitScope};
@@ -96,6 +94,8 @@ enum Phase {
 struct Finished {
     removed: usize,
     removed_bytes: u64,
+    trashed: usize,
+    trashed_bytes: u64,
     failures: Vec<(String, String)>,
     history_error: Option<String>,
 }
@@ -127,7 +127,15 @@ impl Drop for Search {
     }
 }
 
+/// A removal running beside the lists. Its rows are shown as leaving until it reports back.
+struct Cleaning {
+    paths: HashMap<Source, HashSet<PathBuf>>,
+    started: Instant,
+    _task: Task<()>,
+}
+
 enum Notice {
+    Deleting(usize),
     Restoring { session: u64 },
     Restored(Restored),
     Failed(String),
@@ -141,7 +149,7 @@ impl Notice {
             Self::Restored(restored) => {
                 restored.problems.is_empty() && restored.history_error.is_none()
             }
-            Self::Restoring { .. } | Self::Failed(_) => false,
+            Self::Deleting(_) | Self::Restoring { .. } | Self::Failed(_) => false,
         }
     }
 }
@@ -156,10 +164,14 @@ enum Dialog {
         only: Option<(Source, u64)>,
         stats: SelectionStats,
         preview: Vec<(Source, u64)>,
+        typed: String,
+        cancel: bool,
     },
-    Running,
     Finished(Finished),
-    Branches(GitScope),
+    Branches {
+        scope: GitScope,
+        cancel: bool,
+    },
 }
 
 /// One row a context menu can act on.
@@ -310,6 +322,7 @@ pub struct Kuizer {
     folder_check: Option<Task<()>>,
     recent: Recent,
     snapshots: Snapshots,
+    forgotten: Forgotten,
     stale: Option<SystemTime>,
     pending: HashSet<Part>,
     early: Vec<Loaded>,
@@ -340,7 +353,14 @@ pub struct Kuizer {
     report_generation: u64,
     reclaimable: Cell<Option<(u64, Reclaimable)>>,
     range: Option<Span>,
+    visual: bool,
+    count: String,
     dialog: Option<Dialog>,
+    held: keys::Held,
+    cleaning: Option<Cleaning>,
+    flow: flow::Flow,
+    gone: HashMap<Source, HashSet<PathBuf>>,
+    history_fresh: bool,
     task: Option<Task<()>>,
     toast: Option<Toast>,
     toast_task: Option<Task<()>>,
@@ -356,8 +376,6 @@ pub struct Kuizer {
     artifact_scroll: UniformListScrollHandle,
     list_scrolls: HashMap<Tab, UniformListScrollHandle>,
     lists: Lists,
-    scrolls: HashMap<Tab, ScrollHandle>,
-    reveal_cursor: Rc<Cell<bool>>,
     stops: RefCell<Stops>,
     ring: Option<ElementId>,
     reveal_ring: Rc<Cell<bool>>,
@@ -397,7 +415,8 @@ impl Kuizer {
         Self::probe_recent(recent.paths.clone(), cx);
         cx.set_global(tooltip::Typeface(font.clone()));
         motion::configure(config.appearance.motion);
-        theme::configure(config.appearance.theme);
+        theme::configure(config.appearance.theme, config.appearance.accent);
+        theme::set_density(config.appearance.density);
         let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
         let mut app = Self {
             options: ScanOptions::from_config(&config),
@@ -411,6 +430,7 @@ impl Kuizer {
             folder_check: None,
             recent,
             snapshots,
+            forgotten: Forgotten::default(),
             stale: None,
             pending: HashSet::new(),
             early: Vec::new(),
@@ -441,7 +461,14 @@ impl Kuizer {
             report_generation: 0,
             reclaimable: Cell::new(None),
             range: None,
+            visual: false,
+            count: String::new(),
             dialog: None,
+            held: keys::Held::default(),
+            cleaning: None,
+            flow: flow::Flow::default(),
+            gone: HashMap::new(),
+            history_fresh: false,
             task: None,
             toast: None,
             toast_task: None,
@@ -455,16 +482,19 @@ impl Kuizer {
             cursors: HashMap::new(),
             cursor_bounds: Rc::new(Cell::new(None)),
             artifact_scroll: UniformListScrollHandle::new(),
-            list_scrolls: [Tab::Caches, Tab::Toolchains, Tab::Docker, Tab::Repos]
-                .into_iter()
-                .map(|tab| (tab, UniformListScrollHandle::new()))
-                .collect(),
+            list_scrolls: [
+                Tab::Caches,
+                Tab::Toolchains,
+                Tab::Docker,
+                Tab::Repos,
+                Tab::Duplicates,
+                Tab::History,
+                Tab::Issues,
+            ]
+            .into_iter()
+            .map(|tab| (tab, UniformListScrollHandle::new()))
+            .collect(),
             lists: Lists::default(),
-            scrolls: [Tab::Duplicates, Tab::History, Tab::Issues]
-                .into_iter()
-                .map(|tab| (tab, ScrollHandle::new()))
-                .collect(),
-            reveal_cursor: Rc::new(Cell::new(false)),
             stops: RefCell::default(),
             ring: None,
             reveal_ring: Rc::new(Cell::new(false)),
@@ -528,9 +558,11 @@ impl Kuizer {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Loading(_))
-            || matches!(self.dialog, Some(Dialog::Running))
-            || self.restoring()
+        matches!(self.phase, Phase::Loading(_)) || self.restoring()
+    }
+
+    fn working(&self) -> bool {
+        self.busy() || self.refreshing() || self.cleaning.is_some()
     }
 
     fn restoring(&self) -> bool {
@@ -544,7 +576,7 @@ impl Kuizer {
     }
 
     fn can_restore(&self) -> bool {
-        self.report().is_some() && !self.busy() && !self.refreshing() && self.dialog.is_none()
+        self.report().is_some() && !self.working() && self.dialog.is_none()
     }
 
     fn show_toast(&mut self, notice: Notice, cx: &mut Context<Self>) {
@@ -583,7 +615,14 @@ impl Kuizer {
     }
 
     fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
-        if self.toast.is_some() && !self.restoring() {
+        let pinned = matches!(
+            self.toast,
+            Some(Toast {
+                notice: Notice::Deleting(_) | Notice::Restoring { .. },
+                ..
+            })
+        );
+        if self.toast.is_some() && !pinned {
             self.toast = None;
             cx.notify();
         }
@@ -593,10 +632,39 @@ impl Kuizer {
         cx.quit();
     }
 
-    /// Whether the results on screen are still being replaced by a running scan, so nothing in
-    /// them may be removed yet: some sections come from an earlier scan or are not in yet.
+    /// Whether a scan is still filling or replacing the results on screen.
     fn refreshing(&self) -> bool {
         self.stale.is_some() || (self.cancel.is_some() && matches!(self.phase, Phase::Ready(_)))
+    }
+
+    /// Whether a list still shows rows of an earlier scan. Those may not be removed until the
+    /// running scan replaces them; rows the running scan found itself may.
+    fn outdated(&self, source: Source) -> bool {
+        if self.cancel.is_none() {
+            return self.stale.is_some();
+        }
+        let part = match source {
+            Source::Artifact => Part::Artifacts,
+            Source::Cache => Part::Caches,
+            Source::Toolchain => Part::Toolchains,
+            Source::Docker => Part::Docker,
+        };
+        self.pending.contains(&part) && !(source == Source::Artifact && self.streamed)
+    }
+
+    /// Why items of these lists cannot be removed right now, if anything stands in the way.
+    fn locked(&self, mut sources: impl Iterator<Item = Source>) -> Option<&'static str> {
+        if self.restoring() {
+            Some(WAIT_FOR_RESTORE)
+        } else if self.cleaning.is_some() {
+            Some(keys::WAIT_FOR_CLEANUP)
+        } else if sources.any(|source| self.outdated(source)) {
+            Some(
+                "Available once the running scan replaces these results. They come from an earlier scan, so every item is checked again first",
+            )
+        } else {
+            None
+        }
     }
 
     fn refresh_rows(&mut self) {
@@ -740,6 +808,7 @@ impl Kuizer {
         if !self.selection.remove(&(source, id)) {
             self.select((source, id));
         }
+        self.flow.mark((source, id));
         cx.notify();
     }
 
@@ -853,15 +922,18 @@ impl Kuizer {
         }
     }
 
+    /// Why the selection, or the cursor row when nothing is selected, cannot be removed now.
     fn trash_lock(&self) -> Option<&'static str> {
-        if self.restoring() {
-            Some(WAIT_FOR_RESTORE)
-        } else if self.refreshing() {
-            Some(
-                "Available once the fresh scan finishes. These results come from an earlier scan, so every item is checked again first",
-            )
-        } else {
-            None
+        let stats = self.selection.stats();
+        if stats.total().all.count > 0 {
+            let selected = Source::ALL
+                .into_iter()
+                .filter(|source| stats.source(*source).all.count > 0);
+            return self.locked(selected);
+        }
+        match self.cursor_target() {
+            Some(Target::Item(source, ..)) => self.locked([source].into_iter()),
+            _ => self.locked([].into_iter()),
         }
     }
 
@@ -907,7 +979,7 @@ impl Kuizer {
                             .child(status)
                     });
                 let list = match self.tab {
-                    Tab::Overview => return self.render_overview(cx),
+                    Tab::Overview => self.render_overview(cx),
                     Tab::Artifacts => self.render_artifacts(cx),
                     Tab::Caches => self.render_caches(cx),
                     Tab::Toolchains => self.render_toolchains(cx),
@@ -921,6 +993,7 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .size_full()
+                    .child(page_header(self.tab))
                     .children(pending)
                     .child(div().flex().flex_col().flex_1().min_h_0().child(list))
                     .into_any_element()
@@ -1020,11 +1093,12 @@ impl Kuizer {
                         let checked = app.selection.contains(&key);
                         let review = candidate.rule.safety == Safety::Review;
                         let target = Target::Item(Source::Artifact, id, candidate.path.clone());
+                        let look = app.look(Source::Artifact, id, &candidate.path);
                         let row = table_row(("artifact", id), checked)
                             .debug_selector(move || format!("artifact-row-{row}"));
                         Some(
                             app.menu_row(row, target, cursor.as_ref(), cx)
-                                .child(ui::checkbox(checked))
+                                .child(ui::check_mark(look.checked))
                                 .child(
                                     column(col::M)
                                         .id(("artifact-size", id))
@@ -1079,10 +1153,8 @@ impl Kuizer {
                                         }))
                                         .child(model::short_path(&candidate.path, &report.roots)),
                                 )
-                                .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                                    if !app.busy() {
-                                        app.toggle(Source::Artifact, id, cx);
-                                    }
+                                .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
+                                    app.click_row(Source::Artifact, id, event, cx);
                                 })),
                         )
                     })
@@ -1098,12 +1170,14 @@ impl Kuizer {
             .flex_col()
             .size_full()
             .child(toolbar)
-            .child(header)
-            .child(if self.rows.is_empty() {
-                ui::empty("No items match these filters").into_any_element()
-            } else {
-                list.into_any_element()
-            })
+            .child(table(
+                header,
+                if self.rows.is_empty() {
+                    ui::empty("No items match these filters").into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element()
     }
 
@@ -1118,58 +1192,78 @@ impl Kuizer {
         if report.issues.is_empty() {
             return framed(toolbar, centered(ui::empty("The scan reported no issues")));
         }
+        let count = self.listed(Tab::Issues).slots.len();
+        let header = table_header().child(
+            div()
+                .flex_1()
+                .child("Folders that could not be read or were skipped".to_uppercase()),
+        );
+        let list = self
+            .table_list(
+                "issues",
+                Tab::Issues,
+                count,
+                |app, range, cx| app.issue_rows(range, cx),
+                cx,
+            )
+            .debug_selector(|| "issue-list".to_owned());
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(toolbar)
+            .child(table(
+                header,
+                if count == 0 {
+                    ui::empty("No issues match this filter").into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn issue_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(report) = self.report() else {
+            return Vec::new();
+        };
+        let listed = self.listed(Tab::Issues);
         let cursor = self.cursor_target();
-        let needle = self.needle(Tab::Issues);
-        let list = scroll("issues")
-            .debug_selector(|| "issue-list".to_owned())
-            .track_scroll(&self.scroll_for(Tab::Issues))
-            .child(
-                div()
-                    .text_color(theme::muted())
-                    .child("Folders that could not be read or were skipped"),
-            )
-            .children(
-                report
-                    .issues
-                    .iter()
-                    .take(ISSUE_LIMIT)
-                    .enumerate()
-                    .filter(|(_, issue)| {
-                        found(
-                            needle.as_deref(),
-                            &[
-                                issue.path.to_string_lossy().as_ref(),
-                                issue.message.as_str(),
-                            ],
+        range
+            .filter_map(|row| {
+                let index = listed.slots.get(row)?.0;
+                let issue = report.issues.get(index)?;
+                let line = div()
+                    .id(("issue-row", index))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(unit(space::XXS))
+                    .w_full()
+                    .h(unit(size::row_tall()))
+                    .px(unit(space::GUTTER))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .debug_selector(move || format!("issue-row-{row}"));
+                Some(
+                    self.menu_row(line, Target::Issue(issue.path.clone()), cursor.as_ref(), cx)
+                        .child(
+                            div()
+                                .id(("issue", index))
+                                .truncate()
+                                .tip(tooltip::path(&issue.path))
+                                .child(display_path(&issue.path)),
                         )
-                    })
-                    .map(|(index, issue)| {
-                        let row = div()
-                            .flex()
-                            .flex_col()
-                            .gap(unit(space::XXS))
-                            .py(unit(space::S))
-                            .border_b_1()
-                            .border_color(theme::border())
-                            .debug_selector(move || format!("issue-row-{index}"));
-                        self.menu_row(row, Target::Issue(issue.path.clone()), cursor.as_ref(), cx)
-                            .child(
-                                div()
-                                    .id(("issue", index))
-                                    .truncate()
-                                    .tip(tooltip::path(&issue.path))
-                                    .child(display_path(&issue.path)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(unit(font::SMALL))
-                                    .text_color(theme::faint())
-                                    .child(issue.message.clone()),
-                            )
-                    }),
-            )
-            .into_any_element();
-        framed(toolbar, list)
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(unit(font::SMALL))
+                                .text_color(theme::faint())
+                                .child(issue.message.clone()),
+                        ),
+                )
+            })
+            .collect()
     }
 
     fn shown_path(&self, path: &Path) -> String {
@@ -1183,6 +1277,8 @@ impl Kuizer {
 impl Render for Kuizer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(self.zoom.rem_size());
+        self.animate_rows(window);
+        tooltip::focus(self.ring.clone().filter(|_| !self.typing()), cx);
         let view = cx.entity().downgrade();
         let wheel = canvas(
             |_, _, _| {},
@@ -1225,6 +1321,7 @@ impl Render for Kuizer {
             .text_size(unit(font::BODY))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_key_up(cx.listener(Self::on_key_up))
             .capture_any_mouse_down(cx.listener(|app, _: &MouseDownEvent, _, cx| {
                 if app.ring.take().is_some() {
                     cx.notify();
@@ -1245,7 +1342,7 @@ impl Render for Kuizer {
                     .relative()
                     .children(sidebar)
                     .child(div().flex().flex_col().flex_1().min_w_0().child(content))
-                    .when(self.busy() || self.refreshing(), |this| {
+                    .when(self.working(), |this| {
                         this.child(
                             div().absolute().top_0().left_0().right_0().child(
                                 self.loader
@@ -1309,6 +1406,49 @@ fn framed(toolbar: Div, body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
+/// The title of a section and one line on what it holds, above its toolbar.
+fn page_header(tab: Tab) -> Div {
+    div()
+        .debug_selector(|| "page-header".to_owned())
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap(unit(space::XXS))
+        .px(unit(space::GUTTER))
+        .pt(unit(space::section()))
+        .pb(unit(space::XS))
+        .child(
+            div()
+                .text_size(unit(font::HEADING))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(tab.label()),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_size(unit(font::SMALL))
+                .text_color(theme::muted())
+                .child(tab.term().text()),
+        )
+}
+
+/// A table as a card: the column header on top and the rows filling what is left below it.
+fn table(header: Div, body: AnyElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mx(unit(space::GUTTER))
+        .mb(unit(space::GUTTER))
+        .rounded(theme::radius_panel())
+        .border_1()
+        .border_color(theme::border())
+        .overflow_hidden()
+        .child(header)
+        .child(body)
+}
+
 fn scroll(id: &'static str) -> gpui::Stateful<Div> {
     div()
         .id(id)
@@ -1328,21 +1468,21 @@ fn head(width: f32, label: &'static str, term: Term) -> gpui::Stateful<Div> {
     column(width)
         .id(label)
         .tip(tooltip::term(term))
-        .child(label)
+        .child(label.to_uppercase())
 }
 
 fn table_header() -> Div {
-    ui::tabular(div())
+    ui::tabular(theme::label(div()))
         .flex()
         .flex_none()
         .items_center()
         .gap(unit(space::L))
-        .h(unit(size::ROW))
+        .h(unit(size::row()))
         .px(unit(space::GUTTER))
+        .rounded_t(theme::radius_panel())
         .bg(theme::panel())
         .border_b_1()
         .border_color(theme::border())
-        .text_size(unit(font::SMALL))
         .text_color(theme::muted())
 }
 
@@ -1353,7 +1493,7 @@ fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
         .items_center()
         .gap(unit(space::L))
         .w_full()
-        .h(unit(size::ROW))
+        .h(unit(size::row()))
         .px(unit(space::GUTTER))
         .cursor_pointer()
         .border_b_1()

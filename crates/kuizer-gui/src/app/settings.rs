@@ -1,35 +1,45 @@
 //! The settings popover: pages of switches that read and write the config file.
 
 use gpui::Keystroke;
-use kuizer::config::{Config, SettingValue, Sidebar, Theme};
+use kuizer::config::{Accent, Config, DeleteMode, Density, SettingValue, Sidebar, Theme};
 
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Setting {
     Theme,
+    Accent,
+    Density,
     Motion,
     SidebarCollapsed,
     RoutesEnabled,
     RouteHints,
+    Trash,
 }
 
 const THEMES: [&str; 2] = ["Dark", "Light"];
+const ACCENTS: [&str; 4] = ["Purple", "Blue", "Teal", "Pink"];
+const DENSITIES: [&str; 2] = ["Comfortable", "Compact"];
 
 impl Setting {
     fn label(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
+            Self::Accent => "Accent",
+            Self::Density => "Density",
             Self::Motion => "Motion",
             Self::SidebarCollapsed => "Open the sidebar collapsed",
             Self::RoutesEnabled => "Section shortcuts",
             Self::RouteHints => "Show shortcut hints",
+            Self::Trash => "Move to the trash",
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
             Self::Theme => "Dark, or light on an off-white background.",
+            Self::Accent => "The color of the selection, the focus outline and the bars.",
+            Self::Density => "Compact uses shorter list rows and less vertical padding.",
             Self::Motion => "Animate selection, expanding rows and items leaving after a cleanup.",
             Self::SidebarCollapsed => {
                 "Start as a strip of icons. The sidebar shortcut switches it while the app runs."
@@ -38,12 +48,17 @@ impl Setting {
                 "Shift+1 to Shift+9 open the sidebar sections. The command palette still opens every section."
             }
             Self::RouteHints => "Key badges in the sidebar and in the section tooltips.",
+            Self::Trash => {
+                "Project artifacts and caches go to the trash and History can restore them. Off deletes them for good. Toolchains, Docker objects and git branches are always deleted for good."
+            }
         }
     }
 
     fn choices(self) -> Option<&'static [&'static str]> {
         match self {
             Self::Theme => Some(&THEMES),
+            Self::Accent => Some(&ACCENTS),
+            Self::Density => Some(&DENSITIES),
             _ => None,
         }
     }
@@ -51,10 +66,16 @@ impl Setting {
     fn value(self, config: &Config) -> usize {
         match self {
             Self::Theme => usize::from(config.appearance.theme == Theme::Light),
+            Self::Accent => Accent::ALL
+                .iter()
+                .position(|accent| *accent == config.appearance.accent)
+                .unwrap_or(0),
+            Self::Density => usize::from(config.appearance.density == Density::Compact),
             Self::Motion => usize::from(config.appearance.motion),
             Self::SidebarCollapsed => usize::from(config.appearance.sidebar == Sidebar::Collapsed),
             Self::RoutesEnabled => usize::from(config.route_shortcuts.enabled),
             Self::RouteHints => usize::from(config.route_shortcuts.hints),
+            Self::Trash => usize::from(config.delete.mode == DeleteMode::Trash),
         }
     }
 
@@ -77,7 +98,19 @@ impl Setting {
         match self {
             Self::Theme => {
                 config.appearance.theme = if on { Theme::Light } else { Theme::Dark };
-                theme::configure(config.appearance.theme);
+                theme::configure(config.appearance.theme, config.appearance.accent);
+            }
+            Self::Accent => {
+                config.appearance.accent = Accent::ALL[value.min(Accent::ALL.len() - 1)];
+                theme::configure(config.appearance.theme, config.appearance.accent);
+            }
+            Self::Density => {
+                config.appearance.density = if on {
+                    Density::Compact
+                } else {
+                    Density::Comfortable
+                };
+                theme::set_density(config.appearance.density);
             }
             Self::Motion => {
                 config.appearance.motion = on;
@@ -92,6 +125,13 @@ impl Setting {
             }
             Self::RoutesEnabled => config.route_shortcuts.enabled = on,
             Self::RouteHints => config.route_shortcuts.hints = on,
+            Self::Trash => {
+                config.delete.mode = if on {
+                    DeleteMode::Trash
+                } else {
+                    DeleteMode::Permanent
+                };
+            }
         }
     }
 
@@ -103,6 +143,16 @@ impl Setting {
                 "theme",
                 SettingValue::Text(if on { "light" } else { "dark" }),
             ),
+            Self::Accent => (
+                "appearance",
+                "accent",
+                SettingValue::Text(Accent::ALL[value.min(Accent::ALL.len() - 1)].key()),
+            ),
+            Self::Density => (
+                "appearance",
+                "density",
+                SettingValue::Text(if on { "compact" } else { "comfortable" }),
+            ),
             Self::Motion => ("appearance", "motion", SettingValue::Bool(on)),
             Self::SidebarCollapsed => (
                 "appearance",
@@ -111,6 +161,11 @@ impl Setting {
             ),
             Self::RoutesEnabled => ("route_shortcuts", "enabled", SettingValue::Bool(on)),
             Self::RouteHints => ("route_shortcuts", "hints", SettingValue::Bool(on)),
+            Self::Trash => (
+                "delete",
+                "mode",
+                SettingValue::Text(if on { "trash" } else { "permanent" }),
+            ),
         }
     }
 }
@@ -127,7 +182,7 @@ struct Page {
     groups: &'static [Group],
 }
 
-const PAGES: [Page; 2] = [
+const PAGES: [Page; 3] = [
     Page {
         title: "General",
         detail: "Choose how kuizer looks and opens.",
@@ -135,7 +190,7 @@ const PAGES: [Page; 2] = [
             Group {
                 title: "Theme",
                 hint: Some("Applied to the whole window as soon as you pick it."),
-                settings: &[Setting::Theme],
+                settings: &[Setting::Theme, Setting::Accent, Setting::Density],
             },
             Group {
                 title: "Interface",
@@ -143,6 +198,15 @@ const PAGES: [Page; 2] = [
                 settings: &[Setting::Motion, Setting::SidebarCollapsed],
             },
         ],
+    },
+    Page {
+        title: "Deleting",
+        detail: "Choose what happens to the items you remove.",
+        groups: &[Group {
+            title: "Removed items",
+            hint: None,
+            settings: &[Setting::Trash],
+        }],
     },
     Page {
         title: "Shortcuts",
@@ -280,7 +344,7 @@ impl Kuizer {
                 .debug_selector(move || format!("settings-page-{}", page.title))
                 .flex()
                 .items_center()
-                .h(unit(size::ROW))
+                .h(unit(size::row()))
                 .px(unit(space::M))
                 .rounded(theme::radius_control())
                 .cursor_pointer()
@@ -485,7 +549,7 @@ impl Kuizer {
             .flex()
             .gap(unit(space::L))
             .px(unit(space::M))
-            .py(unit(space::L))
+            .py(unit(space::row_y()))
             .rounded(theme::radius_control())
             .when(rule, |this| this.border_b_1().border_color(theme::border()))
             .when(focused, |this| this.bg(theme::selected()));
@@ -495,7 +559,11 @@ impl Kuizer {
                     .child(label)
                     .child(div().flex().gap(unit(space::L)).children(
                         choices.iter().enumerate().map(|(choice, name)| {
-                            theme_card(setting, choice, name, choice == value, cx)
+                            if setting == Setting::Theme {
+                                theme_card(setting, choice, name, choice == value, cx)
+                            } else {
+                                choice_chip(setting, choice, name, choice == value, cx)
+                            }
                         }),
                     ))
             }
@@ -579,6 +647,54 @@ fn theme_card(
                 } else {
                     FontWeight::NORMAL
                 })
+                .text_color(if active {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .child(name),
+        )
+        .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+            app.change(setting, choice, cx);
+        }))
+}
+
+fn choice_chip(
+    setting: Setting,
+    choice: usize,
+    name: &'static str,
+    active: bool,
+    cx: &mut Context<Kuizer>,
+) -> Stateful<Div> {
+    let accent = setting == Setting::Accent;
+    let prefix = if accent { "accent-chip" } else { "choice-chip" };
+    div()
+        .id((prefix, choice))
+        .debug_selector(move || format!("{prefix}-{name}"))
+        .flex()
+        .items_center()
+        .gap(unit(space::S))
+        .h(unit(size::CONTROL))
+        .px(unit(space::M))
+        .rounded(theme::radius_control())
+        .border_1()
+        .border_color(if active {
+            theme::focus()
+        } else {
+            theme::border()
+        })
+        .cursor_pointer()
+        .hover(|style| style.border_color(theme::border_strong()))
+        .when(accent, |this| {
+            this.child(
+                div()
+                    .size(unit(size::LEGEND))
+                    .rounded(theme::radius_pill())
+                    .bg(theme::accent_of(Accent::ALL[choice])),
+            )
+        })
+        .child(
+            div()
                 .text_color(if active {
                     theme::text()
                 } else {

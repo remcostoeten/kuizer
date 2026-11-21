@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,25 @@ const SIDECAR: &str = "dupes.json";
 #[derive(Debug, Clone)]
 pub struct Snapshots {
     dir: Option<PathBuf>,
+    writing: Arc<Mutex<()>>,
+}
+
+/// @name Forgotten
+/// @description Paths deleted while a scan runs. The scan leaves them out of the snapshot it
+/// saves when it finishes, so the next launch does not show them again.
+///
+/// @example
+/// let forgotten = Forgotten::default();
+/// forgotten.add(removed_paths);
+#[derive(Debug, Clone, Default)]
+pub struct Forgotten(Arc<Mutex<HashSet<PathBuf>>>);
+
+impl Forgotten {
+    pub fn add(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        if let Ok(mut forgotten) = self.0.lock() {
+            forgotten.extend(paths);
+        }
+    }
 }
 
 impl Snapshots {
@@ -48,7 +67,10 @@ impl Snapshots {
     }
 
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            writing: Arc::default(),
+        }
     }
 
     /// @name Snapshots::load
@@ -72,7 +94,34 @@ impl Snapshots {
         Some(report)
     }
 
-    fn write(&self, stored: &Stored) {
+    /// @name Snapshots::forget
+    /// @description Drops deleted items from the saved scan of these folders, so the next
+    /// launch does not show them before its fresh scan replaces the list. Does nothing when
+    /// no saved scan of these folders exists or none of the paths are in it.
+    ///
+    /// @example
+    /// snapshots.forget(&roots, &removed);
+    pub fn forget(&self, roots: &[PathBuf], paths: &HashSet<PathBuf>) {
+        let Some(file) = self.file(roots, EXTENSION) else {
+            return;
+        };
+        let _writing = self.writing.lock();
+        let Some(mut stored) = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Stored>(&bytes).ok())
+        else {
+            return;
+        };
+        if stored.schema == SCHEMA
+            && stored.version == env!("CARGO_PKG_VERSION")
+            && stored.roots == roots
+            && stored.forget(paths)
+        {
+            self.write_unlocked(&stored);
+        }
+    }
+
+    fn write_unlocked(&self, stored: &Stored) {
         let (Some(dir), Some(file)) = (&self.dir, self.file(&stored.roots, EXTENSION)) else {
             return;
         };
@@ -166,17 +215,19 @@ impl Staged {
 /// file is written once the whole scan is on screen.
 ///
 /// @example
-/// let recorder = Recorder::new(&roots, &options);
+/// let recorder = Recorder::new(&roots, &options, Forgotten::default());
 /// recorder.record(&loaded);
 /// recorder.save(&snapshots, SystemTime::now());
 pub struct Recorder {
     stored: Mutex<Stored>,
+    forgotten: Forgotten,
 }
 
 impl Recorder {
-    pub fn new(roots: &[PathBuf], options: &ScanOptions) -> Self {
+    pub fn new(roots: &[PathBuf], options: &ScanOptions, forgotten: Forgotten) -> Self {
         Self {
             stored: Mutex::new(Stored::empty(roots, options)),
+            forgotten,
         }
     }
 
@@ -192,7 +243,11 @@ impl Recorder {
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stored.saved = scanned;
-        snapshots.write(&stored);
+        let _writing = snapshots.writing.lock();
+        if let Ok(forgotten) = self.forgotten.0.lock() {
+            stored.forget(&forgotten);
+        }
+        snapshots.write_unlocked(&stored);
     }
 }
 
@@ -338,6 +393,25 @@ impl Stored {
             history: Err(String::new()),
             disks: Vec::new(),
         }
+    }
+
+    fn forget(&mut self, paths: &HashSet<PathBuf>) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let before =
+            self.candidates.len() + self.caches.len() + self.toolchains.len() + self.docker.len();
+        self.candidates
+            .retain(|candidate| !paths.contains(&candidate.path));
+        self.caches
+            .retain(|(_, _, candidate)| !paths.contains(&candidate.path));
+        self.toolchains
+            .retain(|(_, candidate)| !paths.contains(&candidate.path));
+        self.docker
+            .retain(|item| !paths.contains(&item.candidate(0).path));
+        let after =
+            self.candidates.len() + self.caches.len() + self.toolchains.len() + self.docker.len();
+        after < before
     }
 
     fn put(&mut self, loaded: &Loaded) {
@@ -882,7 +956,7 @@ mod tests {
 
     fn save(snapshots: &Snapshots, root: &str) {
         let saved = report(root);
-        let recorder = Recorder::new(&saved.roots, &saved.options);
+        let recorder = Recorder::new(&saved.roots, &saved.options, Forgotten::default());
         let scanned = saved.scanned;
         for part in saved.into_parts() {
             recorder.record(&part);
@@ -899,7 +973,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let snapshots = Snapshots::new(Some(dir.path().join("scans")));
         let saved = report("/p");
-        let recorder = Recorder::new(&saved.roots, &saved.options);
+        let recorder = Recorder::new(&saved.roots, &saved.options, Forgotten::default());
         for part in report("/p").into_parts() {
             recorder.record(&part);
         }
@@ -950,6 +1024,33 @@ mod tests {
             std::fs::read_dir(dir.path().join("scans")).unwrap().count(),
             2
         );
+    }
+
+    #[test]
+    fn deleted_items_leave_the_saved_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshots = Snapshots::new(Some(dir.path().to_path_buf()));
+        let saved = report("/p");
+        save(&snapshots, "/p");
+        let gone = HashSet::from([PathBuf::from("/p/a/node_modules")]);
+        snapshots.forget(&saved.roots, &gone);
+        let loaded = snapshots.load(&saved.roots, &saved.options).unwrap();
+        let paths: Vec<&Path> = loaded.candidates.iter().map(|c| c.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("/p/b/dist")]);
+
+        let forgotten = Forgotten::default();
+        let recorder = Recorder::new(&saved.roots, &saved.options, forgotten.clone());
+        for part in report("/p").into_parts() {
+            recorder.record(&part);
+        }
+        forgotten.add([
+            PathBuf::from("/p/b/dist"),
+            PathBuf::from("/h/.npm/_cacache"),
+        ]);
+        recorder.save(&snapshots, saved.scanned);
+        let loaded = snapshots.load(&saved.roots, &saved.options).unwrap();
+        assert_eq!(loaded.candidates.len(), 1);
+        assert!(loaded.caches.is_empty());
     }
 
     #[test]

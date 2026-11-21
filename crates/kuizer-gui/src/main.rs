@@ -23,6 +23,7 @@ mod treemap;
 mod ui;
 mod zoom;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -34,15 +35,56 @@ use kuizer::config::Config;
 use crate::app::Kuizer;
 use crate::zoom::Zoom;
 
+const BUNDLED_FONTS: [&[u8]; 3] = [
+    include_bytes!("../assets/fonts/SchibstedGrotesk-Regular.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-Medium.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-SemiBold.ttf"),
+];
+
+fn register_fonts(cx: &App) {
+    let fonts = BUNDLED_FONTS.into_iter().map(Cow::Borrowed).collect();
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        eprintln!("kuizer-gui: cannot load the bundled font: {error}");
+    }
+}
+
 fn font(cx: &App) -> SharedString {
     let installed = cx.text_system().all_font_names();
-    theme::FONT_CANDIDATES
-        .iter()
-        .find(|candidate| installed.iter().any(|name| name == *candidate))
-        .map_or_else(
-            || SharedString::from(".SystemUIFont"),
-            |name| (*name).into(),
-        )
+    let first = |candidates: &[&'static str]| {
+        candidates
+            .iter()
+            .find(|candidate| installed.iter().any(|name| name == *candidate))
+            .map(|name| SharedString::from(*name))
+    };
+    if let Some(mono) = first(&theme::MONO_CANDIDATES) {
+        theme::set_mono(mono);
+    }
+    first(&theme::FONT_CANDIDATES).unwrap_or_else(|| SharedString::from(".SystemUIFont"))
+}
+
+const NO_WINDOW_HINT: &str = "kuizer-gui needs a graphical session with a working GPU driver (Vulkan on Linux, Metal on macOS). Install the Vulkan driver for your GPU, or run `kuizer` in a terminal for the same scan and cleanup in the terminal UI.";
+
+// GPUI panics instead of returning an error when it finds no display server or usable GPU.
+fn start_platform() -> Application {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let reason = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown error");
+        let reason = reason.lines().next().unwrap_or(reason);
+        let reason = reason
+            .strip_prefix("called `Result::unwrap()` on an `Err` value: ")
+            .unwrap_or(reason);
+        eprintln!("kuizer-gui: cannot start the graphics backend: {reason}");
+        eprintln!("{NO_WINDOW_HINT}");
+        std::process::exit(1);
+    }));
+    let application = Application::new();
+    std::panic::set_hook(previous);
+    application
 }
 
 fn main() -> ExitCode {
@@ -64,10 +106,11 @@ fn main() -> ExitCode {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let roots = kuizer::scan::normalize_roots(&paths);
 
-    Application::new()
+    start_platform()
         .with_assets(icon::Assets)
         .run(move |cx: &mut App| {
             let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+            register_fonts(cx);
             let font = font(cx);
             if let Some(reason) = problem {
                 fallback::remember(reason, font.clone());
@@ -99,6 +142,7 @@ fn main() -> ExitCode {
             );
             if let Err(error) = opened {
                 eprintln!("kuizer-gui: cannot open a window: {error}");
+                eprintln!("{NO_WINDOW_HINT}");
                 cx.quit();
                 return;
             }

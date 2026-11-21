@@ -617,7 +617,7 @@ pub(super) fn step_row(
         .flex()
         .items_center()
         .gap(unit(space::L))
-        .h(unit(size::ROW))
+        .h(unit(size::row()))
         .child(step_dot(step, &state))
         .child(
             div()
@@ -733,7 +733,7 @@ pub(super) fn found_card(activity: &Activity, roots: &[PathBuf]) -> Div {
                 .flex()
                 .items_center()
                 .gap(unit(space::L))
-                .h(unit(size::ROW))
+                .h(unit(size::row()))
                 .border_t_1()
                 .border_color(theme::border())
                 .child(

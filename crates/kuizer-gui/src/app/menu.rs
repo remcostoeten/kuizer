@@ -12,8 +12,16 @@ impl Kuizer {
             Target::Item(source, id, _) => {
                 let selected = self.selection.contains(&(*source, *id));
                 let external = *source == Source::Docker;
-                let remove = MenuItem::new(Choice::Trash, "Delete", "Del")
-                    .tip("Delete only this item for good, after a confirmation");
+                let remove = MenuItem::new(
+                    Choice::Trash,
+                    if self.config.delete.mode == DeleteMode::Trash && !source.permanent() {
+                        "Move to trash"
+                    } else {
+                        "Delete"
+                    },
+                    "Del",
+                )
+                .tip("Remove only this item, after a confirmation");
                 vec![
                     reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,
@@ -24,7 +32,7 @@ impl Kuizer {
                     )
                     .divided()
                     .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
-                    remove.unless(self.trash_lock()),
+                    remove.unless(self.locked([*source].into_iter())),
                     exclude.unless(external.then_some(NOT_ON_DISK)),
                 ]
             }
@@ -332,6 +340,7 @@ impl Kuizer {
     pub(super) fn prune(&mut self) {
         if let Phase::Ready(report) = &mut self.phase {
             report.drop_paths(&self.excluded);
+            report.remove(&self.gone);
         }
         self.refresh_stats();
         self.refresh_rows();
@@ -361,36 +370,32 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> E {
         let open = self.menu.as_ref().is_some_and(|menu| menu.target == target);
+        let look = match &target {
+            Target::Item(source, id, path) => Some(self.look(*source, *id, path)),
+            _ => None,
+        };
         let tab = target.tab();
         let marked = cursor == Some(&target);
         let bounds = marked.then(|| Rc::clone(&self.cursor_bounds));
-        let reveal = Rc::clone(&self.reveal_cursor);
-        let scroll = self.scrolls.get(&tab).cloned();
         let clicked = target.clone();
         row.when_some(bounds, |this, bounds| {
             this.child(
-                canvas(
-                    move |area, window, _| {
-                        bounds.set(Some(area));
-                        if let Some(scroll) = scroll
-                            && reveal.take()
-                        {
-                            keep_visible(&scroll, area, window);
-                        }
-                    },
-                    |_, (), _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+                canvas(move |area, _, _| bounds.set(Some(area)), |_, (), _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
             )
             .child(ui::marker().debug_selector(|| "cursor".to_owned()))
         })
+        .when_some(look, |this, look| self.flow_row(this, look))
         .when(open, |this| this.bg(theme::hover()))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |app, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                if event.modifiers.shift && !app.busy() {
+                    app.select_to(&clicked);
+                }
                 app.cursors.insert(tab, clicked.clone());
                 app.range = None;
                 app.filtering = false;

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::cli::SortKey;
 use kuizer::commands::{measure_caches_with, sort_candidates};
-use kuizer::config::Config;
+use kuizer::config::{Config, DeleteMode};
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, RuleInfo};
 use kuizer::docker;
@@ -103,6 +103,49 @@ impl Loaded {
             Self::Docker { .. } => Some(Part::Docker),
             Self::Repos(_) => Some(Part::Repos),
             Self::History(_) => Some(Part::History),
+        }
+    }
+
+    /// @name Loaded::without
+    /// @description Leaves out the items of this part that sit under an excluded path or were
+    /// deleted while the scan ran, so a running scan never brings them back. Filtering each part
+    /// as it arrives costs only its own items, not the whole report on every update.
+    ///
+    /// @example
+    /// loaded.without(&excluded, &gone);
+    pub fn without(&mut self, excluded: &[PathBuf], gone: &HashMap<Source, HashSet<PathBuf>>) {
+        let source = match self {
+            Self::Found(_) | Self::Artifacts { .. } => Some(Source::Artifact),
+            Self::Caches(_) => Some(Source::Cache),
+            Self::Toolchains(_) => Some(Source::Toolchain),
+            Self::Docker { .. } => Some(Source::Docker),
+            Self::Repos(_) | Self::History(_) => None,
+        };
+        let deleted = source.and_then(|source| gone.get(&source));
+        if excluded.is_empty() && deleted.is_none_or(HashSet::is_empty) {
+            return;
+        }
+        let stays = |path: &Path| {
+            !deleted.is_some_and(|deleted| deleted.contains(path))
+                && !excluded.iter().any(|excluded| path.starts_with(excluded))
+        };
+        match self {
+            Self::Found(candidates) => candidates.retain(|candidate| stays(&candidate.path)),
+            Self::Artifacts {
+                candidates, issues, ..
+            } => {
+                candidates.retain(|candidate| stays(&candidate.path));
+                issues.retain(|issue| stays(&issue.path));
+            }
+            Self::Caches(caches) => caches.retain(|(_, candidate)| stays(&candidate.path)),
+            Self::Toolchains(toolchains) => {
+                toolchains.retain(|(_, candidate)| stays(&candidate.path));
+            }
+            Self::Docker { entries, .. } => entries.retain(|(_, candidate)| {
+                !deleted.is_some_and(|deleted| deleted.contains(&candidate.path))
+            }),
+            Self::Repos(repos) => repos.retain(|repository| stays(&repository.root)),
+            Self::History(_) => {}
         }
     }
 }
@@ -411,6 +454,30 @@ impl Report {
                 .groups
                 .sort_by_key(|group| std::cmp::Reverse(group.reclaimable()));
         }
+    }
+
+    /// @name Report::remove
+    /// @description Drops the items at these exact paths, per list, as a finished deletion
+    /// does to the report on screen.
+    ///
+    /// @example
+    /// report.remove(&HashMap::from([(Source::Artifact, HashSet::from([path]))]));
+    pub fn remove(&mut self, gone: &HashMap<Source, HashSet<PathBuf>>) {
+        let stays = |source: Source, candidate: &Candidate| {
+            !gone
+                .get(&source)
+                .is_some_and(|paths| paths.contains(&candidate.path))
+        };
+        if gone.contains_key(&Source::Artifact) {
+            self.candidates
+                .retain(|candidate| stays(Source::Artifact, candidate));
+        }
+        self.caches
+            .retain(|(_, candidate)| stays(Source::Cache, candidate));
+        self.toolchains
+            .retain(|(_, candidate)| stays(Source::Toolchain, candidate));
+        self.docker
+            .retain(|(_, candidate)| stays(Source::Docker, candidate));
     }
 
     pub fn by_project(&self) -> Vec<Bucket<PathBuf>> {
@@ -820,6 +887,10 @@ pub enum Source {
 
 impl Source {
     pub const ALL: [Source; 4] = [Self::Artifact, Self::Cache, Self::Toolchain, Self::Docker];
+
+    pub fn permanent(self) -> bool {
+        matches!(self, Self::Toolchain | Self::Docker)
+    }
 }
 
 pub struct Batch {
@@ -846,6 +917,7 @@ pub fn cache_roots(candidates: &[Candidate]) -> Vec<PathBuf> {
 
 pub struct Outcome {
     pub removals: Vec<(Source, Removal)>,
+    pub mode: DeleteMode,
     pub history_error: Option<String>,
 }
 
@@ -854,6 +926,10 @@ impl Outcome {
         self.removals
             .iter()
             .filter(|(_, removal)| removal.status == Status::Removed)
+    }
+
+    pub fn trashed(&self, source: Source) -> bool {
+        self.mode == DeleteMode::Trash && !source.permanent()
     }
 
     pub fn failed(&self) -> impl Iterator<Item = &(Source, Removal)> {
@@ -911,16 +987,29 @@ fn run_batches(
 }
 
 /// @name clean
-/// @description Deletes every selected item for good. Each batch is checked against its own
-/// guard right before acting, exactly like the CLI, and the run is recorded in the history file.
+/// @description Removes every selected item the way `delete.mode` asks: for good, or with
+/// artifacts and caches moved to the trash. Toolchains and Docker objects are always deleted for
+/// good. Each batch is checked against its own guard right before acting, exactly like the CLI.
+/// Trashed items are recorded as their own run in the history file, so a restore of that run
+/// never lists items that cannot come back.
 ///
 /// @example
-/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }]);
-pub fn clean(batches: Vec<Batch>) -> Outcome {
+/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], config.delete.mode);
+pub fn clean(batches: Vec<Batch>, mode: DeleteMode) -> Outcome {
+    let (trashed, permanent): (Vec<Batch>, Vec<Batch>) = batches
+        .into_iter()
+        .partition(|batch| mode == DeleteMode::Trash && !batch.source.permanent());
     let mut removals = Vec::new();
-    let history_error = run_batches(batches, Mode::Permanent, &mut removals);
+    let mut history_error = None;
+    for (batches, mode) in [(trashed, Mode::Trash), (permanent, Mode::Permanent)] {
+        if !batches.is_empty() {
+            let error = run_batches(batches, mode, &mut removals);
+            history_error = history_error.or(error);
+        }
+    }
     Outcome {
         removals,
+        mode,
         history_error,
     }
 }

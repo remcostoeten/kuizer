@@ -237,7 +237,7 @@ impl Kuizer {
 
 /// The outline on the control that has the ring. It sits inside the control, so a scroll
 /// container never clips it, and scrolls the control into view after the ring moves to it.
-fn outline(scroll: Option<ScrollHandle>, reveal: Rc<Cell<bool>>) -> Div {
+pub(super) fn outline(scroll: Option<ScrollHandle>, reveal: Rc<Cell<bool>>) -> Div {
     div()
         .debug_selector(|| "ring".to_owned())
         .absolute()
@@ -333,6 +333,10 @@ mod tests {
         assert_eq!(ring(&view, cx), Some("scope-home".into()));
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("ring").is_some(), "the ring is drawn");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let tipped = cx.update(|_, cx| tooltip::layer(cx).read(cx).showing());
+        assert!(tipped, "the control with the ring shows its tooltip");
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| assert!(app.whole_home));
 

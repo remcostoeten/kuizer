@@ -9,22 +9,10 @@ impl Kuizer {
             return self.render_map(cx);
         }
         let figures = &self.report_stats;
-        let total = figures.artifacts.all.bytes;
-        let safe = figures.artifacts.safe.bytes;
-        let review = figures.artifacts.review.bytes;
         let caches = figures.caches.all.bytes;
         let toolchains = figures.toolchains.all.bytes;
         let containers = figures.docker.all.bytes;
         let space = figures.space();
-        let duplicates = report
-            .duplicates
-            .as_ref()
-            .map_or(0, kuizer::dupes::Duplicates::reclaimable);
-        let disk = report
-            .disks
-            .first()
-            .and_then(|disk| Some((disk.available?, disk.total?)));
-
         let charts = figures.charts(report);
         let categories = &charts.categories;
         let projects = &charts.projects;
@@ -43,112 +31,9 @@ impl Kuizer {
                     .child(self.sidebar_toggle(cx))
                     .child(self.overview_switch(cx)),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(unit(space::L))
-                    .child(
-                        ui::stat(
-                            "Project artifacts",
-                            theme::bytes(total),
-                            format!("{} items", report.candidates.len()),
-                        )
-                        .id("stat-artifacts")
-                        .tip(tooltip::term(Term::ProjectArtifacts)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Safe to remove",
-                            theme::bytes(safe),
-                            "rebuilt on the next build",
-                        )
-                        .id("stat-safe")
-                        .tip(tooltip::term(Term::Safe)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Needs review",
-                            theme::bytes(review),
-                            "check before removing",
-                        )
-                        .id("stat-review")
-                        .tip(tooltip::term(Term::Review)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Global caches",
-                            theme::bytes(caches),
-                            format!("{} caches", report.caches.len()),
-                        )
-                        .id("stat-caches")
-                        .tip(tooltip::term(Term::GlobalCaches)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Toolchains",
-                            theme::bytes(toolchains),
-                            plural(report.toolchains.len(), "version"),
-                        )
-                        .id("stat-toolchains")
-                        .tip(tooltip::term(Term::Toolchains)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Docker",
-                            theme::bytes(containers),
-                            plural(report.docker.len(), "object"),
-                        )
-                        .id("stat-docker")
-                        .tip(tooltip::term(Term::Docker)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Git repositories",
-                            theme::bytes(
-                                report
-                                    .repos
-                                    .iter()
-                                    .filter(|repository| {
-                                        repository.collectable(self.config.git.min_gain.0)
-                                    })
-                                    .map(|repository| repository.objects.gain())
-                                    .sum(),
-                            ),
-                            format!(
-                                "git gc, {} merged branches",
-                                report
-                                    .repos
-                                    .iter()
-                                    .map(|repository| repository.merged.len())
-                                    .sum::<usize>()
-                            ),
-                        )
-                        .id("stat-repos")
-                        .tip(tooltip::term(Term::GitRepositories)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Duplicate files",
-                            theme::bytes(duplicates),
-                            "keep one copy of each",
-                        )
-                        .id("stat-duplicates")
-                        .tip(tooltip::term(Term::DuplicateFiles)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Disk free",
-                            disk.map_or_else(String::new, |(free, _)| theme::bytes(free)),
-                            disk.map_or_else(String::new, |(_, size)| {
-                                format!("of {}", theme::bytes(size))
-                            }),
-                        )
-                        .id("stat-disk")
-                        .tip(tooltip::term(Term::DiskFree)),
-                    ),
-            )
-            .child(overview_disk(report, figures))
+            .child(overview_hero(report, figures))
+            .child(self.overview_wins(report, cx))
+            .child(self.overview_sections(cx))
             .child(
                 div()
                     .flex()
@@ -256,9 +141,259 @@ impl Kuizer {
             )
             .into_any_element()
     }
+
+    /// Why the biggest safe artifacts cannot be selected, or `None` when there are some.
+    pub(super) fn wins_blocked(&self) -> Option<&'static str> {
+        let report = self.report()?;
+        self.report_stats
+            .charts(report)
+            .wins
+            .0
+            .is_empty()
+            .then_some("No safe items to select")
+    }
+
+    /// Selects the biggest safe artifacts and opens their list, where Delete removes them.
+    pub(super) fn select_wins(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.report() else {
+            return;
+        };
+        let ids = self.report_stats.charts(report).wins.0.clone();
+        for id in ids {
+            self.select((Source::Artifact, id));
+        }
+        self.go_to(Tab::Artifacts, cx);
+        if self.safety == Some(Safety::Review) {
+            self.safety = None;
+            self.filtered();
+        }
+    }
+
+    /// The first step to take: the largest safe artifacts, one key away from being selected.
+    fn overview_wins(&self, report: &Report, cx: &mut Context<Self>) -> Div {
+        let (ids, bytes) = &self.report_stats.charts(report).wins;
+        let card = ui::card("Biggest safe wins").debug_selector(|| "overview-wins".to_owned());
+        if ids.is_empty() {
+            return card.child(ui::empty(if self.refreshing() {
+                "No safe items found yet, the scan is still running"
+            } else {
+                "No safe items in this scan"
+            }));
+        }
+        let picks: Vec<&Candidate> = ids
+            .iter()
+            .filter_map(|&id| self.index.find(report, (Source::Artifact, id)))
+            .collect();
+        let largest = picks
+            .first()
+            .map_or(0, |candidate| candidate.usage.allocated);
+        let key = hint(&Command::SelectWins);
+        let button = self
+            .button(
+                "overview-wins-select",
+                format!("Select {}", plural(ids.len(), "item")),
+                ButtonKind::Primary,
+                self.blocked(&Command::SelectWins).is_none(),
+                cx,
+                |app, _, cx| app.select_wins(cx),
+            )
+            .tip(
+                Tooltip::new("Selects them and opens Project artifacts. Nothing is deleted yet")
+                    .keys(&[key])
+                    .build(),
+            );
+        card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(unit(space::L))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(unit(space::XXS))
+                        .child(ui::tabular(
+                            div()
+                                .text_size(unit(font::HEADING))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(theme::bytes(*bytes)),
+                        ))
+                        .child(
+                            div()
+                                .text_size(unit(font::SMALL))
+                                .text_color(theme::faint())
+                                .child(format!(
+                                    "in the {} largest safe {}. Select them, check the list, then press {} to delete them",
+                                    ids.len(),
+                                    if ids.len() == 1 { "item" } else { "items" },
+                                    hint(&Command::Trash),
+                                )),
+                        ),
+                )
+                .child(ui::kbd(key))
+                .child(button),
+        )
+        .children(picks.into_iter().take(WIN_ROWS).enumerate().map(|(index, candidate)| {
+            ui::bar_row(
+                model::short_path(&candidate.path, &report.roots),
+                theme::bytes(candidate.usage.allocated),
+                theme::share(candidate.usage.allocated, largest),
+                theme::bar(),
+            )
+            .id(("win", index))
+            .tip(tooltip::path(&candidate.path))
+        }))
+    }
+
+    /// The sections that can free space, largest share first to read, each a way into its list.
+    fn overview_sections(&self, cx: &mut Context<Self>) -> Div {
+        const SECTIONS: [Tab; 6] = [
+            Tab::Artifacts,
+            Tab::Caches,
+            Tab::Toolchains,
+            Tab::Docker,
+            Tab::Repos,
+            Tab::Duplicates,
+        ];
+        let largest = SECTIONS
+            .iter()
+            .filter_map(|&tab| self.tab_bytes(tab))
+            .max()
+            .unwrap_or(0);
+        let shortcuts = &self.config.route_shortcuts;
+        let hints = shortcuts.enabled && shortcuts.hints;
+        let rows = SECTIONS.into_iter().enumerate().map(|(index, tab)| {
+            let bytes = self.tab_bytes(tab).unwrap_or(0);
+            let (one, many) = tab.noun();
+            let found = match self.tab_count(tab) {
+                Some(1) => format!("1 {one}"),
+                Some(count) => format!("{count} {many}"),
+                None => "not searched".to_owned(),
+            };
+            let row = div()
+                .id(("overview-section", index))
+                .debug_selector(move || format!("overview-section-{index}"))
+                .flex()
+                .items_center()
+                .gap(unit(space::L))
+                .h(unit(size::row_tall()))
+                .px(unit(space::M))
+                .rounded(theme::radius_control())
+                .cursor_pointer()
+                .hover(|style| style.bg(theme::hover()))
+                .tip(tooltip::term(tab.term()))
+                .child(icon::view(
+                    tab.icon(),
+                    theme::muted(),
+                    None,
+                    self.zoom.rem_size(),
+                ))
+                .child(
+                    div()
+                        .w(unit(col::XXL))
+                        .flex_none()
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(tab.label()),
+                )
+                .child(
+                    div()
+                        .w(unit(col::L))
+                        .flex_none()
+                        .truncate()
+                        .text_size(unit(font::SMALL))
+                        .text_color(theme::faint())
+                        .child(found),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(unit(size::TRACK))
+                        .rounded(theme::radius_bar())
+                        .bg(theme::track())
+                        .when(bytes > 0, |this| {
+                            this.child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(theme::share(bytes, largest).max(0.005)))
+                                    .rounded(theme::radius_bar())
+                                    .bg(theme::bar()),
+                            )
+                        }),
+                )
+                .child(
+                    ui::figure(theme::bytes(bytes))
+                        .w(unit(col::M))
+                        .when(bytes == 0, |this| this.text_color(theme::faint())),
+                )
+                .children(
+                    tab.keys()
+                        .first()
+                        .filter(|_| hints)
+                        .map(|key| ui::kbd(commands::label(key))),
+                );
+            self.control(row, cx, move |app, _, cx| app.go_to(tab, cx))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .p(unit(space::M))
+            .rounded(theme::radius_panel())
+            .bg(theme::panel())
+            .border_1()
+            .border_color(theme::border())
+            .children(rows)
+    }
 }
 
-pub(super) fn overview_disk(report: &Report, figures: &ReportStats) -> Div {
+/// How many of the picked items the overview lists by name.
+const WIN_ROWS: usize = 5;
+
+/// One figure of the overview hero, set off from its neighbour by a rule.
+fn hero_figure(
+    label: &'static str,
+    value: String,
+    dot: Option<gpui::Rgba>,
+    term: Term,
+) -> Stateful<Div> {
+    div()
+        .id(label)
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap(unit(space::XS))
+        .pl(unit(space::XL))
+        .border_l_1()
+        .border_color(theme::border())
+        .tip(tooltip::term(term))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(unit(space::S))
+                .text_size(unit(font::SMALL))
+                .text_color(theme::muted())
+                .children(dot.map(|fill| {
+                    div()
+                        .size(unit(size::DOT))
+                        .flex_none()
+                        .rounded(theme::radius_pill())
+                        .bg(fill)
+                }))
+                .child(label),
+        )
+        .child(ui::tabular(
+            div()
+                .text_size(unit(font::HEADING))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(value),
+        ))
+}
+
+pub(super) fn overview_hero(report: &Report, figures: &ReportStats) -> Div {
     let safe = figures.artifacts.safe.bytes;
     let review = figures.artifacts.review.bytes;
     let caches = figures.caches.all.bytes;
@@ -322,16 +457,65 @@ pub(super) fn overview_disk(report: &Report, figures: &ReportStats) -> Div {
         }
         None => reclaimable,
     };
-    let title = if disk.is_some() {
-        format!(
-            "Disk  {} of {} could be reclaimed",
-            theme::bytes(reclaimable),
-            theme::bytes(whole)
-        )
-    } else {
-        format!("Reclaimable  {}", theme::bytes(reclaimable))
-    };
-    ui::card(title).child(chart::composition("disk", &segments, whole))
+    let figures_row =
+        div()
+            .flex()
+            .flex_wrap()
+            .items_end()
+            .gap_x(unit(space::XXL))
+            .gap_y(unit(space::L))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(unit(size::LABEL))
+                    .gap(unit(space::XXS))
+                    .child(
+                        div()
+                            .text_size(unit(font::SMALL))
+                            .text_color(theme::muted())
+                            .child("Could be reclaimed"),
+                    )
+                    .child(ui::tabular(
+                        div()
+                            .text_size(unit(font::DISPLAY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(theme::bytes(reclaimable)),
+                    ))
+                    .children(disk.map(|(_, size)| {
+                        div()
+                            .text_size(unit(font::SMALL))
+                            .text_color(theme::faint())
+                            .child(format!("of a {} disk", theme::bytes(size)))
+                    })),
+            )
+            .child(hero_figure(
+                "Safe to remove",
+                theme::bytes(safe),
+                Some(theme::ok()),
+                Term::Safe,
+            ))
+            .child(hero_figure(
+                "Needs review",
+                theme::bytes(review),
+                Some(theme::review()),
+                Term::Review,
+            ))
+            .children(disk.map(|(free, _)| {
+                hero_figure("Disk free", theme::bytes(free), None, Term::DiskFree)
+            }));
+    div()
+        .flex()
+        .flex_col()
+        .gap(unit(space::XL))
+        .p(unit(space::XXL))
+        .rounded(theme::radius_panel())
+        .bg(theme::panel())
+        .border_1()
+        .border_color(theme::border())
+        .child(figures_row)
+        .child(chart::composition("disk", &segments, whole))
 }
 
 pub(super) fn overview_trends(figures: &ReportStats, charts: &Charts) -> Div {

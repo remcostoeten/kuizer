@@ -9,11 +9,21 @@ use super::*;
 
 pub(super) type Slot = (usize, usize);
 
+/// One drawn line of the duplicate list: a group's heading, or the member at this row of
+/// `Listed::targets`.
+#[derive(Clone, Copy)]
+pub(super) enum Line {
+    Group(usize),
+    Member(usize),
+}
+
 #[derive(Clone, Default)]
 pub(super) struct Listed {
     pub slots: Rc<[Slot]>,
     pub targets: Rc<[Target]>,
     pub bytes: u64,
+    pub lines: Rc<[Line]>,
+    pub line_of: Rc<[usize]>,
 }
 
 struct ListKey {
@@ -97,6 +107,8 @@ fn list_rows(report: &Report, tab: Tab, needle: Option<&str>, safety: Option<Saf
     let mut slots: Vec<Slot> = Vec::new();
     let mut targets: Vec<Target> = Vec::new();
     let mut bytes = 0;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut line_of: Vec<usize> = Vec::new();
     let graded =
         |candidate: &Candidate| safety.is_none_or(|safety| candidate.rule.safety == safety);
     match tab {
@@ -141,13 +153,16 @@ fn list_rows(report: &Report, tab: Tab, needle: Option<&str>, safety: Option<Saf
             }
         }
         Tab::Duplicates => {
-            let groups = report
-                .duplicates
-                .iter()
-                .flat_map(|found| found.groups.iter().take(DUPLICATE_GROUPS));
+            let groups = report.duplicates.iter().flat_map(|found| &found.groups);
             for (group_at, group) in groups.enumerate() {
+                let mut heading = Some(group_at);
                 for (member_at, member) in group.members.iter().enumerate() {
                     if found_path(needle, &member.path) {
+                        if let Some(group_at) = heading.take() {
+                            lines.push(Line::Group(group_at));
+                        }
+                        line_of.push(lines.len());
+                        lines.push(Line::Member(slots.len()));
                         slots.push((group_at, member_at));
                         targets.push(Target::Duplicate(member.path.clone()));
                     }
@@ -155,7 +170,7 @@ fn list_rows(report: &Report, tab: Tab, needle: Option<&str>, safety: Option<Saf
             }
         }
         Tab::Issues => {
-            for (at, issue) in report.issues.iter().take(ISSUE_LIMIT).enumerate() {
+            for (at, issue) in report.issues.iter().enumerate() {
                 let path = issue.path.to_string_lossy();
                 if found(needle, &[path.as_ref(), issue.message.as_str()]) {
                     slots.push((at, 0));
@@ -187,6 +202,8 @@ fn list_rows(report: &Report, tab: Tab, needle: Option<&str>, safety: Option<Saf
         slots: slots.into(),
         targets: targets.into(),
         bytes,
+        lines: lines.into(),
+        line_of: line_of.into(),
     }
 }
 
@@ -292,21 +309,23 @@ impl Kuizer {
                     .child(div().flex_1())
                     .child(self.tally(Tab::Caches, Some(listed.bytes))),
             )
-            .child(header)
-            .child(if report.caches.is_empty() {
-                div()
-                    .flex_1()
-                    .child(ui::empty(if report.options.caches {
-                        "No global caches found"
-                    } else {
-                        "Global caches were skipped for this scan"
-                    }))
-                    .into_any_element()
-            } else if count == 0 {
-                div().flex_1().into_any_element()
-            } else {
-                list.into_any_element()
-            })
+            .child(table(
+                header,
+                if report.caches.is_empty() {
+                    div()
+                        .flex_1()
+                        .child(ui::empty(if report.options.caches {
+                            "No global caches found"
+                        } else {
+                            "Global caches were skipped for this scan"
+                        }))
+                        .into_any_element()
+                } else if count == 0 {
+                    div().flex_1().into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element()
     }
 
@@ -338,8 +357,9 @@ impl Kuizer {
         let row =
             table_row(("cache", id), checked).debug_selector(move || format!("cache-row-{index}"));
         let target = Target::Item(Source::Cache, id, candidate.path.clone());
+        let look = self.look(Source::Cache, id, &candidate.path);
         self.menu_row(row, target, cursor, cx)
-            .child(ui::checkbox(checked))
+            .child(ui::check_mark(look.checked))
             .child(
                 column(col::M)
                     .id(("cache-size", id))
@@ -386,11 +406,9 @@ impl Kuizer {
                         )
                     }),
             )
-            .h(unit(size::ROW_TALL))
-            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                if !app.busy() {
-                    app.toggle(Source::Cache, id, cx);
-                }
+            .h(unit(size::row_tall()))
+            .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
+                app.click_row(Source::Cache, id, event, cx);
             }))
     }
 
@@ -425,21 +443,23 @@ impl Kuizer {
                     .child(div().flex_1())
                     .child(self.tally(Tab::Toolchains, Some(listed.bytes))),
             )
-            .child(header)
-            .child(if report.toolchains.is_empty() {
-                div()
-                    .flex_1()
-                    .child(ui::empty(if report.options.toolchains {
-                        "No installed toolchain versions found"
-                    } else {
-                        "Toolchains were skipped for this scan"
-                    }))
-                    .into_any_element()
-            } else if count == 0 {
-                div().flex_1().into_any_element()
-            } else {
-                list.into_any_element()
-            })
+            .child(table(
+                header,
+                if report.toolchains.is_empty() {
+                    div()
+                        .flex_1()
+                        .child(ui::empty(if report.options.toolchains {
+                            "No installed toolchain versions found"
+                        } else {
+                            "Toolchains were skipped for this scan"
+                        }))
+                        .into_any_element()
+                } else if count == 0 {
+                    div().flex_1().into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element()
     }
 
@@ -472,8 +492,9 @@ impl Kuizer {
         let row = table_row(("toolchain", id), checked)
             .debug_selector(move || format!("toolchain-row-{index}"));
         let target = Target::Item(Source::Toolchain, id, candidate.path.clone());
+        let look = self.look(Source::Toolchain, id, &candidate.path);
         self.menu_row(row, target, cursor, cx)
-            .child(ui::checkbox(checked))
+            .child(ui::check_mark(look.checked))
             .child(
                 column(col::M)
                     .id(("toolchain-size", id))
@@ -524,11 +545,9 @@ impl Kuizer {
                         )
                     }),
             )
-            .h(unit(size::ROW_TALL))
-            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                if !app.busy() {
-                    app.toggle(Source::Toolchain, id, cx);
-                }
+            .h(unit(size::row_tall()))
+            .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
+                app.click_row(Source::Toolchain, id, event, cx);
             }))
     }
 
@@ -582,14 +601,16 @@ impl Kuizer {
                     )
                 },
             )
-            .child(header)
-            .child(if report.docker.is_empty() {
-                div().flex_1().child(ui::empty(empty)).into_any_element()
-            } else if count == 0 {
-                div().flex_1().into_any_element()
-            } else {
-                list.into_any_element()
-            })
+            .child(table(
+                header,
+                if report.docker.is_empty() {
+                    div().flex_1().child(ui::empty(empty)).into_any_element()
+                } else if count == 0 {
+                    div().flex_1().into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element()
     }
 
@@ -621,8 +642,9 @@ impl Kuizer {
         let row = table_row(("docker", id), checked)
             .debug_selector(move || format!("docker-row-{index}"));
         let target = Target::Item(Source::Docker, id, candidate.path.clone());
+        let look = self.look(Source::Docker, id, &candidate.path);
         self.menu_row(row, target, cursor, cx)
-            .child(ui::checkbox(checked))
+            .child(ui::check_mark(look.checked))
             .child(
                 column(col::M)
                     .text_right()
@@ -668,11 +690,9 @@ impl Kuizer {
                         )
                     }),
             )
-            .h(unit(size::ROW_TALL))
-            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                if !app.busy() {
-                    app.toggle(Source::Docker, id, cx);
-                }
+            .h(unit(size::row_tall()))
+            .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
+                app.click_row(Source::Docker, id, event, cx);
             }))
     }
 }

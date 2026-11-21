@@ -72,7 +72,10 @@ impl Kuizer {
             Some(key) => self.item(key).into_iter().collect(),
             None => self.selected(),
         };
-        if items.is_empty() || self.busy() || self.refreshing() {
+        let locked = self
+            .locked(items.iter().map(|(source, _)| *source))
+            .is_some();
+        if items.is_empty() || self.busy() || locked {
             return;
         }
         let stats = SelectionStats::of(items.iter().copied());
@@ -85,6 +88,8 @@ impl Kuizer {
             only,
             stats,
             preview,
+            typed: String::new(),
+            cancel: false,
         });
         window.focus(&self.focus);
         cx.notify();
@@ -100,18 +105,40 @@ impl Kuizer {
         }
     }
 
+    /// Whether the open confirmation may run: a selection with review items needs its item count
+    /// typed first, as the CLI asks.
+    pub(super) fn confirmed(&self) -> bool {
+        let Some(Dialog::Confirm { stats, typed, .. }) = &self.dialog else {
+            return false;
+        };
+        let total = stats.total();
+        total.review.count == 0 || *typed == total.all.count.to_string()
+    }
+
     pub(super) fn accept(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.dialog, Some(Dialog::Confirm { .. })) || self.refreshing() {
-            return;
-        }
         let Some(report) = self.report() else {
             return;
         };
+        let items = self.confirming();
+        let locked = self
+            .locked(items.iter().map(|(source, _)| *source))
+            .is_some();
+        if !self.confirmed() || locked {
+            return;
+        }
+        let mut paths: HashMap<Source, HashSet<PathBuf>> = HashMap::new();
+        for (source, candidate) in &items {
+            paths
+                .entry(*source)
+                .or_default()
+                .insert(candidate.path.clone());
+        }
+        let count = items.len();
         let mut artifacts = Vec::new();
         let mut caches = Vec::new();
         let mut toolchains = Vec::new();
         let mut docker = Vec::new();
-        for (source, candidate) in self.confirming() {
+        for (source, candidate) in items {
             match source {
                 Source::Artifact => artifacts.push(candidate.clone()),
                 Source::Cache => caches.push(candidate.clone()),
@@ -148,8 +175,9 @@ impl Kuizer {
                 candidates: docker,
             });
         }
+        let mode = self.config.delete.mode;
         let spawned = spawn_worker("kuizer-gui-clean", move || {
-            let outcome = model::clean(batches);
+            let outcome = model::clean(batches, mode);
             let history = HistoryView::load();
             (outcome, history)
         });
@@ -159,6 +187,8 @@ impl Kuizer {
                 self.dialog = Some(Dialog::Finished(Finished {
                     removed: 0,
                     removed_bytes: 0,
+                    trashed: 0,
+                    trashed_bytes: 0,
                     failures: vec![(String::new(), error)],
                     history_error: None,
                 }));
@@ -166,12 +196,36 @@ impl Kuizer {
                 return;
             }
         };
-        self.dialog = Some(Dialog::Running);
-        cx.notify();
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.dialog = None;
+        let task = cx.spawn(async move |this, cx| {
             let message = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.finish(message, cx));
-        }));
+        });
+        self.cleaning = Some(Cleaning {
+            paths,
+            started: Instant::now(),
+            _task: task,
+        });
+        self.show_toast(Notice::Deleting(count), cx);
+    }
+
+    /// Keeps deleted items out of the scan saved for the next launch: a running scan leaves
+    /// them out when it saves, and the snapshot already on disk is rewritten without them.
+    fn forget_in_snapshot(&self, removed: &HashMap<Source, HashSet<PathBuf>>) {
+        let paths: HashSet<PathBuf> = removed.values().flatten().cloned().collect();
+        if paths.is_empty() {
+            return;
+        }
+        if self.cancel.is_some() {
+            self.forgotten.add(paths.iter().cloned());
+        }
+        let (snapshots, roots) = (self.snapshots.clone(), self.roots.clone());
+        let spawned = std::thread::Builder::new()
+            .name("kuizer-gui-forget".to_owned())
+            .spawn(move || snapshots.forget(&roots, &paths));
+        if let Err(error) = spawned {
+            eprintln!("kuizer-gui: cannot update the saved scan: {error}");
+        }
     }
 
     pub(super) fn finish(
@@ -179,22 +233,47 @@ impl Kuizer {
         message: Option<(Outcome, Result<HistoryView, String>)>,
         cx: &mut Context<Self>,
     ) {
+        let cleaning = self.cleaning.take();
+        if matches!(
+            self.toast,
+            Some(Toast {
+                notice: Notice::Deleting(_),
+                ..
+            })
+        ) {
+            self.toast = None;
+        }
         let Some((outcome, history)) = message else {
+            self.settle(cleaning, HashMap::new(), cx);
             self.dialog = Some(Dialog::Finished(Finished {
                 removed: 0,
                 removed_bytes: 0,
+                trashed: 0,
+                trashed_bytes: 0,
                 failures: vec![(String::new(), "the cleanup stopped unexpectedly".to_owned())],
                 history_error: None,
             }));
             cx.notify();
             return;
         };
-        let removed: HashSet<(Source, u64)> = outcome
-            .removed()
-            .map(|(source, removal)| (*source, removal.candidate.id))
-            .collect();
+        let mut removed: HashMap<Source, HashSet<PathBuf>> = HashMap::new();
+        for (source, removal) in outcome.removed() {
+            removed
+                .entry(*source)
+                .or_default()
+                .insert(removal.candidate.path.clone());
+        }
+        let trashed = || {
+            outcome
+                .removed()
+                .filter(|(source, _)| outcome.trashed(*source))
+        };
         let finished = Finished {
-            removed: removed.len(),
+            trashed: trashed().count(),
+            trashed_bytes: trashed()
+                .map(|(_, removal)| removal.candidate.usage.allocated)
+                .sum(),
+            removed: outcome.removed().count(),
             removed_bytes: outcome
                 .removed()
                 .map(|(_, removal)| removal.candidate.usage.allocated)
@@ -210,39 +289,31 @@ impl Kuizer {
                 .collect(),
             history_error: outcome.history_error.clone(),
         };
+        let deselected: Vec<(Source, u64)> = self
+            .selected()
+            .into_iter()
+            .filter(|(source, candidate)| {
+                removed
+                    .get(source)
+                    .is_some_and(|paths| paths.contains(&candidate.path))
+            })
+            .map(|(source, candidate)| (source, candidate.id))
+            .collect();
+        for key in &deselected {
+            self.selection.remove(key);
+            self.flow.mark(*key);
+        }
         if let Phase::Ready(report) = &mut self.phase {
-            report
-                .candidates
-                .retain(|candidate| !removed.contains(&(Source::Artifact, candidate.id)));
-            report
-                .caches
-                .retain(|(_, candidate)| !removed.contains(&(Source::Cache, candidate.id)));
-            report
-                .toolchains
-                .retain(|(_, candidate)| !removed.contains(&(Source::Toolchain, candidate.id)));
-            report
-                .docker
-                .retain(|(_, candidate)| !removed.contains(&(Source::Docker, candidate.id)));
             report.history = history;
         }
-        for (source, removal) in &outcome.removals {
-            if removal.status == Status::Removed {
-                self.selection.remove(&(*source, removal.candidate.id));
-            }
+        self.forget_in_snapshot(&removed);
+        if self.cancel.is_some() {
+            self.history_fresh = true;
         }
-        self.refresh_stats();
-        self.refresh_rows();
-        self.refresh_map();
+        self.settle(cleaning, removed, cx);
         let clean = finished.failures.is_empty() && finished.history_error.is_none();
         if clean && finished.removed > 0 {
-            self.show_toast(
-                Notice::Info(format!(
-                    "{} deleted, {} freed",
-                    plural(finished.removed, "item"),
-                    theme::bytes(finished.removed_bytes)
-                )),
-                cx,
-            );
+            self.show_toast(Notice::Info(finished.summary()), cx);
         }
         self.dialog = (!clean).then_some(Dialog::Finished(finished));
         cx.notify();
@@ -280,6 +351,14 @@ impl Kuizer {
             .border_color(theme::border_strong())
             .occlude();
         let panel = match &toast.notice {
+            Notice::Deleting(count) => panel.child(
+                line.child(
+                    div()
+                        .debug_selector(|| "toast-deleting".to_owned())
+                        .text_color(theme::muted())
+                        .child(format!("Deleting {}", plural(*count, "item"))),
+                ),
+            ),
             Notice::Restoring { session } => panel.child(
                 line.child(
                     div()
@@ -386,18 +465,9 @@ impl Kuizer {
             .border_color(theme::border_strong());
         let body = match dialog {
             Dialog::Confirm { .. } => return None,
-            Dialog::Branches(scope) => self.render_branch_dialog(scope, panel, cx),
-            Dialog::Running => panel
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Deleting items"),
-                )
-                .child(
-                    div()
-                        .text_color(theme::muted())
-                        .child("Each path is checked again right before it is removed."),
-                ),
+            Dialog::Branches { scope, cancel } => {
+                self.render_branch_dialog(scope, *cancel, panel, cx)
+            }
             Dialog::Finished(finished) => panel
                 .child(
                     div()
@@ -406,11 +476,7 @@ impl Kuizer {
                         .child(if finished.removed == 0 {
                             "Nothing was deleted".to_owned()
                         } else {
-                            format!(
-                                "Deleted {}, {}",
-                                plural(finished.removed, "item"),
-                                theme::bytes(finished.removed_bytes)
-                            )
+                            finished.summary()
                         }),
                 )
                 .when(!finished.failures.is_empty(), |this| {
@@ -475,14 +541,46 @@ impl Kuizer {
 
     /// The delete confirmation, drawn in place of the status bar.
     pub(super) fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Dialog::Confirm { stats, preview, .. }) = &self.dialog else {
+        let Some(Dialog::Confirm {
+            stats,
+            preview,
+            typed,
+            cancel,
+            ..
+        }) = &self.dialog
+        else {
             return None;
         };
+        let cancel = *cancel;
+        let ring = || ring::outline(None, Rc::new(Cell::new(false)));
+        let confirmed = self.confirmed();
         let total = stats.total();
         let count = total.all.count;
         let bytes = total.all.bytes;
         let review = total.review.count;
-        let title = format!("Delete {} for good?", plural(count, "item"));
+        let lasting = lasting(stats);
+        let trash = self.trashes(stats);
+        let title = if trash {
+            format!("Move {} to the trash?", plural(count - lasting, "item"))
+        } else {
+            format!("Delete {} for good?", plural(count, "item"))
+        };
+        let toolchain_note = if stats.source(Source::Toolchain).all.count > 0 {
+            " The tool downloads a toolchain version again when it is needed."
+        } else {
+            ""
+        };
+        let warning = if !trash {
+            format!("This cannot be undone.{toolchain_note}")
+        } else if lasting > 0 {
+            format!(
+                "{} deleted for good and cannot be restored.{toolchain_note}",
+                plural(lasting, "toolchain or Docker item")
+            )
+        } else {
+            "The space is freed once the trash is emptied. History restores them until then."
+                .to_owned()
+        };
         let selected: Vec<(Source, &Candidate)> =
             preview.iter().filter_map(|&key| self.item(key)).collect();
         let panel = div()
@@ -502,6 +600,7 @@ impl Kuizer {
                     .flex()
                     .items_baseline()
                     .gap(unit(space::M))
+                    .child(self.render_mode())
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(
                         div()
@@ -511,16 +610,19 @@ impl Kuizer {
             )
             .child(
                 div()
-                    .debug_selector(|| "permanent-warning".to_owned())
-                    .text_color(theme::danger())
-                    .child(format!(
-                        "This cannot be undone.{}",
-                        if stats.source(Source::Toolchain).all.count > 0 {
-                            " The tool downloads a toolchain version again when it is needed."
+                    .debug_selector(move || {
+                        if trash && lasting == 0 {
+                            "trash-note".to_owned()
                         } else {
-                            ""
+                            "permanent-warning".to_owned()
                         }
-                    )),
+                    })
+                    .text_color(if trash && lasting == 0 {
+                        theme::muted()
+                    } else {
+                        theme::danger()
+                    })
+                    .child(warning),
             )
             .child(
                 div()
@@ -568,7 +670,13 @@ impl Kuizer {
                         this.child(
                             div()
                                 .text_color(theme::review())
-                                .child(format!("{review} marked review.")),
+                                .child(format!("{review} marked review. Type {count} to confirm:")),
+                        )
+                        .child(
+                            div().w(unit(col::M)).child(
+                                field::view("confirm-count", typed, count.to_string(), true)
+                                    .debug_selector(|| "confirm-count".to_owned()),
+                            ),
                         )
                     })
                     .child(div().flex_1())
@@ -579,21 +687,36 @@ impl Kuizer {
                                     .keys(&["Esc"])
                                     .build(),
                             )
+                            .when(cancel, |this| this.child(ring()))
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.dialog = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        ui::button("confirm", "Delete", ButtonKind::Primary, true)
-                            .tip(
-                                Tooltip::new("Delete these items for good")
-                                    .keys(&["Enter"])
-                                    .build(),
-                            )
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                        ui::button(
+                            "confirm",
+                            self.delete_label(stats),
+                            ButtonKind::Primary,
+                            confirmed,
+                        )
+                        .tip(
+                            Tooltip::new(if !confirmed {
+                                "Type the item count first"
+                            } else if trash {
+                                "Move these items to the trash"
+                            } else {
+                                "Delete these items for good"
+                            })
+                            .keys(&["Enter"])
+                            .build(),
+                        )
+                        .when(!cancel, |this| this.child(ring()))
+                        .on_click(cx.listener(
+                            |app, _: &ClickEvent, _, cx| {
                                 app.accept(cx);
-                            })),
+                            },
+                        )),
                     ),
             );
         Some(if motion::reduced() {
@@ -609,8 +732,51 @@ impl Kuizer {
         })
     }
 
+    /// Whether removing these items moves any of them to the trash. An empty selection answers
+    /// for the setting alone.
+    pub(super) fn trashes(&self, stats: &SelectionStats) -> bool {
+        let count = stats.total().all.count;
+        self.config.delete.mode == DeleteMode::Trash && (count == 0 || lasting(stats) < count)
+    }
+
+    pub(super) fn delete_label(&self, stats: &SelectionStats) -> &'static str {
+        if self.trashes(stats) {
+            "Move to trash"
+        } else {
+            "Delete"
+        }
+    }
+
     pub(super) fn dialog_path(&self, candidate: &Candidate) -> String {
         self.shown_path(&candidate.path)
+    }
+}
+
+fn lasting(stats: &SelectionStats) -> usize {
+    Source::ALL
+        .into_iter()
+        .filter(|source| source.permanent())
+        .map(|source| stats.source(source).all.count)
+        .sum()
+}
+
+impl Finished {
+    fn summary(&self) -> String {
+        let deleted = self.removed - self.trashed;
+        let freed = theme::bytes(self.removed_bytes - self.trashed_bytes);
+        let trashed = format!(
+            "{} moved to the trash, {}",
+            plural(self.trashed, "item"),
+            theme::bytes(self.trashed_bytes)
+        );
+        match (self.trashed, deleted) {
+            (0, _) => format!("{} deleted, {freed} freed", plural(deleted, "item")),
+            (_, 0) => trashed,
+            _ => format!(
+                "{trashed}. {} deleted, {freed} freed",
+                plural(deleted, "item")
+            ),
+        }
     }
 }
 

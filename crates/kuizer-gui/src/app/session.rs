@@ -18,6 +18,8 @@ impl Kuizer {
         self.pending = Part::expected(&self.options);
         self.early.clear();
         self.streamed = false;
+        self.gone.clear();
+        self.history_fresh = false;
         self.progress = Activity::default();
         self.started = Instant::now();
         let cancel = Cancel::new();
@@ -27,9 +29,11 @@ impl Kuizer {
         let roots = self.roots.clone();
         let options = self.options.clone();
         let snapshots = self.snapshots.clone();
+        self.forgotten = Forgotten::default();
+        let forgotten = self.forgotten.clone();
         let spawned = spawn_worker("kuizer-gui-scan", move || {
             scan_parts(
-                &config, &roots, &options, &cancel, &snapshots, &sender, shown,
+                &config, &roots, &options, &cancel, &snapshots, forgotten, &sender, shown,
             );
         });
         if let Err(error) = spawned {
@@ -81,13 +85,16 @@ impl Kuizer {
                     Phase::Loading(shown) => *shown = activity,
                     _ => self.progress = *activity,
                 },
-                Update::Cached(report) => {
+                Update::Cached(mut report) => {
+                    report.drop_paths(&self.excluded);
+                    report.remove(&self.gone);
                     if self.cancel.is_some() && self.cached(*report, &mut dropped) {
                         rows = true;
                         map = true;
                     }
                 }
-                Update::Loaded(loaded) => {
+                Update::Loaded(mut loaded) => {
+                    loaded.without(&self.excluded, &self.gone);
                     let found = matches!(loaded, Loaded::Found(_));
                     let listed = matches!(loaded, Loaded::Artifacts { .. } | Loaded::Caches(_));
                     if self.loaded(loaded, &mut dropped) {
@@ -130,9 +137,6 @@ impl Kuizer {
         }
         let changed = rows || map || sections || grown;
         if changed {
-            if let Phase::Ready(report) = &mut self.phase {
-                report.drop_paths(&self.excluded);
-            }
             if rows || map || sections {
                 self.refresh_stats();
             } else {
@@ -151,6 +155,7 @@ impl Kuizer {
             {
                 self.menu = None;
             }
+            self.reconfirm();
         }
         if !dropped.is_empty() {
             cx.background_spawn(async move { drop(dropped) }).detach();
@@ -203,7 +208,8 @@ impl Kuizer {
                 && self
                     .report()
                     .is_some_and(|shown| !shown.candidates.is_empty());
-            if !self.pending.contains(&kind) || streaming {
+            let kept = kind == Part::History && self.history_fresh;
+            if !self.pending.contains(&kind) || streaming || kept {
                 dropped.push(part);
                 continue;
             }
@@ -242,6 +248,10 @@ impl Kuizer {
             if part == Part::Artifacts {
                 self.streamed = false;
             }
+            if part == Part::History && self.history_fresh {
+                dropped.push(loaded);
+                return false;
+            }
         }
         self.replace(loaded, dropped);
         true
@@ -275,6 +285,18 @@ impl Kuizer {
             return;
         };
         let source = loaded.part().and_then(Part::source);
+        let asked = match &self.dialog {
+            Some(Dialog::Confirm {
+                only: Some((only, id)),
+                ..
+            }) if Some(*only) == source => Some(
+                report
+                    .section(*only)
+                    .find(|candidate| candidate.id == *id)
+                    .map(|candidate| candidate.path.clone()),
+            ),
+            _ => None,
+        };
         let kept: HashSet<PathBuf> = source.map_or_else(HashSet::new, |source| {
             report
                 .section(source)
@@ -299,6 +321,53 @@ impl Kuizer {
             {
                 self.selection.insert((source, candidate.id), candidate);
             }
+            if let Some(path) = asked {
+                let moved = path.and_then(|path| {
+                    report
+                        .section(source)
+                        .find(|candidate| candidate.path == path)
+                        .map(|candidate| candidate.id)
+                });
+                match (moved, &mut self.dialog) {
+                    (Some(id), Some(Dialog::Confirm { only, .. })) => *only = Some((source, id)),
+                    _ => self.dialog = None,
+                }
+            }
+        }
+    }
+
+    /// Brings an open confirmation up to date after the scan changed the lists under it: the
+    /// totals follow what is still there, and a typed count for other totals is thrown away.
+    pub(super) fn reconfirm(&mut self) {
+        if !matches!(self.dialog, Some(Dialog::Confirm { .. })) {
+            return;
+        }
+        let items = self.confirming();
+        let fresh = SelectionStats::of(items.iter().copied());
+        let shown: Vec<(Source, u64)> = items
+            .iter()
+            .take(LIST_LIMIT)
+            .map(|(source, candidate)| (*source, candidate.id))
+            .collect();
+        let locked = self
+            .locked(items.iter().map(|(source, _)| *source))
+            .is_some();
+        if items.is_empty() || locked {
+            self.dialog = None;
+            return;
+        }
+        if let Some(Dialog::Confirm {
+            stats,
+            preview,
+            typed,
+            ..
+        }) = &mut self.dialog
+        {
+            if *stats != fresh {
+                typed.clear();
+            }
+            *stats = fresh;
+            *preview = shown;
         }
     }
 
@@ -351,12 +420,17 @@ pub(super) fn spawn_worker<T: Send + 'static>(
     Ok(receiver)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the scan thread takes everything it works with by value or reference"
+)]
 pub(super) fn scan_parts(
     config: &Config,
     roots: &[PathBuf],
     options: &ScanOptions,
     cancel: &Cancel,
     snapshots: &Snapshots,
+    forgotten: Forgotten,
     sender: &mpsc::UnboundedSender<Update>,
     shown: bool,
 ) {
@@ -390,7 +464,7 @@ pub(super) fn scan_parts(
             let _ = sender.unbounded_send(Update::Activity(Box::new(activity)));
         })
     };
-    let recorder = Recorder::new(roots, options);
+    let recorder = Recorder::new(roots, options, forgotten);
     let result = model::load(config, roots, options, cancel, &tracker, &|loaded| {
         recorder.record(&loaded);
         shown_first();

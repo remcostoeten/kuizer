@@ -50,6 +50,15 @@ pub fn button(
 }
 
 pub fn checkbox(checked: bool) -> Div {
+    check_mark(if checked { 1.0 } else { 0.0 })
+}
+
+/// A checkbox part way between clear at 0 and checked at 1, for the moment it is toggled.
+pub fn check_mark(weight: f32) -> Div {
+    let faded = |color: Rgba| Rgba {
+        a: color.a * weight,
+        ..color
+    };
     div()
         .flex()
         .items_center()
@@ -58,17 +67,17 @@ pub fn checkbox(checked: bool) -> Div {
         .flex_none()
         .rounded(theme::radius_checkbox())
         .border_1()
-        .border_color(if checked {
-            theme::primary()
+        .border_color(if weight >= 0.5 {
+            theme::bar()
         } else {
             theme::border_strong()
         })
-        .when(checked, |this| {
-            this.child(
+        .when(weight > 0.0, |this| {
+            this.bg(faded(theme::bar())).child(
                 div()
                     .size(unit(size::DOT))
                     .rounded(theme::radius_dot())
-                    .bg(theme::primary()),
+                    .bg(faded(theme::on_accent())),
             )
         })
 }
@@ -82,22 +91,22 @@ pub fn switch(on: bool) -> Div {
         .w(unit(size::SWITCH))
         .h(unit(size::SWITCH_HEIGHT))
         .p(unit(space::XXS))
-        .rounded(theme::radius_checkbox())
+        .rounded(theme::radius_pill())
         .border_1()
         .border_color(if on {
-            theme::primary()
+            theme::bar()
         } else {
             theme::border_strong()
         })
-        .bg(if on { theme::primary() } else { theme::track() })
+        .bg(if on { theme::bar() } else { theme::track() })
         .child(
             div()
                 .size(unit(
                     size::SWITCH_HEIGHT - 2. * space::XXS - 2. * size::HAIR,
                 ))
-                .rounded(theme::radius_dot())
+                .rounded(theme::radius_pill())
                 .bg(if on {
-                    theme::on_primary()
+                    theme::on_accent()
                 } else {
                     theme::muted()
                 }),
@@ -119,11 +128,9 @@ pub fn card(title: impl Into<SharedString>) -> Div {
 }
 
 pub fn heading(title: impl Into<SharedString>) -> Div {
-    div()
-        .text_size(unit(font::SMALL))
-        .font_weight(FontWeight::MEDIUM)
+    theme::label(div())
         .text_color(theme::muted())
-        .child(title.into())
+        .child(title.into().to_uppercase())
 }
 
 pub fn stat(
@@ -137,11 +144,10 @@ pub fn stat(
         .gap(unit(space::XXS))
         .flex_1()
         .min_w(unit(size::STAT))
-        .p(unit(space::GUTTER))
-        .rounded(theme::radius_panel())
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
+        .pl(unit(space::XL))
+        .py(unit(space::XS))
+        .border_l_1()
+        .border_color(theme::border_strong())
         .child(
             div()
                 .text_size(unit(font::SMALL))
@@ -212,7 +218,7 @@ pub fn safety_label(id: impl Into<ElementId>, review: bool) -> Stateful<Div> {
     let (label, tone, term) = if review {
         ("review", Tone::Review, Term::Review)
     } else {
-        ("safe", Tone::Neutral, Term::Safe)
+        ("safe", Tone::Safe, Term::Safe)
     };
     tag(id, label, tone).tip(tooltip::term(term))
 }
@@ -257,7 +263,7 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
         .flex()
         .items_center()
         .gap(unit(space::XL))
-        .py(unit(space::M))
+        .py(unit(space::row_y()))
         .border_t_1()
         .border_color(theme::border())
         .child(
@@ -290,20 +296,21 @@ pub fn kbd(key: impl Into<SharedString>) -> Div {
         .bg(theme::background())
         .border_1()
         .border_color(theme::border_strong())
-        .text_size(unit(font::CAPTION))
         .text_color(theme::muted())
+        .map(theme::label)
         .child(key.into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
+    Safe,
     Review,
 }
 
 pub fn tag(id: impl Into<ElementId>, label: impl Into<SharedString>, tone: Tone) -> Stateful<Div> {
     let (background, foreground) = match tone {
-        Tone::Neutral => (theme::track(), theme::muted()),
+        Tone::Neutral | Tone::Safe => (theme::track(), theme::muted()),
         Tone::Review => (theme::review_soft(), theme::review()),
     };
     div()
@@ -311,12 +318,22 @@ pub fn tag(id: impl Into<ElementId>, label: impl Into<SharedString>, tone: Tone)
         .flex()
         .flex_none()
         .items_center()
+        .gap(unit(space::XS))
         .h(unit(size::BADGE))
-        .px(unit(space::S))
-        .rounded(theme::radius_control())
+        .px(unit(space::M))
+        .rounded(theme::radius_pill())
         .bg(background)
         .text_size(unit(font::CAPTION))
         .text_color(foreground)
+        .when(tone == Tone::Safe, |this| {
+            this.child(
+                div()
+                    .size(unit(size::DOT))
+                    .flex_none()
+                    .rounded(theme::radius_pill())
+                    .bg(theme::ok()),
+            )
+        })
         .child(label.into())
 }
 
@@ -374,11 +391,9 @@ pub fn toolbar() -> Div {
         .items_center()
         .gap_x(unit(space::L))
         .gap_y(unit(space::XS))
-        .min_h(unit(size::TOOLBAR))
+        .min_h(unit(size::toolbar()))
         .px(unit(space::GUTTER))
-        .py(unit(space::S))
-        .border_b_1()
-        .border_color(theme::border())
+        .py(unit(space::bar_y()))
         .text_color(theme::muted())
 }
 

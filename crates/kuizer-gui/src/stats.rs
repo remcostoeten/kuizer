@@ -331,6 +331,7 @@ pub struct Charts {
     pub sizes: Vec<kuizer::stats::Bucket>,
     pub ecosystems: Vec<kuizer::stats::Bucket>,
     pub removed: Option<Vec<kuizer::stats::Bucket>>,
+    pub wins: (Vec<u64>, u64),
 }
 
 /// @name ReportStats
@@ -381,6 +382,7 @@ impl ReportStats {
                 ages: kuizer::stats::by_age(&report.candidates, SystemTime::now()),
                 sizes: kuizer::stats::by_size(&report.candidates),
                 ecosystems: kuizer::stats::by_ecosystem(&report.candidates),
+                wins: kuizer::stats::biggest_safe(&report.candidates, kuizer::stats::WINS),
                 removed: report.history.as_ref().ok().map(|view| {
                     kuizer::stats::removed_by_month(&view.history, &kuizer::history::now(), 12)
                 }),

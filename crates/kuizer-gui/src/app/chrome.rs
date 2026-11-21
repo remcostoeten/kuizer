@@ -131,66 +131,68 @@ impl Kuizer {
                     )),
                 )
             });
-        div()
-            .id("titlebar")
-            .debug_selector(|| "titlebar".to_owned())
+        let brand = div()
+            .debug_selector(|| "brand".to_owned())
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(space::L))
-            .h(unit(size::BAR))
-            .min_h(frame::TITLEBAR)
-            .px(unit(space::GUTTER))
-            .when_some(frame::inset(window), |this, inset| this.pl(inset))
-            .when(custom, |this| this.pr(unit(space::S)))
-            .bg(theme::panel())
-            .border_b_1()
-            .border_color(theme::border())
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
-            .on_mouse_move(cx.listener(Self::titlebar_move))
-            .when(custom, |this| {
-                this.on_mouse_down(MouseButton::Right, |event, window, _| {
-                    window.show_window_menu(event.position);
-                })
+            .gap(unit(space::M))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(aligned, |this| {
+                this.w(unit(size::SIDEBAR))
+                    .h_full()
+                    .pl(unit(space::GUTTER))
+                    .bg(theme::panel())
+                    .border_r_1()
+                    .border_color(theme::border())
             })
             .child(
                 div()
                     .flex()
-                    .flex_1()
-                    .gap(unit(space::L))
-                    .child(
-                        div()
-                            .debug_selector(|| "brand".to_owned())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(aligned, |this| {
-                                this.flex_basis(unit(size::SIDEBAR - space::L))
-                            })
-                            .child("kuizer"),
-                    )
-                    // Absolute, so the path never sets how narrow this side can get.
-                    .child(
-                        div().relative().flex_1().child(
-                            div()
-                                .id("roots")
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .gap(unit(space::S))
-                                .text_color(theme::muted())
-                                .when(!start, |this| {
-                                    this.tip(tooltip::plain(roots.clone())).child(icon::view(
-                                        Icon::Folder,
-                                        theme::faint(),
-                                        None,
-                                        self.zoom.rem_size(),
-                                    ))
-                                })
-                                .child(div().flex_1().min_w_0().truncate().child(roots)),
-                        ),
-                    ),
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(unit(size::BADGE))
+                    .rounded(theme::radius_checkbox())
+                    .bg(theme::bar())
+                    .text_size(unit(font::CAPTION))
+                    .text_color(theme::on_accent())
+                    .child("k"),
             )
+            .child("kuizer");
+        // Absolute, so the path never sets how narrow this side can get.
+        let path = div().relative().flex_1().h_full().child(
+            div()
+                .id("roots")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .gap(unit(space::S))
+                .text_color(theme::muted())
+                .when(!start, |this| {
+                    this.tip(tooltip::plain(roots.clone())).child(icon::view(
+                        Icon::Folder,
+                        theme::faint(),
+                        None,
+                        self.zoom.rem_size(),
+                    ))
+                })
+                .child(div().flex_1().min_w_0().truncate().child(roots)),
+        );
+        let bar = div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .gap(unit(space::L))
+            .h_full()
+            .when(aligned, |this| {
+                this.pl(unit(space::GUTTER))
+                    .pr(unit(if custom { space::S } else { space::GUTTER }))
+                    .border_b_1()
+                    .border_color(theme::border())
+            })
+            .child(path)
             .child(
                 div()
                     .flex()
@@ -203,7 +205,33 @@ impl Kuizer {
                     .children(stale)
                     .child(actions)
                     .children(controls),
-            )
+            );
+        div()
+            .id("titlebar")
+            .debug_selector(|| "titlebar".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(if aligned { 0. } else { space::L }))
+            .h(unit(size::BAR))
+            .min_h(frame::TITLEBAR)
+            .when(!aligned, |this| {
+                this.px(unit(space::GUTTER))
+                    .when_some(frame::inset(window), |this, inset| this.pl(inset))
+                    .when(custom, |this| this.pr(unit(space::S)))
+                    .border_b_1()
+                    .border_color(theme::border())
+            })
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
+            .on_mouse_move(cx.listener(Self::titlebar_move))
+            .when(custom, |this| {
+                this.on_mouse_down(MouseButton::Right, |event, window, _| {
+                    window.show_window_menu(event.position);
+                })
+            })
+            .child(brand)
+            .child(bar)
     }
 
     pub(super) fn titlebar_down(
@@ -354,13 +382,13 @@ impl Kuizer {
                     div()
                         .flex()
                         .items_end()
-                        .h(unit(size::ROW))
+                        .h(unit(size::row()))
                         .px(unit(space::M))
                         .pb(unit(space::S))
                         .text_size(unit(font::CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::faint())
-                        .child(heading)
+                        .child(heading.to_uppercase())
                         .into_any_element()
                 }
             });
@@ -375,7 +403,7 @@ impl Kuizer {
             .flex_none()
             .items_center()
             .gap(unit(space::M))
-            .h(unit(size::ROW))
+            .h(unit(size::row()))
             .px(unit(space::M))
             .rounded(theme::radius_control())
             .cursor_pointer()
@@ -462,7 +490,7 @@ impl Kuizer {
             .flex_none()
             .items_center()
             .gap(unit(space::M))
-            .h(unit(size::ROW))
+            .h(unit(size::row()))
             .px(unit(space::M))
             .rounded(theme::radius_control())
             .cursor_pointer()
@@ -522,6 +550,34 @@ impl Kuizer {
         self.render_selection_bar(cx).into_any_element()
     }
 
+    pub(super) fn render_mode(&self) -> Div {
+        let mode = self.mode();
+        let tone = if mode == keys::Mode::Confirm {
+            ui::Tone::Review
+        } else {
+            ui::Tone::Neutral
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::S))
+            .child(
+                ui::tag("mode", mode.label(), tone)
+                    .debug_selector(move || format!("mode-{}", mode.label().to_lowercase()))
+                    .when(mode == keys::Mode::Visual, |this| {
+                        this.tip(
+                            Tooltip::new("Motions select the rows they pass")
+                                .keys(&["v", "Esc"])
+                                .build(),
+                        )
+                    }),
+            )
+            .when(!self.count.is_empty(), |this| {
+                this.child(ui::kbd(self.count.clone()))
+            })
+    }
+
     fn render_selection_bar(&self, cx: &mut Context<Self>) -> Div {
         let stats = self.selection.stats();
         let total = stats.total();
@@ -537,7 +593,7 @@ impl Kuizer {
             )
         };
         let ready = self.report().is_some() && !self.busy();
-        let refreshing = self.refreshing();
+        let lock = self.trash_lock();
         let can_select = ready && self.tab.selects();
         div()
             .flex()
@@ -549,6 +605,7 @@ impl Kuizer {
             .bg(theme::panel())
             .border_t_1()
             .border_color(theme::border())
+            .child(self.render_mode())
             .child(
                 div()
                     .id("selection")
@@ -581,29 +638,34 @@ impl Kuizer {
                 .tip(tooltip::term(Term::SelectSafe)),
             )
             .child(
-                self.button("clear", "Clear", ButtonKind::Ghost, ready && !empty, cx, |app, _, cx| {
-                    if !app.busy() {
-                        app.selection.clear();
-                        cx.notify();
-                    }
-                })
+                self.button(
+                    "clear",
+                    "Clear",
+                    ButtonKind::Ghost,
+                    ready && !empty,
+                    cx,
+                    |app, _, cx| {
+                        if !app.busy() {
+                            app.selection.clear();
+                            cx.notify();
+                        }
+                    },
+                )
                 .tip(tooltip::plain("Clear the selection in every tab")),
             )
             .child(
                 self.button(
                     "trash",
-                    "Delete",
+                    self.delete_label(&self.selection.stats()),
                     ButtonKind::Primary,
-                    ready && !refreshing && !empty,
+                    ready && !empty && lock.is_none(),
                     cx,
                     |app, window, cx| app.open_confirm(window, cx),
                 )
-                .when(refreshing, |this| {
-                    this.tip(tooltip::plain(
-                        "Available once the fresh scan finishes. These results come from an earlier scan, so every item is checked again first",
-                    ))
-                })
-                .when(!refreshing, |this| this.tip(tooltip::term(Term::Trash))),
+                .map(|this| match lock {
+                    Some(reason) => this.tip(tooltip::plain(reason)),
+                    None => this.tip(tooltip::term(Term::Trash)),
+                }),
             )
     }
 }
