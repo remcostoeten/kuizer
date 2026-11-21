@@ -28,7 +28,7 @@ Logic belongs in the core. Frontends render state and dispatch actions; they nev
 Anything a user could reasonably have a strong preference about is a setting: deletion behavior, keybindings, appearance and scan scope. When adding such a feature, add its config key in the same change. Internal tuning values (paddings, buffer sizes, animation curves) are not settings; keep them as constants.
 
 - Config lives in `~/.config/kuizer/config.toml`, parsed by `src/config`. `docs/config.example.toml` lists every key and must be updated with each new one.
-- Defaults are conservative; config can make them aggressive. Examples: `delete.mode` switches between trash and instant permanent deletion, `delete.confirm` turns the confirmation step off, scan roots, exclusions, thresholds and thread counts are all keys.
+- Defaults are conservative; config can make them aggressive. Examples: `delete.mode` switches between permanent deletion and the trash, `delete.confirm` turns the confirmation step off, scan roots, exclusions, thresholds and thread counts are all keys.
 - Keybindings are configurable. Every action has a stable name (`select.toggle`, `delete.selected`, `nav.down`), a default binding and an override in config. Both frontends read the same keymap from the core, so a rebind applies to the GUI and the TUI. This shared keymap does not exist yet: today the bindings are hardcoded per frontend. Build the keymap in `src/` before adding more bindings, and move existing ones into it when touching them.
 - Appearance is configurable: theme, accent, density, motion on or off.
 - The GUI exposes settings in a settings view that reads and writes the same config file. No setting exists only in the GUI.
@@ -39,7 +39,7 @@ Anything a user could reasonably have a strong preference about is a setting: de
 Deletion is the one thing this app must never get wrong.
 
 - Scanning never deletes. Deletion goes through `src/delete`, which revalidates every item before removing it.
-- The defaults are trash mode with a confirmation step that shows item count and total size. A user may switch to instant permanent deletion through config; respect that choice without nagging.
+- The defaults are permanent deletion with a confirmation step that shows item count and total size. `delete.mode = "trash"` moves project artifacts and caches to the trash instead; toolchains, Docker objects and git branches are always removed for good. A selection with `review` items always asks, and the GUI and CLI ask for the item count to be typed. A user may turn the confirmation off through config; respect that choice without nagging.
 - `src/protect.rs` refuses system paths, the home directory itself and mount points. Config can add protected paths but cannot remove the built-in ones.
 - Tests touch only temp directories (`tempfile`). Never run a deleting test against a real path.
 

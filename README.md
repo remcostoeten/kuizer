@@ -14,7 +14,7 @@ Website and documentation: [kuizer.app](https://kuizer.app), [kuizer.app/docs](h
   <img src="https://shieldcn.dev/github/remcostoeten/kuizer/license.svg?font=jetbrains-mono" alt="license" />
   <img src="https://shieldcn.dev/crates/kuizer.svg?font=jetbrains-mono" alt="crates.io" />
   <img src="https://shieldcn.dev/badge/core-Rust-black.svg?font=jetbrains-mono&logo=rust" alt="core: Rust" />
-  <img src="https://shieldcn.dev/badge/deletes%20to-trash-black.svg?font=jetbrains-mono" alt="deletes to: trash" />
+  <img src="https://shieldcn.dev/badge/deletion-asks%20first-black.svg?font=jetbrains-mono" alt="deletion: asks first" />
   <img src="https://shieldcn.dev/badge/platform-Linux%20%7C%20macOS-black.svg?font=jetbrains-mono" alt="platform: Linux and macOS" />
 </p>
 
@@ -30,11 +30,11 @@ kuizer walks your project folders and lists `node_modules`, `.next`, Cargo `targ
 It ships as a terminal tool with an interactive list, and as a desktop app built on [GPUI](https://gpui.rs). Both run the same scan, the same checks and the same deletion, and share one config file and one history.
 
 - **Each artifact is checked against its project.** A `dist` folder counts only next to a `package.json`, and a `target` folder only next to a `Cargo.toml` with Cargo's cache tag inside. Every result is marked `safe` or `review`.
-- **Deletion goes to the trash and is checked twice.** Right before removal, kuizer confirms the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home or a system directory.
+- **Every item is checked again right before removal.** kuizer confirms the item is the directory it scanned, not a symlink or mount point, inside a scanned root, and not your home or a system directory.
 - **Profiles and secrets are never entered.** Chrome, Brave, Firefox, Edge and Electron apps such as Discord, Slack and VS Code, plus `~/.ssh`, `~/.gnupg`, the keyrings and global tool installs are skipped. Anything else in a hidden home folder is `review`, never `safe`.
 - **Beyond project folders** it lists global caches (npm, pnpm, yarn, bun, cargo, pip, uv, Go, Gradle, Maven, Playwright and more), installed toolchain versions (rustup, nvm, fnm, volta, pyenv, uv, SDKMAN, Go), Docker and Podman leftovers, git repositories that `git gc` would shrink, and duplicate files by size and BLAKE3 hash.
 - **Idle projects only, if you want.** `--idle 60d` keeps the dependencies of what you work on today; a project's activity is its newest source file or last commit, so a stray `npm install` does not count.
-- **Every deletion is logged.** `kuizer history` lists past runs with ids like `s4`, and `kuizer restore s4` puts a run back from the trash without overwriting anything.
+- **Every deletion is logged.** `kuizer history` lists past runs with ids like `s4`. In trash mode, `kuizer restore s4` puts a run back from the trash without overwriting anything.
 - **Reports stay on your machine.** `kuizer scan --report` writes one HTML file with a zoomable treemap, and `kuizer dashboard` one page with charts and drill-downs. Neither loads anything from the network.
 
 Configuration lives in `~/.config/kuizer/config.toml`; every key is optional and [docs/config.example.toml](docs/config.example.toml) lists them all. A folder containing a `.kuizerignore` file is skipped with everything under it. kuizer was called sweep until October 2026 and still reads `.sweepignore` markers and `~/.sweep-history.json`. The design and module boundaries are in [docs/design.md](docs/design.md).
@@ -54,12 +54,12 @@ kuizer cache --clean --select npm          # remove the npm cache
 kuizer toolchain ~/projects --clean        # remove toolchain versions no project pins
 kuizer docker --clean                      # remove dangling images, stopped containers and build cache
 kuizer git ~/apps --gc --branches          # pack loose objects, delete merged branches
-kuizer restore --last                      # put the last run back from the trash
+kuizer restore --last                      # trash mode: put the last run back
 kuizer duplicates ~/Downloads --verify     # duplicate files, compared byte by byte
 kuizer --json scan ~/projects              # every command prints JSON with --json
 ```
 
-Deletion is permanent: nothing goes to the trash. Every command shows what it will remove and asks first. A tool downloads a toolchain version again when needed, and a merged branch's commits stay in the default branch.
+Deletion is permanent by default: nothing goes to the trash. Set `delete.mode = "trash"` in the config, or turn on "Move to the trash" in the desktop app settings, to move project artifacts and caches to the trash instead. Every command shows what it will remove and asks first. A tool downloads a toolchain version again when needed, and a merged branch's commits stay in the default branch.
 
 ## Desktop app
 
