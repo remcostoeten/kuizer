@@ -506,6 +506,16 @@ impl Config {
         )?)
     }
 
+    /// @name usable_excludes
+    /// @description Returns the excludes built from every valid pattern. Loading the config
+    /// reports the invalid ones.
+    ///
+    /// @example
+    /// let excludes = config.usable_excludes();
+    pub fn usable_excludes(&self) -> Excludes {
+        Excludes::usable(&self.scan.exclude, &self.scan.exclude_extensions)
+    }
+
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_default()
     }

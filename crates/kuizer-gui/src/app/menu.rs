@@ -21,7 +21,7 @@ impl Kuizer {
                     },
                     "Del",
                 )
-                .tip("Remove only this item, after a confirmation");
+                .tip("Remove only this item, right away");
                 vec![
                     reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,

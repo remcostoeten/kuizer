@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::cli::SortKey;
 use crate::delete::{Mode, Target};
@@ -9,6 +10,7 @@ use crate::detect::{Category, Safety};
 use crate::scan::{Candidate, Progress, Summary};
 
 const SHOWN: usize = 8;
+const ENTER_HOLD: Duration = Duration::from_millis(600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -84,6 +86,7 @@ pub struct ConfirmStats {
 type Job = (u64, Target, Mode);
 
 pub struct App {
+    last_enter: Option<Instant>,
     pub items: Vec<Item>,
     pub view: Vec<usize>,
     pub rows: Vec<Row>,
@@ -133,6 +136,7 @@ pub struct App {
 impl App {
     pub fn new(mode: Mode, confirm_before_delete: bool) -> Self {
         Self {
+            last_enter: None,
             items: Vec::new(),
             view: Vec::new(),
             rows: Vec::new(),
@@ -694,6 +698,14 @@ impl App {
 
     pub fn item(&self, id: u64) -> Option<&Item> {
         self.index.get(&id).map(|&index| &self.items[index])
+    }
+
+    pub fn enter_repeats(&mut self, now: Instant) -> bool {
+        let repeat = self
+            .last_enter
+            .is_some_and(|at| now.duration_since(at) < ENTER_HOLD);
+        self.last_enter = Some(now);
+        repeat
     }
 
     pub fn confirm(&mut self) -> Vec<Job> {

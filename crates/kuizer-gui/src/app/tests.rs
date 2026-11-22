@@ -1770,3 +1770,24 @@ fn a_long_path_gives_way_in_its_folder_part_first() {
     );
     assert_eq!(fit(80.), (String::new(), "node_mo…".to_owned()));
 }
+
+#[gpui::test]
+fn delete_keys_without_a_selection_remove_nothing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = project(dir.path());
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_refresh(&view, cx);
+    for tab in [Tab::Artifacts, Tab::Caches, Tab::Toolchains, Tab::Docker] {
+        view.update(cx, |app, cx| {
+            app.tab = tab;
+            cx.notify();
+        });
+        for key in ["enter", "delete", "d"] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.run_until_parked();
+    }
+    assert!(root.join("site").join("node_modules").exists());
+}

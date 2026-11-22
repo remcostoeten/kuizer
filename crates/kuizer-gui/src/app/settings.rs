@@ -5,6 +5,44 @@ use kuizer::config::{Accent, Config, DeleteMode, Density, SettingValue, Sidebar,
 
 use super::*;
 
+#[derive(Default)]
+pub(super) struct SettingWrites {
+    saved: Vec<(Setting, usize)>,
+    queued: Vec<(Setting, usize)>,
+    writing: bool,
+}
+
+impl SettingWrites {
+    fn queue(&mut self, setting: Setting, was: usize, value: usize) {
+        if !self.saved.iter().any(|(known, _)| *known == setting) {
+            self.saved.push((setting, was));
+        }
+        self.queued.retain(|(known, _)| *known != setting);
+        self.queued.push((setting, value));
+    }
+
+    fn next(&mut self) -> Option<(Setting, usize)> {
+        if self.writing || self.queued.is_empty() {
+            return None;
+        }
+        self.writing = true;
+        Some(self.queued.remove(0))
+    }
+
+    fn finished(&mut self, setting: Setting, value: usize, written: bool) -> Option<usize> {
+        self.writing = false;
+        let at = self.saved.iter().position(|(known, _)| *known == setting)?;
+        if written {
+            self.saved[at].1 = value;
+        }
+        if self.queued.iter().any(|(known, _)| *known == setting) {
+            return None;
+        }
+        let (_, saved) = self.saved.remove(at);
+        (!written).then_some(saved)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Setting {
     Theme,
@@ -303,30 +341,48 @@ impl Kuizer {
         };
         let was = setting.value(&self.config);
         setting.set(&mut self.config, value);
+        self.setting_writes.queue(setting, was, value);
+        self.write_next_setting(file, cx);
+        cx.notify();
+    }
+
+    fn write_next_setting(&mut self, file: PathBuf, cx: &mut Context<Self>) {
+        let Some((setting, value)) = self.setting_writes.next() else {
+            return;
+        };
         let (table, key, entry) = setting.entry(value);
+        let target = file.clone();
         let written = cx.background_spawn(async move {
             let _one_writer = CONFIG_WRITE
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            kuizer::config::set_setting(&file, table, key, entry).map_err(|error| error.to_string())
+            kuizer::config::set_setting(&target, table, key, entry)
+                .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let written = written.await;
-            let _ = this.update(cx, |app, cx| app.setting_written(setting, was, written, cx));
+            let _ = this.update(cx, |app, cx| {
+                app.setting_written(setting, value, written, cx);
+                app.write_next_setting(file, cx);
+            });
         })
         .detach();
-        cx.notify();
     }
 
     pub(super) fn setting_written(
         &mut self,
         setting: Setting,
-        was: usize,
+        value: usize,
         written: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
+        let rollback = self
+            .setting_writes
+            .finished(setting, value, written.is_ok());
         if let Err(error) = written {
-            setting.set(&mut self.config, was);
+            if let Some(saved) = rollback {
+                setting.set(&mut self.config, saved);
+            }
             self.tell(
                 Notice::Failed(format!("Could not save {}: {error}", setting.label())),
                 cx,
@@ -710,4 +766,24 @@ fn choice_chip(
 fn switch_page(state: &mut Settings, step: usize) {
     state.page = (state.page + step) % PAGES.len();
     state.row = 0;
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_write_never_rolls_back_a_newer_value() {
+        let mut writes = SettingWrites::default();
+        writes.queue(Setting::Motion, 1, 0);
+        assert_eq!(writes.next(), Some((Setting::Motion, 0)));
+        writes.queue(Setting::Motion, 0, 1);
+        assert_eq!(writes.next(), None);
+        assert_eq!(writes.finished(Setting::Motion, 0, false), None);
+        assert_eq!(writes.next(), Some((Setting::Motion, 1)));
+        assert_eq!(writes.finished(Setting::Motion, 1, true), None);
+        writes.queue(Setting::Motion, 1, 0);
+        assert_eq!(writes.next(), Some((Setting::Motion, 0)));
+        assert_eq!(writes.finished(Setting::Motion, 0, false), Some(1));
+    }
 }

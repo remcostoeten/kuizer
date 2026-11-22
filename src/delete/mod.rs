@@ -290,7 +290,7 @@ mod tests {
         let guard = Guard::new(&[base.path().to_path_buf()]).with_cwd(None);
         let target = Target {
             path: locked.clone(),
-            identity: None,
+            identity: crate::platform::identity(&std::fs::symlink_metadata(&locked).unwrap()),
         };
 
         let outcome = delete(&guard, &target, Mode::Permanent);

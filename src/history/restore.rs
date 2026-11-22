@@ -305,6 +305,28 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restores_an_entry_with_a_non_utf8_path() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"caf\xE9".to_vec()));
+        fs::create_dir(&parent).unwrap();
+        let item = parent.join("node_modules");
+        let run = Run::new(now(), &[], vec![entry(&item, Mode::Trash)]);
+        let text = serde_json::to_string(&history(vec![run])).unwrap();
+        let history: History = serde_json::from_str(&text).unwrap();
+        let targets = history.find("s1").unwrap();
+        let mut put = Vec::new();
+        restore_with(&history, &targets, false, &in_trash(&[&item]), |index| {
+            put.push(index);
+            Ok(())
+        });
+        assert_eq!(put, vec![0]);
+    }
+
     #[test]
     fn restores_every_trashed_entry_and_reports_the_rest() {
         let dir = tempfile::tempdir().unwrap();

@@ -618,12 +618,10 @@ impl Kuizer {
                     Some("Only an item tile can be selected")
                 }
             }
-            Command::Trash => {
-                let item = matches!(cursor(), Some(Target::Item(..)));
-                self.trash_lock().or_else(|| self.hold()).or_else(|| {
-                    (self.selection.is_empty() && !item).then_some("Select items first")
-                })
-            }
+            Command::Trash => self
+                .trash_lock()
+                .or_else(|| self.hold())
+                .or_else(|| self.selection.is_empty().then_some("Select items first")),
             Command::ExtendDown | Command::ExtendUp | Command::Visual => {
                 if !self.tab.selects() {
                     Some(SELECT_LISTS)

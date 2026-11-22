@@ -189,6 +189,19 @@ fn absorb(
     }
 }
 
+fn from_absorbed(root: Table, warnings: &mut Vec<ConfigWarning>) -> Config {
+    root.try_into::<Config>().unwrap_or_else(|error| {
+        warnings.push(ConfigWarning::new(
+            "",
+            format!("the settings could not be read ({error}), using the defaults with cautious deletion"),
+        ));
+        Config {
+            delete: DeleteConfig::cautious(),
+            ..Config::default()
+        }
+    })
+}
+
 fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
     let mut known: HashSet<String> = if config.detect.builtin_rules {
         builtin_rules().into_iter().map(|rule| rule.name).collect()
@@ -278,7 +291,7 @@ impl Config {
         let mut warnings = Vec::new();
         let mut root = Table::new();
         absorb(&mut root, &mut Vec::new(), user, &mut warnings);
-        let mut config = root.try_into::<Self>().unwrap_or_default();
+        let mut config = from_absorbed(root, &mut warnings);
         config.normalize();
         settle(&mut config, &mut warnings);
         if warnings.iter().any(|warning| warning.key == "delete.mode") {
@@ -321,6 +334,15 @@ mod tests {
             .iter()
             .map(|warning| warning.key.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_table_that_cannot_deserialize_falls_back_to_cautious_deletion() {
+        let root: Table = "scan = \"not a table\"".parse().expect("parses");
+        let mut warnings = Vec::new();
+        let config = from_absorbed(root, &mut warnings);
+        assert_eq!(config.delete, DeleteConfig::cautious());
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]

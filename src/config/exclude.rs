@@ -55,6 +55,25 @@ impl Excludes {
         })
     }
 
+    /// @name usable
+    /// @description Builds the excludes from every pattern that compiles, so one bad pattern
+    /// never switches off the valid ones next to it.
+    ///
+    /// @example
+    /// let excludes = Excludes::usable(&config.scan.exclude, &config.scan.exclude_extensions);
+    pub fn usable(patterns: &[String], extensions: &[String]) -> Self {
+        let valid: Vec<String> = patterns
+            .iter()
+            .filter(|pattern| Self::new(std::slice::from_ref(pattern), &[]).is_ok())
+            .cloned()
+            .collect();
+        Self::new(&valid, extensions).unwrap_or_else(|_| Self {
+            paths: GlobSet::empty(),
+            names: GlobSet::empty(),
+            extensions: extensions.to_vec(),
+        })
+    }
+
     pub fn path(&self, path: &Path) -> bool {
         path.file_name().is_some_and(|name| self.name(name)) || self.full_path(path)
     }
@@ -93,6 +112,15 @@ mod tests {
     fn excludes(patterns: &[&str]) -> Excludes {
         let patterns: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
         Excludes::new(&patterns, &["log".to_owned()]).expect("valid")
+    }
+
+    #[test]
+    fn a_bad_pattern_keeps_the_valid_ones_next_to_it() {
+        let patterns = ["[".to_owned(), "keep-out".to_owned()];
+        assert!(Excludes::new(&patterns, &[]).is_err());
+        let excludes = Excludes::usable(&patterns, &[]);
+        assert!(excludes.path(Path::new("/home/me/.cache/keep-out")));
+        assert!(!excludes.path(Path::new("/home/me/.cache/other")));
     }
 
     #[test]

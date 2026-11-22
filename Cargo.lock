@@ -3402,6 +3402,7 @@ dependencies = [
  "dirs 7.0.0",
  "globset",
  "jiff",
+ "libc",
  "ratatui",
  "rustix 1.1.5",
  "serde",

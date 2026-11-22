@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - GUI: the Duplicates, History and Issues lists are virtualized like the others and are no longer capped at 200 groups or 500 issues.
 - GUI: deleted items no longer come back from the saved scan on the next launch.
 - GUI: without a working GPU driver (no Vulkan), the app prints why it cannot start and points to the `kuizer` terminal UI instead of panicking.
+- GUI: Enter, `d` and Delete act only on a selection. With nothing selected they remove nothing; a single row is deleted through its menu.
+- GUI: settings are written one at a time, latest value first, and a failed write never undoes a newer change. A bad `scan.exclude` pattern no longer turns off the valid ones for caches and toolchains.
+- TUI: holding Enter no longer confirms a deletion.
+- `--idle` refuses ages too large to compute, and a project with an unreadable folder counts as unknown and never matches.
+- Deletion refuses items the scan could not identify and parent folders that became symlinks. Branch deletion only succeeds while the branch still points at the checked commit. Volta removal keeps every other protection.
+- History keeps non-UTF-8 paths, retries a failed write in the same run, and Ctrl-C during a removal finishes the current item and saves the history. A second Ctrl-C exits at once.
+- A config that cannot be read falls back to cautious deletion with a warning.
 - GUI: items can be deleted while a scan is still running. Rows the running scan found are available at once; rows shown from an earlier scan unlock when the scan replaces their list. Deletion runs in the background, its rows dim until they are gone, and the lists stay usable.
 - GUI: Shift+click selects every row from the cursor row to the clicked one. A click or Ctrl+click toggles a single row.
 - `appearance.accent` picks the accent color of the desktop app: `purple` (default), `blue`, `teal` or `pink`, in both themes. It is also in the settings under General.

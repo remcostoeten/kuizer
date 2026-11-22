@@ -57,8 +57,6 @@ impl Kuizer {
     pub(super) fn trash(&mut self, cx: &mut Context<Self>) {
         if !self.selection.is_empty() {
             self.delete(None, cx);
-        } else if let Some(Target::Item(source, id, _)) = self.cursor_target() {
-            self.delete(Some((source, id)), cx);
         }
     }
 

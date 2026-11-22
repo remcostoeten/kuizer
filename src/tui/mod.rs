@@ -101,7 +101,9 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         handle_filter(app, key);
         return;
     }
+    let held_enter = key.code == KeyCode::Enter && app.enter_repeats(Instant::now());
     match (&app.overlay, key.code) {
+        (Overlay::Confirm { .. }, KeyCode::Enter) if held_enter => {}
         (Overlay::Confirm { .. }, KeyCode::Char('y') | KeyCode::Enter) => {
             let batch = app.confirm();
             dispatch(app, jobs, batch);
@@ -267,7 +269,8 @@ pub fn run_with_notice(
                     handle_key(&mut app, key, &job_tx);
                 }
                 redraw = true;
-                if app.quit || !event::poll(Duration::ZERO)? {
+                let confirming = matches!(app.overlay, Overlay::Confirm { .. });
+                if app.quit || confirming || !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
@@ -329,6 +332,19 @@ mod tests {
 
     fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode, modifiers: KeyModifiers) {
         handle_key(app, KeyEvent::new(code, modifiers), jobs);
+    }
+
+    #[test]
+    fn holding_enter_never_confirms_a_deletion() {
+        let (jobs, queued) = unbounded::<Job>();
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
+        app.confirm_before_delete = true;
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::Confirm { .. }));
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::Confirm { .. }));
+        assert!(queued.try_recv().is_err());
     }
 
     #[test]

@@ -58,6 +58,7 @@ inherits = "release"
 lto = "fat"
 
 [target."cfg(unix)".dependencies]
+libc = { version = "0.2", default-features = false }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
 
 [package.metadata.binstall]

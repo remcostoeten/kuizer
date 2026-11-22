@@ -774,16 +774,12 @@ fn measure_caches(
     cancel: &Cancel,
     tracker: &Tracker,
 ) -> Vec<(KnownCache, Candidate)> {
-    let excludes = config.excludes().ok();
+    let excludes = config.usable_excludes();
     let found: Vec<KnownCache> = Locations::for_user()
         .map(|locations| {
             caches::find(&locations, &Protected::for_user())
                 .into_iter()
-                .filter(|cache| {
-                    excludes
-                        .as_ref()
-                        .is_none_or(|excludes| !excludes.path(&cache.path))
-                })
+                .filter(|cache| !excludes.path(&cache.path))
                 .collect()
         })
         .unwrap_or_default();
@@ -807,16 +803,12 @@ fn measure_toolchains(
     cancel: &Cancel,
     tracker: &Tracker,
 ) -> Vec<(Toolchain, Candidate)> {
-    let excludes = config.excludes().ok();
+    let excludes = config.usable_excludes();
     let found: Vec<Toolchain> = toolchains::Locations::for_user()
         .map(|locations| {
             toolchains::find(&locations, &config.toolchains.tools)
                 .into_iter()
-                .filter(|toolchain| {
-                    excludes
-                        .as_ref()
-                        .is_none_or(|excludes| !excludes.path(&toolchain.path))
-                })
+                .filter(|toolchain| !excludes.path(&toolchain.path))
                 .collect()
         })
         .unwrap_or_default();
