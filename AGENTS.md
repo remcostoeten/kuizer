@@ -39,7 +39,7 @@ Anything a user could reasonably have a strong preference about is a setting: de
 Deletion is the one thing this app must never get wrong.
 
 - Scanning never deletes. Deletion goes through `src/delete`, which revalidates every item before removing it.
-- The defaults are permanent deletion with a confirmation step that shows item count and total size. `delete.mode = "trash"` moves project artifacts and caches to the trash instead; toolchains, Docker objects and git branches are always removed for good. A selection with `review` items always asks, and the GUI and CLI ask for the item count to be typed. A user may turn the confirmation off through config; respect that choice without nagging.
+- The defaults are permanent deletion with a confirmation step that shows item count and total size. `delete.mode = "trash"` moves project artifacts and caches to the trash instead; toolchains, Docker objects and git branches are always removed for good. In the CLI a selection with `review` items always asks, and asks for the item count to be typed. The GUI deletes the selection directly from its summary bar, without a confirmation step; a held key never deletes. A user may turn the CLI confirmation off through config; respect that choice without nagging.
 - `src/protect.rs` refuses system paths, the home directory itself and mount points. Config can add protected paths but cannot remove the built-in ones.
 - Tests touch only temp directories (`tempfile`). Never run a deleting test against a real path.
 
@@ -71,7 +71,7 @@ The look is a feature, not polish added at the end.
 - GUI colors, spacing and radii come from `crates/kuizer-gui/src/theme.rs`. No hardcoded values in views.
 - The TUI follows the same palette and hierarchy, adapted to the terminal.
 - Motion shows state changes only: selection, expand and collapse, an item leaving after deletion, a view appearing. Keep it short (under 150ms) and never animate in response to typing or plain navigation.
-- Stateful behavior transitions instead of jumping. When an item moves from idle to marked to confirming to deleting to gone, each step animates from the previous one, and nothing pops in or out.
+- Stateful behavior transitions instead of jumping. When an item moves from idle to marked to deleting to gone, each step animates from the previous one, and nothing pops in or out.
 - Confirmations and other follow-up actions happen inline, in place, as motion. A delete confirm expands in the row or the footer where the action was triggered; it is not a modal or popup. Reach for a modal only when there is no sensible place inline, and justify it in the summary.
 - Motion can be turned off in config (`ui.motion`). GPUI 0.2.2 cannot read the system reduced-motion setting, so this config key is the only switch; do not build OS detection. With motion off, state changes still happen, just instantly.
 - Consistency over novelty. A new view reuses existing components and spacing before it introduces its own.

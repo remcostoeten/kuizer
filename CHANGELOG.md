@@ -5,15 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 ## [Unreleased]
 
 - `delete.mode = "trash"` is back as an opt-in, also as a switch in the GUI settings. Deletion stays permanent by default. In trash mode project artifacts and caches go to the trash; toolchains, Docker objects and git branches are still removed for good.
-- GUI: a selection with `review` items asks you to type the item count before it is removed, as the CLI does.
+- GUI: deleting no longer asks. While anything is selected, a floating bar above the status bar sums up the selection (count, size, `review` items, and whether it is deleted for good or moved to the trash) with Clear and Delete. Enter, Delete, `d`, the Delete button and the row menu delete at once; a held key never does.
+- GUI: the Duplicates, History and Issues lists are virtualized like the others and are no longer capped at 200 groups or 500 issues.
+- GUI: deleted items no longer come back from the saved scan on the next launch.
+- GUI: without a working GPU driver (no Vulkan), the app prints why it cannot start and points to the `kuizer` terminal UI instead of panicking.
 - GUI: items can be deleted while a scan is still running. Rows the running scan found are available at once; rows shown from an earlier scan unlock when the scan replaces their list. Deletion runs in the background, its rows dim until they are gone, and the lists stay usable.
 - GUI: Shift+click selects every row from the cursor row to the clicked one. A click or Ctrl+click toggles a single row.
 - `appearance.accent` picks the accent color of the desktop app: `purple` (default), `blue`, `teal` or `pink`, in both themes. It is also in the settings under General.
 - GUI: a count before a motion repeats it (`10j`, `3` then Page Down, `5G` for row 5), and `v` starts visual mode, where every motion selects the rows it passes until Esc.
-- GUI: Tab, Left and Right move between Cancel and Delete in the delete confirmation.
 - GUI: neutral grey surfaces, an iris accent, 2px and 4px corners, and uppercase monospace labels for column headings and card titles. Text uses Schibsted Grotesk, now bundled with the app, and labels IBM Plex Mono when it is installed. The keyboard cursor row has a stronger tint.
-- GUI: holding Enter no longer accepts a delete confirmation; only a fresh key press does.
-- GUI: deleting animates. Marked, confirming and deleting rows fade into each other, and removed rows fade out instead of vanishing. Instant with `appearance.motion = false`.
+- GUI: deleting animates. Marked and deleting rows fade into each other, and removed rows fade out instead of vanishing. Instant with `appearance.motion = false`.
 - GUI and TUI: the status bar always shows the current mode (Normal, Visual, Filter, Confirm and so on), with a typed count next to it in the GUI.
 - GUI: a control's tooltip also opens when the keyboard focus ring rests on it. Tab moves between the buttons of the branch-deletion dialog.
 - GUI: the Overview has a "Biggest safe wins" card. `w` selects the largest safe project artifacts and opens their list, without deleting anything.

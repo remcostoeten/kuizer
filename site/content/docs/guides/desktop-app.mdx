@@ -23,7 +23,7 @@ Type a folder, pick one with the system folder dialog, reopen one of the last ei
 
 ![The project artifacts list with several rows selected and the inline confirmation showing the item count and total size before they are deleted](/screenshots/artifacts.png)
 
-Deletion is permanent by default. The "Move to the trash" switch under Settings > Deleting writes `delete.mode = "trash"` to the config file; project artifacts and global caches then move to the trash, while toolchains, Docker objects and git branches are still removed for good. A plain confirmation appears when every selected item is `safe`. When any item is `review`, you type the item count. The History section has a Restore button for runs that still sit in the trash.
+Deletion is permanent by default. The "Move to the trash" switch under Settings > Deleting writes `delete.mode = "trash"` to the config file; project artifacts and global caches then move to the trash, while toolchains, Docker objects and git branches are still removed for good. While anything is selected, a bar above the status bar sums up the selection: the item count, the total size, how many items are `review`, and whether they are deleted for good or moved to the trash. Its Delete button, `enter`, `delete` and `d` remove the selection at once, without a confirmation. Holding the key down never deletes. The History section has a Restore button for runs that still sit in the trash.
 
 ## Keyboard
 

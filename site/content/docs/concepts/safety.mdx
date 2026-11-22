@@ -16,7 +16,7 @@ Before each removal kuizer confirms that the item:
 
 ## Permanent by default
 
-Deletion is permanent unless you opt in to the trash. A confirmation shows the item count and total size first. Set `delete.confirm = false` in the [config file](/docs/configuration) to skip it in the terminal UI; `review` items and projects with uncommitted changes always ask. When a selection contains `review` items, the CLI and the desktop app ask you to type the item count.
+Deletion is permanent unless you opt in to the trash. In the terminal, a confirmation shows the item count and total size first. Set `delete.confirm = false` in the [config file](/docs/configuration) to skip it in the terminal UI; `review` items and projects with uncommitted changes always ask. When a selection contains `review` items, the CLI asks you to type the item count. The desktop app shows the same totals in a bar while items are selected and deletes them as soon as you press Delete.
 
 ## Trash mode
 
@@ -38,7 +38,7 @@ Projects with uncommitted git changes get a warning in the list and in the delet
 
 ## What never goes to the trash
 
-Toolchains, Docker objects and git branches are removed for good in either mode, and the confirmation says so.
+Toolchains, Docker objects and git branches are removed for good in either mode, and the confirmation, or the summary bar in the desktop app, says so.
 
 | Command | What goes | How |
 | --- | --- | --- |
