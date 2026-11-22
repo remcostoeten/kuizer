@@ -155,7 +155,6 @@ impl Kuizer {
             {
                 self.menu = None;
             }
-            self.reconfirm();
         }
         if !dropped.is_empty() {
             cx.background_spawn(async move { drop(dropped) }).detach();
@@ -285,18 +284,6 @@ impl Kuizer {
             return;
         };
         let source = loaded.part().and_then(Part::source);
-        let asked = match &self.dialog {
-            Some(Dialog::Confirm {
-                only: Some((only, id)),
-                ..
-            }) if Some(*only) == source => Some(
-                report
-                    .section(*only)
-                    .find(|candidate| candidate.id == *id)
-                    .map(|candidate| candidate.path.clone()),
-            ),
-            _ => None,
-        };
         let kept: HashSet<PathBuf> = source.map_or_else(HashSet::new, |source| {
             report
                 .section(source)
@@ -321,53 +308,6 @@ impl Kuizer {
             {
                 self.selection.insert((source, candidate.id), candidate);
             }
-            if let Some(path) = asked {
-                let moved = path.and_then(|path| {
-                    report
-                        .section(source)
-                        .find(|candidate| candidate.path == path)
-                        .map(|candidate| candidate.id)
-                });
-                match (moved, &mut self.dialog) {
-                    (Some(id), Some(Dialog::Confirm { only, .. })) => *only = Some((source, id)),
-                    _ => self.dialog = None,
-                }
-            }
-        }
-    }
-
-    /// Brings an open confirmation up to date after the scan changed the lists under it: the
-    /// totals follow what is still there, and a typed count for other totals is thrown away.
-    pub(super) fn reconfirm(&mut self) {
-        if !matches!(self.dialog, Some(Dialog::Confirm { .. })) {
-            return;
-        }
-        let items = self.confirming();
-        let fresh = SelectionStats::of(items.iter().copied());
-        let shown: Vec<(Source, u64)> = items
-            .iter()
-            .take(LIST_LIMIT)
-            .map(|(source, candidate)| (*source, candidate.id))
-            .collect();
-        let locked = self
-            .locked(items.iter().map(|(source, _)| *source))
-            .is_some();
-        if items.is_empty() || locked {
-            self.dialog = None;
-            return;
-        }
-        if let Some(Dialog::Confirm {
-            stats,
-            preview,
-            typed,
-            ..
-        }) = &mut self.dialog
-        {
-            if *stats != fresh {
-                typed.clear();
-            }
-            *stats = fresh;
-            *preview = shown;
         }
     }
 

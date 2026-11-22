@@ -1,9 +1,6 @@
-use gpui::{Animation, AnimationExt};
+use gpui::BoxShadow;
 
 use super::*;
-
-const INLINE_PATHS: usize = 3;
-const CONFIRM_IN: Duration = Duration::from_millis(120);
 
 impl Kuizer {
     pub(super) fn restore(&mut self, session: u64, cx: &mut Context<Self>) {
@@ -57,17 +54,20 @@ impl Kuizer {
         self.show_toast(notice, cx);
     }
 
-    pub(super) fn open_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm(None, window, cx);
+    pub(super) fn trash(&mut self, cx: &mut Context<Self>) {
+        if !self.selection.is_empty() {
+            self.delete(None, cx);
+        } else if let Some(Target::Item(source, id, _)) = self.cursor_target() {
+            self.delete(Some((source, id)), cx);
+        }
     }
 
-    /// Opens the delete confirmation for the selection, or for one item when `only` is set.
-    pub(super) fn confirm(
-        &mut self,
-        only: Option<(Source, u64)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Starts deleting the selection, or one item when `only` is set, unless something stands
+    /// in the way.
+    pub(super) fn delete(&mut self, only: Option<(Source, u64)>, cx: &mut Context<Self>) {
+        let Some(report) = self.report() else {
+            return;
+        };
         let items = match only {
             Some(key) => self.item(key).into_iter().collect(),
             None => self.selected(),
@@ -76,54 +76,6 @@ impl Kuizer {
             .locked(items.iter().map(|(source, _)| *source))
             .is_some();
         if items.is_empty() || self.busy() || locked {
-            return;
-        }
-        let stats = SelectionStats::of(items.iter().copied());
-        let preview = items
-            .iter()
-            .take(LIST_LIMIT)
-            .map(|(source, candidate)| (*source, candidate.id))
-            .collect();
-        self.dialog = Some(Dialog::Confirm {
-            only,
-            stats,
-            preview,
-            typed: String::new(),
-            cancel: false,
-        });
-        window.focus(&self.focus);
-        cx.notify();
-    }
-
-    /// What the open confirmation acts on: one item from a context menu, or the selection.
-    pub(super) fn confirming(&self) -> Vec<(Source, &Candidate)> {
-        match &self.dialog {
-            Some(Dialog::Confirm {
-                only: Some(key), ..
-            }) => self.item(*key).into_iter().collect(),
-            _ => self.selected(),
-        }
-    }
-
-    /// Whether the open confirmation may run: a selection with review items needs its item count
-    /// typed first, as the CLI asks.
-    pub(super) fn confirmed(&self) -> bool {
-        let Some(Dialog::Confirm { stats, typed, .. }) = &self.dialog else {
-            return false;
-        };
-        let total = stats.total();
-        total.review.count == 0 || *typed == total.all.count.to_string()
-    }
-
-    pub(super) fn accept(&mut self, cx: &mut Context<Self>) {
-        let Some(report) = self.report() else {
-            return;
-        };
-        let items = self.confirming();
-        let locked = self
-            .locked(items.iter().map(|(source, _)| *source))
-            .is_some();
-        if !self.confirmed() || locked {
             return;
         }
         let mut paths: HashMap<Source, HashSet<PathBuf>> = HashMap::new();
@@ -196,7 +148,6 @@ impl Kuizer {
                 return;
             }
         };
-        self.dialog = None;
         let task = cx.spawn(async move |this, cx| {
             let message = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.finish(message, cx));
@@ -333,23 +284,26 @@ impl Kuizer {
                 },
             )
             .debug_selector(|| "dismiss-toast".to_owned())
+            .h(unit(size::SEGMENT))
+            .px(unit(space::M))
+            .text_size(unit(font::SMALL))
             .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
         };
-        let line = div().flex().items_center().gap(unit(space::L));
-        let panel = div()
-            .id("toast")
+        let line = div()
+            .flex()
+            .items_center()
+            .gap(unit(space::M))
+            .min_h(unit(size::SEGMENT));
+        let panel = floating(div().id("toast"))
             .debug_selector(|| "toast".to_owned())
             .flex()
             .flex_col()
             .gap(unit(space::S))
             .max_w(unit(size::PALETTE))
-            .py(unit(space::M))
-            .px(unit(space::L))
-            .rounded(theme::radius_panel())
-            .bg(theme::elevated())
-            .border_1()
-            .border_color(theme::border_strong())
-            .occlude();
+            .py(unit(space::S))
+            .pl(unit(space::L))
+            .pr(unit(space::S))
+            .text_size(unit(font::SMALL));
         let panel = match &toast.notice {
             Notice::Deleting(count) => panel.child(
                 line.child(
@@ -433,22 +387,18 @@ impl Kuizer {
                 .child(dismiss()),
             ),
             Notice::Info(text) => panel.child(
-                line.child(div().flex_1().child(text.clone()))
-                    .child(dismiss()),
+                line.child(icon::sized(
+                    Icon::Check,
+                    theme::ok(),
+                    None,
+                    self.zoom.rem_size(),
+                    size::CHECK,
+                ))
+                .child(div().flex_1().child(text.clone()))
+                .child(dismiss()),
             ),
         };
-        Some(
-            div()
-                .absolute()
-                .bottom(unit(space::L))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .px(unit(space::XL))
-                .child(panel)
-                .into_any_element(),
-        )
+        Some(panel.into_any_element())
     }
 
     pub(super) fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -464,7 +414,6 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong());
         let body = match dialog {
-            Dialog::Confirm { .. } => return None,
             Dialog::Branches { scope, cancel } => {
                 self.render_branch_dialog(scope, *cancel, panel, cx)
             }
@@ -539,75 +488,80 @@ impl Kuizer {
         )
     }
 
-    /// The delete confirmation, drawn in place of the status bar.
-    pub(super) fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(Dialog::Confirm {
-            stats,
-            preview,
-            typed,
-            cancel,
-            ..
-        }) = &self.dialog
-        else {
-            return None;
-        };
-        let cancel = *cancel;
-        let ring = || ring::outline(None, Rc::new(Cell::new(false)));
-        let confirmed = self.confirmed();
+    /// The floating bar that sums up the selection and deletes it, over the bottom of the list.
+    pub(super) fn render_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (stats, shown) = self.flow.bar()?;
         let total = stats.total();
         let count = total.all.count;
-        let bytes = total.all.bytes;
         let review = total.review.count;
-        let lasting = lasting(stats);
-        let trash = self.trashes(stats);
-        let title = if trash {
-            format!("Move {} to the trash?", plural(count - lasting, "item"))
-        } else {
-            format!("Delete {} for good?", plural(count, "item"))
-        };
-        let toolchain_note = if stats.source(Source::Toolchain).all.count > 0 {
-            " The tool downloads a toolchain version again when it is needed."
-        } else {
-            ""
-        };
-        let warning = if !trash {
-            format!("This cannot be undone.{toolchain_note}")
-        } else if lasting > 0 {
-            format!(
-                "{} deleted for good and cannot be restored.{toolchain_note}",
+        let lasting = lasting(&stats);
+        let trash = self.trashes(&stats);
+        let note = match (trash, lasting) {
+            (false, _) => "deleted for good".to_owned(),
+            (true, 0) => "moved to the trash".to_owned(),
+            (true, lasting) => format!(
+                "{} to the trash, {} deleted for good",
+                count - lasting,
                 plural(lasting, "toolchain or Docker item")
-            )
-        } else {
-            "The space is freed once the trash is emptied. History restores them until then."
-                .to_owned()
+            ),
         };
-        let selected: Vec<(Source, &Candidate)> =
-            preview.iter().filter_map(|&key| self.item(key)).collect();
-        let panel = div()
-            .id("confirm-panel")
-            .debug_selector(|| "confirm-panel".to_owned())
+        let ready = self.report().is_some() && !self.busy();
+        let lock = self.trash_lock();
+        let bar = floating(div().id("summary-bar"))
+            .debug_selector(|| "summary-bar".to_owned())
             .flex()
-            .flex_none()
-            .flex_col()
-            .gap(unit(space::S))
-            .py(unit(space::M))
-            .px(unit(space::GUTTER))
-            .bg(theme::panel())
-            .border_t_1()
-            .border_color(theme::border_strong())
+            .items_center()
+            .gap(unit(space::L))
+            .min_w(unit(size::SUMMARY))
+            .max_w_full()
+            .p(unit(space::S))
+            .when(shown < 1.0, |this| {
+                this.opacity(shown)
+                    .relative()
+                    .top(unit(space::M * (1.0 - shown)))
+            })
             .child(
-                div()
+                theme::mono(ui::tabular(div()))
                     .flex()
-                    .items_baseline()
-                    .gap(unit(space::M))
-                    .child(self.render_mode())
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .h(unit(size::TILE))
+                    .min_w(unit(size::TILE))
+                    .px(unit(space::M))
+                    .rounded(theme::radius_control())
+                    .bg(theme::tile_selected())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(count.to_string()),
+            )
+            .child(
+                ui::tabular(div())
+                    .id("summary-selection")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(unit(space::XS))
+                    .text_color(theme::muted())
+                    .tip(selection_details(stats))
+                    .child("selected ·")
                     .child(
                         div()
-                            .text_color(theme::muted())
-                            .child(format!("{} in total.", theme::bytes(bytes))),
+                            .text_color(theme::text())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(theme::bytes(total.all.bytes)),
                     ),
             )
+            .when(review > 0, |this| {
+                this.child(
+                    ui::tag(
+                        "summary-review",
+                        format!("{review} review"),
+                        ui::Tone::Review,
+                    )
+                    .tip(tooltip::term(Term::Review)),
+                )
+            })
+            .child(div().flex_1())
             .child(
                 div()
                     .debug_selector(move || {
@@ -617,119 +571,68 @@ impl Kuizer {
                             "permanent-warning".to_owned()
                         }
                     })
-                    .text_color(if trash && lasting == 0 {
-                        theme::muted()
-                    } else {
-                        theme::danger()
-                    })
-                    .child(warning),
+                    .min_w_0()
+                    .truncate()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::faint())
+                    .child(note),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .text_color(theme::muted())
-                    .children(selected.iter().take(INLINE_PATHS).map(|(_, candidate)| {
-                        div()
-                            .flex()
-                            .gap(unit(space::M))
-                            .child(
-                                div()
-                                    .id(("dialog-path", candidate.id))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .tip(tooltip::path(&candidate.path))
-                                    .child(self.dialog_path(candidate)),
-                            )
-                            .child(ui::safety_label(
-                                ("dialog-safety", candidate.id),
-                                candidate.rule.safety == Safety::Review,
-                            ))
-                            .child(
-                                div()
-                                    .w(unit(col::M))
-                                    .text_right()
-                                    .child(theme::bytes(candidate.usage.allocated)),
-                            )
-                    }))
-                    .when(count > INLINE_PATHS, |this| {
-                        this.child(
-                            div()
-                                .text_color(theme::faint())
-                                .child(format!("and {} more", count - INLINE_PATHS)),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(unit(space::M))
-                    .when(review > 0, |this| {
-                        this.child(
-                            div()
-                                .text_color(theme::review())
-                                .child(format!("{review} marked review. Type {count} to confirm:")),
-                        )
-                        .child(
-                            div().w(unit(col::M)).child(
-                                field::view("confirm-count", typed, count.to_string(), true)
-                                    .debug_selector(|| "confirm-count".to_owned()),
-                            ),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
-                            .tip(
-                                Tooltip::new("Keep everything where it is")
-                                    .keys(&["Esc"])
-                                    .build(),
-                            )
-                            .when(cancel, |this| this.child(ring()))
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                app.dialog = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        ui::button(
-                            "confirm",
-                            self.delete_label(stats),
-                            ButtonKind::Primary,
-                            confirmed,
-                        )
-                        .tip(
-                            Tooltip::new(if !confirmed {
-                                "Type the item count first"
-                            } else if trash {
-                                "Move these items to the trash"
-                            } else {
-                                "Delete these items for good"
-                            })
-                            .keys(&["Enter"])
-                            .build(),
-                        )
-                        .when(!cancel, |this| this.child(ring()))
-                        .on_click(cx.listener(
-                            |app, _: &ClickEvent, _, cx| {
-                                app.accept(cx);
-                            },
-                        )),
-                    ),
-            );
-        Some(if motion::reduced() {
-            panel.into_any_element()
-        } else {
-            panel
-                .with_animation(
-                    "confirm-in",
-                    Animation::new(CONFIRM_IN).with_easing(motion::ease_out),
-                    |panel, progress| panel.opacity(0.3 + 0.7 * progress),
+                self.button(
+                    "clear",
+                    "Clear",
+                    ButtonKind::Ghost,
+                    ready,
+                    cx,
+                    |app, _, cx| {
+                        if !app.busy() {
+                            app.selection.clear();
+                            cx.notify();
+                        }
+                    },
                 )
-                .into_any_element()
-        })
+                .flex_none()
+                .pr(unit(space::S))
+                .child(ui::kbd("Esc"))
+                .tip(tooltip::plain("Clear the selection in every tab")),
+            )
+            .child(
+                self.button(
+                    "trash",
+                    self.delete_label(&stats),
+                    if trash {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Danger
+                    },
+                    ready && lock.is_none(),
+                    cx,
+                    |app, _, cx| app.delete(None, cx),
+                )
+                .flex_none()
+                .h(unit(size::TILE))
+                .pl(unit(space::M))
+                .pr(unit(space::S))
+                .gap(unit(space::S))
+                .map(|this| {
+                    let ink = if trash {
+                        theme::on_primary()
+                    } else {
+                        theme::on_danger()
+                    };
+                    let fill = if trash {
+                        theme::kbd()
+                    } else {
+                        theme::kbd_on_danger()
+                    };
+                    this.child(ui::kbd_on(commands::label("enter"), fill, ink))
+                })
+                .map(|this| match lock {
+                    Some(reason) => this.tip(tooltip::plain(reason)),
+                    None => this.tip(tooltip::term(Term::Trash)),
+                }),
+            );
+        Some(bar.into_any_element())
     }
 
     /// Whether removing these items moves any of them to the trash. An empty selection answers
@@ -745,10 +648,6 @@ impl Kuizer {
         } else {
             "Delete"
         }
-    }
-
-    pub(super) fn dialog_path(&self, candidate: &Candidate) -> String {
-        self.shown_path(&candidate.path)
     }
 }
 
@@ -780,7 +679,7 @@ impl Finished {
     }
 }
 
-pub(super) fn selection_details(
+fn selection_details(
     stats: SelectionStats,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + use<> {
     move |window, cx| {
@@ -798,4 +697,28 @@ pub(super) fn selection_details(
             .row("Docker", line(stats.source(Source::Docker).all))
             .build()(window, cx)
     }
+}
+
+/// The look shared by the bars that float over the bottom of the list: the selection summary
+/// and the toast.
+fn floating(bar: Stateful<Div>) -> Stateful<Div> {
+    bar.rounded(theme::radius_dialog())
+        .bg(theme::elevated())
+        .border_1()
+        .border_color(theme::border_strong())
+        .shadow(vec![
+            BoxShadow {
+                color: theme::shadow(),
+                offset: point(px(0.), px(space::M)),
+                blur_radius: px(space::XXL),
+                spread_radius: px(0.),
+            },
+            BoxShadow {
+                color: theme::shadow_contact(),
+                offset: point(px(0.), px(size::HAIR)),
+                blur_radius: px(space::XXS),
+                spread_radius: px(0.),
+            },
+        ])
+        .occlude()
 }

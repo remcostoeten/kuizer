@@ -26,6 +26,8 @@ pub mod space {
     pub const GUTTER: f32 = XL;
     /// The inset of a sidebar item inside the sidebar, so item text starts at the gutter.
     pub const INSET: f32 = M;
+    /// The gap between the inset content surface and the window edges around it.
+    pub const SURFACE: f32 = M;
 
     use super::compact;
 
@@ -64,15 +66,25 @@ pub mod size {
     pub const ICON: f32 = 16.;
     pub const CHECK: f32 = 14.;
     pub const GLYPH: f32 = 10.;
+    pub const KEY: f32 = 16.;
     pub const BADGE: f32 = 18.;
+    pub const CHIP: f32 = 20.;
     pub const SEGMENT: f32 = 24.;
     pub const CONTROL: f32 = 28.;
+    pub const TILE: f32 = 30.;
     pub const INPUT: f32 = 32.;
+    pub const STATUS: f32 = 32.;
     pub const BAR: f32 = 36.;
     pub const SIDEBAR: f32 = 220.;
     pub const SIDEBAR_COLLAPSED: f32 = 48.;
     pub const METER: f32 = 12.;
     pub const TRACK: f32 = 4.;
+    /// The height of the composition strip above a list.
+    pub const STRIP: f32 = 6.;
+    /// The width of the size bar next to a size in a table row.
+    pub const GAUGE: f32 = 44.;
+    /// The narrowest the mode tag of the status bar gets, so its width holds between modes.
+    pub const MODE: f32 = 68.;
     pub const SWATCH: f32 = 8.;
     pub const LEGEND: f32 = 10.;
     pub const CARET: f32 = 14.;
@@ -83,10 +95,14 @@ pub mod size {
     pub const ACTIONS: f32 = 196.;
     pub const LABEL: f32 = 240.;
     pub const KEYS: f32 = 250.;
-    pub const FILTER: f32 = 240.;
+    pub const FILTER: f32 = 300.;
+    /// The widest the command palette trigger in the titlebar gets.
+    pub const TRIGGER: f32 = 340.;
     pub const LIST: f32 = 340.;
     pub const MENU: f32 = 220.;
     pub const DIALOG: f32 = 520.;
+    /// The narrowest the floating selection summary gets while there is room for it.
+    pub const SUMMARY: f32 = 540.;
     pub const PALETTE: f32 = 560.;
     pub const PAGE: f32 = 760.;
     pub const SHORTCUTS: f32 = 820.;
@@ -181,7 +197,7 @@ fn tint_of(accent: Accent) -> Tint {
             accent: (0x007e_64fb, 0x006c_35f5),
             focus: (0x0096_8dfa, 0x006c_35f5),
             selected: (0x001f_1342, 0x00ee_effd),
-            tile: (0x0033_2d5d, 0x00cd_cefb),
+            tile: (0x0033_2d5d, 0x00dc_dcfa),
         },
         Accent::Blue => Tint {
             accent: (0x003b_82f6, 0x0014_63e6),
@@ -283,7 +299,12 @@ pub fn transparent() -> Rgba {
 }
 
 pub fn shadow() -> Hsla {
-    hsla(0., 0., 0., if light() { 0.16 } else { 0.4 })
+    hsla(0., 0., 0., if light() { 0.14 } else { 0.55 })
+}
+
+/// The tight contact shadow under a floating bar, paired with `shadow`.
+pub fn shadow_contact() -> Hsla {
+    hsla(0., 0., 0., if light() { 0.1 } else { 0.5 })
 }
 
 pub fn scrim() -> Rgba {
@@ -304,6 +325,17 @@ pub fn elevated() -> Rgba {
 
 pub fn hover() -> Rgba {
     pick(0x0022_2222, 0x00f0_f0f0)
+}
+
+/// The faint tint under a pointer resting on a list row or a sidebar item, softer than `hover`
+/// so it never reads as the cursor.
+pub fn hover_row() -> Rgba {
+    pick_alpha(0xffff_ff09, 0x0000_0008)
+}
+
+/// The fill of a key badge and of the root path chip.
+pub fn kbd() -> Rgba {
+    pick_alpha(0xffff_ff12, 0x0000_000f)
 }
 
 pub fn selected() -> Rgba {
@@ -367,23 +399,23 @@ pub fn ok() -> Rgba {
 }
 
 pub fn bar_strong() -> Rgba {
-    pick(0x00c6_c6c6, 0x0038_3838)
+    pick(0x00c6_c6c6, 0x004d_4d4d)
 }
 
 pub fn bar_mid() -> Rgba {
-    pick(0x0074_7474, 0x0087_8787)
+    pick(0x0074_7474, 0x008f_8f8f)
 }
 
 pub fn bar_soft() -> Rgba {
-    pick(0x0060_6060, 0x00a1_a1a1)
+    pick(0x0060_6060, 0x00b0_b0b0)
 }
 
 pub fn bar_rest() -> Rgba {
-    pick(0x0037_3737, 0x00c9_c9c9)
+    pick(0x0037_3737, 0x00d4_d4d4)
 }
 
 pub fn track() -> Rgba {
-    pick(0x0025_2525, 0x00e6_e6e6)
+    pick(0x0025_2525, 0x00ec_ecec)
 }
 
 pub fn review() -> Rgba {
@@ -391,16 +423,30 @@ pub fn review() -> Rgba {
 }
 
 pub fn review_soft() -> Rgba {
-    pick_alpha(0xc2a3_6e24, 0xb482_0a24)
+    pick_alpha(0xc2a3_6e24, 0x9a63_081a)
 }
 
 pub fn danger() -> Rgba {
     pick_alpha(0xff66_7fbf, 0xc826_46e6)
 }
 
-/// The tint over rows an open delete confirmation covers.
-pub fn danger_soft() -> Rgba {
-    pick_alpha(0xff66_7f1f, 0xc826_461a)
+/// The fill of the button that deletes for good.
+pub fn danger_solid() -> Rgba {
+    pick(0x00ff_667f, 0x00c8_2646)
+}
+
+pub fn danger_hover() -> Rgba {
+    pick(0x00ff_8fa1, 0x00a8_1e3a)
+}
+
+/// Text and glyphs drawn on `danger_solid`.
+pub fn on_danger() -> Rgba {
+    pick(0x000d_0d0d, 0x00ff_ffff)
+}
+
+/// The fill of a key badge on `danger_solid`.
+pub fn kbd_on_danger() -> Rgba {
+    rgba(0x0d0d_0d29)
 }
 
 pub fn primary() -> Rgba {
@@ -446,11 +492,11 @@ pub fn tile_selected() -> Rgba {
 }
 
 pub fn radius_button() -> Pixels {
-    px(2.)
+    px(4.)
 }
 
 pub fn radius_control() -> Pixels {
-    px(2.)
+    px(4.)
 }
 
 pub fn radius_panel() -> Pixels {
@@ -458,7 +504,17 @@ pub fn radius_panel() -> Pixels {
 }
 
 pub fn radius_dialog() -> Pixels {
-    px(4.)
+    px(6.)
+}
+
+/// The inset content surface that sits beside the sidebar.
+pub fn radius_surface() -> Pixels {
+    px(8.)
+}
+
+/// Key badges, tags and chips.
+pub fn radius_tag() -> Pixels {
+    px(2.)
 }
 
 pub fn radius_checkbox() -> Pixels {
@@ -516,7 +572,25 @@ pub fn set_mono(font: SharedString) {
 /// @example
 /// theme::label(div()).child("SIZE")
 pub fn label<E: Styled>(element: E) -> E {
-    let element = element.text_size(unit(font::CAPTION));
+    mono(element.text_size(unit(font::CAPTION)))
+}
+
+/// @name mono_family
+/// @description The monospace typeface the window found installed, if any.
+///
+/// @example
+/// let family = theme::mono_family();
+pub fn mono_family() -> Option<SharedString> {
+    MONO.get().cloned()
+}
+
+/// @name mono
+/// @description Sets an element in the monospace typeface at whatever size it already has, for
+/// paths, rule names and counts.
+///
+/// @example
+/// theme::mono(div()).child(path)
+pub fn mono<E: Styled>(element: E) -> E {
     match MONO.get() {
         Some(font) => element.font_family(font.clone()),
         None => element,

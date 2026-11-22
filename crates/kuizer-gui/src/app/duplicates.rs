@@ -337,8 +337,6 @@ impl Kuizer {
                 .w_full()
                 .h(unit(size::row()))
                 .px(unit(space::GUTTER))
-                .border_b_1()
-                .border_color(theme::border())
         };
         range
             .filter_map(|at| match *listed.lines.get(at)? {
@@ -356,7 +354,7 @@ impl Kuizer {
                     );
                     Some(
                         line(("duplicate-group", index))
-                            .bg(theme::panel())
+                            .bg(theme::elevated())
                             .tip(group_details(group))
                             .child(
                                 div()

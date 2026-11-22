@@ -494,13 +494,12 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
         assert_eq!(report.candidates.len(), 2, "streamed artifacts win");
         assert!(report.history.is_err(), "a fresh part is never replaced");
     });
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
-    view.update(cx, |app, _| {
-        assert!(
-            matches!(app.dialog, Some(Dialog::Confirm { .. })),
+    view.read_with(cx, |app, _| {
+        assert_eq!(
+            app.trash_lock(),
+            None,
             "rows the running scan found can go before it finishes"
         );
-        app.dialog = None;
     });
 
     view.update(cx, |app, cx| {
@@ -522,9 +521,8 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
         assert!(!app.refreshing());
         assert_eq!(app.selection, HashSet::from([(Source::Artifact, 2)]));
         assert_eq!(app.report().unwrap().scanned, SystemTime::UNIX_EPOCH);
+        assert_eq!(app.trash_lock(), None);
     });
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
-    view.read_with(cx, |app, _| assert!(app.dialog.is_some()));
 }
 
 #[gpui::test]
@@ -588,11 +586,6 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
         assert_eq!(report.candidates.len(), 1, "it leaves once the fade ends");
         assert_eq!(report.candidates[0].path, a);
     });
-    cx.update(|window, cx| {
-        view.update(cx, |app, cx| {
-            app.confirm(Some((Source::Artifact, 1)), window, cx);
-        });
-    });
     view.update(cx, |app, cx| {
         let summary = app.report().unwrap().summary;
         let artifacts = Loaded::Artifacts {
@@ -612,16 +605,6 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
         assert_eq!(report.candidates.len(), 1, "the deleted folder is not back");
         assert_eq!(report.candidates[0].path, a);
         assert!(report.history.is_ok(), "the history read after it is kept");
-        assert!(
-            matches!(
-                app.dialog,
-                Some(Dialog::Confirm {
-                    only: Some((Source::Artifact, 8)),
-                    ..
-                })
-            ),
-            "the open confirmation follows its item to the new id"
-        );
     });
 }
 
@@ -854,10 +837,10 @@ fn a_known_folder_opens_with_the_last_scan_while_it_refreshes(cx: &mut TestAppCo
     assert!(cx.debug_bounds("stale").is_some());
     assert!(cx.debug_bounds("loader").is_some());
 
-    view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
-    view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "stale items cannot be trashed");
+    view.update(cx, |app, cx| {
+        app.toggle(Source::Artifact, id, cx);
+        app.delete(None, cx);
+        assert!(app.cleaning.is_none(), "stale items cannot be deleted");
         assert_eq!(app.selected().len(), 1);
     });
 
@@ -867,9 +850,8 @@ fn a_known_folder_opens_with_the_last_scan_while_it_refreshes(cx: &mut TestAppCo
         assert!(matches!(app.phase, Phase::Ready(_)));
         assert_eq!(app.selected().len(), 1);
         assert!(app.stale.is_none());
+        assert_eq!(app.trash_lock(), None);
     });
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
-    view.read_with(cx, |app, _| assert!(app.dialog.is_some()));
 }
 
 #[gpui::test]
@@ -1039,7 +1021,6 @@ fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
     wait_for_refresh(&view, cx);
     let id = view.read_with(cx, |app, _| app.report().unwrap().candidates[0].id);
     view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
@@ -1089,7 +1070,6 @@ fn trash_mode_moves_the_selection_to_the_trash_inside(cx: &mut TestAppContext) {
     wait_for_refresh(&view, cx);
     let id = view.read_with(cx, |app, _| app.report().unwrap().candidates[0].id);
     view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("trash-note").is_some());
     assert!(cx.debug_bounds("permanent-warning").is_none());
@@ -1200,7 +1180,6 @@ esac
         .unwrap();
     assert!(!reveal.enabled, "a Docker object has no folder to reveal");
     view.update(cx, |app, cx| app.toggle(Source::Docker, image, cx));
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
@@ -1259,7 +1238,6 @@ fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("toolchain-row-1").is_some());
     view.update(cx, |app, cx| app.toggle(Source::Toolchain, id, cx));
-    cx.update(|window, cx| view.update(cx, |app, cx| app.open_confirm(window, cx)));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
@@ -1499,22 +1477,32 @@ fn a_right_click_on_the_titlebar_opens_no_item_menu(cx: &mut TestAppContext) {
     assert!(menu_target(&view, cx).is_none());
 }
 
+#[test]
+fn delete_from_the_menu_removes_that_item_only() {
+    isolated("delete_from_the_menu_removes_that_item_only_inside");
+}
+
 #[gpui::test]
-fn trash_from_the_menu_asks_for_that_item_only(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let root = project(dir.path());
+#[ignore = "runs in its own process through delete_from_the_menu_removes_that_item_only"]
+fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
+    let Some(base) = isolated_base() else {
+        return;
+    };
+    let root = project(&base.join("work"));
     let other = root.join("web").join("node_modules").join("x");
     std::fs::create_dir_all(&other).unwrap();
     std::fs::write(root.join("web").join("package.json"), "{}").unwrap();
     std::fs::write(other.join("index.js"), vec![b'y'; 8 * 1024]).unwrap();
-    let (view, cx) = open(cx, dir.path().join("recent"));
+    let (view, cx) = open(cx, base.join("recent"));
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
-    view.update(cx, |app, cx| {
+    let selected = view.update(cx, |app, cx| {
         app.tab = Tab::Artifacts;
-        let first = app.report().unwrap().candidates[0].id;
-        app.toggle(Source::Artifact, first, cx);
+        let first = &app.report().unwrap().candidates[0];
+        let (id, path) = (first.id, first.path.clone());
+        app.toggle(Source::Artifact, id, cx);
+        path
     });
     cx.update(|window, cx| window.draw(cx).clear());
 
@@ -1530,31 +1518,77 @@ fn trash_from_the_menu_asks_for_that_item_only(cx: &mut TestAppContext) {
         assert_eq!(trash.tip, app.trash_lock());
     });
     cx.simulate_keystrokes("delete");
-    view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
+    view.read_with(cx, |app, _| assert!(app.cleaning.is_none()));
     cx.simulate_keystrokes("escape");
     view.update(cx, |app, _| app.stale = None);
 
     let second = right_click(cx, "artifact-row-1");
-    let Some(Target::Item(_, id, _)) = menu_target(&view, cx) else {
+    let Some(Target::Item(_, _, path)) = menu_target(&view, cx) else {
         panic!("the menu is open on the second row");
     };
     assert!(second.size.height > px(0.));
     cx.simulate_keystrokes("delete");
     view.read_with(cx, |app, _| {
-        assert!(matches!(
-            app.dialog,
-            Some(Dialog::Confirm {
-                only: Some((Source::Artifact, only)),
-                ..
-            }) if only == id
-        ));
-        let items = app.confirming();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].1.id, id);
-        assert_eq!(app.selected().len(), 1, "the selection is untouched");
+        assert!(app.dialog.is_none(), "the menu never asks")
     });
-    cx.simulate_keystrokes("escape");
-    view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
+    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    assert!(!path.exists());
+    assert!(selected.exists(), "the selection is untouched");
+    view.read_with(cx, |app, _| assert_eq!(app.selected().len(), 1));
+}
+
+#[test]
+fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does() {
+    isolated("enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside");
+}
+
+#[gpui::test]
+#[ignore = "runs in its own process through enter_deletes_the_selection_at_once_but_a_held_enter_never_does"]
+fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside(cx: &mut TestAppContext) {
+    let Some(base) = isolated_base() else {
+        return;
+    };
+    cx.update(bind_keys);
+    let root = project(&base.join("work"));
+    let other = root.join("web").join("node_modules").join("x");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(root.join("web").join("package.json"), "{}").unwrap();
+    std::fs::write(other.join("index.js"), vec![b'y'; 8 * 1024]).unwrap();
+    let (view, cx) = open(cx, base.join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_refresh(&view, cx);
+    let select = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+        view.update(cx, |app, cx| {
+            let first = &app.report().unwrap().candidates[0];
+            let (id, path) = (first.id, first.path.clone());
+            app.toggle(Source::Artifact, id, cx);
+            path
+        })
+    };
+
+    let first = select(&view, cx);
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(cx.debug_bounds("summary-bar").is_some());
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |app, _| {
+        assert!(app.dialog.is_none(), "Enter never asks")
+    });
+    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    cx.executor().advance_clock(flow::STEP);
+    cx.run_until_parked();
+    assert!(!first.exists());
+
+    let second = select(&view, cx);
+    cx.simulate_event(KeyDownEvent {
+        keystroke: Keystroke::parse("enter").unwrap(),
+        is_held: true,
+    });
+    view.read_with(cx, |app, _| {
+        assert!(app.cleaning.is_none(), "a held Enter deletes nothing");
+        assert_eq!(app.selected().len(), 1);
+    });
+    assert!(second.exists());
 }
 
 #[gpui::test]
@@ -1711,11 +1745,8 @@ fn the_mode_follows_whatever_takes_the_next_key(cx: &mut TestAppContext) {
         assert_eq!(app.mode(), keys::Mode::Filter);
         app.palette = Some(Palette::default());
         assert_eq!(app.mode(), keys::Mode::Palette);
-        app.dialog = Some(Dialog::Confirm {
-            only: None,
-            stats: SelectionStats::default(),
-            preview: Vec::new(),
-            typed: String::new(),
+        app.dialog = Some(Dialog::Branches {
+            scope: GitScope::All,
             cancel: false,
         });
         assert_eq!(app.mode(), keys::Mode::Confirm);
@@ -1724,4 +1755,18 @@ fn the_mode_follows_whatever_takes_the_next_key(cx: &mut TestAppContext) {
         app.filtering = false;
         assert_eq!(app.mode(), keys::Mode::Visual);
     });
+}
+
+#[test]
+fn a_long_path_gives_way_in_its_folder_part_first() {
+    let fit = |room: f32| fit_path("~/apps/kuizer/site/", "node_modules", room, 10.);
+    assert_eq!(
+        fit(400.),
+        ("~/apps/kuizer/site/".to_owned(), "node_modules".to_owned())
+    );
+    assert_eq!(
+        fit(200.),
+        ("~/apps/…".to_owned(), "node_modules".to_owned())
+    );
+    assert_eq!(fit(80.), (String::new(), "node_mo…".to_owned()));
 }

@@ -90,7 +90,7 @@ pub fn view(
         .border_color(if active {
             theme::focus()
         } else {
-            theme::border_strong()
+            theme::border()
         })
         .cursor(CursorStyle::IBeam)
         .when(empty && active, |this| this.child(caret()))

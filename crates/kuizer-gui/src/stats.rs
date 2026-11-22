@@ -105,6 +105,7 @@ impl SelectionStats {
     ///
     /// @example
     /// let stats = SelectionStats::of(app.selected().into_iter());
+    #[cfg(test)]
     pub fn of<'a>(items: impl Iterator<Item = (Source, &'a Candidate)>) -> Self {
         let mut stats = Self::default();
         for (source, candidate) in items {
@@ -131,7 +132,7 @@ struct Weight {
 }
 
 /// @name Selection
-/// @description The selected items with running totals, so the status bar and the confirmation
+/// @description The selected items with running totals, so the summary bar and the views
 /// read their figures without walking the report. Every change goes through a method that keeps
 /// the totals in step.
 ///
@@ -303,6 +304,20 @@ fn count(report: &Report, source: Source) -> usize {
     }
 }
 
+fn by_category(candidates: &[Candidate]) -> Vec<(Category, u64)> {
+    let mut bytes: Vec<(Category, u64)> = Category::ALL.into_iter().map(|key| (key, 0)).collect();
+    for candidate in candidates {
+        if let Some(slot) = bytes
+            .iter_mut()
+            .find(|(key, _)| *key == candidate.rule.category)
+        {
+            slot.1 += candidate.usage.allocated;
+        }
+    }
+    bytes.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    bytes
+}
+
 fn at(report: &Report, source: Source, position: usize) -> Option<&Candidate> {
     match source {
         Source::Artifact => report.candidates.get(position),
@@ -348,6 +363,8 @@ pub struct ReportStats {
     pub caches: Totals,
     pub toolchains: Totals,
     pub docker: Totals,
+    /// Bytes of the project artifacts per category, largest first.
+    pub categories: Vec<(Category, u64)>,
     charts: OnceCell<Charts>,
     history: OnceCell<Option<HistoryStats>>,
 }
@@ -359,6 +376,7 @@ impl ReportStats {
             caches: Totals::of(report.section(Source::Cache)),
             toolchains: Totals::of(report.section(Source::Toolchain)),
             docker: Totals::of(report.section(Source::Docker)),
+            categories: by_category(&report.candidates),
             charts: OnceCell::new(),
             history: OnceCell::new(),
         }

@@ -188,6 +188,7 @@ impl Kuizer {
     pub(super) fn ring_key(
         &mut self,
         keystroke: &Keystroke,
+        repeat: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -214,7 +215,7 @@ impl Kuizer {
         if let Some(back) = back {
             self.move_ring(Move::Step { back });
         } else if matches!(keystroke.key.as_str(), "enter" | "space") && plain && !modifiers.shift {
-            let press = self.stops.borrow().press(&ring);
+            let press = self.stops.borrow().press(&ring).filter(|_| !repeat);
             if let Some(press) = press {
                 press(self, window, cx);
             }

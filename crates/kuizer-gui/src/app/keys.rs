@@ -173,10 +173,7 @@ impl Kuizer {
     pub(super) fn mode(&self) -> Mode {
         if self.menu.is_some() {
             Mode::Menu
-        } else if matches!(
-            self.dialog,
-            Some(Dialog::Confirm { .. } | Dialog::Branches { .. })
-        ) {
+        } else if matches!(self.dialog, Some(Dialog::Branches { .. })) {
             Mode::Confirm
         } else if self.settings.is_some() {
             Mode::Settings
@@ -213,7 +210,7 @@ impl Kuizer {
         let keystroke = &event.keystroke;
         let repeat = self.held.press(event, Instant::now());
         if self.menu.is_some() {
-            self.menu_key(event, window, cx);
+            self.menu_key(event, cx);
             return;
         }
         if self.dialog.is_some() {
@@ -244,7 +241,7 @@ impl Kuizer {
             }
             self.filtering = false;
         }
-        if self.ring_key(keystroke, window, cx) {
+        if self.ring_key(keystroke, repeat, window, cx) {
             return;
         }
         if matches!(self.phase, Phase::Start) && self.type_folder(event, cx) {
@@ -374,34 +371,6 @@ impl Kuizer {
     fn dialog_key(&mut self, keystroke: &Keystroke, repeat: bool, cx: &mut Context<Self>) {
         let key = keystroke.key.as_str();
         match &mut self.dialog {
-            Some(Dialog::Confirm {
-                stats,
-                typed,
-                cancel,
-                ..
-            }) => match key {
-                "escape" => self.dialog = None,
-                "tab" | "left" | "right" => *cancel = !*cancel,
-                "enter" if *cancel => self.dialog = None,
-                "enter" => {
-                    if !repeat {
-                        self.accept(cx);
-                    }
-                    return;
-                }
-                "backspace" => {
-                    typed.pop();
-                }
-                _ => match keystroke.key_char.as_deref() {
-                    Some(digits)
-                        if stats.total().review.count > 0
-                            && digits.chars().all(|digit| digit.is_ascii_digit()) =>
-                    {
-                        typed.push_str(digits);
-                    }
-                    _ => return,
-                },
-            },
             Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
             Some(Dialog::Branches { cancel, .. }) => match key {
                 "escape" => self.dialog = None,
@@ -803,13 +772,7 @@ impl Kuizer {
                 }
             }
             Command::SelectWins => self.select_wins(cx),
-            Command::Trash => {
-                if !self.selection.is_empty() {
-                    self.confirm(None, window, cx);
-                } else if let Some(Target::Item(source, id, _)) = self.cursor_target() {
-                    self.confirm(Some((source, id)), window, cx);
-                }
-            }
+            Command::Trash => self.trash(cx),
             Command::Reveal => {
                 if let Some(path) = self.cursor_target().as_ref().and_then(Target::path) {
                     self.reveal_path(path.to_path_buf(), cx);
@@ -928,7 +891,7 @@ impl Kuizer {
         listed.map_or(self.rows.len(), <[Target]>::len)
     }
 
-    fn listed_row(
+    pub(super) fn listed_row(
         &self,
         listed: Option<&[Target]>,
         target: &Target,
@@ -1437,46 +1400,8 @@ mod tests {
         assert!(cx.debug_bounds("palette-Delete selected").is_some());
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| {
-            assert!(app.dialog.is_none(), "a blocked command does not run");
+            assert!(app.cleaning.is_none(), "a blocked command does not run");
             assert!(app.palette.is_some(), "the palette stays open");
-        });
-
-        view.update(cx, |app, _| app.stale = None);
-        cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| {
-            assert!(app.palette.is_none());
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
-        });
-    }
-
-    #[gpui::test]
-    fn d_opens_the_confirmation_and_escape_leaves_it(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(bind_keys);
-        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
-        cx.simulate_keystrokes("d");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: Some(_), .. })
-            ));
-        });
-        cx.simulate_keystrokes("escape");
-        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
-
-        view.update(cx, |app, cx| {
-            let id = app.report().unwrap().candidates[0].id;
-            app.toggle(Source::Artifact, id, cx);
-        });
-        cx.simulate_keystrokes("d");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
         });
     }
 
@@ -1804,48 +1729,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_held_enter_opens_the_confirmation_but_never_accepts_it(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = projects(dir.path(), 2);
-        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
-        cx.simulate_keystrokes("enter");
-        cx.simulate_event(enter(true));
-        view.read_with(cx, |app, _| {
-            assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
-        });
-        cx.simulate_keystrokes("escape");
-        cx.simulate_event(enter(true));
-        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
-    }
-
-    #[gpui::test]
-    fn review_items_need_their_count_typed(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = projects(dir.path(), 2);
-        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
-        view.update(cx, |app, _| {
-            let Phase::Ready(report) = &mut app.phase else {
-                panic!("a finished scan");
-            };
-            let candidate = &mut report.candidates[0];
-            let mut rule = (*candidate.rule).clone();
-            rule.safety = Safety::Review;
-            candidate.rule = std::sync::Arc::new(rule);
-        });
-        cx.simulate_keystrokes("secondary-a enter enter");
-        view.read_with(cx, |app, _| {
-            assert!(
-                matches!(app.dialog, Some(Dialog::Confirm { .. })),
-                "enter alone removes nothing"
-            );
-            assert!(!app.confirmed());
-        });
-        cx.simulate_keystrokes("3 backspace 2");
-        view.read_with(cx, |app, _| assert!(app.confirmed()));
-        cx.simulate_keystrokes("escape");
-    }
-
-    #[gpui::test]
     fn shift_click_selects_a_range_and_ctrl_click_takes_one_out(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let root = projects(dir.path(), 4);
@@ -1894,48 +1777,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_moves_between_the_confirm_buttons(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = projects(dir.path(), 2);
-        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
-        cx.simulate_keystrokes("enter tab enter");
-        view.read_with(cx, |app, _| {
-            assert!(app.dialog.is_none(), "Enter on Cancel only closes it");
-            assert!(app.cleaning.is_none());
-            assert_eq!(app.report().unwrap().candidates.len(), 2);
-        });
-    }
-
-    #[gpui::test]
-    fn space_toggles_and_enter_trashes_the_cursor_item(cx: &mut TestAppContext) {
+    fn space_toggles_the_cursor_item(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let root = projects(dir.path(), 2);
         let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
         cx.simulate_keystrokes("j space");
-        let second = view.read_with(cx, |app, _| {
+        view.read_with(cx, |app, _| {
             let Some(Target::Item(source, id, _)) = app.cursor_target() else {
                 panic!("an item");
             };
             assert_eq!(app.selection, HashSet::from([(source, id)]));
-            (source, id)
         });
         cx.simulate_keystrokes("space");
         view.read_with(cx, |app, _| assert!(app.selection.is_empty()));
-        cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: Some(key), .. }) if key == second
-            ));
-        });
-        cx.simulate_keystrokes("escape k space delete");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
-            assert_eq!(app.confirming().len(), 1);
-        });
     }
 
     #[gpui::test]

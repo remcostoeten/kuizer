@@ -7,28 +7,16 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let start = matches!(self.phase, Phase::Start);
-        let roots = if start {
-            "Choose what to scan".to_owned()
-        } else {
-            self.roots
-                .iter()
-                .map(|root| display_path(root))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let roots = self
+            .roots
+            .iter()
+            .map(|root| display_path(root))
+            .collect::<Vec<_>>()
+            .join(", ");
         let busy = self.busy();
         let refreshing = self.refreshing();
         let scanning = matches!(self.phase, Phase::Loading(_)) || refreshing;
         let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_)) && !refreshing;
-        let partial = (finished
-            && self
-                .report()
-                .is_some_and(|report| report.summary.cancelled))
-        .then(|| {
-            ui::tag("partial", "Partial", ui::Tone::Review).tip(tooltip::plain(
-                "The scan was stopped early, so some folders and sections are missing. Rescan to get everything",
-            ))
-        });
         let stale = self.stale.map(|saved| {
             div()
                 .flex()
@@ -53,19 +41,22 @@ impl Kuizer {
         });
         let controls = frame::controls(window);
         let custom = controls.is_some();
-        let aligned = !matches!(self.phase, Phase::Start)
-            && !self.collapsed
-            && frame::inset(window).is_none();
+        let small = |button: Stateful<Div>| {
+            button
+                .h(unit(size::SEGMENT))
+                .px(unit(space::M))
+                .text_size(unit(font::SMALL))
+        };
         let actions = div()
             .debug_selector(|| "titlebar-actions".to_owned())
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(space::L))
+            .gap(unit(space::XS))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(scanning, |this| {
                 this.child(
-                    self.button(
+                    small(self.button(
                         "stop-scan",
                         "Stop here",
                         ButtonKind::Ghost,
@@ -74,7 +65,7 @@ impl Kuizer {
                         |app, _, cx| {
                             app.stop_scan(cx);
                         },
-                    )
+                    ))
                     .tip(
                         Tooltip::new("Stop the scan and keep what it found so far")
                             .keys(&["S"])
@@ -82,14 +73,14 @@ impl Kuizer {
                     ),
                 )
                 .child(
-                    self.button(
+                    small(self.button(
                         "cancel-scan",
                         "Cancel scan",
                         ButtonKind::Secondary,
                         true,
                         cx,
                         |app, _, cx| app.cancel_scan(cx),
-                    )
+                    ))
                     .tip(
                         Tooltip::new("Stop the scan and go back to the start screen")
                             .keys(&["Esc"])
@@ -99,7 +90,7 @@ impl Kuizer {
             })
             .when(finished, |this| {
                 this.child(
-                    self.button(
+                    small(self.button(
                         "new-scan",
                         "New scan",
                         ButtonKind::Ghost,
@@ -108,16 +99,18 @@ impl Kuizer {
                         |app, _, cx| {
                             app.new_scan(cx);
                         },
-                    )
-                    .tip(tooltip::plain(
-                        "Choose another folder or change the scan options",
-                    )),
+                    ))
+                    .tip(
+                        Tooltip::new("Choose another folder or change the scan options")
+                            .keys(&[hint(&Command::NewScan)])
+                            .build(),
+                    ),
                 )
                 .child(
-                    self.button(
+                    small(self.button(
                         "rescan",
                         "Rescan",
-                        ButtonKind::Secondary,
+                        ButtonKind::Ghost,
                         !busy,
                         cx,
                         |app, _, cx| {
@@ -125,10 +118,14 @@ impl Kuizer {
                                 app.rescan(cx);
                             }
                         },
-                    )
-                    .tip(tooltip::plain(
-                        "Scan the same folders again with the same options",
-                    )),
+                    ))
+                    .pl(unit(space::S))
+                    .child(ui::kbd(hint(&Command::Rescan)))
+                    .tip(
+                        Tooltip::new("Scan the same folders again with the same options")
+                            .keys(&[hint(&Command::Rescan)])
+                            .build(),
+                    ),
                 )
             });
         let brand = div()
@@ -138,90 +135,74 @@ impl Kuizer {
             .items_center()
             .gap(unit(space::M))
             .font_weight(FontWeight::SEMIBOLD)
-            .when(aligned, |this| {
-                this.w(unit(size::SIDEBAR))
-                    .h_full()
-                    .pl(unit(space::GUTTER))
-                    .bg(theme::panel())
-                    .border_r_1()
-                    .border_color(theme::border())
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(unit(size::BADGE))
-                    .rounded(theme::radius_checkbox())
-                    .bg(theme::bar())
-                    .text_size(unit(font::CAPTION))
-                    .text_color(theme::on_accent())
-                    .child("k"),
-            )
+            .child(logo())
             .child("kuizer");
-        // Absolute, so the path never sets how narrow this side can get.
-        let path = div().relative().flex_1().h_full().child(
+        let place = if start {
             div()
                 .id("roots")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .gap(unit(space::S))
+                .min_w_0()
+                .truncate()
+                .text_size(unit(font::SMALL))
+                .text_color(theme::faint())
+                .child("Choose what to scan")
+        } else {
+            theme::mono(div())
+                .id("roots")
+                .flex_shrink_0()
+                .max_w(unit(size::LABEL))
+                .truncate()
+                .px(unit(space::S))
+                .py(unit(space::XXS))
+                .rounded(theme::radius_tag())
+                .bg(theme::kbd())
+                .text_size(unit(font::SMALL))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::muted())
-                .when(!start, |this| {
-                    this.tip(tooltip::plain(roots.clone())).child(icon::view(
-                        Icon::Folder,
-                        theme::faint(),
-                        None,
-                        self.zoom.rem_size(),
-                    ))
-                })
-                .child(div().flex_1().min_w_0().truncate().child(roots)),
-        );
-        let bar = div()
+                .tip(tooltip::plain(roots.clone()))
+                .child(roots)
+        };
+        let left = div()
             .flex()
             .flex_1()
             .items_center()
             .gap(unit(space::L))
-            .h_full()
-            .when(aligned, |this| {
-                this.pl(unit(space::GUTTER))
-                    .pr(unit(if custom { space::S } else { space::GUTTER }))
-                    .border_b_1()
-                    .border_color(theme::border())
-            })
-            .child(path)
+            .when(!start, |this| this.child(self.sidebar_toggle(cx)))
+            .child(brand)
             .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_end()
-                    .gap(unit(space::L))
-                    .child(self.render_search(cx))
-                    .children(partial)
-                    .children(stale)
-                    .child(actions)
-                    .children(controls),
+                // Absolute, so the path never sets how narrow this side can get.
+                div().relative().flex_1().h_full().child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .gap(unit(space::L))
+                        .overflow_hidden()
+                        .child(place)
+                        .children(self.scan_state()),
+                ),
             );
+        let right = div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_end()
+            .gap(unit(space::L))
+            .children(stale)
+            .child(actions)
+            .children(controls);
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
             .flex()
             .flex_none()
             .items_center()
-            .gap(unit(if aligned { 0. } else { space::L }))
+            .gap(unit(space::L))
             .h(unit(size::BAR))
             .min_h(frame::TITLEBAR)
-            .when(!aligned, |this| {
-                this.px(unit(space::GUTTER))
-                    .when_some(frame::inset(window), |this, inset| this.pl(inset))
-                    .when(custom, |this| this.pr(unit(space::S)))
-                    .border_b_1()
-                    .border_color(theme::border())
-            })
+            .pl(unit(space::L))
+            .when_some(frame::inset(window), |this, inset| this.pl(inset))
+            .pr(unit(if custom { space::S } else { space::SURFACE }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
             .on_mouse_move(cx.listener(Self::titlebar_move))
@@ -230,8 +211,53 @@ impl Kuizer {
                     window.show_window_menu(event.position);
                 })
             })
-            .child(brand)
-            .child(bar)
+            .child(left)
+            .child(self.render_search(cx))
+            .child(right)
+    }
+
+    /// Where the scan stands, as a dot and a few words after the root path in the titlebar.
+    fn scan_state(&self) -> Option<Stateful<Div>> {
+        let (dot, text, tip) = match &self.phase {
+            Phase::Start => return None,
+            Phase::Loading(_) => (theme::bar(), "Scanning".to_owned(), None),
+            Phase::Failed(_) => (theme::danger(), "Scan failed".to_owned(), None),
+            Phase::Ready(_) if self.refreshing() => (theme::bar(), "Scanning".to_owned(), None),
+            Phase::Ready(report) if report.summary.cancelled => (
+                theme::review(),
+                "Partial scan".to_owned(),
+                Some(
+                    "The scan was stopped early, so some folders and sections are missing. Rescan to get everything",
+                ),
+            ),
+            Phase::Ready(report) => {
+                let age = theme::age(Some(report.scanned));
+                let text = match age.as_str() {
+                    "" | "now" => "Scanned just now".to_owned(),
+                    age => format!("Scanned {age} ago"),
+                };
+                (theme::ok(), text, None)
+            }
+        };
+        Some(
+            div()
+                .id("scan-state")
+                .flex()
+                .min_w_0()
+                .items_center()
+                .gap(unit(space::S))
+                .text_size(unit(font::SMALL))
+                .text_color(theme::faint())
+                .when_some(tip, |this, tip| this.tip(tooltip::plain(tip)))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(unit(size::DOT))
+                        .rounded(theme::radius_pill())
+                        .bg(dot),
+                )
+                .child(ui::tabular(div().min_w_0().truncate().child(text))),
+        )
     }
 
     pub(super) fn titlebar_down(
@@ -328,8 +354,7 @@ impl Kuizer {
         }
     }
 
-    /// The button at the start of every section header that collapses the sidebar to icons and
-    /// back.
+    /// The button at the start of the titlebar that collapses the sidebar to icons and back.
     pub(super) fn sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
         let toggle = div()
@@ -339,11 +364,11 @@ impl Kuizer {
             .flex_none()
             .items_center()
             .justify_center()
-            .size(unit(size::CONTROL))
+            .size(unit(size::SEGMENT))
             .rounded(theme::radius_control())
             .cursor_pointer()
-            .text_color(theme::faint())
-            .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
+            .hover(|style| style.bg(theme::hover()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .tip_hover(
                 Tooltip::new(if collapsed {
                     "Show section names"
@@ -358,7 +383,7 @@ impl Kuizer {
             )
             .child(icon::view(
                 Icon::Sidebar,
-                theme::faint(),
+                theme::muted(),
                 self.icon_epoch(Icon::Sidebar),
                 self.zoom.rem_size(),
             ));
@@ -368,27 +393,91 @@ impl Kuizer {
         })
     }
 
+    /// The total the scan can free at the top of the sidebar, with a strip that splits it by
+    /// section and marks the open one.
+    fn render_reclaim(&self) -> Option<Div> {
+        let report = self.report()?;
+        let stats = &self.report_stats;
+        let total = stats.space();
+        let parts = [
+            (Tab::Artifacts, stats.artifacts.all.bytes),
+            (Tab::Caches, stats.caches.all.bytes),
+            (Tab::Docker, stats.docker.all.bytes),
+            (Tab::Toolchains, stats.toolchains.all.bytes),
+        ];
+        let split = div()
+            .flex()
+            .gap(unit(space::XXS))
+            .h(unit(size::TRACK))
+            .children(
+                parts
+                    .into_iter()
+                    .filter(|(_, bytes)| *bytes > 0)
+                    .map(|(tab, bytes)| {
+                        div()
+                            .h_full()
+                            .w(relative(theme::share(bytes, total)))
+                            .min_w(unit(size::MARKER))
+                            .rounded(theme::radius_bar())
+                            .bg(if tab == self.tab {
+                                theme::bar()
+                            } else {
+                                theme::bar_rest()
+                            })
+                    }),
+            );
+        let disk = report
+            .disks
+            .first()
+            .and_then(|disk| Some((disk.available?, disk.total?)));
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .px(unit(space::M))
+                .pt(unit(space::XS))
+                .pb(unit(space::L))
+                .child(ui::caption("Reclaimable"))
+                .child(
+                    ui::amount(total, font::FIGURE)
+                        .pt(unit(space::XS))
+                        .pb(unit(space::M)),
+                )
+                .child(split)
+                .children(disk.map(|(free, size)| {
+                    ui::tabular(div())
+                        .pt(unit(space::M))
+                        .text_size(unit(font::CAPTION))
+                        .text_color(theme::faint())
+                        .child(format!(
+                            "{} free of {}",
+                            theme::bytes(free),
+                            theme::bytes(size)
+                        ))
+                })),
+        )
+    }
+
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
         self.stops
             .borrow_mut()
             .within(Some(self.sidebar_scroll.clone()));
         let mut items: Vec<AnyElement> = Vec::new();
+        if !collapsed {
+            items.extend(self.render_reclaim().map(IntoElement::into_any_element));
+        }
         for tab in Tab::ALL {
             let heading = tab.heading().map(|heading| {
                 if collapsed {
                     ui::divider().mx(unit(space::M)).into_any_element()
                 } else {
-                    div()
-                        .flex()
-                        .items_end()
-                        .h(unit(size::row()))
+                    ui::caption(heading)
+                        .flex_none()
                         .px(unit(space::M))
+                        .pt(unit(space::L))
                         .pb(unit(space::S))
-                        .text_size(unit(font::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::faint())
-                        .child(heading.to_uppercase())
                         .into_any_element()
                 }
             });
@@ -396,19 +485,9 @@ impl Kuizer {
             items.push(self.render_tab(tab, cx).into_any_element());
         }
         self.stops.borrow_mut().within(None);
-        let settings = div()
-            .id("sidebar-settings")
+        let settings = ui::nav_item("sidebar-settings", false)
             .debug_selector(|| "sidebar-settings".to_owned())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(unit(space::M))
-            .h(unit(size::row()))
-            .px(unit(space::M))
-            .rounded(theme::radius_control())
-            .cursor_pointer()
-            .text_color(theme::muted())
-            .hover(|style| style.bg(theme::hover()).text_color(theme::text()))
+            .when(collapsed, |this| this.justify_center().px_0())
             .tip_hover(
                 Tooltip::new("Settings")
                     .keys(&[hint(&Command::Settings)])
@@ -419,7 +498,7 @@ impl Kuizer {
             )
             .child(icon::view(
                 Icon::Settings,
-                theme::muted(),
+                theme::faint(),
                 self.icon_epoch(Icon::Settings),
                 self.zoom.rem_size(),
             ))
@@ -439,11 +518,9 @@ impl Kuizer {
             } else {
                 size::SIDEBAR
             }))
-            .py(unit(space::M))
+            .pt(unit(space::XS))
+            .pb(unit(space::SURFACE))
             .px(unit(space::INSET))
-            .bg(theme::panel())
-            .border_r_1()
-            .border_color(theme::border())
             .child(
                 div()
                     .id("sidebar-items")
@@ -455,7 +532,16 @@ impl Kuizer {
                     .overflow_y_scroll()
                     .children(items),
             )
-            .child(settings)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .pt(unit(space::S))
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .child(settings),
+            )
     }
 
     pub(super) fn hover_icon(&mut self, icon: Icon, hovered: bool, cx: &mut Context<Self>) {
@@ -473,6 +559,7 @@ impl Kuizer {
         let active = self.tab == tab;
         let collapsed = self.collapsed;
         let figure = self.tab_figure(tab);
+        let warn = tab == Tab::Issues && figure.is_some();
         let shortcuts = &self.config.route_shortcuts;
         let hints = shortcuts.enabled && shortcuts.hints;
         let tip = Tooltip::new(tab.term().text())
@@ -482,29 +569,9 @@ impl Kuizer {
             })
             .keys(if hints { tab.keys() } else { &[] })
             .build();
-        let item = div()
-            .id(tab.label())
+        let item = ui::nav_item(tab.label(), active)
             .debug_selector(|| tab.label().to_owned())
-            .relative()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(unit(space::M))
-            .h(unit(size::row()))
-            .px(unit(space::M))
-            .rounded(theme::radius_control())
-            .cursor_pointer()
-            .text_color(if active {
-                theme::text()
-            } else {
-                theme::muted()
-            })
-            .when(active, |this| {
-                this.bg(theme::selected()).font_weight(FontWeight::MEDIUM)
-            })
-            .when(!active, |this| {
-                this.hover(|style| style.bg(theme::hover()).text_color(theme::text()))
-            })
+            .when(collapsed, |this| this.justify_center().px_0())
             .tip_hover(
                 tip,
                 cx.listener(move |app, hovered: &bool, _, cx| {
@@ -514,9 +581,9 @@ impl Kuizer {
             .child(icon::view(
                 tab.icon(),
                 if active {
-                    theme::text()
+                    theme::focus()
                 } else {
-                    theme::muted()
+                    theme::faint()
                 },
                 self.icon_epoch(tab.icon()),
                 self.zoom.rem_size(),
@@ -527,35 +594,46 @@ impl Kuizer {
                         ui::figure(figure)
                             .text_size(unit(font::SMALL))
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(if active {
-                                theme::muted()
-                            } else {
-                                theme::faint()
+                            .text_color(match (warn, active) {
+                                (true, _) => theme::review(),
+                                (false, true) => theme::muted(),
+                                (false, false) => theme::faint(),
                             })
                     }))
-                    .children(
-                        tab.keys()
-                            .first()
-                            .filter(|_| hints)
-                            .map(|key| ui::kbd(commands::label(key))),
-                    )
             });
         self.control(item, cx, move |app, _, cx| app.go_to(tab, cx))
     }
 
-    pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(confirm) = self.render_confirm(cx) {
-            return confirm;
-        }
-        self.render_selection_bar(cx).into_any_element()
+    pub(super) fn render_statusbar(&self) -> AnyElement {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::L))
+            .h(unit(size::STATUS))
+            .pl(unit(space::S))
+            .pr(unit(space::GUTTER))
+            .border_t_1()
+            .border_color(theme::border())
+            .text_size(unit(font::SMALL))
+            .text_color(theme::faint())
+            .child(self.render_mode())
+            .child(self.render_hints())
+            .children(self.render_position())
+            .into_any_element()
     }
 
     pub(super) fn render_mode(&self) -> Div {
         let mode = self.mode();
-        let tone = if mode == keys::Mode::Confirm {
-            ui::Tone::Review
-        } else {
-            ui::Tone::Neutral
+        let (fill, color) = match mode {
+            keys::Mode::Normal => (theme::hover(), theme::muted()),
+            keys::Mode::Visual => (theme::bar(), theme::on_accent()),
+            keys::Mode::Filter => (theme::review_soft(), theme::review()),
+            keys::Mode::Confirm => (theme::danger_solid(), theme::on_danger()),
+            keys::Mode::Palette
+            | keys::Mode::Settings
+            | keys::Mode::Menu
+            | keys::Mode::Shortcuts => (theme::tile_selected(), theme::text()),
         };
         div()
             .flex()
@@ -563,8 +641,21 @@ impl Kuizer {
             .items_center()
             .gap(unit(space::S))
             .child(
-                ui::tag("mode", mode.label(), tone)
+                theme::label(div())
+                    .id("mode")
                     .debug_selector(move || format!("mode-{}", mode.label().to_lowercase()))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .h(unit(size::CHIP))
+                    .min_w(unit(size::MODE))
+                    .px(unit(space::M))
+                    .rounded(theme::radius_tag())
+                    .bg(fill)
+                    .text_color(color)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(mode.label().to_uppercase())
                     .when(mode == keys::Mode::Visual, |this| {
                         this.tip(
                             Tooltip::new("Motions select the rows they pass")
@@ -574,98 +665,117 @@ impl Kuizer {
                     }),
             )
             .when(!self.count.is_empty(), |this| {
-                this.child(ui::kbd(self.count.clone()))
+                this.child(
+                    theme::label(div())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(unit(space::S))
+                        .h(unit(size::CHIP))
+                        .px(unit(space::S))
+                        .rounded(theme::radius_tag())
+                        .bg(theme::tile_selected())
+                        .text_color(theme::text())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(self.count.clone())
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme::focus())
+                                .child("count"),
+                        ),
+                )
             })
     }
 
-    fn render_selection_bar(&self, cx: &mut Context<Self>) -> Div {
-        let stats = self.selection.stats();
-        let total = stats.total();
-        let empty = total.all.count == 0;
-        let review = total.review.count;
-        let summary = if empty {
-            "Nothing selected".to_owned()
-        } else {
-            format!(
-                "{} selected, {}",
-                total.all.count,
-                theme::bytes(total.all.bytes)
-            )
+    /// The keys that do the most in the current mode, read from the keymap so a rebind shows.
+    fn render_hints(&self) -> Div {
+        let list = self.report().is_some() && self.tab != Tab::Overview;
+        let hints: Vec<(&'static str, &'static str)> = match self.mode() {
+            keys::Mode::Normal if list => {
+                let mut hints = vec![
+                    (hint(&Command::Down), "move"),
+                    (hint(&Command::Toggle), "select"),
+                    (hint(&Command::Visual), "visual"),
+                    (hint(&Command::FocusFilter), "filter"),
+                ];
+                if self.tab.selects() {
+                    hints.push((hint(&Command::Trash), "delete"));
+                }
+                hints.push((hint(&Command::Palette), "commands"));
+                hints
+            }
+            keys::Mode::Normal => vec![
+                (hint(&Command::Palette), "commands"),
+                (hint(&Command::Shortcuts), "shortcuts"),
+            ],
+            keys::Mode::Visual => vec![
+                (hint(&Command::Down), "extend the selection"),
+                (hint(&Command::Trash), "delete"),
+                ("Esc", "back to normal"),
+            ],
+            keys::Mode::Filter => vec![("Enter", "keep the filter"), ("Esc", "clear it")],
+            _ => vec![("Esc", "close")],
         };
-        let ready = self.report().is_some() && !self.busy();
-        let lock = self.trash_lock();
-        let can_select = ready && self.tab.selects();
         div()
             .flex()
-            .flex_none()
+            .flex_1()
+            .min_w_0()
             .items_center()
-            .gap(unit(space::M))
-            .h(unit(size::BAR))
-            .px(unit(space::GUTTER))
-            .bg(theme::panel())
-            .border_t_1()
-            .border_color(theme::border())
-            .child(self.render_mode())
-            .child(
-                div()
-                    .id("selection")
-                    .when(!empty, |this| this.tip(selection_details(stats)))
-                    .child(summary),
-            )
-            .when(review > 0, |this| {
-                this.child(
-                    div()
-                        .id("marked-review")
-                        .text_color(theme::review())
-                        .tip(tooltip::term(Term::Review))
-                        .child(format!("{review} marked review")),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                self.button(
-                    "select-safe",
-                    "Select safe",
-                    ButtonKind::Ghost,
-                    can_select,
-                    cx,
-                    |app, _, cx| {
-                        if app.tab.selects() && !app.busy() {
-                            app.select_safe(cx);
-                        }
-                    },
-                )
-                .tip(tooltip::term(Term::SelectSafe)),
-            )
-            .child(
-                self.button(
-                    "clear",
-                    "Clear",
-                    ButtonKind::Ghost,
-                    ready && !empty,
-                    cx,
-                    |app, _, cx| {
-                        if !app.busy() {
-                            app.selection.clear();
-                            cx.notify();
-                        }
-                    },
-                )
-                .tip(tooltip::plain("Clear the selection in every tab")),
-            )
-            .child(
-                self.button(
-                    "trash",
-                    self.delete_label(&self.selection.stats()),
-                    ButtonKind::Primary,
-                    ready && !empty && lock.is_none(),
-                    cx,
-                    |app, window, cx| app.open_confirm(window, cx),
-                )
-                .map(|this| match lock {
-                    Some(reason) => this.tip(tooltip::plain(reason)),
-                    None => this.tip(tooltip::term(Term::Trash)),
-                }),
+            .gap(unit(space::L))
+            .overflow_hidden()
+            .children(
+                hints
+                    .into_iter()
+                    .filter(|(key, _)| !key.is_empty())
+                    .map(|(key, label)| {
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(unit(space::XS))
+                            .child(ui::kbd(key))
+                            .child(label)
+                    }),
             )
     }
+
+    /// Where the cursor is in the artifact list, as row out of rows.
+    fn render_position(&self) -> Option<Div> {
+        if self.tab != Tab::Artifacts || self.rows.is_empty() {
+            return None;
+        }
+        let cursor = self.cursor_target()?;
+        let row = self.listed_row(None, &cursor, &self.artifact_row)?;
+        Some(
+            ui::tabular(theme::mono(div()))
+                .flex_none()
+                .text_color(theme::muted())
+                .child(format!("{}/{}", row + 1, self.rows.len())),
+        )
+    }
+}
+
+/// The kuizer mark: three bars of falling length on the accent.
+fn logo() -> Div {
+    let line = |width: f32| {
+        div()
+            .w(unit(width))
+            .h(unit(size::MARKER))
+            .rounded(theme::radius_dot())
+            .bg(theme::on_accent())
+    };
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .justify_center()
+        .gap(unit(size::HAIR))
+        .size(unit(size::CHECK))
+        .pl(unit(space::XS))
+        .rounded(theme::radius_tag())
+        .bg(theme::bar())
+        .child(line(size::SWATCH))
+        .child(line(size::DOT))
+        .child(line(size::TRACK))
 }

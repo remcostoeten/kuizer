@@ -354,10 +354,10 @@ impl Kuizer {
                     theme::muted()
                 })
                 .when(active, |this| {
-                    this.bg(theme::selected()).font_weight(FontWeight::MEDIUM)
+                    this.bg(theme::hover()).font_weight(FontWeight::MEDIUM)
                 })
                 .when(!active, |this| {
-                    this.hover(|style| style.bg(theme::hover()).text_color(theme::text()))
+                    this.hover(|style| style.bg(theme::hover_row()).text_color(theme::text()))
                 })
                 .child(page.title)
                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {

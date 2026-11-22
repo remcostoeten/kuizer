@@ -767,7 +767,7 @@ pub(super) fn found_card(activity: &Activity, roots: &[PathBuf]) -> Div {
         .gap(unit(space::L))
         .p(unit(space::GUTTER))
         .rounded(theme::radius_panel())
-        .bg(theme::panel())
+        .bg(theme::elevated())
         .border_1()
         .border_color(theme::border())
         .child(total);

@@ -133,12 +133,7 @@ impl Kuizer {
         }
     }
 
-    pub(super) fn menu_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(menu) = &self.menu else {
             return;
         };
@@ -179,7 +174,7 @@ impl Kuizer {
             "end" => enabled.last().copied(),
             "enter" | "space" => {
                 if let Some(active) = menu.active {
-                    self.choose(active, window, cx);
+                    self.choose(active, cx);
                 }
                 return;
             }
@@ -189,7 +184,7 @@ impl Kuizer {
                         .iter()
                         .position(|item| item.enabled && item.answers(key))
                 {
-                    self.choose(index, window, cx);
+                    self.choose(index, cx);
                 }
                 return;
             }
@@ -200,7 +195,7 @@ impl Kuizer {
         self.redraw_chrome(cx);
     }
 
-    pub(super) fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.take() else {
             return;
         };
@@ -236,7 +231,7 @@ impl Kuizer {
             }
             (Choice::Toggle, Target::Item(source, id, _)) => self.toggle(source, id, cx),
             (Choice::Trash, Target::Item(source, id, _)) => {
-                self.confirm(Some((source, id)), window, cx);
+                self.delete(Some((source, id)), cx);
             }
             (Choice::Restore, Target::Run(session, _)) => {
                 self.restore(session, cx);
@@ -456,7 +451,7 @@ impl Kuizer {
                         theme::faint()
                     })
                     .when(enabled && active == Some(index), |this| {
-                        this.bg(theme::selected())
+                        this.bg(theme::tile_selected())
                     })
                     .when(enabled, |this| this.cursor_pointer())
                     .when_some(item.tip, |this, tip| this.tip(tooltip::plain(tip)))
@@ -471,8 +466,8 @@ impl Kuizer {
                             app.redraw_chrome(cx);
                         }
                     }))
-                    .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
-                        app.choose(index, window, cx);
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        app.choose(index, cx);
                     }));
                 div().flex().flex_col().children(divider).child(row)
             }));

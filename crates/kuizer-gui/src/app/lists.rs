@@ -275,6 +275,9 @@ impl Kuizer {
         .track_scroll(self.list_scroll(tab).cloned().unwrap_or_default())
         .flex_1()
         .w_full()
+        .when(!self.selection.is_empty(), |this| {
+            this.pb(unit(space::XXL * 2. + space::L))
+        })
     }
 
     pub(super) fn render_caches(&self, cx: &mut Context<Self>) -> AnyElement {

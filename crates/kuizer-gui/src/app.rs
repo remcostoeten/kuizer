@@ -14,7 +14,7 @@ use gpui::{
     ElementId, Entity, FocusHandle, FontWeight, KeyDownEvent, KeyUpEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, Task, UniformListScrollHandle, Window, anchored,
-    canvas, deferred, div, point, prelude::*, px, uniform_list,
+    canvas, deferred, div, point, prelude::*, px, relative, uniform_list,
 };
 use kuizer::config::{Config, DeleteMode, Sidebar};
 use kuizer::detect::{Category, Safety};
@@ -73,7 +73,6 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
-use clean::selection_details;
 use keys::{found, found_path, keep_visible, shows_run};
 use lists::{Line, Lists};
 use map::SpaceMap;
@@ -160,18 +159,8 @@ struct Toast {
 }
 
 enum Dialog {
-    Confirm {
-        only: Option<(Source, u64)>,
-        stats: SelectionStats,
-        preview: Vec<(Source, u64)>,
-        typed: String,
-        cancel: bool,
-    },
     Finished(Finished),
-    Branches {
-        scope: GitScope,
-        cancel: bool,
-    },
+    Branches { scope: GitScope, cancel: bool },
 }
 
 /// One row a context menu can act on.
@@ -343,6 +332,8 @@ pub struct Kuizer {
     hidden: HashSet<Category>,
     rows: Vec<usize>,
     rows_bytes: u64,
+    rows_max: u64,
+    path_room: Rc<Cell<f32>>,
     rows_filter: Option<RowsFilter>,
     rows_generation: u64,
     all_checked: Cell<Option<(u64, u64, bool)>>,
@@ -451,6 +442,8 @@ impl Kuizer {
             hidden: HashSet::new(),
             rows: Vec::new(),
             rows_bytes: 0,
+            rows_max: 0,
+            path_room: Rc::new(Cell::new(0.)),
             rows_filter: None,
             rows_generation: 0,
             all_checked: Cell::new(None),
@@ -672,6 +665,7 @@ impl Kuizer {
         let Phase::Ready(report) = &self.phase else {
             self.rows.clear();
             self.rows_bytes = 0;
+            self.rows_max = 0;
             self.rows_filter = None;
             return;
         };
@@ -717,11 +711,10 @@ impl Kuizer {
                 .map(|(index, _)| index)
                 .collect();
         }
-        self.rows_bytes = self
-            .rows
-            .iter()
-            .map(|&index| report.candidates[index].usage.allocated)
-            .sum();
+        (self.rows_bytes, self.rows_max) = self.rows.iter().fold((0, 0), |(sum, max), &index| {
+            let bytes = report.candidates[index].usage.allocated;
+            (sum + bytes, max.max(bytes))
+        });
         self.rows_filter = Some(filter);
     }
 
@@ -993,7 +986,7 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .child(page_header(self.tab))
+                    .child(page_header(self.tab, self.tab_bytes(self.tab)))
                     .children(pending)
                     .child(div().flex().flex_col().flex_1().min_h_0().child(list))
                     .into_any_element()
@@ -1019,28 +1012,79 @@ impl Kuizer {
         }
     }
 
-    fn render_artifacts(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.report().is_none() {
-            return div().into_any_element();
-        }
-        let shown_bytes = self.rows_bytes;
-        let all_checked = self.all_rows_checked();
-        let chip = |category: Category| {
+    /// The strip that splits the project artifacts by category, and a chip per category that
+    /// hides or shows it in the list.
+    fn render_categories(&self, cx: &mut Context<Self>) -> Div {
+        let categories: Vec<(usize, Category, u64)> = self
+            .report_stats
+            .categories
+            .iter()
+            .enumerate()
+            .filter(|(_, (category, bytes))| *bytes > 0 || self.hidden.contains(category))
+            .map(|(rank, (category, bytes))| (rank, *category, *bytes))
+            .collect();
+        let whole = categories.iter().map(|(_, _, bytes)| bytes).sum::<u64>();
+        let tone = |rank: usize, shown: bool| {
+            if !shown {
+                return theme::track();
+            }
+            match rank {
+                0 => theme::bar_strong(),
+                1 => theme::bar_mid(),
+                2 => theme::bar_soft(),
+                _ => theme::bar_rest(),
+            }
+        };
+        let strip = div()
+            .flex()
+            .gap(unit(space::XXS))
+            .h(unit(size::STRIP))
+            .children(categories.iter().filter(|(_, _, bytes)| *bytes > 0).map(
+                |&(rank, category, bytes)| {
+                    div()
+                        .h_full()
+                        .w(relative(theme::share(bytes, whole)))
+                        .min_w(unit(size::MARKER))
+                        .rounded(theme::radius_bar())
+                        .bg(tone(rank, !self.hidden.contains(&category)))
+                },
+            ));
+        let chips = categories.iter().map(|&(rank, category, bytes)| {
             let shown = !self.hidden.contains(&category);
             let chip = div()
                 .id(category.as_str())
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(unit(space::S))
-                .px(unit(space::M))
+                .px(unit(space::S))
                 .h(unit(size::SEGMENT))
                 .rounded(theme::radius_control())
                 .cursor_pointer()
-                .text_color(if shown { theme::text() } else { theme::faint() })
-                .hover(|style| style.bg(theme::hover()))
+                .text_size(unit(font::SMALL))
+                .text_color(if shown {
+                    theme::muted()
+                } else {
+                    theme::faint()
+                })
+                .hover(|style| style.bg(theme::hover()).text_color(theme::text()))
                 .tip(tooltip::term(Term::category(category)))
-                .child(ui::checkbox(shown))
-                .child(category.as_str());
+                .child(
+                    div()
+                        .flex_none()
+                        .size(unit(size::SWATCH))
+                        .rounded(theme::radius_dot())
+                        .when(shown, |this| this.bg(tone(rank, true)))
+                        .when(!shown, |this| {
+                            this.border_1().border_color(theme::border_strong())
+                        }),
+                )
+                .child(theme::mono(div()).child(category.as_str()))
+                .child(
+                    ui::tabular(div())
+                        .text_color(theme::faint())
+                        .child(theme::bytes(bytes)),
+                );
             self.control(chip, cx, move |app, _, cx| {
                 if !app.hidden.remove(&category) {
                     app.hidden.insert(category);
@@ -1048,11 +1092,33 @@ impl Kuizer {
                 app.refresh_rows();
                 cx.notify();
             })
-        };
-        let chips: Vec<Stateful<Div>> = Category::ALL.into_iter().map(chip).collect();
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(unit(space::S))
+            .px(unit(space::GUTTER))
+            .pt(unit(space::M))
+            .child(strip)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(unit(space::XXS))
+                    .ml(unit(-space::S))
+                    .children(chips),
+            )
+    }
+
+    fn render_artifacts(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.report().is_none() {
+            return div().into_any_element();
+        }
+        let shown_bytes = self.rows_bytes;
+        let all_checked = self.all_rows_checked();
         let toolbar = self
             .list_toolbar(cx)
-            .child(div().flex().gap(unit(space::XXS)).children(chips))
             .child(div().flex_1())
             .child(self.tally(Tab::Artifacts, Some(shown_bytes)));
         let header = table_header()
@@ -1071,20 +1137,40 @@ impl Kuizer {
                     },
                 ),
             )
-            .child(head(col::M, "Size", Term::Size).text_right())
+            .child(
+                head(col::XL, "Size", Term::Size)
+                    .text_right()
+                    .pr(unit(size::GAUGE + space::M))
+                    .text_color(theme::muted()),
+            )
             .child(head(col::S, "Safety", Term::Safety))
-            .child(head(col::L, "Category", Term::Category))
-            .child(head(col::XL, "Rule", Term::Rule))
+            .child(head(col::M, "Category", Term::Category))
+            .child(head(col::L, "Rule", Term::Rule))
             .child(head(col::XS, "Changed", Term::Changed).text_right())
-            .child(div().flex_1().child("Path"));
+            .child(div().relative().flex_1().child("PATH").child({
+                let room = Rc::clone(&self.path_room);
+                canvas(
+                    move |area, window, _| {
+                        let width = f32::from(area.size.width);
+                        if (room.get() - width).abs() > 0.5 {
+                            room.set(width);
+                            window.on_next_frame(|window, _| window.refresh());
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .inset_0()
+            }));
         let list = uniform_list(
             "artifacts",
             self.rows.len(),
-            cx.processor(|app, range: Range<usize>, _window, cx| {
+            cx.processor(|app, range: Range<usize>, window, cx| {
                 let Some(report) = app.report() else {
                     return Vec::new();
                 };
                 let cursor = app.cursor_target();
+                let largest = app.rows_max.max(1);
                 range
                     .filter_map(|row| {
                         let candidate = &report.candidates[*app.rows.get(row)?];
@@ -1094,37 +1180,105 @@ impl Kuizer {
                         let review = candidate.rule.safety == Safety::Review;
                         let target = Target::Item(Source::Artifact, id, candidate.path.clone());
                         let look = app.look(Source::Artifact, id, &candidate.path);
+                        let bright = checked || cursor.as_ref() == Some(&target);
+                        let bytes = candidate.usage.allocated;
+                        let figure = theme::bytes(bytes);
+                        let (number, suffix) =
+                            figure.split_once(' ').unwrap_or((figure.as_str(), ""));
+                        let large = suffix.starts_with(['G', 'T']);
+                        let amount = if bright || large {
+                            theme::text()
+                        } else if suffix.starts_with('M') {
+                            theme::muted()
+                        } else {
+                            theme::faint()
+                        };
+                        let age = theme::age(candidate.newest);
+                        let old = age.ends_with("mo") || age.ends_with('y');
+                        let path = model::short_path(&candidate.path, &report.roots);
+                        let cut = path.rfind('/').map_or(0, |at| at + 1);
+                        let (folder, leaf) = path.split_at(cut);
+                        let advance = f32::from(mono_width(window, "0", app.zoom.rem_size()));
+                        let (folder, leaf) = fit_path(folder, leaf, app.path_room.get(), advance);
                         let row = table_row(("artifact", id), checked)
                             .debug_selector(move || format!("artifact-row-{row}"));
                         Some(
                             app.menu_row(row, target, cursor.as_ref(), cx)
-                                .child(ui::check_mark(look.checked))
+                                .child(if look.deleting {
+                                    ui::deleting_mark()
+                                } else {
+                                    ui::check_mark(look.checked)
+                                        .when(bright && look.checked < 0.5, |this| {
+                                            this.border_color(theme::muted())
+                                        })
+                                })
                                 .child(
-                                    column(col::M)
+                                    column(col::XL)
                                         .id(("artifact-size", id))
-                                        .text_right()
+                                        .flex()
+                                        .items_center()
+                                        .justify_end()
+                                        .gap(unit(space::M))
                                         .tip(Self::item_tip(key, cx, |candidate, report| {
                                             size_tooltip(candidate, &report.roots)
                                         }))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(theme::bytes(candidate.usage.allocated)),
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_baseline()
+                                                .gap(unit(space::XS))
+                                                .child(
+                                                    div()
+                                                        .text_color(amount)
+                                                        .font_weight(if large {
+                                                            FontWeight::SEMIBOLD
+                                                        } else {
+                                                            FontWeight::NORMAL
+                                                        })
+                                                        .child(number.to_owned()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(unit(font::CAPTION))
+                                                        .text_color(theme::faint())
+                                                        .child(suffix.to_owned()),
+                                                ),
+                                        )
+                                        .child(if checked {
+                                            ui::gauge(
+                                                theme::share(bytes, largest).sqrt(),
+                                                theme::bar(),
+                                                theme::tile_selected(),
+                                            )
+                                        } else {
+                                            ui::gauge(
+                                                theme::share(bytes, largest).sqrt(),
+                                                ui::tone_of(bytes),
+                                                theme::track(),
+                                            )
+                                        }),
                                 )
+                                .child(column(col::S).flex().child(if look.deleting {
+                                    ui::tag(("artifact-safety", id), "deleting", ui::Tone::Danger)
+                                } else {
+                                    ui::safety_label(("artifact-safety", id), review)
+                                        .when(bright && !review, |this| {
+                                            this.text_color(theme::muted())
+                                        })
+                                }))
                                 .child(
-                                    column(col::S)
-                                        .flex()
-                                        .child(ui::safety_label(("artifact-safety", id), review)),
-                                )
-                                .child(
-                                    column(col::L)
+                                    theme::mono(column(col::M))
                                         .id(("artifact-category", id))
+                                        .text_size(unit(font::SMALL))
                                         .text_color(theme::muted())
                                         .tip(tooltip::term(Term::category(candidate.rule.category)))
                                         .child(candidate.rule.category.as_str()),
                                 )
                                 .child(
-                                    column(col::XL)
+                                    column(col::L)
                                         .id(("artifact-rule", id))
                                         .truncate()
+                                        .font_weight(FontWeight::MEDIUM)
                                         .tip(Self::item_tip(key, cx, |candidate, _| {
                                             Tooltip::new(format!(
                                                 "{} Ecosystem: {}.",
@@ -1138,20 +1292,48 @@ impl Kuizer {
                                 .child(
                                     column(col::XS)
                                         .text_right()
-                                        .text_color(theme::muted())
-                                        .child(theme::age(candidate.newest)),
+                                        .text_color(if old {
+                                            theme::muted()
+                                        } else {
+                                            theme::faint()
+                                        })
+                                        .child(age),
                                 )
                                 .child(
-                                    div()
+                                    theme::mono(div())
                                         .id(("artifact-path", id))
+                                        .flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
-                                        .text_color(theme::muted())
+                                        .overflow_hidden()
+                                        .text_size(unit(font::SMALL))
+                                        .when(look.deleting, |this| {
+                                            this.line_through()
+                                                .text_decoration_color(theme::faint())
+                                        })
                                         .tip(Self::item_tip(key, cx, |candidate, _| {
                                             Tooltip::new(display_path(&candidate.path))
                                         }))
-                                        .child(model::short_path(&candidate.path, &report.roots)),
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(if bright {
+                                                    theme::muted()
+                                                } else {
+                                                    theme::faint()
+                                                })
+                                                .child(folder),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(if bright {
+                                                    theme::text()
+                                                } else {
+                                                    theme::muted()
+                                                })
+                                                .child(leaf),
+                                        ),
                                 )
                                 .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
                                     app.click_row(Source::Artifact, id, event, cx);
@@ -1169,6 +1351,7 @@ impl Kuizer {
             .flex()
             .flex_col()
             .size_full()
+            .child(self.render_categories(cx))
             .child(toolbar)
             .child(table(
                 header,
@@ -1242,8 +1425,6 @@ impl Kuizer {
                     .w_full()
                     .h(unit(size::row_tall()))
                     .px(unit(space::GUTTER))
-                    .border_b_1()
-                    .border_color(theme::border())
                     .debug_selector(move || format!("issue-row-{row}"));
                 Some(
                     self.menu_row(line, Target::Issue(issue.path.clone()), cursor.as_ref(), cx)
@@ -1309,7 +1490,22 @@ impl Render for Kuizer {
         self.region(Region::Sidebar);
         let sidebar = (!start).then(|| self.render_sidebar(cx));
         self.region(Region::Statusbar);
-        let statusbar = (!start).then(|| self.render_statusbar(cx));
+        let statusbar = (!start).then(|| self.render_statusbar());
+        let summary = if start { None } else { self.render_summary(cx) };
+        let floating = (toast.is_some() || summary.is_some()).then(|| {
+            div()
+                .absolute()
+                .bottom(unit(space::L))
+                .left_0()
+                .right_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(unit(space::S))
+                .px(unit(space::XL))
+                .children(toast)
+                .children(summary)
+        });
         let root = div()
             .relative()
             .flex()
@@ -1339,25 +1535,45 @@ impl Render for Kuizer {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .relative()
+                    .when(sidebar.is_none(), |this| this.pl(unit(space::SURFACE)))
                     .children(sidebar)
-                    .child(div().flex().flex_col().flex_1().min_w_0().child(content))
-                    .when(self.working(), |this| {
-                        this.child(
-                            div().absolute().top_0().left_0().right_0().child(
-                                self.loader
-                                    .get_or_insert_with(|| cx.new(|_| chart::Loader))
-                                    .clone(),
-                            ),
-                        )
-                    })
-                    .when(
-                        matches!(self.dialog, Some(Dialog::Confirm { .. })),
-                        |this| this.child(div().id("confirm-guard").absolute().inset_0().occlude()),
-                    )
-                    .children(toast),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .mr(unit(space::SURFACE))
+                            .mb(unit(space::SURFACE))
+                            .rounded(theme::radius_surface())
+                            .bg(theme::panel())
+                            .border_1()
+                            .border_color(theme::border())
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(content)
+                                    .when(self.working(), |this| {
+                                        this.child(
+                                            div().absolute().top_0().left_0().right_0().child(
+                                                self.loader
+                                                    .get_or_insert_with(|| {
+                                                        cx.new(|_| chart::Loader)
+                                                    })
+                                                    .clone(),
+                                            ),
+                                        )
+                                    })
+                                    .children(floating),
+                            )
+                            .children(statusbar),
+                    ),
             )
-            .children(statusbar)
             .children(dialog)
             .children(menu)
             .children(palette)
@@ -1406,45 +1622,58 @@ fn framed(toolbar: Div, body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// The title of a section and one line on what it holds, above its toolbar.
-fn page_header(tab: Tab) -> Div {
+/// The title of a section and one line on what it holds, above its toolbar, with the space the
+/// section can free on the right.
+fn page_header(tab: Tab, bytes: Option<u64>) -> Div {
     div()
         .debug_selector(|| "page-header".to_owned())
         .flex()
-        .flex_col()
         .flex_none()
-        .gap(unit(space::XXS))
+        .items_end()
+        .gap(unit(space::XL))
         .px(unit(space::GUTTER))
         .pt(unit(space::section()))
         .pb(unit(space::XS))
         .child(
             div()
-                .text_size(unit(font::HEADING))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(tab.label()),
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(unit(space::XXS))
+                .child(
+                    div()
+                        .text_size(unit(font::HEADING))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(tab.label()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(unit(font::SMALL))
+                        .text_color(theme::faint())
+                        .child(tab.term().text()),
+                ),
         )
-        .child(
+        .children(bytes.filter(|&bytes| bytes > 0).map(|bytes| {
             div()
-                .truncate()
-                .text_size(unit(font::SMALL))
-                .text_color(theme::muted())
-                .child(tab.term().text()),
-        )
+                .flex()
+                .flex_col()
+                .flex_none()
+                .items_end()
+                .child(ui::caption("Reclaimable"))
+                .child(ui::amount(bytes, font::FIGURE))
+        }))
 }
 
-/// A table as a card: the column header on top and the rows filling what is left below it.
+/// A table: the column header on top and the rows filling what is left below it, edge to edge
+/// in the content surface.
 fn table(header: Div, body: AnyElement) -> Div {
     div()
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
-        .mx(unit(space::GUTTER))
-        .mb(unit(space::GUTTER))
-        .rounded(theme::radius_panel())
-        .border_1()
-        .border_color(theme::border())
-        .overflow_hidden()
         .child(header)
         .child(body)
 }
@@ -1476,14 +1705,13 @@ fn table_header() -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap(unit(space::L))
+        .gap(unit(space::M))
         .h(unit(size::row()))
         .px(unit(space::GUTTER))
-        .rounded_t(theme::radius_panel())
-        .bg(theme::panel())
+        .border_t_1()
         .border_b_1()
         .border_color(theme::border())
-        .text_color(theme::muted())
+        .text_color(theme::faint())
 }
 
 fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
@@ -1491,15 +1719,61 @@ fn table_row(id: (&'static str, u64), checked: bool) -> gpui::Stateful<Div> {
         .id(gpui::ElementId::NamedInteger(id.0.into(), id.1))
         .flex()
         .items_center()
-        .gap(unit(space::L))
+        .gap(unit(space::M))
         .w_full()
         .h(unit(size::row()))
         .px(unit(space::GUTTER))
         .cursor_pointer()
-        .border_b_1()
-        .border_color(theme::border())
         .when(checked, |this| this.bg(theme::selected()))
-        .hover(|style| style.bg(theme::hover()))
+        .when(!checked, |this| {
+            this.hover(|style| style.bg(theme::hover_row()))
+        })
+}
+
+/// The width `text` takes in the monospace typeface at the small type size.
+fn mono_width(window: &Window, text: &str, rem: Pixels) -> Pixels {
+    let font = theme::mono_family().map_or_else(|| window.text_style().font(), gpui::font);
+    let run = gpui::TextRun {
+        len: text.len(),
+        font,
+        color: theme::text().into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let font_size = rem * (font::SMALL / theme::REM);
+    window
+        .text_system()
+        .layout_line(text, font_size, &[run], None)
+        .width
+}
+
+/// Cuts a path to the characters that fit in `room` pixels of a monospace face whose glyphs
+/// are `advance` wide. The folder part gives way first and ends in an ellipsis; the last part
+/// stays whole unless it alone is too long.
+fn fit_path(folder: &str, leaf: &str, room: f32, advance: f32) -> (String, String) {
+    if room <= 0. || advance <= 0. {
+        return (folder.to_owned(), leaf.to_owned());
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a column holds a few hundred characters at most"
+    )]
+    let fits = (room / advance).floor() as usize;
+    let cut = |text: &str, keep: usize| -> String {
+        let mut kept: String = text.chars().take(keep).collect();
+        kept.push('…');
+        kept
+    };
+    let (folder_len, leaf_len) = (folder.chars().count(), leaf.chars().count());
+    if folder_len + leaf_len <= fits {
+        (folder.to_owned(), leaf.to_owned())
+    } else if leaf_len + 1 < fits {
+        (cut(folder, fits - leaf_len - 1), leaf.to_owned())
+    } else {
+        (String::new(), cut(leaf, fits.saturating_sub(1)))
+    }
 }
 
 fn size_details(

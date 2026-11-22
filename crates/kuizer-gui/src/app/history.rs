@@ -207,8 +207,6 @@ impl Kuizer {
                     .w_full()
                     .h(unit(size::row()))
                     .px(unit(space::GUTTER))
-                    .border_b_1()
-                    .border_color(theme::border())
                     .debug_selector(move || format!("run-{session}"));
                 let target = Target::Run(run.id, run.command.clone());
                 Some(

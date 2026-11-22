@@ -1,5 +1,6 @@
-//! The delete flow as motion: a row blends from idle to marked to confirming to deleting to
-//! gone, each step starting from where the previous one left it.
+//! The delete flow as motion: a row blends from idle to marked to deleting to gone, each step
+//! starting from where the previous one left it, and the summary bar rises in with the first
+//! selected item and fades out with the last.
 
 use gpui::Rgba;
 
@@ -17,27 +18,22 @@ type Paths = HashMap<Source, HashSet<PathBuf>>;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Look {
     pub(super) checked: f32,
-    pub(super) confirming: f32,
     pub(super) opacity: f32,
     pub(super) slide: f32,
+    pub(super) deleting: bool,
 }
 
 impl Look {
     fn background(&self) -> Rgba {
-        mix(
-            faded(theme::selected(), self.checked),
-            theme::danger_soft(),
-            self.confirming,
-        )
+        faded(theme::selected(), self.checked)
     }
 }
 
-/// When the confirmation last opened or closed, and whether it covers one item or the
-/// selection.
+/// When the summary bar last appeared or went away, and the selection it sums up.
 struct Shown {
     at: Instant,
     open: bool,
-    only: Option<Key>,
+    stats: SelectionStats,
 }
 
 /// What a finished cleanup lets go of: `removed` rows fade out and leave the report once the
@@ -53,7 +49,7 @@ struct Settling {
 #[derive(Default)]
 pub(super) struct Flow {
     marks: HashMap<Key, Instant>,
-    confirm: Option<Shown>,
+    bar: Option<Shown>,
     settling: Option<Settling>,
 }
 
@@ -72,24 +68,38 @@ impl Flow {
         }
     }
 
-    /// Notes the confirmation opening, closing or following its item to a new id.
-    pub(super) fn observe(&mut self, confirm: Option<Option<Key>>) {
-        let open = confirm.is_some();
-        match (&mut self.confirm, confirm) {
-            (Some(shown), Some(only)) if shown.open => shown.only = only,
-            (Some(shown), None) if !shown.open => {}
-            (None, None) => {}
-            (shown, covered) => {
-                let only = match covered {
-                    Some(only) => only,
-                    None => shown.as_ref().and_then(|shown| shown.only),
+    /// Notes the selection growing from or shrinking to nothing, which brings the summary bar
+    /// in or out. A bar on its way out keeps the totals it showed last.
+    pub(super) fn observe(&mut self, stats: SelectionStats) {
+        let open = stats.total().all.count > 0;
+        match &mut self.bar {
+            Some(shown) if shown.open == open => {
+                if open {
+                    shown.stats = stats;
+                }
+            }
+            None if !open => {}
+            bar => {
+                let stats = match bar {
+                    Some(shown) if !open => shown.stats,
+                    _ => stats,
                 };
-                *shown = Some(Shown {
+                *bar = Some(Shown {
                     at: Instant::now(),
                     open,
-                    only,
+                    stats,
                 });
             }
+        }
+    }
+
+    pub(super) fn bar(&self) -> Option<(SelectionStats, f32)> {
+        let shown = self.bar.as_ref()?;
+        let blend = progress(shown.at, Instant::now());
+        match (shown.open, blend < 1.0) {
+            (true, _) => Some((shown.stats, blend)),
+            (false, true) => Some((shown.stats, 1.0 - blend)),
+            (false, false) => None,
         }
     }
 
@@ -102,25 +112,13 @@ impl Flow {
         let fresh = |at: Instant| now.saturating_duration_since(at) < STEP;
         self.settling.is_some()
             || deleting.is_some_and(fresh)
-            || self.confirm.as_ref().is_some_and(|shown| fresh(shown.at))
+            || self.bar.as_ref().is_some_and(|shown| fresh(shown.at))
             || self.marks.values().any(|at| fresh(*at))
     }
 
     fn check(&self, key: Key, checked: bool, now: Instant) -> f32 {
         let blend = self.marks.get(&key).map_or(1.0, |at| progress(*at, now));
         if checked { blend } else { 1.0 - blend }
-    }
-
-    fn confirming(&self, key: Key, checked: bool, now: Instant) -> f32 {
-        let Some(shown) = &self.confirm else {
-            return 0.0;
-        };
-        let covers = shown.only.map_or(checked, |only| only == key);
-        if !covers {
-            return 0.0;
-        }
-        let blend = progress(shown.at, now);
-        if shown.open { blend } else { 1.0 - blend }
     }
 }
 
@@ -131,8 +129,12 @@ impl Kuizer {
         let key = (source, id);
         let checked = self.selection.contains(&key);
         let within = |paths: &Paths| paths.get(&source).is_some_and(|set| set.contains(path));
+        let removing = self
+            .cleaning
+            .as_ref()
+            .is_some_and(|cleaning| within(&cleaning.paths));
         let (opacity, slide) = if let Some(cleaning) = &self.cleaning
-            && within(&cleaning.paths)
+            && removing
         {
             (deleting(cleaning.started, now), 0.0)
         } else if let Some(settling) = &self.flow.settling
@@ -149,9 +151,9 @@ impl Kuizer {
         };
         Look {
             checked: self.flow.check(key, checked, now),
-            confirming: self.flow.confirming(key, checked, now),
             opacity,
             slide,
+            deleting: removing,
         }
     }
 
@@ -208,13 +210,10 @@ impl Kuizer {
         self.refresh_map();
     }
 
-    /// Follows the confirmation and asks for the next frame while any row is still blending.
+    /// Follows the selection for the summary bar and asks for the next frame while any row or
+    /// the bar is still blending.
     pub(super) fn animate_rows(&mut self, window: &mut Window) {
-        let confirm = match &self.dialog {
-            Some(Dialog::Confirm { only, .. }) => Some(*only),
-            _ => None,
-        };
-        self.flow.observe(confirm);
+        self.flow.observe(self.selection.stats());
         if self
             .flow
             .moving(self.cleaning.as_ref().map(|cleaning| cleaning.started))
@@ -248,15 +247,5 @@ fn faded(color: Rgba, weight: f32) -> Rgba {
     Rgba {
         a: color.a * weight,
         ..color
-    }
-}
-
-fn mix(from: Rgba, to: Rgba, weight: f32) -> Rgba {
-    let blend = |a: f32, b: f32| a + (b - a) * weight;
-    Rgba {
-        r: blend(from.r, to.r),
-        g: blend(from.g, to.g),
-        b: blend(from.b, to.b),
-        a: blend(from.a, to.a),
     }
 }

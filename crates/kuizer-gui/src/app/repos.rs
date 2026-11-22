@@ -602,7 +602,7 @@ impl Kuizer {
                     .gap(unit(space::XS))
                     .p(unit(space::L))
                     .rounded(theme::radius_panel())
-                    .bg(theme::panel())
+                    .bg(theme::elevated())
                     .children(lines.iter().take(LIST_LIMIT).map(|(repository, branch)| {
                         div()
                             .flex()
