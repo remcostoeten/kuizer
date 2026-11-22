@@ -4,7 +4,7 @@ description: kuizer-gui is a desktop window for the same scan, with a command pa
 icon: Compass
 ---
 
-`kuizer-gui` is a desktop window for the same scan, built on [GPUI](https://gpui.rs). It shows an overview, project artifacts, global caches, toolchains, Docker objects, git repositories, duplicates, history and scan issues. It moves selected items to the trash with the same checks as `kuizer clean`.
+`kuizer-gui` is a desktop window for the same scan, built on [GPUI](https://gpui.rs). It shows an overview, project artifacts, global caches, toolchains, Docker objects, git repositories, duplicates, history and scan issues. It deletes selected items with the same checks as `kuizer clean`.
 
 ```sh
 kuizer-gui
@@ -23,7 +23,7 @@ Type a folder, pick one with the system folder dialog, reopen one of the last ei
 
 ![The project artifacts list with several rows selected and the inline confirmation showing the item count and total size before they are deleted](/screenshots/artifacts.png)
 
-Deletion is permanent: nothing goes to the trash and there is no undo. A plain confirmation appears when every selected item is `safe`. When any item is `review`, you type the item count. The History section keeps a Restore button for runs from older versions that still sit in the trash.
+Deletion is permanent by default. The "Move to the trash" switch under Settings > Deleting writes `delete.mode = "trash"` to the config file; project artifacts and global caches then move to the trash, while toolchains, Docker objects and git branches are still removed for good. While anything is selected, a bar above the status bar sums up the selection: the item count, the total size, how many items are `review`, and whether they are deleted for good or moved to the trash. Its Delete button, `enter`, `delete` and `d` remove the selection at once, without a confirmation. Holding the key down never deletes. The History section has a Restore button for runs that still sit in the trash.
 
 ## Keyboard
 
@@ -33,7 +33,7 @@ Everything works from the keyboard. `Ctrl+K` (`Cmd+K` on macOS) opens a command 
 | --- | --- |
 | `j` `k` or the arrow keys | Move the cursor row |
 | `space` | Select the item |
-| `enter` `delete` `d` | Delete the selection, or the cursor item, for good |
+| `enter` `delete` `d` | Delete the selection, or the cursor item |
 | `o` | Reveal the item in the file manager |
 | `y` | Copy the item's path |
 | `/` | Filter the list by path or name |

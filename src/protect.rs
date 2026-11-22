@@ -62,6 +62,8 @@ const HOME_DIRS: &[&str] = &[
     "Library/Keychains",
 ];
 
+const VOLTA_TOOLS: &str = ".volta/tools";
+
 const TOOL_DIRS: &[&str] = &[
     ".vscode/extensions",
     ".vscode-insiders/extensions",
@@ -77,7 +79,7 @@ const TOOL_DIRS: &[&str] = &[
     ".config/yarn/global",
     ".yarn/global",
     ".npm-global",
-    ".volta/tools",
+    VOLTA_TOOLS,
     ".local/share/nvim",
     ".config/coc/extensions",
 ];
@@ -109,6 +111,7 @@ pub struct Protected {
     dirs: HashSet<PathBuf>,
     names: HashSet<OsString>,
     homes: Vec<PathBuf>,
+    exempt: Vec<PathBuf>,
 }
 
 impl Protected {
@@ -133,7 +136,12 @@ impl Protected {
             .iter()
             .filter_map(|dir| dir.file_name().map(OsString::from))
             .collect();
-        Self { dirs, names, homes }
+        Self {
+            dirs,
+            names,
+            homes,
+            exempt: Vec::new(),
+        }
     }
 
     pub fn for_user() -> Self {
@@ -187,7 +195,22 @@ impl Protected {
     /// }
     pub fn covers(&self, path: &Path) -> bool {
         path.ancestors()
-            .any(|dir| self.dirs.contains(dir) || marked_on_disk(dir))
+            .any(|dir| marked_on_disk(dir) || (self.dirs.contains(dir) && !self.exempts(dir, path)))
+    }
+
+    fn exempts(&self, dir: &Path, path: &Path) -> bool {
+        self.exempt
+            .iter()
+            .any(|exempt| exempt == dir && path.starts_with(exempt))
+    }
+
+    pub(crate) fn allowing_volta_tools(mut self) -> Self {
+        self.exempt = self
+            .homes
+            .iter()
+            .map(|home| home.join(VOLTA_TOOLS))
+            .collect();
+        self
     }
 
     /// @name in_hidden_home_dir
@@ -214,6 +237,21 @@ mod tests {
 
     use super::*;
     use crate::detect::builtin_rules;
+
+    #[test]
+    fn the_volta_exemption_still_refuses_browser_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let node = home.join(".volta/tools/image/node/20.0.0");
+        let profile = home.join(".config/google-chrome/Default");
+        fs::create_dir_all(&node).expect("node");
+        fs::create_dir_all(&profile).expect("profile");
+        let protected = Protected::new(Some(home));
+        assert!(protected.covers(&node));
+        let allowed = protected.allowing_volta_tools();
+        assert!(!allowed.covers(&node));
+        assert!(allowed.covers(&profile));
+    }
 
     #[test]
     fn recognizes_profile_listings() {

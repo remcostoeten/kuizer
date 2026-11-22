@@ -4,10 +4,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyView, App, Bounds, Context, Corner, DispatchPhase, Entity,
-    FontWeight, Global, IntoElement, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled, Task, Window, anchored, canvas,
-    deferred, div, point, prelude::*,
+    Animation, AnimationExt, AnyView, App, Bounds, Context, Corner, DispatchPhase, ElementId,
+    Entity, FontWeight, Global, IntoElement, KeyDownEvent, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    anchored, canvas, deferred, div, point, prelude::*,
 };
 use kuizer::output::display_path;
 
@@ -185,9 +185,35 @@ pub struct Layer {
     pending: Option<(Anchor, Task<()>)>,
     closed: Option<Instant>,
     epoch: usize,
+    focus: Option<ElementId>,
+    offered: bool,
 }
 
 impl Layer {
+    #[cfg(test)]
+    pub fn showing(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    fn aim(&mut self, focus: Option<ElementId>, cx: &mut Context<Self>) {
+        if self.focus == focus {
+            return;
+        }
+        if self.focus.is_some() {
+            self.dismiss(cx);
+        }
+        self.focus = focus;
+        self.offered = false;
+    }
+
+    /// Whether the control `id` should open its tooltip for the keyboard now. True once per
+    /// focus, so a tooltip closed by a key or the mouse stays closed until the focus moves.
+    fn claim(&mut self, id: &ElementId) -> bool {
+        let due = !self.offered && self.focus.as_ref() == Some(id);
+        self.offered |= due;
+        due
+    }
+
     fn request(
         &mut self,
         anchor: Anchor,
@@ -358,6 +384,29 @@ impl Render for Layer {
     }
 }
 
+/// Points the keyboard tooltip at the control with `id`, the one the focus ring rests on, or at
+/// nothing. That control opens its own tooltip the next time it is drawn, after the hover delay.
+pub fn focus(id: Option<ElementId>, cx: &mut App) {
+    let layer = layer(cx);
+    layer.update(cx, |layer, cx| layer.aim(id, cx));
+}
+
+fn offer(id: &ElementId, area: Bounds<Pixels>, build: &Build, window: &mut Window, cx: &mut App) {
+    let Some(shared) = cx.try_global::<Shared>() else {
+        return;
+    };
+    let layer = shared.0.clone();
+    if !layer.update(cx, |layer, _| layer.claim(id)) {
+        return;
+    }
+    let build = Rc::clone(build);
+    window.defer(cx, move |window, cx| {
+        layer.update(cx, |layer, cx| {
+            layer.request(Anchor { bounds: area }, build, window, cx);
+        });
+    });
+}
+
 pub fn layer(cx: &mut App) -> Entity<Layer> {
     if let Some(shared) = cx.try_global::<Shared>() {
         return shared.0.clone();
@@ -374,21 +423,32 @@ pub trait Tip: StatefulInteractiveElement + ParentElement + Sized {
 
     /// Like `tip`, and also calls `listener` when the hover starts or ends. GPUI keeps one
     /// hover listener per element, so use this instead of `on_hover` next to a tooltip.
+    /// The tooltip also opens while the focus ring rests on the element, see `focus`.
     fn tip_hover(
-        self,
+        mut self,
         build: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
         listener: impl Fn(&bool, &mut Window, &mut App) + 'static,
     ) -> Self {
         let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let build: Build = Rc::new(build);
+        let id = self.interactivity().element_id.clone();
         let probe = {
             let bounds = Rc::clone(&bounds);
-            canvas(move |area, _, _| bounds.set(Some(area)), |_, (), _, _| {})
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
+            let build = Rc::clone(&build);
+            canvas(
+                move |area, window, cx| {
+                    bounds.set(Some(area));
+                    if let Some(id) = &id {
+                        offer(id, area, &build, window, cx);
+                    }
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
         };
-        let build: Build = Rc::new(build);
         self.child(probe).on_hover(move |hovered, window, cx| {
             listener(hovered, window, cx);
             let Some(area) = bounds.get() else {
@@ -541,6 +601,35 @@ mod tests {
         assert!(visible(cx));
         cx.simulate_click(point(px(20.), px(20.)), Modifiers::default());
         assert!(!visible(cx));
+    }
+
+    fn aim(cx: &mut VisualTestContext, id: Option<&'static str>) {
+        cx.update(|window, cx| {
+            focus(id.map(ElementId::from), cx);
+            window.refresh();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_focused_control_opens_its_tooltip_until_the_focus_moves(cx: &mut TestAppContext) {
+        let cx = open(cx);
+        aim(cx, Some("second"));
+        assert!(!visible(cx), "the keyboard waits like the mouse");
+        cx.executor().advance_clock(DELAY);
+        cx.run_until_parked();
+        let bounds = shown(cx).expect("the tooltip is painted");
+        assert!(
+            bounds.origin.y >= px(80.),
+            "it opens below the focused control"
+        );
+
+        aim(cx, Some("first"));
+        let bounds = shown(cx).expect("the next one opens at once");
+        assert!(bounds.origin.y >= px(40.) && bounds.origin.y < px(80.));
+
+        aim(cx, None);
+        assert!(!visible(cx), "leaving the controls closes it");
     }
 
     #[gpui::test]

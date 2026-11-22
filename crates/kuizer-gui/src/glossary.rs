@@ -159,7 +159,7 @@ impl Term {
                 "Every cleanup kuizer made on this machine, from this window and from the command line, and what is still in the trash."
             }
             Self::Trash => {
-                "Deletes the selection for good after you confirm. Nothing goes to the trash and nothing can be restored."
+                "Removes the selection at once, without asking. Items are deleted for good unless Move to the trash is on in the settings; toolchains and Docker objects are always deleted for good."
             }
             Self::Safety => {
                 "How sure kuizer is that removing an item is harmless. safe items are rebuilt by a tool, review items need a look first."
@@ -171,7 +171,7 @@ impl Term {
                 "A tool rebuilds this from your project files, for example on the next install or build. Removing it only costs the time to rebuild."
             }
             Self::Review => {
-                "Probably generated, but it may hold something a rebuild cannot bring back, such as a virtual environment with local changes or a pinned toolchain. Look before you remove it. Review items are never selected in bulk, and moving them asks you to type the item count."
+                "Probably generated, but it may hold something a rebuild cannot bring back, such as a virtual environment with local changes or a pinned toolchain. Look before you remove it. Select safe skips review items."
             }
             Self::Dependencies => {
                 "Installed packages such as node_modules, Pods and Python virtual environments. Your package manager installs them again."
@@ -232,7 +232,7 @@ impl Term {
                 "All items removed over time. Items you put back with kuizer restore are counted as restored."
             }
             Self::Freed => {
-                "Space actually given back: items deleted permanently, or moved to the trash by an older version and since emptied."
+                "Space actually given back: items deleted permanently, or moved to the trash and since emptied."
             }
             Self::InTrash => {
                 "Removed items that are still in the trash. Restore in the table below or kuizer restore puts them back until the trash is emptied."

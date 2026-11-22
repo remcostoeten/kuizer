@@ -28,7 +28,7 @@ impl Kuizer {
                 } else {
                     theme::text()
                 })
-                .when(index == active, |this| this.bg(theme::selected()))
+                .when(index == active, |this| this.bg(theme::tile_selected()))
                 .when(blocked.is_none(), |this| this.cursor_pointer())
                 .child(div().flex_1().min_w_0().truncate().child(label))
                 .children(blocked.map(|reason| {
@@ -280,11 +280,28 @@ impl Kuizer {
     /// The start of every list toolbar: the filter, and the safety segments on sections whose
     /// rows are graded. Sections add their own controls, a spacer and `tally` after it.
     pub(super) fn list_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let can_select = self.report().is_some() && !self.busy() && self.tab.selects();
         ui::toolbar()
-            .child(self.sidebar_toggle(cx))
             .child(self.render_filter(cx))
             .when(self.tab.grades(), |this| {
                 this.child(self.safety_segments(cx))
+            })
+            .when(self.tab.selects(), |this| {
+                this.child(
+                    self.button(
+                        "select-safe",
+                        "Select safe",
+                        ButtonKind::Secondary,
+                        can_select,
+                        cx,
+                        |app, _, cx| {
+                            if app.tab.selects() && !app.busy() {
+                                app.select_safe(cx);
+                            }
+                        },
+                    )
+                    .tip(tooltip::term(Term::SelectSafe)),
+                )
             })
     }
 
@@ -332,14 +349,17 @@ impl Kuizer {
         let (shown, total) = self.counts(tab);
         let (one, many) = tab.noun();
         let noun = if total == 1 { one } else { many };
-        let mut text = if shown == total {
-            format!("{total} {noun}")
-        } else {
-            format!("{shown} of {total} {noun}")
+        let strong = |text: String| {
+            div()
+                .text_color(theme::text())
+                .font_weight(FontWeight::MEDIUM)
+                .child(text)
         };
-        if let Some(bytes) = bytes {
-            text.push_str(&format!(", {}", theme::bytes(bytes)));
-        }
+        let count = if shown == total {
+            strong(total.to_string())
+        } else {
+            strong(format!("{shown} of {total}"))
+        };
         let tip = match tab {
             Tab::Issues => Some(Tooltip::new(Term::Issues.text()).title(Term::Issues.title())),
             Tab::Repos => Some(Tooltip::new("What git gc frees in the listed repositories")),
@@ -350,10 +370,20 @@ impl Kuizer {
             div()
                 .id("tally")
                 .debug_selector(|| "tally".to_owned())
+                .flex()
                 .flex_none()
+                .items_baseline()
+                .gap(unit(space::XS))
+                .text_size(unit(font::SMALL))
                 .text_color(theme::muted())
                 .when_some(tip, |this, tip| this.tip(tip.build()))
-                .child(text),
+                .child(count)
+                .child(if bytes.is_some() {
+                    format!("{noun},")
+                } else {
+                    noun.to_owned()
+                })
+                .children(bytes.map(|bytes| strong(theme::bytes(bytes)))),
         )
     }
 
@@ -364,14 +394,20 @@ impl Kuizer {
             .id("search")
             .debug_selector(|| "search".to_owned())
             .flex()
-            .flex_none()
             .items_center()
-            .gap(unit(space::S))
-            .h(unit(size::CONTROL))
-            .px(unit(space::S))
+            .gap(unit(space::M))
+            .w(unit(size::TRIGGER))
+            .h(unit(size::SEGMENT))
+            .pl(unit(space::M))
+            .pr(unit(space::S))
             .rounded(theme::radius_control())
+            .bg(theme::panel())
+            .border_1()
+            .border_color(theme::border())
+            .text_size(unit(font::SMALL))
+            .text_color(theme::faint())
             .cursor_pointer()
-            .hover(|style| style.bg(theme::hover()))
+            .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
             .tip_hover(
                 Tooltip::new("Search every command, section and recent folder")
                     .title("Search or run a command")
@@ -382,12 +418,20 @@ impl Kuizer {
                 }),
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(icon::view(
+            .child(icon::sized(
                 Icon::Search,
-                theme::muted(),
+                theme::faint(),
                 self.icon_epoch(Icon::Search),
                 self.zoom.rem_size(),
+                size::CHECK,
             ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child("Search or run a command"),
+            )
             .child(ui::kbd(key));
         self.control(search, cx, |app, _, cx| app.open_palette(cx))
     }

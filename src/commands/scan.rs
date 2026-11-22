@@ -55,6 +55,10 @@ pub fn keep_idle(
         return Ok(());
     }
     let cutoff = idle.and_then(|Idle(age)| SystemTime::now().checked_sub(age));
+    if idle.is_some() && cutoff.is_none() {
+        candidates.clear();
+        return Ok(());
+    }
     scan::annotate(candidates, config, cutoff)?;
     if let Some(cutoff) = cutoff {
         candidates.retain(|candidate| {

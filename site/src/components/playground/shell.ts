@@ -2,22 +2,7 @@ import { demoCaches, demoRoot, projectNames, scanTotals } from '@/content/demo'
 import { installOptions } from '@/content/install'
 import { version } from '@/content/site'
 import { formatBytes, formatCount } from '@/shared/helpers/bytes'
-import {
-  bytesOf,
-  itemById,
-  itemState,
-  onDiskIds,
-  startScan,
-  updateItems,
-  type HistoryRun,
-  type ShellLine,
-  type State,
-} from './model'
-
-type Result = {
-  state: State
-  lines: ShellLine[]
-}
+import { bytesOf, itemById, onDiskIds, startScan, type HistoryRun, type ShellLine, type State } from './model'
 
 const historyPath = '~/.kuizer-history.json'
 
@@ -31,10 +16,6 @@ function muted(text: string): ShellLine {
 
 function warn(text: string): ShellLine {
   return { text, tone: 'warn' }
-}
-
-function ok(text: string): ShellLine {
-  return { text, tone: 'ok' }
 }
 
 function clock(iso: string): string {
@@ -55,7 +36,7 @@ function help(): ShellLine[] {
     plain(`  kuizer ${demoRoot}          open the interactive list again`),
     plain(`  kuizer scan ${demoRoot}     print what is on the fake disk`),
     plain('  kuizer history              every deletion made on this page'),
-    plain('  kuizer restore --last       put the last run back from the trash'),
+    plain('  kuizer restore --last       put the last run back, in trash mode only'),
     plain('  kuizer restore s1           put one run back by id'),
     plain('  kuizer cache                global caches the real tool knows'),
     plain('  ls, clear, help'),
@@ -67,7 +48,7 @@ function help(): ShellLine[] {
 function scan(state: State): ShellLine[] {
   const ids = onDiskIds(state)
   if (ids.length === 0) {
-    return [muted(`nothing found under ${demoRoot}, every artifact is in the trash`)]
+    return [muted(`nothing found under ${demoRoot}, every artifact was deleted`)]
   }
   const items = ids.map(itemById).sort((left, right) => right.bytes - left.bytes)
   const lines = items.map((item) => {
@@ -103,9 +84,8 @@ function caches(): ShellLine[] {
 }
 
 function runLine(run: HistoryRun): ShellLine {
-  const where = run.restored ? 'restored' : run.mode === 'trash' ? 'in the trash' : 'deleted permanently'
   return plain(
-    `  ${run.id.padEnd(4)} ${clock(run.at).padEnd(12)} ${plural(run.ids.length, 'item').padEnd(9)} ${formatBytes(bytesOf(run.ids)).padStart(10)}  ${run.mode.padEnd(9)} ${where}`,
+    `  ${run.id.padEnd(4)} ${clock(run.at).padEnd(12)} ${plural(run.ids.length, 'item').padEnd(9)} ${formatBytes(bytesOf(run.ids)).padStart(10)}  deleted permanently`,
   )
 }
 
@@ -113,84 +93,35 @@ function history(state: State): ShellLine[] {
   if (state.runs.length === 0) {
     return [muted(`nothing deleted yet, history is kept in ${historyPath}`)]
   }
-  const counted = state.runs.filter((run) => !run.restored)
-  const restored = state.runs.filter((run) => run.restored)
-  const countedIds = counted.flatMap((run) => run.ids)
-  const trashIds = counted.filter((run) => run.mode === 'trash').flatMap((run) => run.ids)
-  const freedIds = counted.filter((run) => run.mode === 'permanent').flatMap((run) => run.ids)
+  const ids = state.runs.flatMap((run) => run.ids)
   const first = state.runs[0]
-  const lines = [
+  return [
     ...state.runs.map(runLine),
     plain(''),
     plain(
-      `${formatBytes(bytesOf(countedIds))} removed across ${plural(countedIds.length, 'item')} in ${plural(counted.length, 'run')} since ${first ? clock(first.at) : '-'}`,
+      `${formatBytes(bytesOf(ids))} removed across ${plural(ids.length, 'item')} in ${plural(state.runs.length, 'run')} since ${first ? clock(first.at) : '-'}`,
     ),
+    plain('all of it is freed, every run deleted permanently'),
+    muted(historyPath),
   ]
-  if (restored.length > 0) {
-    const ids = restored.flatMap((run) => run.ids)
-    lines.push(
-      plain(
-        `${formatBytes(bytesOf(ids))} across ${plural(ids.length, 'item')} was restored and is not counted`,
-      ),
-    )
-  }
-  if (trashIds.length > 0) {
-    if (freedIds.length > 0) {
-      lines.push(
-        plain(
-          `${formatBytes(bytesOf(freedIds))} of that is freed, deleted permanently or emptied from the trash`,
-        ),
-      )
-    }
-    lines.push(
-      plain(
-        `${formatBytes(bytesOf(trashIds))} is still in the trash across ${plural(trashIds.length, 'item')} and frees once the trash is emptied, \`kuizer restore ID\` puts it back`,
-      ),
-    )
-  } else if (countedIds.length > 0) {
-    lines.push(plain('all of it is freed, none of it is still in the trash'))
-  }
-  lines.push(muted(historyPath))
-  return lines
 }
 
-function restore(state: State, target: string): Result {
+function restore(state: State, target: string): ShellLine[] {
   const run =
-    target === '--last' || target === ''
-      ? [...state.runs].reverse().find((entry) => !entry.restored)
-      : state.runs.find((entry) => entry.id === target)
+    target === '--last' || target === '' ? state.runs.at(-1) : state.runs.find((entry) => entry.id === target)
   if (!run) {
-    const reason =
-      state.runs.length === 0 ? 'nothing to restore, the history is empty' : `no run ${target} in the history`
-    return { state, lines: [warn(reason)] }
+    return [
+      warn(
+        state.runs.length === 0
+          ? 'nothing to restore, the history is empty'
+          : `no run ${target} in the history`,
+      ),
+    ]
   }
-  if (run.restored) {
-    return { state, lines: [muted(`${run.id} was already restored`)] }
-  }
-  if (run.mode === 'permanent') {
-    return {
-      state,
-      lines: [warn(`${run.id} was deleted permanently, there is nothing in the trash to put back`)],
-    }
-  }
-  const restorable = run.ids.filter((id) => itemState(state, id).status === 'deleted')
-  const lines = restorable.map((id, index) =>
-    ok(
-      `  restored     ${`${run.id}:${index}`.padEnd(8)}  ${formatBytes(itemById(id).bytes).padStart(10)}  ${itemById(id).path}`,
-    ),
-  )
-  const bytes = bytesOf(restorable)
-  const runs = state.runs.map((entry) => (entry.id === run.id ? { ...entry, restored: true } : entry))
-  const next = updateItems(state, restorable, { status: 'ready', selected: false })
-  return {
-    state: { ...next, runs, trashed: Math.max(state.trashed - bytes, 0) },
-    lines: [
-      ...lines,
-      plain(''),
-      plain(`${plural(restorable.length, 'item')} restored (${formatBytes(bytes)}), 0 skipped`),
-      muted(`run kuizer ${demoRoot} again and they are back in the list`),
-    ],
-  }
+  return [
+    warn(`${run.id} was deleted permanently, there is nothing in the trash to put back`),
+    muted('set delete.mode = "trash" in the config file and `kuizer restore` puts later runs back'),
+  ]
 }
 
 function install(command: string): ShellLine[] {
@@ -248,10 +179,7 @@ export function runShell(state: State, line: string): State {
   if (command === 'scan') return reply(scan(echoed))
   if (command === 'history') return reply(history(echoed))
   if (command === 'cache') return reply(caches())
-  if (command === 'restore') {
-    const result = restore(echoed, argument)
-    return reply(result.lines, result.state)
-  }
+  if (command === 'restore') return reply(restore(echoed, argument))
   if (command === 'clean') {
     return reply([
       muted(

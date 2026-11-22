@@ -294,7 +294,7 @@ fn remove_on(
     let parent_fd = openat(
         CWD,
         parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
     let seen = statat(&parent_fd, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)?;

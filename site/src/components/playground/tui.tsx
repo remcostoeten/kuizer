@@ -15,7 +15,6 @@ import {
   projectChanges,
   selectedIds,
   visibleItems,
-  type DeleteMode,
   type SortKey,
   type State,
   type ViewRow,
@@ -81,13 +80,7 @@ export function Tui({ state, dispatch, flash }: Props) {
       <Detail state={state} />
       <Footer state={state} dispatch={dispatch} flash={flash} />
       {state.overlay.kind === 'confirm' && (
-        <Confirm
-          state={state}
-          ids={state.overlay.ids}
-          mode={state.overlay.mode}
-          dispatch={dispatch}
-          flash={flash}
-        />
+        <Confirm state={state} ids={state.overlay.ids} dispatch={dispatch} flash={flash} />
       )}
       {state.overlay.kind === 'help' && <Help dispatch={dispatch} />}
     </div>
@@ -120,12 +113,7 @@ function Header({ state, dispatch }: Omit<Props, 'flash'>) {
   const status = state.scan.finished ? `done in ${state.scan.elapsed.toFixed(1)}s` : 'scanning'
   const statusKey = state.scan.finished ? 'done' : 'scanning'
   const selected = bytesOf(selectedIds(state))
-  const note =
-    selected === 0
-      ? null
-      : state.mode === 'permanent'
-        ? `→ ${formatBytes(freeAfter(state, selected, 'permanent'))} after delete`
-        : 'selection stays on disk in the trash'
+  const note = selected === 0 ? null : `→ ${formatBytes(freeAfter(state, selected))} after delete`
   const tips = headerTips(state)
   return (
     <div className="flex shrink-0 items-center gap-x-3 overflow-hidden whitespace-nowrap px-3 py-1.5">
@@ -311,7 +299,7 @@ function Row({ row, state, largest, dispatch }: RowProps) {
       ? 'relative text-faint row-deleted'
       : 'text-muted opacity-45'
   const highlight = entry.selected && ready ? 'bg-(--t-selected)' : ''
-  const tips = itemTips(state, item, entry, largest)
+  const tips = itemTips(item, entry, largest)
   function dim(name: string) {
     return ready ? name : 'text-muted'
   }
@@ -485,7 +473,6 @@ function Footer({ state, dispatch, flash }: KeysProps) {
         </button>
       )}
       {state.freed > 0 && <span data-tip={tips.freed}>freed {formatBytes(state.freed)}</span>}
-      {state.trashed > 0 && <span data-tip={tips.trashed}>trashed {formatBytes(state.trashed)}</span>}
       {state.message && (
         <span key={state.message} className="text-muted rise">
           {state.message}
@@ -527,7 +514,6 @@ function Overlay({ title, onDismiss, children, rounded = false }: OverlayProps) 
 type ConfirmProps = {
   state: State
   ids: string[]
-  mode: DeleteMode
   dispatch: Dispatch
   flash: Flash | null
 }
@@ -535,7 +521,7 @@ type ConfirmProps = {
 const shown = 8
 const dirtyShown = 3
 
-function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
+function Confirm({ state, ids, dispatch, flash }: ConfirmProps) {
   const items = ids.map(itemById)
   const bytes = bytesOf(ids)
   const review = items.filter((item) => item.safety === 'review').length
@@ -543,11 +529,7 @@ function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
   for (const item of items) {
     if (projectChanges(item.project) > 0 && !dirty.includes(item.project)) dirty.push(item.project)
   }
-  const action =
-    mode === 'trash'
-      ? 'Move to trash. Space is freed once the trash is emptied.'
-      : 'Delete permanently. This cannot be undone.'
-  const tips = confirmTips(mode)
+  const tips = confirmTips()
   return (
     <Overlay
       title={`Delete ${plural(items.length, 'item')} · ${formatBytes(bytes)}`}
@@ -564,9 +546,9 @@ function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
         ))}
         {items.length > shown && <div className="text-muted">and {items.length - shown} more</div>}
       </div>
-      <div className="mt-3 font-semibold">{action}</div>
+      <div className="mt-3 font-semibold">Delete permanently. This cannot be undone.</div>
       <div>
-        {formatBytes(state.free)} free now, {formatBytes(freeAfter(state, bytes, mode))} free afterwards.
+        {formatBytes(state.free)} free now, {formatBytes(freeAfter(state, bytes))} free afterwards.
       </div>
       {review > 0 && (
         <div>{review} of these are marked review: check they are generated before deleting.</div>
@@ -583,13 +565,6 @@ function Confirm({ state, ids, mode, dispatch, flash }: ConfirmProps) {
       )}
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
         <Key keyName="y" label="confirm" tip={tips.confirm} dispatch={dispatch} flash={flash} />
-        <Key
-          keyName="t"
-          label={mode === 'trash' ? 'switch to permanent' : 'switch to trash'}
-          tip={tips.toggle}
-          dispatch={dispatch}
-          flash={flash}
-        />
         <Key keyName="n" label="cancel" tip={tips.cancel} dispatch={dispatch} flash={flash} />
       </div>
     </Overlay>

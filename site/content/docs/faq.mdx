@@ -1,7 +1,7 @@
 ---
 title: Frequently asked questions
 sidebarTitle: FAQ
-description: Short answers on what kuizer deletes, what it never touches, the trash and restore, duplicate files, Windows support and the rename from sweep.
+description: Short answers on what kuizer deletes, what it never touches, permanent deletion and the optional trash mode, duplicate files, Windows support and the rename from sweep.
 icon: Lightbulb
 ---
 
@@ -23,7 +23,7 @@ A `.venv` or `venv` is recreated from `requirements.txt`, `pyproject.toml` or a 
 
 ## Where do deleted items go?
 
-Nowhere: kuizer deletes for good, after a confirmation. Every run is logged and `kuizer history` lists past runs. Runs from older versions that moved items to the trash can still be put back with `kuizer restore`.
+By default nowhere: kuizer deletes for good, after a confirmation. With `delete.mode = "trash"` in the [config file](/docs/configuration), project artifacts and global caches move to the trash and `kuizer restore` puts a run back on Linux. Toolchains, Docker objects and git branches are removed for good in either mode. Every run is logged and `kuizer history` lists past runs.
 
 ## Does kuizer delete duplicate files?
 

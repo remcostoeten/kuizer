@@ -13,7 +13,6 @@ use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Target};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::output::display_path;
-use crate::protect::Protected;
 use crate::scan::{self, Cancel, Candidate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -573,7 +572,7 @@ pub fn remove(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), De
             .is_some_and(|parent| parent.ends_with("tools/image/node"));
     let unprotected;
     let guard = if volta {
-        unprotected = guard.clone().with_protected(Protected::default());
+        unprotected = guard.clone().allowing_volta_tools();
         &unprotected
     } else {
         guard

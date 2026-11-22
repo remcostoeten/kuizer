@@ -16,29 +16,15 @@ impl Kuizer {
             }
         };
         let cumulative = &view.history.cumulative;
-        let runs: Vec<(usize, &kuizer::history::Run)> = view
+        let mut recent: Vec<&kuizer::history::Run> = view
             .history
             .runs
             .iter()
-            .enumerate()
-            .filter(|(_, run)| run.action == Action::Delete)
             .rev()
-            .collect();
-        let needle = self.needle(Tab::History);
-        let listed: Vec<(usize, &kuizer::history::Run)> = runs
-            .iter()
-            .copied()
-            .filter(|(_, run)| shows_run(needle.as_deref(), run))
-            .collect();
-        let recent: Vec<&kuizer::history::Run> = runs
-            .iter()
+            .filter(|run| run.action == Action::Delete)
             .take(HISTORY_BARS)
-            .rev()
-            .map(|(_, run)| *run)
             .collect();
-        let can_restore = self.can_restore();
-        let refreshing = self.refreshing();
-        let cursor = self.cursor_target();
+        recent.reverse();
         let tallest = recent.iter().map(|run| run.total.bytes).max().unwrap_or(0);
         let chart = div()
             .flex()
@@ -66,8 +52,8 @@ impl Kuizer {
             }));
         let header = table_header()
             .child(head(col::XS, "Run", Term::Run))
-            .child(column(col::XL).child("Started"))
-            .child(column(col::S).text_right().child("Items"))
+            .child(column(col::XL).child("STARTED"))
+            .child(column(col::S).text_right().child("ITEMS"))
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::M, "Mode", Term::Mode))
             .child(head(col::L, "Trash", Term::Restore))
@@ -76,15 +62,18 @@ impl Kuizer {
                     .id("Command")
                     .flex_1()
                     .tip(tooltip::term(Term::Command))
-                    .child("Command"),
+                    .child("COMMAND"),
             );
         let toolbar = self
             .list_toolbar(cx)
             .child(div().flex_1())
             .child(self.tally(Tab::History, None));
-        let list = scroll("history")
-            .debug_selector(|| "history-list".to_owned())
-            .track_scroll(&self.scroll_for(Tab::History))
+        let summary = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(unit(space::XL))
+            .p(unit(space::GUTTER))
             .child(
                 div()
                     .flex()
@@ -150,71 +139,6 @@ impl Kuizer {
                         this.child(ui::empty("No cleanups recorded yet"))
                     }),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .rounded(theme::radius_panel())
-                    .border_1()
-                    .border_color(theme::border())
-                    .child(header)
-                    .children(listed.iter().map(|&(index, run)| {
-                        let mode = run.deleted.first().map_or("", |entry| match entry.mode {
-                            kuizer::delete::Mode::Trash => "trash",
-                            kuizer::delete::Mode::Permanent => "permanent",
-                            kuizer::delete::Mode::DryRun => "dry run",
-                        });
-                        let session = run.id;
-                        let row = div()
-                            .flex()
-                            .items_center()
-                            .gap(unit(space::L))
-                            .h(unit(size::ROW))
-                            .px(unit(space::GUTTER))
-                            .border_t_1()
-                            .border_color(theme::border())
-                            .debug_selector(move || format!("run-{session}"));
-                        let target = Target::Run(run.id, run.command.clone());
-                        self.menu_row(row, target, cursor.as_ref(), cx)
-                            .child(column(col::XS).child(run.session()))
-                            .child(
-                                column(col::XL)
-                                    .id(("started", index))
-                                    .text_color(theme::muted())
-                                    .tip(tooltip::plain(run.started_at.clone()))
-                                    .child(short_time(&run.started_at)),
-                            )
-                            .child(
-                                column(col::S)
-                                    .text_right()
-                                    .child(run.total.items.to_string()),
-                            )
-                            .child(
-                                column(col::M)
-                                    .text_right()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(theme::bytes(run.total.bytes)),
-                            )
-                            .child(column(col::M).text_color(theme::muted()).child(mode))
-                            .child(column(col::L).flex().child(self.restore_cell(
-                                self.report_stats.trash_state(report, index),
-                                run,
-                                can_restore,
-                                refreshing,
-                                cx,
-                            )))
-                            .child(
-                                div()
-                                    .id(("command", index))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme::faint())
-                                    .tip(tooltip::plain(run.command.clone()))
-                                    .child(run.command.clone()),
-                            )
-                    })),
-            )
             .children(
                 view.history
                     .runs
@@ -226,9 +150,107 @@ impl Kuizer {
                             .text_color(theme::faint())
                             .child("Restores are counted in Items removed as restored")
                     }),
+            );
+        let count = self.listed(Tab::History).slots.len();
+        let list = self
+            .table_list(
+                "history",
+                Tab::History,
+                count,
+                |app, range, cx| app.history_rows(range, cx),
+                cx,
             )
+            .debug_selector(|| "history-list".to_owned());
+        let body = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(summary)
+            .child(table(
+                header,
+                if count == 0 {
+                    div().flex_1().into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element();
-        framed(toolbar, list)
+        framed(toolbar, body)
+    }
+
+    fn history_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(report) = self.report() else {
+            return Vec::new();
+        };
+        let Ok(view) = &report.history else {
+            return Vec::new();
+        };
+        let listed = self.listed(Tab::History);
+        let can_restore = self.can_restore();
+        let refreshing = self.refreshing();
+        let cursor = self.cursor_target();
+        range
+            .filter_map(|row| {
+                let index = listed.slots.get(row)?.0;
+                let run = view.history.runs.get(index)?;
+                let mode = run.deleted.first().map_or("", |entry| match entry.mode {
+                    kuizer::delete::Mode::Trash => "trash",
+                    kuizer::delete::Mode::Permanent => "permanent",
+                    kuizer::delete::Mode::DryRun => "dry run",
+                });
+                let session = run.id;
+                let line = ui::tabular(div())
+                    .id(("run-row", session))
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::L))
+                    .w_full()
+                    .h(unit(size::row()))
+                    .px(unit(space::GUTTER))
+                    .debug_selector(move || format!("run-{session}"));
+                let target = Target::Run(run.id, run.command.clone());
+                Some(
+                    self.menu_row(line, target, cursor.as_ref(), cx)
+                        .child(column(col::XS).child(run.session()))
+                        .child(
+                            column(col::XL)
+                                .id(("started", index))
+                                .text_color(theme::muted())
+                                .tip(tooltip::plain(run.started_at.clone()))
+                                .child(short_time(&run.started_at)),
+                        )
+                        .child(
+                            column(col::S)
+                                .text_right()
+                                .child(run.total.items.to_string()),
+                        )
+                        .child(
+                            column(col::M)
+                                .text_right()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(theme::bytes(run.total.bytes)),
+                        )
+                        .child(column(col::M).text_color(theme::muted()).child(mode))
+                        .child(column(col::L).flex().child(self.restore_cell(
+                            self.report_stats.trash_state(report, index),
+                            run,
+                            can_restore,
+                            refreshing,
+                            cx,
+                        )))
+                        .child(
+                            div()
+                                .id(("command", index))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme::faint())
+                                .tip(tooltip::plain(run.command.clone()))
+                                .child(run.command.clone()),
+                        ),
+                )
+            })
+            .collect()
     }
 
     pub(super) fn restore_cell(

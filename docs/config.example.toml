@@ -38,9 +38,12 @@ verify = false
 # are skipped unless this is true; a scan root inside one still looks there.
 include_hidden = false
 
-# Deletion is always permanent. With confirm = false the TUI deletes safe items straight
-# away; review items and projects with uncommitted changes still ask.
+# mode = "permanent" deletes for good. mode = "trash" moves project artifacts and caches to
+# the trash, where `kuizer restore` can bring them back; toolchains, Docker objects and git
+# branches are always removed for good. With confirm = false the TUI deletes safe items
+# straight away; review items and projects with uncommitted changes still ask.
 [delete]
+mode = "permanent"
 confirm = true
 
 # Git repositories found under the scan roots. kuizer lists a repository when `git gc`
@@ -59,6 +62,10 @@ motion = true
 sidebar = "expanded"
 # "dark" or "light". The light theme uses an off-white background.
 theme = "dark"
+# "purple", "blue", "teal" or "pink": the color of the selection, the focus outline and the bars.
+accent = "purple"
+# "comfortable" or "compact": compact uses shorter list rows and less vertical padding.
+density = "comfortable"
 
 # The keys that open a sidebar section in the GUI (Shift+1 to Shift+9). With enabled = false
 # they do nothing; the command palette still opens every section. hints = false hides the

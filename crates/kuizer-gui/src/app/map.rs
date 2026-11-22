@@ -329,7 +329,6 @@ impl Kuizer {
             .flex_none()
             .items_center()
             .gap(unit(space::L))
-            .child(self.sidebar_toggle(cx))
             .child(switch)
             .child(
                 div()
@@ -468,7 +467,7 @@ impl Kuizer {
             .min_h(unit(size::MAP))
             .w_full()
             .overflow_hidden()
-            .bg(theme::panel())
+            .bg(theme::elevated())
             .child(probe)
             .child(layer)
             .into_any_element()

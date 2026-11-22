@@ -45,9 +45,9 @@ export const headline = ['Find the gigabytes', 'your builds left behind.'] as co
 export const quickRuns = ['npx kuizer', 'cargo install kuizer'] as const
 export const subtitle = [
   'node_modules, target, .venv, caches, old toolchains and duplicates.',
-  'One scan lists them with sizes. You tick rows, the trash takes them.',
+  'One scan lists them with sizes. You tick rows and confirm, kuizer deletes them.',
 ] as const
 export const metaDescription =
-  'Finds every node_modules, Cargo target, .venv and tool cache under your projects and moves the ones you pick to the trash. Open source, for Linux and macOS.'
+  'Finds every node_modules, Cargo target, .venv and tool cache under your projects and deletes the ones you pick, after a confirmation. Open source, for Linux and macOS.'
 export const description =
-  'One scan lists dependency folders, build output, global caches, old toolchains, Docker leftovers, git repos and duplicate files with their sizes, and marks which ones the next build recreates. You tick rows, the trash takes them, and kuizer restore brings a run back.'
+  'One scan lists dependency folders, build output, global caches, old toolchains, Docker leftovers, git repos and duplicate files with their sizes, and marks which ones the next build recreates. You tick rows and confirm, kuizer deletes them and logs the run. Trash mode is optional.'

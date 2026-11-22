@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::cli::SortKey;
 use crate::delete::{Mode, Target};
@@ -9,6 +10,7 @@ use crate::detect::{Category, Safety};
 use crate::scan::{Candidate, Progress, Summary};
 
 const SHOWN: usize = 8;
+const ENTER_HOLD: Duration = Duration::from_millis(600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -84,6 +86,7 @@ pub struct ConfirmStats {
 type Job = (u64, Target, Mode);
 
 pub struct App {
+    last_enter: Option<Instant>,
     pub items: Vec<Item>,
     pub view: Vec<usize>,
     pub rows: Vec<Row>,
@@ -107,6 +110,7 @@ pub struct App {
     pub mode: Mode,
     pub confirm_before_delete: bool,
     pub freed: u64,
+    pub trashed: u64,
     pub free: Option<u64>,
     pub message: Option<String>,
     pub quit: bool,
@@ -132,6 +136,7 @@ pub struct App {
 impl App {
     pub fn new(mode: Mode, confirm_before_delete: bool) -> Self {
         Self {
+            last_enter: None,
             items: Vec::new(),
             view: Vec::new(),
             rows: Vec::new(),
@@ -155,6 +160,7 @@ impl App {
             mode,
             confirm_before_delete,
             freed: 0,
+            trashed: 0,
             free: None,
             message: None,
             quit: false,
@@ -694,6 +700,14 @@ impl App {
         self.index.get(&id).map(|&index| &self.items[index])
     }
 
+    pub fn enter_repeats(&mut self, now: Instant) -> bool {
+        let repeat = self
+            .last_enter
+            .is_some_and(|at| now.duration_since(at) < ENTER_HOLD);
+        self.last_enter = Some(now);
+        repeat
+    }
+
     pub fn confirm(&mut self) -> Vec<Job> {
         let Overlay::Confirm { ids, mode } = std::mem::replace(&mut self.overlay, Overlay::None)
         else {
@@ -750,17 +764,18 @@ impl App {
                 removed = bytes;
             }
         }
-        if mode != Mode::DryRun {
-            self.freed += removed;
+        match mode {
+            Mode::Permanent => self.freed += removed,
+            Mode::Trash => self.trashed += removed,
+            Mode::DryRun => {}
         }
     }
 
     pub fn free_after(&self, bytes: u64, mode: Mode) -> Option<u64> {
         let free = self.free?;
-        Some(if mode == Mode::DryRun {
-            free
-        } else {
-            free.saturating_add(bytes)
+        Some(match mode {
+            Mode::Permanent => free.saturating_add(bytes),
+            Mode::Trash | Mode::DryRun => free,
         })
     }
 
@@ -1005,6 +1020,20 @@ mod tests {
         app.finish(2, Mode::Permanent, Ok(()));
         assert_eq!(app.freed, 30);
         assert_eq!(app.item(2).unwrap().status, Status::Deleted);
+    }
+
+    #[test]
+    fn trashed_items_do_not_count_as_freed_space() {
+        let mut app = app_with(Mode::Trash, true);
+        app.free = Some(100);
+        assert_eq!(app.free_after(10, Mode::Permanent), Some(110));
+        assert_eq!(app.free_after(10, Mode::Trash), Some(100));
+        app.open_confirm();
+        let jobs = app.confirm();
+        assert_eq!(jobs[0].2, Mode::Trash);
+        app.finish(2, Mode::Trash, Ok(()));
+        assert_eq!(app.trashed, 30);
+        assert_eq!(app.freed, 0);
     }
 
     #[test]

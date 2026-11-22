@@ -114,7 +114,9 @@ impl FromStr for Idle {
         };
         count
             .checked_mul(days * 86_400)
-            .map(|seconds| Self(Duration::from_secs(seconds)))
+            .map(Duration::from_secs)
+            .filter(|age| SystemTime::now().checked_sub(*age).is_some())
+            .map(Self)
             .ok_or_else(|| IdleError(input.to_owned()))
     }
 }
@@ -150,6 +152,12 @@ pub fn age(time: Option<SystemTime>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_age_before_the_clock_can_reach_is_rejected() {
+        assert!("9999999999999y".parse::<Idle>().is_err());
+        assert!("60d".parse::<Idle>().is_ok());
+    }
 
     #[test]
     fn parses_units() {

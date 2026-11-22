@@ -514,12 +514,18 @@ fn delete_branch(
     if at.as_deref() != Some(branch.commit.as_str()) || !merged {
         return Err(RepoError::Changed(branch.name.clone()));
     }
-    let output = git(root, &["branch", "-D", name]).map_err(RepoError::Git)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(RepoError::Git(stderr(&output)))
+    delete_ref_at(root, name, &branch.commit)
+}
+
+fn delete_ref_at(root: &Path, name: &str, commit: &str) -> Result<(), RepoError> {
+    let reference = format!("refs/heads/{name}");
+    let output = git(root, &["update-ref", "-d", &reference, commit]).map_err(RepoError::Git)?;
+    if !output.status.success() {
+        return Err(RepoError::Changed(name.to_owned()));
     }
+    let section = format!("branch.{name}");
+    let _ = git(root, &["config", "--remove-section", &section]);
+    Ok(())
 }
 
 fn kept(
@@ -1204,6 +1210,36 @@ mod tests {
         let found = find(&Config::default(), &[root.to_path_buf()]).expect("walks");
         let root = fs::canonicalize(root).expect("canonicalize");
         assert_eq!(found, [root.clone(), root.join("apps/kearn")]);
+    }
+
+    #[test]
+    fn a_branch_that_moved_after_the_check_survives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        if !repository(root) {
+            return;
+        }
+        let run = |args: &[&str]| assert!(git(root, args).expect("git").status.success());
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+        let commit = |message: &str| {
+            let mut args = identity.to_vec();
+            args.extend(["commit", "--allow-empty", "-m", message]);
+            run(&args);
+        };
+        commit("first");
+        run(&["branch", "work"]);
+        let checked = read(root, &["rev-parse", "refs/heads/work"]).expect("commit");
+        run(&["checkout", "-q", "work"]);
+        commit("unmerged");
+        run(&["checkout", "-q", "-"]);
+        assert!(matches!(
+            delete_ref_at(root, "work", &checked),
+            Err(RepoError::Changed(_))
+        ));
+        assert!(succeeds(
+            root,
+            &["rev-parse", "--verify", "refs/heads/work"]
+        ));
     }
 
     #[test]

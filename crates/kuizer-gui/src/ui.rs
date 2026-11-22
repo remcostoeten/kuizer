@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use gpui::{
     Div, ElementId, FontFeatures, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled,
-    div, prelude::*, relative,
+    div, prelude::*, px, relative,
 };
 
 use crate::glossary::Term;
+use crate::icon::{self, Icon};
 use crate::theme::{self, font, size, space, unit};
 use crate::tooltip::{self, Tip};
 
@@ -14,6 +15,7 @@ pub enum ButtonKind {
     Primary,
     Secondary,
     Ghost,
+    Danger,
 }
 
 pub fn button(
@@ -22,34 +24,95 @@ pub fn button(
     kind: ButtonKind,
     enabled: bool,
 ) -> Stateful<Div> {
-    let (background, foreground, hover) = match kind {
-        ButtonKind::Primary => (theme::primary(), theme::on_primary(), theme::text()),
-        ButtonKind::Secondary => (theme::elevated(), theme::text(), theme::hover()),
-        ButtonKind::Ghost => (theme::transparent(), theme::muted(), theme::hover()),
+    let (background, foreground, hover, hover_text) = match kind {
+        ButtonKind::Primary => (
+            theme::primary(),
+            theme::on_primary(),
+            theme::text(),
+            theme::on_primary(),
+        ),
+        ButtonKind::Secondary => (
+            theme::hover(),
+            theme::text(),
+            theme::border_strong(),
+            theme::text(),
+        ),
+        ButtonKind::Ghost => (
+            theme::transparent(),
+            theme::muted(),
+            theme::hover(),
+            theme::text(),
+        ),
+        ButtonKind::Danger => (
+            theme::danger_solid(),
+            theme::on_danger(),
+            theme::danger_hover(),
+            theme::on_danger(),
+        ),
     };
     let base = div()
         .id(id)
         .flex()
         .items_center()
+        .gap(unit(space::M))
         .h(unit(size::CONTROL))
         .px(unit(space::L))
         .rounded(theme::radius_button())
         .text_size(unit(font::BODY))
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(if kind == ButtonKind::Danger {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
         .bg(background)
         .text_color(foreground)
-        .when(kind == ButtonKind::Secondary, |this| {
-            this.border_1().border_color(theme::border_strong())
-        })
         .child(label.into());
     if enabled {
-        base.cursor_pointer().hover(move |style| style.bg(hover))
+        base.cursor_pointer()
+            .hover(move |style| style.bg(hover).text_color(hover_text))
     } else {
         base.opacity(theme::DISABLED)
     }
 }
 
 pub fn checkbox(checked: bool) -> Div {
+    check_mark(if checked { 1.0 } else { 0.0 })
+}
+
+/// A checkbox part way between clear at 0 and checked at 1, for the moment it is toggled.
+pub fn check_mark(weight: f32) -> Div {
+    let faded = |color: Rgba| Rgba {
+        a: color.a * weight,
+        ..color
+    };
+    check_box(if weight >= 0.5 {
+        theme::bar()
+    } else {
+        theme::border_strong()
+    })
+    .when(weight > 0.0, |this| {
+        this.bg(faded(theme::bar())).child(icon::sized(
+            Icon::Check,
+            faded(theme::on_accent()),
+            None,
+            px(theme::REM),
+            size::GLYPH,
+        ))
+    })
+}
+
+/// The checkbox of a row that is being deleted: a danger outline around a dash.
+pub fn deleting_mark() -> Div {
+    check_box(theme::danger()).child(
+        div()
+            .w(unit(size::DOT))
+            .h(unit(size::MARKER))
+            .rounded(theme::radius_dot())
+            .bg(theme::danger()),
+    )
+}
+
+fn check_box(edge: Rgba) -> Div {
     div()
         .flex()
         .items_center()
@@ -58,19 +121,7 @@ pub fn checkbox(checked: bool) -> Div {
         .flex_none()
         .rounded(theme::radius_checkbox())
         .border_1()
-        .border_color(if checked {
-            theme::primary()
-        } else {
-            theme::border_strong()
-        })
-        .when(checked, |this| {
-            this.child(
-                div()
-                    .size(unit(size::DOT))
-                    .rounded(theme::radius_dot())
-                    .bg(theme::primary()),
-            )
-        })
+        .border_color(edge)
 }
 
 pub fn switch(on: bool) -> Div {
@@ -82,22 +133,22 @@ pub fn switch(on: bool) -> Div {
         .w(unit(size::SWITCH))
         .h(unit(size::SWITCH_HEIGHT))
         .p(unit(space::XXS))
-        .rounded(theme::radius_checkbox())
+        .rounded(theme::radius_pill())
         .border_1()
         .border_color(if on {
-            theme::primary()
+            theme::bar()
         } else {
             theme::border_strong()
         })
-        .bg(if on { theme::primary() } else { theme::track() })
+        .bg(if on { theme::bar() } else { theme::track() })
         .child(
             div()
                 .size(unit(
                     size::SWITCH_HEIGHT - 2. * space::XXS - 2. * size::HAIR,
                 ))
-                .rounded(theme::radius_dot())
+                .rounded(theme::radius_pill())
                 .bg(if on {
-                    theme::on_primary()
+                    theme::on_accent()
                 } else {
                     theme::muted()
                 }),
@@ -112,18 +163,96 @@ pub fn card(title: impl Into<SharedString>) -> Div {
         .gap(unit(space::L))
         .p(unit(space::GUTTER))
         .rounded(theme::radius_panel())
-        .bg(theme::panel())
+        .bg(theme::elevated())
         .border_1()
         .border_color(theme::border())
         .child(heading(title))
 }
 
 pub fn heading(title: impl Into<SharedString>) -> Div {
+    theme::label(div())
+        .text_color(theme::faint())
+        .child(title.into().to_uppercase())
+}
+
+/// @name amount
+/// @description A size set as a figure: the number at `size` and its unit smaller and muted
+/// after it, as the sidebar total and section headers show it.
+///
+/// @example
+/// ui::amount(bytes, font::FIGURE)
+pub fn amount(bytes: u64, size: f32) -> Div {
+    let text = theme::bytes(bytes);
+    let (number, suffix) = text.split_once(' ').unwrap_or((text.as_str(), ""));
+    tabular(
+        div()
+            .flex()
+            .items_baseline()
+            .gap(unit(space::XS))
+            .child(
+                div()
+                    .text_size(unit(size))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(number.to_owned()),
+            )
+            .child(
+                div()
+                    .text_size(unit(font::BODY))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::muted())
+                    .child(suffix.to_owned()),
+            ),
+    )
+}
+
+/// @name gauge
+/// @description The short bar next to a size in a table row, filled to `fraction`.
+///
+/// @example
+/// ui::gauge(0.4, theme::bar_mid(), theme::track())
+pub fn gauge(fraction: f32, fill: Rgba, track: Rgba) -> Div {
     div()
-        .text_size(unit(font::SMALL))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::muted())
-        .child(title.into())
+        .flex_none()
+        .w(unit(size::GAUGE))
+        .h(unit(size::TRACK))
+        .rounded(theme::radius_bar())
+        .bg(track)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative(fraction.clamp(0.05, 1.0)))
+                .rounded(theme::radius_bar())
+                .bg(fill),
+        )
+}
+
+/// @name tone_of
+/// @description The neutral fill for a size: stronger for larger sizes, so the biggest items
+/// stand out in a list without a hue.
+///
+/// @example
+/// let fill = ui::tone_of(candidate.usage.allocated);
+pub fn tone_of(bytes: u64) -> Rgba {
+    const MB: u64 = 1 << 20;
+    match bytes {
+        _ if bytes >= 1 << 30 => theme::bar_strong(),
+        _ if bytes >= 100 * MB => theme::bar_mid(),
+        _ if bytes >= MB => theme::bar_soft(),
+        _ => theme::bar_rest(),
+    }
+}
+
+/// @name caption
+/// @description A small upper case label in the monospace typeface, as group names, column
+/// headings and figure captions are set.
+///
+/// @example
+/// ui::caption("Reclaimable")
+pub fn caption(text: impl Into<SharedString>) -> Div {
+    theme::label(div())
+        .text_color(theme::faint())
+        .child(text.into().to_uppercase())
 }
 
 pub fn stat(
@@ -137,11 +266,10 @@ pub fn stat(
         .gap(unit(space::XXS))
         .flex_1()
         .min_w(unit(size::STAT))
-        .p(unit(space::GUTTER))
-        .rounded(theme::radius_panel())
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
+        .pl(unit(space::XL))
+        .py(unit(space::XS))
+        .border_l_1()
+        .border_color(theme::border_strong())
         .child(
             div()
                 .text_size(unit(font::SMALL))
@@ -212,7 +340,7 @@ pub fn safety_label(id: impl Into<ElementId>, review: bool) -> Stateful<Div> {
     let (label, tone, term) = if review {
         ("review", Tone::Review, Term::Review)
     } else {
-        ("safe", Tone::Neutral, Term::Safe)
+        ("safe", Tone::Safe, Term::Safe)
     };
     tag(id, label, tone).tip(tooltip::term(term))
 }
@@ -228,15 +356,21 @@ pub fn segment(
         .h(unit(size::SEGMENT))
         .flex()
         .items_center()
-        .rounded(theme::radius_control())
+        .rounded(theme::radius_tag())
         .cursor_pointer()
+        .text_size(unit(font::SMALL))
         .text_color(if active {
             theme::text()
         } else {
             theme::muted()
         })
-        .when(active, |this| this.bg(theme::selected()))
-        .hover(|style| style.text_color(theme::text()))
+        .when(active, |this| {
+            this.bg(theme::border_strong())
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |this| {
+            this.hover(|style| style.bg(theme::hover()).text_color(theme::text()))
+        })
         .child(label.into())
 }
 
@@ -246,10 +380,8 @@ pub fn segments() -> Div {
         .flex_none()
         .gap(unit(space::XXS))
         .p(unit(space::XXS))
-        .rounded(theme::radius_panel())
-        .bg(theme::panel())
-        .border_1()
-        .border_color(theme::border())
+        .rounded(theme::radius_control())
+        .bg(theme::background())
 }
 
 pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>) -> Div {
@@ -257,7 +389,7 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
         .flex()
         .items_center()
         .gap(unit(space::XL))
-        .py(unit(space::M))
+        .py(unit(space::row_y()))
         .border_t_1()
         .border_color(theme::border())
         .child(
@@ -278,45 +410,65 @@ pub fn option_row(label: impl Into<SharedString>, hint: impl Into<SharedString>)
 }
 
 pub fn kbd(key: impl Into<SharedString>) -> Div {
+    kbd_on(key, theme::kbd(), theme::muted())
+}
+
+/// A key badge on a filled control, in the colors that read on that fill.
+pub fn kbd_on(key: impl Into<SharedString>, fill: Rgba, color: Rgba) -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .min_w(unit(size::BADGE))
-        .h(unit(size::BADGE))
+        .min_w(unit(size::KEY))
+        .h(unit(size::KEY))
         .px(unit(space::XS))
-        .rounded(theme::radius_control())
-        .bg(theme::background())
-        .border_1()
-        .border_color(theme::border_strong())
-        .text_size(unit(font::CAPTION))
-        .text_color(theme::muted())
+        .rounded(theme::radius_tag())
+        .bg(fill)
+        .text_color(color)
+        .font_weight(FontWeight::MEDIUM)
+        .map(theme::label)
         .child(key.into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
+    Safe,
     Review,
+    Danger,
 }
 
 pub fn tag(id: impl Into<ElementId>, label: impl Into<SharedString>, tone: Tone) -> Stateful<Div> {
     let (background, foreground) = match tone {
-        Tone::Neutral => (theme::track(), theme::muted()),
+        Tone::Neutral => (theme::kbd(), theme::muted()),
+        Tone::Safe => (theme::transparent(), theme::faint()),
         Tone::Review => (theme::review_soft(), theme::review()),
+        Tone::Danger => (theme::transparent(), theme::danger()),
     };
-    div()
+    theme::label(div())
         .id(id)
         .flex()
         .flex_none()
         .items_center()
+        .gap(unit(space::S))
         .h(unit(size::BADGE))
-        .px(unit(space::S))
-        .rounded(theme::radius_control())
+        .when(matches!(tone, Tone::Neutral | Tone::Review), |this| {
+            this.px(unit(space::S))
+        })
+        .rounded(theme::radius_tag())
         .bg(background)
-        .text_size(unit(font::CAPTION))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(foreground)
+        .when(tone == Tone::Safe, |this| {
+            this.child(
+                div()
+                    .size(unit(size::DOT))
+                    .flex_none()
+                    .rounded(theme::radius_pill())
+                    .bg(theme::ok()),
+            )
+        })
         .child(label.into())
 }
 
@@ -360,6 +512,37 @@ pub fn marker() -> Div {
     div().absolute().inset_0().bg(theme::cursor())
 }
 
+/// @name nav_item
+/// @description A row of the sidebar or the settings navigation: icon, label and an optional
+/// figure on the right. The open item is a fill, not a stripe.
+///
+/// @example
+/// ui::nav_item("History", active).child(label)
+pub fn nav_item(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(unit(space::M))
+        .h(unit(size::row()))
+        .px(unit(space::M))
+        .rounded(theme::radius_control())
+        .cursor_pointer()
+        .text_color(if active {
+            theme::text()
+        } else {
+            theme::muted()
+        })
+        .when(active, |this| {
+            this.bg(theme::hover()).font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |this| {
+            this.hover(|style| style.bg(theme::hover_row()).text_color(theme::text()))
+        })
+}
+
 /// @name toolbar
 /// @description The bar at the top of a section with its filters and totals, on the shared
 /// gutter.
@@ -374,11 +557,9 @@ pub fn toolbar() -> Div {
         .items_center()
         .gap_x(unit(space::L))
         .gap_y(unit(space::XS))
-        .min_h(unit(size::TOOLBAR))
+        .min_h(unit(size::toolbar()))
         .px(unit(space::GUTTER))
-        .py(unit(space::S))
-        .border_b_1()
-        .border_color(theme::border())
+        .py(unit(space::bar_y()))
         .text_color(theme::muted())
 }
 

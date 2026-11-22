@@ -1,8 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
-use gpui::{Hsla, Pixels, Rems, Rgba, hsla, px, rems, rgb, rgba};
-use kuizer::config::Theme;
+use gpui::{Hsla, Pixels, Rems, Rgba, SharedString, Styled, hsla, px, rems, rgb, rgba};
+use kuizer::config::{Accent, Density, Theme};
 use kuizer::detect::Category;
 use kuizer::units::ByteSize;
 
@@ -25,6 +26,25 @@ pub mod space {
     pub const GUTTER: f32 = XL;
     /// The inset of a sidebar item inside the sidebar, so item text starts at the gutter.
     pub const INSET: f32 = M;
+    /// The gap between the inset content surface and the window edges around it.
+    pub const SURFACE: f32 = M;
+
+    use super::compact;
+
+    /// The vertical padding of rows that grow with their text, such as settings rows.
+    pub fn row_y() -> f32 {
+        if compact() { XS } else { M }
+    }
+
+    /// The vertical padding of a toolbar around its controls.
+    pub fn bar_y() -> f32 {
+        if compact() { XXS } else { XS }
+    }
+
+    /// The space above a section's title.
+    pub fn section() -> f32 {
+        if compact() { M } else { L }
+    }
 }
 
 /// The type scale.
@@ -35,6 +55,7 @@ pub mod font {
     pub const TITLE: f32 = 15.;
     pub const HEADING: f32 = 18.;
     pub const FIGURE: f32 = 24.;
+    pub const DISPLAY: f32 = 32.;
 }
 
 /// Fixed heights and widths of controls, bars and panels.
@@ -45,18 +66,25 @@ pub mod size {
     pub const ICON: f32 = 16.;
     pub const CHECK: f32 = 14.;
     pub const GLYPH: f32 = 10.;
+    pub const KEY: f32 = 16.;
     pub const BADGE: f32 = 18.;
+    pub const CHIP: f32 = 20.;
     pub const SEGMENT: f32 = 24.;
     pub const CONTROL: f32 = 28.;
+    pub const TILE: f32 = 30.;
     pub const INPUT: f32 = 32.;
-    pub const ROW: f32 = 32.;
-    pub const ROW_TALL: f32 = 44.;
-    pub const BAR: f32 = 40.;
-    pub const TOOLBAR: f32 = 44.;
+    pub const STATUS: f32 = 32.;
+    pub const BAR: f32 = 36.;
     pub const SIDEBAR: f32 = 220.;
     pub const SIDEBAR_COLLAPSED: f32 = 48.;
     pub const METER: f32 = 12.;
     pub const TRACK: f32 = 4.;
+    /// The height of the composition strip above a list.
+    pub const STRIP: f32 = 6.;
+    /// The width of the size bar next to a size in a table row.
+    pub const GAUGE: f32 = 44.;
+    /// The narrowest the mode tag of the status bar gets, so its width holds between modes.
+    pub const MODE: f32 = 68.;
     pub const SWATCH: f32 = 8.;
     pub const LEGEND: f32 = 10.;
     pub const CARET: f32 = 14.;
@@ -67,10 +95,14 @@ pub mod size {
     pub const ACTIONS: f32 = 196.;
     pub const LABEL: f32 = 240.;
     pub const KEYS: f32 = 250.;
-    pub const FILTER: f32 = 240.;
+    pub const FILTER: f32 = 300.;
+    /// The widest the command palette trigger in the titlebar gets.
+    pub const TRIGGER: f32 = 340.;
     pub const LIST: f32 = 340.;
     pub const MENU: f32 = 220.;
     pub const DIALOG: f32 = 520.;
+    /// The narrowest the floating selection summary gets while there is room for it.
+    pub const SUMMARY: f32 = 540.;
     pub const PALETTE: f32 = 560.;
     pub const PAGE: f32 = 760.;
     pub const SHORTCUTS: f32 = 820.;
@@ -84,6 +116,23 @@ pub mod size {
     pub const SWITCH_HEIGHT: f32 = 18.;
     /// How far below the titlebar the command palette opens.
     pub const DROP: f32 = 72.;
+
+    use super::compact;
+
+    /// The height of a one-line row. Every row of a virtualized list takes its height from here
+    /// or from `row_tall`, so the list stays uniform.
+    pub fn row() -> f32 {
+        if compact() { 24. } else { 28. }
+    }
+
+    /// The height of a row with a second line of detail.
+    pub fn row_tall() -> f32 {
+        if compact() { 32. } else { 40. }
+    }
+
+    pub fn toolbar() -> f32 {
+        if compact() { 32. } else { 40. }
+    }
 }
 
 /// Widths of fixed table columns.
@@ -102,15 +151,91 @@ pub const DISABLED: f32 = 0.4;
 pub const DIM: f32 = 0.8;
 
 static LIGHT: AtomicBool = AtomicBool::new(false);
+static ACCENT: AtomicUsize = AtomicUsize::new(0);
+static COMPACT: AtomicBool = AtomicBool::new(false);
 
-/// @name configure
-/// @description Applies `appearance.theme` from the config. Every color below follows it on the
-/// next render.
+/// @name set_density
+/// @description Applies `appearance.density` from the config. Row heights and the paddings in
+/// `size` and `space` that are functions follow it on the next render.
 ///
 /// @example
-/// configure(config.appearance.theme);
-pub fn configure(theme: Theme) {
+/// set_density(config.appearance.density);
+pub fn set_density(density: Density) {
+    COMPACT.store(density == Density::Compact, Ordering::Relaxed);
+}
+
+fn compact() -> bool {
+    COMPACT.load(Ordering::Relaxed)
+}
+
+/// @name configure
+/// @description Applies `appearance.theme` and `appearance.accent` from the config. Every color
+/// below follows them on the next render.
+///
+/// @example
+/// configure(config.appearance.theme, config.appearance.accent);
+pub fn configure(theme: Theme, accent: Accent) {
     LIGHT.store(theme == Theme::Light, Ordering::Relaxed);
+    let slot = Accent::ALL
+        .iter()
+        .position(|known| *known == accent)
+        .unwrap_or(0);
+    ACCENT.store(slot, Ordering::Relaxed);
+}
+
+/// The accent-colored parts of the palette, each as a dark and a light value.
+struct Tint {
+    accent: (u32, u32),
+    focus: (u32, u32),
+    selected: (u32, u32),
+    tile: (u32, u32),
+}
+
+fn tint_of(accent: Accent) -> Tint {
+    match accent {
+        Accent::Purple => Tint {
+            accent: (0x007e_64fb, 0x006c_35f5),
+            focus: (0x0096_8dfa, 0x006c_35f5),
+            selected: (0x001f_1342, 0x00ee_effd),
+            tile: (0x0033_2d5d, 0x00dc_dcfa),
+        },
+        Accent::Blue => Tint {
+            accent: (0x003b_82f6, 0x0014_63e6),
+            focus: (0x005a_96ff, 0x0014_63e6),
+            selected: (0x0014_213a, 0x00e3_edff),
+            tile: (0x002c_3a55, 0x00bc_d2f5),
+        },
+        Accent::Teal => Tint {
+            accent: (0x000f_9f92, 0x000a_8577),
+            focus: (0x0022_b8a9, 0x000a_8577),
+            selected: (0x0010_292a, 0x00dc_f5f1),
+            tile: (0x0027_474a, 0x00b3_e3dc),
+        },
+        Accent::Pink => Tint {
+            accent: (0x00e8_508f, 0x00d6_246e),
+            focus: (0x00f0_66a0, 0x00d6_246e),
+            selected: (0x0033_1626, 0x00ff_e5ef),
+            tile: (0x004f_2f40, 0x00f2_bdd2),
+        },
+    }
+}
+
+fn tint() -> Tint {
+    tint_of(Accent::ALL[ACCENT.load(Ordering::Relaxed)])
+}
+
+fn shade(theme: Theme, (dark, light_value): (u32, u32)) -> Rgba {
+    pick_in(theme, dark, light_value)
+}
+
+/// @name accent_of
+/// @description The bar color of an accent in the active theme, for previewing an accent that
+/// is not the active one.
+///
+/// @example
+/// let dot = accent_of(Accent::Teal);
+pub fn accent_of(accent: Accent) -> Rgba {
+    shade(current(), tint_of(accent).accent)
 }
 
 fn light() -> bool {
@@ -162,7 +287,7 @@ fn pick_alpha(dark: u32, light_value: u32) -> Rgba {
 }
 
 fn background_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x0011_1111, 0x00f4_f4f1)
+    pick_in(theme, 0x000d_0d0d, 0x00ff_ffff)
 }
 
 pub fn background() -> Rgba {
@@ -174,15 +299,20 @@ pub fn transparent() -> Rgba {
 }
 
 pub fn shadow() -> Hsla {
-    hsla(0., 0., 0., if light() { 0.16 } else { 0.4 })
+    hsla(0., 0., 0., if light() { 0.14 } else { 0.55 })
+}
+
+/// The tight contact shadow under a floating bar, paired with `shadow`.
+pub fn shadow_contact() -> Hsla {
+    hsla(0., 0., 0., if light() { 0.1 } else { 0.5 })
 }
 
 pub fn scrim() -> Rgba {
-    pick_alpha(0x0000_00a0, 0x1a1a_1866)
+    pick_alpha(0x0000_00a0, 0x1111_1466)
 }
 
 fn panel_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x0017_1717, 0x00ec_ece8)
+    pick_in(theme, 0x0014_1414, 0x00fa_fafa)
 }
 
 pub fn panel() -> Rgba {
@@ -190,37 +320,48 @@ pub fn panel() -> Rgba {
 }
 
 pub fn elevated() -> Rgba {
-    pick(0x001c_1c1c, 0x00fa_faf8)
+    pick(0x001a_1a1a, 0x00ff_ffff)
 }
 
 pub fn hover() -> Rgba {
-    pick(0x0022_2222, 0x00e3_e3de)
+    pick(0x0022_2222, 0x00f0_f0f0)
+}
+
+/// The faint tint under a pointer resting on a list row or a sidebar item, softer than `hover`
+/// so it never reads as the cursor.
+pub fn hover_row() -> Rgba {
+    pick_alpha(0xffff_ff09, 0x0000_0008)
+}
+
+/// The fill of a key badge and of the root path chip.
+pub fn kbd() -> Rgba {
+    pick_alpha(0xffff_ff12, 0x0000_000f)
 }
 
 pub fn selected() -> Rgba {
-    pick(0x002d_1f16, 0x00f2_e2d8)
+    shade(current(), tint().selected)
 }
 
 /// The outline of whatever has the keyboard: the open section, a focused field.
 pub fn focus() -> Rgba {
-    pick(0x00a8_a8a8, 0x0055_5550)
+    shade(current(), tint().focus)
 }
 
 /// The tint over the row that has the keyboard.
 pub fn cursor() -> Rgba {
-    pick_alpha(0xffff_ff0a, 0x0000_000a)
+    pick_alpha(0xffff_ff14, 0x0000_0012)
 }
 
 pub fn border() -> Rgba {
-    pick(0x0029_2929, 0x00dc_dcd6)
+    pick(0x0027_2727, 0x00e3_e3e3)
 }
 
 pub fn border_strong() -> Rgba {
-    pick(0x0038_3838, 0x00c6_c6bf)
+    pick(0x003d_3d3d, 0x00c7_c7c7)
 }
 
 fn text_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x00fa_fafa, 0x001a_1a18)
+    pick_in(theme, 0x00ff_ffff, 0x000d_0d0d)
 }
 
 pub fn text() -> Rgba {
@@ -228,7 +369,7 @@ pub fn text() -> Rgba {
 }
 
 fn muted_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x00a1_a1a1, 0x0060_605b)
+    pick_in(theme, 0x00b3_b3b3, 0x004d_4d4d)
 }
 
 pub fn muted() -> Rgba {
@@ -236,35 +377,45 @@ pub fn muted() -> Rgba {
 }
 
 pub fn faint() -> Rgba {
-    pick(0x0073_7373, 0x0080_807a)
+    pick(0x006b_6b6b, 0x008f_8f8f)
 }
 
 fn bar_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x00d9_7757, 0x00cf_6a48)
+    shade(theme, tint().accent)
 }
 
 pub fn bar() -> Rgba {
     bar_in(current())
 }
 
+/// Text and glyphs drawn on top of the accent color.
+pub fn on_accent() -> Rgba {
+    rgb(0x00ff_ffff)
+}
+
+/// The status dot of an item that is safe to remove.
+pub fn ok() -> Rgba {
+    pick(0x003f_cf8e, 0x0015_9a5c)
+}
+
 pub fn bar_strong() -> Rgba {
-    pick(0x00c8_c8c8, 0x003a_3a37)
+    pick(0x00c6_c6c6, 0x004d_4d4d)
 }
 
 pub fn bar_mid() -> Rgba {
-    pick(0x0076_7676, 0x0089_8984)
+    pick(0x0074_7474, 0x008f_8f8f)
 }
 
 pub fn bar_soft() -> Rgba {
-    pick(0x0062_6262, 0x00a3_a39d)
+    pick(0x0060_6060, 0x00b0_b0b0)
 }
 
 pub fn bar_rest() -> Rgba {
-    pick(0x0038_3838, 0x00c8_c8c2)
+    pick(0x0037_3737, 0x00d4_d4d4)
 }
 
 pub fn track() -> Rgba {
-    pick(0x0026_2626, 0x00e1_e1dc)
+    pick(0x0025_2525, 0x00ec_ecec)
 }
 
 pub fn review() -> Rgba {
@@ -272,90 +423,179 @@ pub fn review() -> Rgba {
 }
 
 pub fn review_soft() -> Rgba {
-    pick_alpha(0xc2a3_6e24, 0xb482_0a24)
+    pick_alpha(0xc2a3_6e24, 0x9a63_081a)
 }
 
 pub fn danger() -> Rgba {
     pick_alpha(0xff66_7fbf, 0xc826_46e6)
 }
 
+/// The fill of the button that deletes for good.
+pub fn danger_solid() -> Rgba {
+    pick(0x00ff_667f, 0x00c8_2646)
+}
+
+pub fn danger_hover() -> Rgba {
+    pick(0x00ff_8fa1, 0x00a8_1e3a)
+}
+
+/// Text and glyphs drawn on `danger_solid`.
+pub fn on_danger() -> Rgba {
+    pick(0x000d_0d0d, 0x00ff_ffff)
+}
+
+/// The fill of a key badge on `danger_solid`.
+pub fn kbd_on_danger() -> Rgba {
+    rgba(0x0d0d_0d29)
+}
+
 pub fn primary() -> Rgba {
-    pick(0x00fa_fafa, 0x001a_1a18)
+    pick(0x00ff_ffff, 0x000d_0d0d)
 }
 
 pub fn on_primary() -> Rgba {
-    pick(0x0011_1111, 0x00f4_f4f1)
+    pick(0x000d_0d0d, 0x00ff_ffff)
 }
 
 /// A folder tile of the space map: set back from the items it holds.
 pub fn tile_folder() -> Rgba {
-    pick(0x0020_2020, 0x00e8_e8e3)
+    pick(0x001b_1b1b, 0x00f0_f0f0)
 }
 
 /// The "n smaller" tile of the space map.
 pub fn tile_rest() -> Rgba {
-    pick(0x001c_1c1c, 0x00ec_ece7)
+    pick(0x0017_1717, 0x00f4_f4f4)
 }
 
 /// An item tile of the space map. Categories differ by a small step in grey, never by hue.
 pub fn tile(category: Category) -> Rgba {
     match category {
-        Category::Dependencies => pick(0x002c_2c2c, 0x00cd_cdc7),
-        Category::Build => pick(0x0029_2929, 0x00d3_d3cd),
-        Category::Cache => pick(0x0026_2626, 0x00d9_d9d3),
-        Category::Temp => pick(0x0023_2323, 0x00df_dfd9),
+        Category::Dependencies => pick(0x002a_2a2a, 0x00d3_d3d3),
+        Category::Build => pick(0x0027_2727, 0x00d9_d9d9),
+        Category::Cache => pick(0x0024_2424, 0x00df_dfdf),
+        Category::Temp => pick(0x0021_2121, 0x00e5_e5e5),
     }
 }
 
 /// The thin top edge of an item tile, a second neutral cue for its category.
 pub fn tile_edge(category: Category) -> Rgba {
     match category {
-        Category::Dependencies => pick(0x0070_7070, 0x008c_8c86),
-        Category::Build => pick(0x0058_5858, 0x00a1_a19b),
-        Category::Cache => pick(0x0046_4646, 0x00b3_b3ad),
-        Category::Temp => pick(0x0038_3838, 0x00c4_c4be),
+        Category::Dependencies => pick(0x006e_6e6e, 0x008a_8a8a),
+        Category::Build => pick(0x0056_5656, 0x009f_9f9f),
+        Category::Cache => pick(0x0044_4444, 0x00b1_b1b1),
+        Category::Temp => pick(0x0036_3636, 0x00c2_c2c2),
     }
 }
 
 pub fn tile_selected() -> Rgba {
-    pick(0x003c_3c3c, 0x00b9_b9b2)
+    shade(current(), tint().tile)
 }
 
 pub fn radius_button() -> Pixels {
-    px(0.)
+    px(4.)
 }
 
 pub fn radius_control() -> Pixels {
-    px(0.)
+    px(4.)
 }
 
 pub fn radius_panel() -> Pixels {
-    px(0.)
+    px(4.)
 }
 
 pub fn radius_dialog() -> Pixels {
-    px(0.)
+    px(6.)
+}
+
+/// The inset content surface that sits beside the sidebar.
+pub fn radius_surface() -> Pixels {
+    px(8.)
+}
+
+/// Key badges, tags and chips.
+pub fn radius_tag() -> Pixels {
+    px(2.)
 }
 
 pub fn radius_checkbox() -> Pixels {
-    px(0.)
+    px(2.)
 }
 
 pub fn radius_dot() -> Pixels {
-    px(0.)
+    px(1.)
 }
 
 pub fn radius_bar() -> Pixels {
-    px(0.)
+    px(1.)
 }
 
-pub const FONT_CANDIDATES: [&str; 5] = [
+pub fn radius_pill() -> Pixels {
+    px(999.)
+}
+
+pub const FONT_CANDIDATES: [&str; 7] = [
+    "Schibsted Grotesk",
+    "PP Neue Montreal",
     "Geist",
     "Inter",
     "IBM Plex Sans",
     "Zed Plex Sans",
     "Noto Sans",
 ];
+
+/// The typefaces for labels, table headings and key badges, in order of preference.
+pub const MONO_CANDIDATES: [&str; 7] = [
+    "IBM Plex Mono",
+    "PP Neue Montreal Mono",
+    "Geist Mono",
+    "JetBrains Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+    "Menlo",
+];
+
+static MONO: OnceLock<SharedString> = OnceLock::new();
+
+/// @name set_mono
+/// @description Remembers the monospace typeface the window found installed, for `label`.
+///
+/// @example
+/// set_mono("Geist Mono".into());
+pub fn set_mono(font: SharedString) {
+    let _ = MONO.set(font);
+}
+
+/// @name label
+/// @description Styles a small label the way table headings and card titles are set: in the
+/// monospace typeface at caption size. The caller passes the text in upper case.
+///
+/// @example
+/// theme::label(div()).child("SIZE")
+pub fn label<E: Styled>(element: E) -> E {
+    mono(element.text_size(unit(font::CAPTION)))
+}
+
+/// @name mono_family
+/// @description The monospace typeface the window found installed, if any.
+///
+/// @example
+/// let family = theme::mono_family();
+pub fn mono_family() -> Option<SharedString> {
+    MONO.get().cloned()
+}
+
+/// @name mono
+/// @description Sets an element in the monospace typeface at whatever size it already has, for
+/// paths, rule names and counts.
+///
+/// @example
+/// theme::mono(div()).child(path)
+pub fn mono<E: Styled>(element: E) -> E {
+    match MONO.get() {
+        Some(font) => element.font_family(font.clone()),
+        None => element,
+    }
+}
 
 pub fn bytes(value: u64) -> String {
     ByteSize(value).to_string()

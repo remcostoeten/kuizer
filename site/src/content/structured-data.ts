@@ -27,7 +27,7 @@ const features = [
   'Lists installed toolchain versions from rustup, nvm, fnm, volta, pyenv, uv, SDKMAN and Go',
   'Lists Docker and Podman leftovers and git repositories that git gc would shrink',
   'Finds duplicate files by size and BLAKE3 hash',
-  'Moves deletions to the trash, logs every run and restores a run with kuizer restore',
+  'Deletes only what you select after a confirmation, logs every run and has an optional trash mode',
   'Runs as a terminal UI and as a desktop app that share one config file and one history',
 ]
 

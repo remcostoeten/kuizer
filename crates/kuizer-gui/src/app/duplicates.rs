@@ -243,150 +243,185 @@ impl Kuizer {
         };
         let wasted = found.reclaimable();
         let copies: usize = found.groups.iter().map(|group| group.members.len()).sum();
-        let largest = found
-            .groups
-            .first()
-            .map_or(0, kuizer::dupes::Group::reclaimable);
-        let cursor = self.cursor_target();
-        let needle = self.needle(Tab::Duplicates);
         let toolbar = self
             .list_toolbar(cx)
             .child(div().flex_1())
             .child(self.tally(Tab::Duplicates, None));
-        let list = scroll("duplicates")
-            .debug_selector(|| "duplicate-list".to_owned())
-            .track_scroll(&self.scroll_for(Tab::Duplicates))
+        let stats = div()
+            .flex()
+            .flex_wrap()
+            .flex_none()
+            .gap(unit(space::L))
+            .p(unit(space::GUTTER))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(unit(space::L))
-                    .child(
-                        ui::stat(
-                            "Reclaimable",
-                            theme::bytes(wasted),
-                            "by keeping one copy of each",
-                        )
-                        .id("stat-reclaimable")
-                        .tip(tooltip::term(Term::Reclaimable)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Groups",
-                            found.groups.len().to_string(),
-                            format!("{copies} files in total"),
-                        )
-                        .id("stat-groups")
-                        .tip(tooltip::term(Term::Groups)),
-                    )
-                    .child(
-                        ui::stat(
-                            "Files compared",
-                            found.files.to_string(),
-                            format!("in {:.1}s", found.duration.as_secs_f32()),
-                        )
-                        .id("stat-compared")
-                        .tip(tooltip::term(Term::FilesCompared)),
-                    ),
-            )
-            .child(
-                ui::card(if found.groups.len() > DUPLICATE_GROUPS {
-                    format!(
-                        "Largest {DUPLICATE_GROUPS} of {} groups",
-                        found.groups.len()
-                    )
-                } else {
-                    "Groups".to_owned()
-                })
-                .children(
-                    found
-                        .groups
-                        .iter()
-                        .take(DUPLICATE_GROUPS)
-                        .enumerate()
-                        .filter(|(_, group)| {
-                            group
-                                .members
-                                .iter()
-                                .any(|member| found_path(needle.as_deref(), &member.path))
-                        })
-                        .map(|(index, group)| {
-                            let members = SharedString::from(format!("dupe-{index}"));
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(unit(space::XS))
-                                .pt(unit(space::M))
-                                .border_t_1()
-                                .border_color(theme::border())
-                                .child(
-                                    ui::bar_row(
-                                        format!(
-                                            "{} copies of {}{}",
-                                            group.members.len(),
-                                            theme::bytes(group.size),
-                                            if group.verified {
-                                                ""
-                                            } else {
-                                                ", not byte-verified"
-                                            }
-                                        ),
-                                        format!(
-                                            "{} reclaimable",
-                                            theme::bytes(group.reclaimable())
-                                        ),
-                                        theme::share(group.reclaimable(), largest),
-                                        theme::bar(),
-                                    )
-                                    .id(("group", index))
-                                    .tip(group_details(group)),
-                                )
-                                .children(
-                                    group
-                                        .members
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, member)| {
-                                            found_path(needle.as_deref(), &member.path)
-                                        })
-                                        .map(|(position, member)| {
-                                            let row = div()
-                                                .flex()
-                                                .gap(unit(space::M))
-                                                .text_color(theme::muted())
-                                                .debug_selector(move || {
-                                                    format!("duplicate-{index}-{position}")
-                                                });
-                                            let target = Target::Duplicate(member.path.clone());
-                                            self.menu_row(row, target, cursor.as_ref(), cx)
-                                                .child(
-                                                    div()
-                                                        .id((members.clone(), position))
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .tip(tooltip::path(&member.path))
-                                                        .child(model::short_path(
-                                                            &member.path,
-                                                            &report.roots,
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .text_color(theme::faint())
-                                                        .child(theme::age(member.modified)),
-                                                )
-                                        }),
-                                )
-                        }),
+                ui::stat(
+                    "Reclaimable",
+                    theme::bytes(wasted),
+                    "by keeping one copy of each",
                 )
-                .when(found.groups.is_empty(), |this| {
-                    this.child(ui::empty("No duplicate files found"))
-                }),
+                .id("stat-reclaimable")
+                .tip(tooltip::term(Term::Reclaimable)),
             )
+            .child(
+                ui::stat(
+                    "Groups",
+                    found.groups.len().to_string(),
+                    format!("{copies} files in total"),
+                )
+                .id("stat-groups")
+                .tip(tooltip::term(Term::Groups)),
+            )
+            .child(
+                ui::stat(
+                    "Files compared",
+                    found.files.to_string(),
+                    format!("in {:.1}s", found.duration.as_secs_f32()),
+                )
+                .id("stat-compared")
+                .tip(tooltip::term(Term::FilesCompared)),
+            );
+        let header = table_header()
+            .child(div().flex_1().child("FILE"))
+            .child(column(col::L).text_right().child("CHANGED"));
+        let count = self.listed(Tab::Duplicates).lines.len();
+        let list = self
+            .table_list(
+                "duplicates",
+                Tab::Duplicates,
+                count,
+                |app, range, cx| app.duplicate_lines(range, cx),
+                cx,
+            )
+            .debug_selector(|| "duplicate-list".to_owned());
+        let empty = if found.groups.is_empty() {
+            "No duplicate files found"
+        } else {
+            "No duplicates match this filter"
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(stats)
+            .child(table(
+                header,
+                if count == 0 {
+                    ui::empty(empty).into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element();
-        framed(toolbar, list)
+        framed(toolbar, body)
+    }
+
+    fn duplicate_lines(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(report) = self.report() else {
+            return Vec::new();
+        };
+        let Some(found) = &report.duplicates else {
+            return Vec::new();
+        };
+        let largest = found
+            .groups
+            .first()
+            .map_or(0, kuizer::dupes::Group::reclaimable);
+        let listed = self.listed(Tab::Duplicates);
+        let cursor = self.cursor_target();
+        let line = |id: (&'static str, usize)| {
+            ui::tabular(div())
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(unit(space::L))
+                .w_full()
+                .h(unit(size::row()))
+                .px(unit(space::GUTTER))
+        };
+        range
+            .filter_map(|at| match *listed.lines.get(at)? {
+                Line::Group(index) => {
+                    let group = found.groups.get(index)?;
+                    let label = format!(
+                        "{} copies of {}{}",
+                        group.members.len(),
+                        theme::bytes(group.size),
+                        if group.verified {
+                            ""
+                        } else {
+                            ", not byte-verified"
+                        }
+                    );
+                    Some(
+                        line(("duplicate-group", index))
+                            .bg(theme::elevated())
+                            .tip(group_details(group))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .w(unit(col::L))
+                                    .flex_none()
+                                    .h(unit(size::TRACK))
+                                    .rounded(theme::radius_bar())
+                                    .bg(theme::track())
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(gpui::relative(
+                                                theme::share(group.reclaimable(), largest)
+                                                    .max(0.005),
+                                            ))
+                                            .rounded(theme::radius_bar())
+                                            .bg(theme::bar()),
+                                    ),
+                            )
+                            .child(
+                                column(col::L)
+                                    .text_right()
+                                    .text_color(theme::muted())
+                                    .child(format!(
+                                        "{} reclaimable",
+                                        theme::bytes(group.reclaimable())
+                                    )),
+                            ),
+                    )
+                }
+                Line::Member(row) => {
+                    let (index, position) = *listed.slots.get(row)?;
+                    let member = found.groups.get(index)?.members.get(position)?;
+                    let target = Target::Duplicate(member.path.clone());
+                    let drawn = line(("duplicate", at))
+                        .text_color(theme::muted())
+                        .debug_selector(move || format!("duplicate-{index}-{position}"));
+                    Some(
+                        self.menu_row(drawn, target, cursor.as_ref(), cx)
+                            .child(
+                                div()
+                                    .id(("duplicate-path", at))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .pl(unit(space::L))
+                                    .tip(tooltip::path(&member.path))
+                                    .child(model::short_path(&member.path, &report.roots)),
+                            )
+                            .child(
+                                column(col::L)
+                                    .text_right()
+                                    .text_color(theme::faint())
+                                    .child(theme::age(member.modified)),
+                            ),
+                    )
+                }
+            })
+            .collect()
     }
 }
 

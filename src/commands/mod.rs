@@ -6,6 +6,7 @@ mod docker;
 mod duplicates;
 mod git;
 mod history;
+mod interrupt;
 mod removal;
 mod restore;
 mod rules;
@@ -47,6 +48,8 @@ pub enum AppError {
     ScopeRejected(String),
     #[error("{0} items could not be removed")]
     RemovalFailed(usize),
+    #[error("stopped by Ctrl-C, {0} items were left in place")]
+    Interrupted(usize),
     #[error("no home directory is known for this platform")]
     NoHome,
     #[error("{0} already exists, pass --force to overwrite it")]

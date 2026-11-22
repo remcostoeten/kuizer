@@ -187,7 +187,7 @@ fn scan_examples() -> String {
 
 fn clean_help() -> String {
     format!(
-        "Selects safe items unless --select says otherwise, and deletes them permanently after a confirmation.\n\n{}",
+        "Selects safe items unless --select says otherwise, and deletes them permanently after a confirmation, or moves them to the trash with delete.mode = \"trash\".\n\n{}",
         examples(&[
             (
                 "kuizer clean",

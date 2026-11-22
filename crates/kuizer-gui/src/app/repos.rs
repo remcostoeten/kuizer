@@ -195,12 +195,15 @@ impl Kuizer {
             return;
         }
         self.menu = None;
-        self.dialog = Some(Dialog::Branches(scope));
+        self.dialog = Some(Dialog::Branches {
+            scope,
+            cancel: false,
+        });
         cx.notify();
     }
 
     pub(super) fn accept_branches(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Branches(scope)) = self.dialog.take() else {
+        let Some(Dialog::Branches { scope, .. }) = self.dialog.take() else {
             return;
         };
         if self.branches_blocked(Some(&scope)).is_some() {
@@ -370,21 +373,23 @@ impl Kuizer {
                         ),
                     ),
             )
-            .child(header)
-            .child(if report.repos.is_empty() {
-                div()
-                    .flex_1()
-                    .child(ui::empty(if report.options.repos {
-                        "No git repositories worth cleaning"
-                    } else {
-                        "Git repositories were skipped for this scan"
-                    }))
-                    .into_any_element()
-            } else if rows == 0 {
-                div().flex_1().into_any_element()
-            } else {
-                list.into_any_element()
-            })
+            .child(table(
+                header,
+                if report.repos.is_empty() {
+                    div()
+                        .flex_1()
+                        .child(ui::empty(if report.options.repos {
+                            "No git repositories worth cleaning"
+                        } else {
+                            "Git repositories were skipped for this scan"
+                        }))
+                        .into_any_element()
+                } else if rows == 0 {
+                    div().flex_1().into_any_element()
+                } else {
+                    list.into_any_element()
+                },
+            ))
             .into_any_element()
     }
 
@@ -437,7 +442,7 @@ impl Kuizer {
         let gc_root = root.clone();
         let branch_root = root.clone();
         self.menu_row(row, target, cursor, cx)
-            .h(unit(size::ROW_TALL))
+            .h(unit(size::row_tall()))
             .child(
                 column(col::M)
                     .id(("repo-gain", id))
@@ -548,9 +553,11 @@ impl Kuizer {
     pub(super) fn render_branch_dialog(
         &self,
         scope: &GitScope,
+        cancel: bool,
         panel: Div,
         cx: &mut Context<Self>,
     ) -> Div {
+        let ring = || ring::outline(None, Rc::new(Cell::new(false)));
         let targets = self.prunable(scope);
         let total: usize = targets
             .iter()
@@ -595,7 +602,7 @@ impl Kuizer {
                     .gap(unit(space::XS))
                     .p(unit(space::L))
                     .rounded(theme::radius_panel())
-                    .bg(theme::panel())
+                    .bg(theme::elevated())
                     .children(lines.iter().take(LIST_LIMIT).map(|(repository, branch)| {
                         div()
                             .flex()
@@ -627,6 +634,7 @@ impl Kuizer {
                     .child(
                         ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
                             .tip(Tooltip::new("Keep every branch").keys(&["Esc"]).build())
+                            .when(cancel, |this| this.child(ring()))
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.dialog = None;
                                 cx.notify();
@@ -640,6 +648,7 @@ impl Kuizer {
                                     .keys(&["Enter"])
                                     .build(),
                             )
+                            .when(!cancel, |this| this.child(ring()))
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.accept_branches(cx);
                             })),
@@ -890,10 +899,15 @@ mod tests {
         cx.simulate_keystrokes("b");
         assert!(view.read_with(cx, |app, _| matches!(
             &app.dialog,
-            Some(Dialog::Branches(GitScope::One(shown))) if *shown == root
+            Some(Dialog::Branches { scope: GitScope::One(shown), .. }) if *shown == root
         )));
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |app, _| app.dialog.is_none()));
+        cx.simulate_keystrokes("b tab enter");
+        assert!(
+            view.read_with(cx, |app, _| app.dialog.is_none()),
+            "Enter on Cancel closes"
+        );
         assert!(git(
             &root,
             &["show-ref", "--verify", "--quiet", "refs/heads/done"]

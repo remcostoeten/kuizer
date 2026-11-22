@@ -12,8 +12,16 @@ impl Kuizer {
             Target::Item(source, id, _) => {
                 let selected = self.selection.contains(&(*source, *id));
                 let external = *source == Source::Docker;
-                let remove = MenuItem::new(Choice::Trash, "Delete", "Del")
-                    .tip("Delete only this item for good, after a confirmation");
+                let remove = MenuItem::new(
+                    Choice::Trash,
+                    if self.config.delete.mode == DeleteMode::Trash && !source.permanent() {
+                        "Move to trash"
+                    } else {
+                        "Delete"
+                    },
+                    "Del",
+                )
+                .tip("Remove only this item, right away");
                 vec![
                     reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,
@@ -24,7 +32,7 @@ impl Kuizer {
                     )
                     .divided()
                     .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
-                    remove.unless(self.trash_lock()),
+                    remove.unless(self.locked([*source].into_iter())),
                     exclude.unless(external.then_some(NOT_ON_DISK)),
                 ]
             }
@@ -125,12 +133,7 @@ impl Kuizer {
         }
     }
 
-    pub(super) fn menu_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(menu) = &self.menu else {
             return;
         };
@@ -171,7 +174,7 @@ impl Kuizer {
             "end" => enabled.last().copied(),
             "enter" | "space" => {
                 if let Some(active) = menu.active {
-                    self.choose(active, window, cx);
+                    self.choose(active, cx);
                 }
                 return;
             }
@@ -181,7 +184,7 @@ impl Kuizer {
                         .iter()
                         .position(|item| item.enabled && item.answers(key))
                 {
-                    self.choose(index, window, cx);
+                    self.choose(index, cx);
                 }
                 return;
             }
@@ -192,7 +195,7 @@ impl Kuizer {
         self.redraw_chrome(cx);
     }
 
-    pub(super) fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(menu) = self.menu.take() else {
             return;
         };
@@ -228,7 +231,7 @@ impl Kuizer {
             }
             (Choice::Toggle, Target::Item(source, id, _)) => self.toggle(source, id, cx),
             (Choice::Trash, Target::Item(source, id, _)) => {
-                self.confirm(Some((source, id)), window, cx);
+                self.delete(Some((source, id)), cx);
             }
             (Choice::Restore, Target::Run(session, _)) => {
                 self.restore(session, cx);
@@ -332,6 +335,7 @@ impl Kuizer {
     pub(super) fn prune(&mut self) {
         if let Phase::Ready(report) = &mut self.phase {
             report.drop_paths(&self.excluded);
+            report.remove(&self.gone);
         }
         self.refresh_stats();
         self.refresh_rows();
@@ -361,36 +365,32 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> E {
         let open = self.menu.as_ref().is_some_and(|menu| menu.target == target);
+        let look = match &target {
+            Target::Item(source, id, path) => Some(self.look(*source, *id, path)),
+            _ => None,
+        };
         let tab = target.tab();
         let marked = cursor == Some(&target);
         let bounds = marked.then(|| Rc::clone(&self.cursor_bounds));
-        let reveal = Rc::clone(&self.reveal_cursor);
-        let scroll = self.scrolls.get(&tab).cloned();
         let clicked = target.clone();
         row.when_some(bounds, |this, bounds| {
             this.child(
-                canvas(
-                    move |area, window, _| {
-                        bounds.set(Some(area));
-                        if let Some(scroll) = scroll
-                            && reveal.take()
-                        {
-                            keep_visible(&scroll, area, window);
-                        }
-                    },
-                    |_, (), _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
+                canvas(move |area, _, _| bounds.set(Some(area)), |_, (), _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
             )
             .child(ui::marker().debug_selector(|| "cursor".to_owned()))
         })
+        .when_some(look, |this, look| self.flow_row(this, look))
         .when(open, |this| this.bg(theme::hover()))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |app, _: &MouseDownEvent, _, cx| {
+            cx.listener(move |app, event: &MouseDownEvent, _, cx| {
+                if event.modifiers.shift && !app.busy() {
+                    app.select_to(&clicked);
+                }
                 app.cursors.insert(tab, clicked.clone());
                 app.range = None;
                 app.filtering = false;
@@ -451,7 +451,7 @@ impl Kuizer {
                         theme::faint()
                     })
                     .when(enabled && active == Some(index), |this| {
-                        this.bg(theme::selected())
+                        this.bg(theme::tile_selected())
                     })
                     .when(enabled, |this| this.cursor_pointer())
                     .when_some(item.tip, |this, tip| this.tip(tooltip::plain(tip)))
@@ -466,8 +466,8 @@ impl Kuizer {
                             app.redraw_chrome(cx);
                         }
                     }))
-                    .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
-                        app.choose(index, window, cx);
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        app.choose(index, cx);
                     }));
                 div().flex().flex_col().children(divider).child(row)
             }));

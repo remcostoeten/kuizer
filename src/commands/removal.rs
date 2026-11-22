@@ -2,8 +2,10 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use super::AppError;
+use super::interrupt::Interrupt;
 use super::scan::sort_candidates;
 use crate::cli::{RemovalArgs, Selection, SortKey};
+use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
 use crate::history::{self, Entry, Recorder};
@@ -31,11 +33,11 @@ pub fn files(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), Del
     delete::delete(guard, &target(candidate), mode)
 }
 
-pub fn mode(args: &RemovalArgs) -> Mode {
+pub fn mode(args: &RemovalArgs, config: &Config) -> Mode {
     if args.dry_run {
         Mode::DryRun
     } else {
-        Mode::Permanent
+        config.delete.mode.into()
     }
 }
 
@@ -174,7 +176,13 @@ pub fn run(
     let guard = Guard::new(request.roots);
     let mut removals = Vec::with_capacity(candidates.len());
     let mut recorder = Recorder::for_user(started_at, request.roots);
+    let interrupt = Interrupt::catch();
+    let mut left = 0;
     for candidate in candidates {
+        if interrupt.requested() {
+            left += 1;
+            continue;
+        }
         let removal = match (request.remove)(&guard, &candidate, mode) {
             Ok(()) => {
                 recorder.add(Entry::new(&candidate, mode));
@@ -205,6 +213,9 @@ pub fn run(
         );
     } else {
         output::print_removal_summary(&removals, mode);
+    }
+    if left > 0 {
+        return Err(AppError::Interrupted(left));
     }
     match removals
         .iter()

@@ -13,7 +13,7 @@ use crate::treemap;
 const START_FIRST: &str = "Start a scan first";
 const NEEDS_SCAN: &str = "Available once a scan is shown";
 const WAIT_FOR_SCAN: &str = "Available once the scan finishes";
-const WAIT_FOR_CLEANUP: &str = "Available once the cleanup finishes";
+pub(super) const WAIT_FOR_CLEANUP: &str = "Available once the cleanup finishes";
 const SELECT_LISTS: &str = "Available in Project artifacts, Global caches, Toolchains and Docker";
 const LISTS_ONLY: &str = "Available in a list section";
 const NO_ROWS: &str = "This list has no rows";
@@ -27,7 +27,13 @@ enum Motion {
     Last,
     PageDown,
     PageUp,
+    Forward(usize),
+    Back(usize),
+    Row(usize),
 }
+
+/// The longest count prefix a motion takes, in digits.
+const COUNT_DIGITS: usize = 6;
 
 /// Where the cursor lands after a motion in a list of `count` rows, never past either end.
 fn step(motion: Motion, current: usize, count: usize, page: usize) -> usize {
@@ -39,6 +45,9 @@ fn step(motion: Motion, current: usize, count: usize, page: usize) -> usize {
         Motion::Last => last,
         Motion::PageDown => (current + page).min(last),
         Motion::PageUp => current.saturating_sub(page),
+        Motion::Forward(rows) => current.saturating_add(rows).min(last),
+        Motion::Back(rows) => current.saturating_sub(rows),
+        Motion::Row(row) => row.min(last),
     }
 }
 
@@ -101,7 +110,86 @@ pub(super) struct Entry {
     pub blocked: Option<&'static str>,
 }
 
+/// How long a key counts as still down without a release. Longer than any key-repeat delay.
+const HELD_FOR: Duration = Duration::from_millis(1200);
+
+/// Tells a key repeat from a fresh press. GPUI 0.2.2 reports repeats on Wayland and macOS only,
+/// and on X11 a held key arrives as presses with no release between them, so the last key down
+/// is tracked here until its release.
+#[derive(Default)]
+pub(super) struct Held {
+    key: Option<(String, Instant)>,
+    releases: bool,
+}
+
+impl Held {
+    pub(super) fn press(&mut self, event: &KeyDownEvent, now: Instant) -> bool {
+        let key = &event.keystroke.key;
+        let down = self.releases
+            && self
+                .key
+                .as_ref()
+                .is_some_and(|(held, since)| held == key && now.duration_since(*since) < HELD_FOR);
+        self.key = Some((key.clone(), now));
+        event.is_held || down
+    }
+
+    pub(super) fn release(&mut self, key: &str) {
+        self.releases = true;
+        if self.key.as_ref().is_some_and(|(held, _)| held == key) {
+            self.key = None;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mode {
+    Normal,
+    Visual,
+    Filter,
+    Palette,
+    Settings,
+    Menu,
+    Shortcuts,
+    Confirm,
+}
+
+impl Mode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Mode::Normal => "Normal",
+            Mode::Visual => "Visual",
+            Mode::Filter => "Filter",
+            Mode::Palette => "Palette",
+            Mode::Settings => "Settings",
+            Mode::Menu => "Menu",
+            Mode::Shortcuts => "Shortcuts",
+            Mode::Confirm => "Confirm",
+        }
+    }
+}
+
 impl Kuizer {
+    pub(super) fn mode(&self) -> Mode {
+        if self.menu.is_some() {
+            Mode::Menu
+        } else if matches!(self.dialog, Some(Dialog::Branches { .. })) {
+            Mode::Confirm
+        } else if self.settings.is_some() {
+            Mode::Settings
+        } else if self.palette.is_some() {
+            Mode::Palette
+        } else if self.shortcuts {
+            Mode::Shortcuts
+        } else if self.filtering {
+            Mode::Filter
+        } else if self.visual {
+            Mode::Visual
+        } else {
+            Mode::Normal
+        }
+    }
+
     /// Whether a text field other than the start screen's folder field has the keyboard.
     pub(super) fn typing(&self) -> bool {
         self.palette.is_some() || self.filtering
@@ -113,10 +201,6 @@ impl Kuizer {
         (!text.is_empty()).then(|| text.to_lowercase())
     }
 
-    pub(super) fn scroll_for(&self, tab: Tab) -> ScrollHandle {
-        self.scrolls.get(&tab).cloned().unwrap_or_default()
-    }
-
     pub(super) fn on_key(
         &mut self,
         event: &KeyDownEvent,
@@ -124,12 +208,13 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) {
         let keystroke = &event.keystroke;
+        let repeat = self.held.press(event, Instant::now());
         if self.menu.is_some() {
-            self.menu_key(event, window, cx);
+            self.menu_key(event, cx);
             return;
         }
         if self.dialog.is_some() {
-            self.dialog_key(keystroke, cx);
+            self.dialog_key(keystroke, repeat, cx);
             return;
         }
         if self.settings.is_some() {
@@ -156,7 +241,7 @@ impl Kuizer {
             }
             self.filtering = false;
         }
-        if self.ring_key(keystroke, window, cx) {
+        if self.ring_key(keystroke, repeat, window, cx) {
             return;
         }
         if matches!(self.phase, Phase::Start) && self.type_folder(event, cx) {
@@ -174,15 +259,97 @@ impl Kuizer {
             }
             _ => {}
         }
+        if self.count_key(keystroke) {
+            cx.notify();
+            return;
+        }
         if let Some(command) = commands::lookup(keystroke, self.map_active())
             && (self.config.route_shortcuts.enabled || !matches!(command, Command::GoTo(_)))
+            && !(repeat && matches!(command, Command::Trash))
         {
             self.run(command, window, cx);
         }
+        if !self.count.is_empty() {
+            self.count.clear();
+            cx.notify();
+        }
+    }
+
+    /// Takes a digit as part of a count before a motion, as in `10j`. A leading zero is not a
+    /// count.
+    fn count_key(&mut self, keystroke: &Keystroke) -> bool {
+        let modifiers = keystroke.modifiers;
+        let plain = !modifiers.modified() && !modifiers.shift;
+        let digit = keystroke.key.len() == 1 && keystroke.key.as_bytes()[0].is_ascii_digit();
+        let listing = matches!(self.phase, Phase::Ready(_))
+            && self.tab != Tab::Overview
+            && !self.map_active();
+        if !plain || !digit || !listing || (self.count.is_empty() && keystroke.key == "0") {
+            return false;
+        }
+        if self.count.len() < COUNT_DIGITS {
+            self.count.push_str(&keystroke.key);
+        }
+        true
+    }
+
+    /// The motion a command stands for, with the typed count applied: `10j` moves ten rows,
+    /// `3` then Page Down three pages, and `5G` or `5gg` goes to the fifth row.
+    fn motion(&self, command: &Command, times: Option<usize>) -> Option<Motion> {
+        let page = || self.page_size();
+        Some(match (command, times) {
+            (Command::Down | Command::ExtendDown, None) => Motion::Down,
+            (Command::Up | Command::ExtendUp, None) => Motion::Up,
+            (Command::Down | Command::ExtendDown, Some(times)) => Motion::Forward(times),
+            (Command::Up | Command::ExtendUp, Some(times)) => Motion::Back(times),
+            (Command::First, None) => Motion::First,
+            (Command::Last, None) => Motion::Last,
+            (Command::First | Command::Last, Some(row)) => Motion::Row(row.saturating_sub(1)),
+            (Command::PageDown, None) => Motion::PageDown,
+            (Command::PageUp, None) => Motion::PageUp,
+            (Command::PageDown, Some(times)) => Motion::Forward(page().saturating_mul(times)),
+            (Command::PageUp, Some(times)) => Motion::Back(page().saturating_mul(times)),
+            _ => return None,
+        })
+    }
+
+    /// Turns visual mode on or off. On, the cursor row is selected and every motion selects
+    /// the rows it passes, from this row.
+    fn toggle_visual(&mut self) {
+        self.visual = !self.visual;
+        self.range = None;
+        if !self.visual {
+            return;
+        }
+        let listed = self.listing(self.tab);
+        let listed = listed.as_deref();
+        let Some(cursor) = self.cursor_target() else {
+            return;
+        };
+        let Some(row) = self.listed_row(listed, &cursor, &self.artifact_row) else {
+            return;
+        };
+        let mut added = HashSet::new();
+        if let Some(key) = self.listed_key(listed, row)
+            && self.select(key)
+        {
+            added.insert(key);
+        }
+        self.range = Some(Span {
+            tab: self.tab,
+            anchor: cursor,
+            anchor_row: Cell::new(row),
+            added,
+        });
     }
 
     fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.map_active() && !self.map.path.is_empty() {
+        self.count.clear();
+        if self.visual {
+            self.visual = false;
+            self.range = None;
+            cx.notify();
+        } else if self.map_active() && !self.map.path.is_empty() {
             self.map_back(self.map.path.len() - 1);
             cx.notify();
         } else if self.search.is_some() {
@@ -197,22 +364,22 @@ impl Kuizer {
         }
     }
 
-    fn dialog_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    pub(super) fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.held.release(&event.keystroke.key);
+    }
+
+    fn dialog_key(&mut self, keystroke: &Keystroke, repeat: bool, cx: &mut Context<Self>) {
         let key = keystroke.key.as_str();
         match &mut self.dialog {
-            Some(Dialog::Confirm { .. }) => match key {
-                "escape" => self.dialog = None,
-                "enter" => {
-                    self.accept(cx);
-                    return;
-                }
-                _ => return,
-            },
             Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
-            Some(Dialog::Branches(_)) => match key {
+            Some(Dialog::Branches { cancel, .. }) => match key {
                 "escape" => self.dialog = None,
+                "tab" | "left" | "right" => *cancel = !*cancel,
+                "enter" if *cancel => self.dialog = None,
                 "enter" => {
-                    self.accept_branches(cx);
+                    if !repeat {
+                        self.accept_branches(cx);
+                    }
                     return;
                 }
                 _ => return,
@@ -352,10 +519,8 @@ impl Kuizer {
         if self.tab == Tab::Artifacts {
             self.refresh_rows();
         }
-        self.reveal_cursor.set(false);
-        match self.list_scroll(self.tab) {
-            Some(scroll) => scroll.scroll_to_item(0, ScrollStrategy::Top),
-            None => self.scroll_for(self.tab).set_offset(point(px(0.), px(0.))),
+        if let Some(scroll) = self.list_scroll(self.tab) {
+            scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
     }
 
@@ -371,7 +536,6 @@ impl Kuizer {
     pub(super) fn go_to(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.filtering = false;
-            self.reveal_cursor.set(false);
         }
         self.tab = tab;
         if tab == Tab::Duplicates {
@@ -449,34 +613,33 @@ impl Kuizer {
                 .then_some("This level has no tiles"),
             Command::MapToggle => {
                 if self.map_focused().and_then(treemap::Node::item).is_some() {
-                    self.wait()
+                    self.hold()
                 } else {
                     Some("Only an item tile can be selected")
                 }
             }
-            Command::Trash => {
-                let item = matches!(cursor(), Some(Target::Item(..)));
-                self.trash_lock().or_else(|| self.wait()).or_else(|| {
-                    (self.selection.is_empty() && !item).then_some("Select items first")
-                })
-            }
-            Command::ExtendDown | Command::ExtendUp => {
+            Command::Trash => self
+                .trash_lock()
+                .or_else(|| self.hold())
+                .or_else(|| self.selection.is_empty().then_some("Select items first")),
+            Command::ExtendDown | Command::ExtendUp | Command::Visual => {
                 if !self.tab.selects() {
                     Some(SELECT_LISTS)
                 } else if self.map_active() {
                     Some(LISTS_ONLY)
                 } else {
-                    self.wait()
+                    self.hold()
                         .or_else(|| cursor().is_none().then_some(NO_ROWS))
                 }
             }
             Command::SelectAll | Command::SelectNone | Command::Toggle => {
                 if self.tab.selects() {
-                    self.wait()
+                    self.hold()
                 } else {
                     Some(SELECT_LISTS)
                 }
             }
+            Command::SelectWins => self.hold().or_else(|| self.wins_blocked()),
             Command::FocusFilter => (self.tab == Tab::Overview).then_some(LISTS_ONLY),
             Command::Gc => self.gc_blocked(repo().as_ref()),
             Command::GcAll => self.gc_blocked(self.in_repos().then_some(&GitScope::All)),
@@ -513,10 +676,22 @@ impl Kuizer {
     }
 
     /// Why work that replaces the results has to wait, or `None` when nothing is running.
+    /// Why the lists cannot be selected in right now. A running scan or cleanup does not stand
+    /// in the way, only a view without results.
+    pub(super) fn hold(&self) -> Option<&'static str> {
+        if self.restoring() {
+            Some(WAIT_FOR_RESTORE)
+        } else if matches!(self.phase, Phase::Loading(_)) {
+            Some(WAIT_FOR_SCAN)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn wait(&self) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
-        } else if matches!(self.dialog, Some(Dialog::Running)) {
+        } else if self.cleaning.is_some() {
             Some(WAIT_FOR_CLEANUP)
         } else if self.git_running() {
             Some(repos::GIT_RUNNING)
@@ -534,10 +709,25 @@ impl Kuizer {
         if self.blocked(&command).is_some() {
             return;
         }
-        if !matches!(command, Command::ExtendDown | Command::ExtendUp) {
+        let times = std::mem::take(&mut self.count).parse::<usize>().ok();
+        let motion = self.motion(&command, times);
+        let extends = matches!(command, Command::ExtendDown | Command::ExtendUp)
+            || (self.visual && motion.is_some());
+        if !extends && !matches!(command, Command::Visual) {
             self.range = None;
+            self.visual &= motion.is_some();
+        }
+        if let Some(motion) = motion {
+            if extends {
+                self.extend(motion);
+            } else {
+                self.move_cursor(motion);
+            }
+            cx.notify();
+            return;
         }
         match command {
+            Command::Visual => self.toggle_visual(),
             Command::Palette => self.open_palette(cx),
             Command::Shortcuts => {
                 self.palette = None;
@@ -556,14 +746,14 @@ impl Kuizer {
             }
             Command::StopDuplicates => self.stop_duplicates(cx),
             Command::Quit => cx.quit(),
-            Command::Down => self.move_cursor(Motion::Down),
-            Command::Up => self.move_cursor(Motion::Up),
-            Command::ExtendDown => self.extend(Motion::Down),
-            Command::ExtendUp => self.extend(Motion::Up),
-            Command::First => self.move_cursor(Motion::First),
-            Command::Last => self.move_cursor(Motion::Last),
-            Command::PageDown => self.move_cursor(Motion::PageDown),
-            Command::PageUp => self.move_cursor(Motion::PageUp),
+            Command::Down
+            | Command::Up
+            | Command::ExtendDown
+            | Command::ExtendUp
+            | Command::First
+            | Command::Last
+            | Command::PageDown
+            | Command::PageUp => {}
             Command::Toggle => {
                 if let Some(Target::Item(source, id, _)) = self.cursor_target() {
                     self.toggle(source, id, cx);
@@ -579,13 +769,8 @@ impl Kuizer {
                     self.selection.remove(&key);
                 }
             }
-            Command::Trash => {
-                if !self.selection.is_empty() {
-                    self.confirm(None, window, cx);
-                } else if let Some(Target::Item(source, id, _)) = self.cursor_target() {
-                    self.confirm(Some((source, id)), window, cx);
-                }
-            }
+            Command::SelectWins => self.select_wins(cx),
+            Command::Trash => self.trash(cx),
             Command::Reveal => {
                 if let Some(path) = self.cursor_target().as_ref().and_then(Target::path) {
                     self.reveal_path(path.to_path_buf(), cx);
@@ -704,7 +889,7 @@ impl Kuizer {
         listed.map_or(self.rows.len(), <[Target]>::len)
     }
 
-    fn listed_row(
+    pub(super) fn listed_row(
         &self,
         listed: Option<&[Target]>,
         target: &Target,
@@ -768,6 +953,39 @@ impl Kuizer {
             .or_else(|| self.first_target())
     }
 
+    /// A click on a row toggles it, with or without Ctrl. A Shift+click already selected its
+    /// range when the button went down, so it toggles nothing.
+    pub(super) fn click_row(
+        &mut self,
+        source: Source,
+        id: u64,
+        event: &ClickEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.busy() && !event.modifiers().shift {
+            self.toggle(source, id, cx);
+        }
+    }
+
+    /// Selects every row from the cursor row to this one, as a Shift+click does.
+    pub(super) fn select_to(&mut self, target: &Target) {
+        let listed = self.listing(target.tab());
+        let listed = listed.as_deref();
+        let rows = (
+            self.cursor_target()
+                .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row)),
+            self.listed_row(listed, target, &Cell::new(0)),
+        );
+        let (Some(from), Some(to)) = rows else {
+            return;
+        };
+        for row in from.min(to)..=from.max(to) {
+            if let Some(key) = self.listed_key(listed, row) {
+                self.select(key);
+            }
+        }
+    }
+
     fn move_cursor(&mut self, motion: Motion) {
         let tab = self.tab;
         let listed = self.listing(tab);
@@ -793,14 +1011,12 @@ impl Kuizer {
             self.artifact_row.set(next);
         }
         if let Some(scroll) = self.list_scroll(self.tab) {
-            let strategy = if next < current {
-                ScrollStrategy::Top
+            let (line, strategy) = if next < current {
+                (self.heading_line(next), ScrollStrategy::Top)
             } else {
-                ScrollStrategy::Bottom
+                (self.drawn_line(next), ScrollStrategy::Bottom)
             };
-            scroll.scroll_to_item(next, strategy);
-        } else {
-            self.reveal_cursor.set(true);
+            scroll.scroll_to_item(line, strategy);
         }
     }
 
@@ -854,6 +1070,33 @@ impl Kuizer {
         self.range = Some(range);
     }
 
+    /// The drawn line of a list row. Only the duplicate list draws more lines than rows, as
+    /// it puts a heading above each group.
+    fn drawn_line(&self, row: usize) -> usize {
+        if self.tab != Tab::Duplicates {
+            return row;
+        }
+        self.listed(Tab::Duplicates)
+            .line_of
+            .get(row)
+            .copied()
+            .unwrap_or(row)
+    }
+
+    /// The line to scroll to the top for a row: its group's heading when the row is the first
+    /// of its group, so moving up never hides which group a duplicate belongs to.
+    fn heading_line(&self, row: usize) -> usize {
+        let line = self.drawn_line(row);
+        let heading = line.checked_sub(1).filter(|&above| {
+            self.tab == Tab::Duplicates
+                && matches!(
+                    self.listed(Tab::Duplicates).lines.get(above),
+                    Some(Line::Group(_))
+                )
+        });
+        heading.unwrap_or(line)
+    }
+
     /// How many rows PageUp and PageDown move: the rows that fit in the list, less one.
     #[allow(
         clippy::cast_possible_truncation,
@@ -861,9 +1104,11 @@ impl Kuizer {
         reason = "a positive row count far below usize::MAX"
     )]
     fn page_size(&self) -> usize {
-        let view = match self.list_scroll(self.tab) {
-            Some(scroll) => scroll.0.borrow().base_handle.bounds(),
-            None => self.scroll_for(self.tab).bounds(),
+        let Some(view) = self
+            .list_scroll(self.tab)
+            .map(|scroll| scroll.0.borrow().base_handle.bounds())
+        else {
+            return 10;
         };
         match self.cursor_bounds.get() {
             Some(row) if row.size.height > px(0.) => {
@@ -902,14 +1147,9 @@ impl Kuizer {
             Tab::Docker => report.docker.len(),
             Tab::Repos => report.repos.len(),
             Tab::Duplicates => report.duplicates.as_ref().map_or(0, |found| {
-                found
-                    .groups
-                    .iter()
-                    .take(DUPLICATE_GROUPS)
-                    .map(|group| group.members.len())
-                    .sum()
+                found.groups.iter().map(|group| group.members.len()).sum()
             }),
-            Tab::Issues => report.issues.len().min(ISSUE_LIMIT),
+            Tab::Issues => report.issues.len(),
             Tab::History => report
                 .history
                 .as_ref()
@@ -1158,46 +1398,8 @@ mod tests {
         assert!(cx.debug_bounds("palette-Delete selected").is_some());
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| {
-            assert!(app.dialog.is_none(), "a blocked command does not run");
+            assert!(app.cleaning.is_none(), "a blocked command does not run");
             assert!(app.palette.is_some(), "the palette stays open");
-        });
-
-        view.update(cx, |app, _| app.stale = None);
-        cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| {
-            assert!(app.palette.is_none());
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
-        });
-    }
-
-    #[gpui::test]
-    fn d_opens_the_confirmation_and_escape_leaves_it(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(bind_keys);
-        let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
-        cx.simulate_keystrokes("d");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: Some(_), .. })
-            ));
-        });
-        cx.simulate_keystrokes("escape");
-        view.read_with(cx, |app, _| assert!(app.dialog.is_none()));
-
-        view.update(cx, |app, cx| {
-            let id = app.report().unwrap().candidates[0].id;
-            app.toggle(Source::Artifact, id, cx);
-        });
-        cx.simulate_keystrokes("d");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
         });
     }
 
@@ -1226,10 +1428,12 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("settings").is_some());
         cx.simulate_keystrokes("tab space");
-        view.read_with(cx, |app, _| assert!(!app.config.route_shortcuts.enabled));
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.config.delete.mode, kuizer::config::DeleteMode::Trash);
+        });
         cx.run_until_parked();
         let written = std::fs::read_to_string(&file).unwrap();
-        assert!(written.contains("enabled = false"), "{written}");
+        assert!(written.contains("mode = \"trash\""), "{written}");
         cx.simulate_keystrokes("ctrl-,");
         view.read_with(cx, |app, _| assert!(app.settings.is_none(), "it toggles"));
         cx.simulate_keystrokes("ctrl-, escape");
@@ -1502,36 +1706,88 @@ mod tests {
         inside(cx, "cache-row-0", "cache-list");
     }
 
+    fn enter(is_held: bool) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke::parse("enter").unwrap(),
+            is_held,
+        }
+    }
+
+    #[test]
+    fn a_key_that_was_not_released_is_a_repeat() {
+        let mut held = Held::default();
+        let now = Instant::now();
+        assert!(held.press(&enter(true), now), "the platform said so");
+        held.release("enter");
+        assert!(!held.press(&enter(false), now));
+        assert!(held.press(&enter(false), now), "X11 sends no release");
+        held.release("enter");
+        assert!(!held.press(&enter(false), now));
+        assert!(!held.press(&enter(false), now + HELD_FOR), "a lost release");
+    }
+
     #[gpui::test]
-    fn space_toggles_and_enter_trashes_the_cursor_item(cx: &mut TestAppContext) {
+    fn shift_click_selects_a_range_and_ctrl_click_takes_one_out(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 4);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        let mut click = |row: &'static str, modifiers: gpui::Modifiers| {
+            draw(cx);
+            let bounds = cx.debug_bounds(row).expect("the row is painted");
+            cx.simulate_click(bounds.center(), modifiers);
+            view.read_with(cx, |app, _| app.selection.len())
+        };
+        assert_eq!(click("artifact-row-0", gpui::Modifiers::default()), 1);
+        assert_eq!(click("artifact-row-2", gpui::Modifiers::shift()), 3);
+        assert_eq!(click("artifact-row-1", gpui::Modifiers::control()), 2);
+        assert_eq!(click("artifact-row-3", gpui::Modifiers::shift()), 4);
+    }
+
+    #[gpui::test]
+    fn a_count_repeats_a_motion_and_visual_mode_selects_along_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = projects(dir.path(), 6);
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        let selected = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| app.selection.len())
+        };
+        cx.simulate_keystrokes("3 j");
+        assert_eq!(cursor_row(&view, cx), 3);
+        assert_eq!(selected(&view, cx), 0, "a plain motion selects nothing");
+        cx.simulate_keystrokes("2 G");
+        assert_eq!(cursor_row(&view, cx), 1, "a count before G is a row number");
+
+        cx.simulate_keystrokes("v 3 j");
+        assert_eq!(cursor_row(&view, cx), 4);
+        assert_eq!(selected(&view, cx), 4, "the start row and three more");
+        cx.simulate_keystrokes("k");
+        assert_eq!(selected(&view, cx), 3, "moving back gives a row up again");
+        cx.simulate_keystrokes("escape j");
+        view.read_with(cx, |app, _| assert!(!app.visual));
+        assert_eq!(selected(&view, cx), 3, "the selection outlives the mode");
+
+        cx.simulate_keystrokes("9 9 K");
+        assert_eq!(
+            cursor_row(&view, cx),
+            0,
+            "a count stops at the end of the list"
+        );
+    }
+
+    #[gpui::test]
+    fn space_toggles_the_cursor_item(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let root = projects(dir.path(), 2);
         let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
         cx.simulate_keystrokes("j space");
-        let second = view.read_with(cx, |app, _| {
+        view.read_with(cx, |app, _| {
             let Some(Target::Item(source, id, _)) = app.cursor_target() else {
                 panic!("an item");
             };
             assert_eq!(app.selection, HashSet::from([(source, id)]));
-            (source, id)
         });
         cx.simulate_keystrokes("space");
         view.read_with(cx, |app, _| assert!(app.selection.is_empty()));
-        cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: Some(key), .. }) if key == second
-            ));
-        });
-        cx.simulate_keystrokes("escape k space delete");
-        view.read_with(cx, |app, _| {
-            assert!(matches!(
-                app.dialog,
-                Some(Dialog::Confirm { only: None, .. })
-            ));
-            assert_eq!(app.confirming().len(), 1);
-        });
     }
 
     #[gpui::test]

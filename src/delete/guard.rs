@@ -54,6 +54,8 @@ pub enum Refusal {
     Symlink,
     #[error("path changed since the scan (different device or inode)")]
     Changed,
+    #[error("path could not be identified during the scan, scan again before removing it")]
+    Unverified,
     #[error("path is a mount point")]
     MountPoint,
     #[error("path no longer exists")]
@@ -132,8 +134,8 @@ impl Guard {
         Ok(())
     }
 
-    pub fn with_protected(mut self, protected: Protected) -> Self {
-        self.protected = protected;
+    pub(crate) fn allowing_volta_tools(mut self) -> Self {
+        self.protected = self.protected.allowing_volta_tools();
         self
     }
 
@@ -152,7 +154,10 @@ impl Guard {
         if metadata.file_type().is_symlink() {
             return Err(Refusal::Symlink);
         }
-        if identity.is_some() && platform::identity(&metadata) != identity {
+        if identity.is_none() {
+            return Err(Refusal::Unverified);
+        }
+        if platform::identity(&metadata) != identity {
             return Err(Refusal::Changed);
         }
         if self.mounts.is_mount_point(path) {
@@ -189,8 +194,13 @@ mod tests {
         }]);
         guard.mounts.0.set(table).ok().unwrap();
 
-        assert_eq!(guard.check(&mounted, None), Err(Refusal::MountPoint));
-        assert_eq!(guard.check(&plain, None), Ok(()));
+        let identity = |path: &Path| platform::identity(&fs::symlink_metadata(path).unwrap());
+        assert_eq!(
+            guard.check(&mounted, identity(&mounted)),
+            Err(Refusal::MountPoint)
+        );
+        assert_eq!(guard.check(&plain, identity(&plain)), Ok(()));
+        assert_eq!(guard.check(&plain, None), Err(Refusal::Unverified));
     }
 
     fn guard() -> Guard {

@@ -5,7 +5,6 @@ import {
   foundTotal,
   projectChanges,
   selectedIds,
-  type DeleteMode,
   type ItemState,
   type State,
   type ViewRow,
@@ -76,10 +75,7 @@ export function headerTips(state: State) {
     safeOnly: 'Items marked check are hidden. Click, f or x brings them back.',
     filter: `Only paths and rules containing "${state.filter}". click or / edits it, x clears.`,
     free: `Free space on the disk that holds ${demoRoot}.`,
-    note:
-      state.mode === 'permanent'
-        ? 'Permanent deletes free space the moment they finish.'
-        : 'Trashed files still take space until the trash is emptied.',
+    note: 'Permanent deletes free space the moment they finish.',
   }
 }
 
@@ -89,17 +85,14 @@ export function headerTips(state: State) {
  * the item is selected, being deleted or already gone.
  *
  * @example
- * itemTips(state, item, itemState(state, item.id), largest).rule
+ * itemTips(item, itemState(state, item.id), largest).rule
  */
-export function itemTips(state: State, item: DemoItem, entry: ItemState, largest: number) {
-  const run = state.runs.find((candidate) => candidate.ids.includes(item.id))
+export function itemTips(item: DemoItem, entry: ItemState, largest: number) {
   const share = largest === 0 ? 0 : Math.round((item.bytes / largest) * 100)
   const changes = projectChanges(item.project)
   const mark =
     entry.status === 'deleted'
-      ? run?.mode === 'permanent'
-        ? 'Deleted permanently.'
-        : `In the trash. kuizer restore ${run?.id ?? ''} puts it back.`
+      ? 'Deleted permanently.'
       : entry.status === 'deleting'
         ? 'Deleting.'
         : entry.selected
@@ -166,25 +159,19 @@ export function footerTips(state: State) {
     cancel: 'Drop the filter and go back to the list.',
     selected: `${formatBytes(bytesOf(selected))} selected. Click or enter deletes it, u clears the selection.`,
     freed: 'Freed for good. Permanent deletes give the space back immediately.',
-    trashed: 'Waiting in the trash. The space comes back once the trash is emptied.',
   }
 }
 
 /**
  * @name confirmTips
- * @description Tooltip copy for the keys in the delete confirmation, phrased
- * for the mode the run would use.
+ * @description Tooltip copy for the keys in the delete confirmation.
  *
  * @example
- * confirmTips('trash').confirm // 'Move these to the trash.'
+ * confirmTips().confirm // 'Delete these permanently. There is no undo.'
  */
-export function confirmTips(mode: DeleteMode) {
+export function confirmTips() {
   return {
-    confirm: mode === 'trash' ? 'Move these to the trash.' : 'Delete these permanently. There is no undo.',
-    toggle:
-      mode === 'trash'
-        ? 'Delete permanently instead of trashing, for this run only.'
-        : 'Move to the trash instead of deleting, for this run only.',
+    confirm: 'Delete these permanently. There is no undo.',
     cancel: 'Keep everything and close.',
   }
 }

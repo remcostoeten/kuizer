@@ -30,6 +30,7 @@ pub enum Icon {
     Search,
     Folder,
     Settings,
+    Check,
 }
 
 /// How a layer moves while its icon plays the hover animation. Shifts are in viewbox units,
@@ -46,7 +47,7 @@ pub enum Motion {
 type Layer = (&'static str, Motion);
 
 impl Icon {
-    pub const ALL: [Icon; 13] = [
+    pub const ALL: [Icon; 14] = [
         Self::Overview,
         Self::Artifacts,
         Self::Caches,
@@ -60,6 +61,7 @@ impl Icon {
         Self::Search,
         Self::Folder,
         Self::Settings,
+        Self::Check,
     ];
 
     pub fn name(self) -> &'static str {
@@ -77,6 +79,7 @@ impl Icon {
             Self::Search => "search",
             Self::Folder => "folder",
             Self::Settings => "settings",
+            Self::Check => "check",
         }
     }
 
@@ -189,6 +192,10 @@ impl Icon {
                 ),
                 (r#"<circle cx="12" cy="12" r="3"/>"#, Motion::Still),
             ],
+            Self::Check => &[(
+                r#"<path stroke-width="3.5" d="M4.5 12.5 9.5 17.5 19.5 6.5"/>"#,
+                Motion::Still,
+            )],
         }
     }
 
@@ -234,12 +241,22 @@ impl Motion {
 /// @example
 /// icon::view(Icon::History, theme::muted(), Some(hovers), zoom.rem_size())
 pub fn view(icon: Icon, color: Rgba, hover: Option<u64>, rem: Pixels) -> AnyElement {
-    let unit_px = rem * (size::ICON / theme::REM / VIEWBOX);
+    sized(icon, color, hover, rem, size::ICON)
+}
+
+/// @name sized
+/// @description Draws an icon like `view`, at `extent` instead of the standard icon size, for a
+/// glyph inside a checkbox or a small button.
+///
+/// @example
+/// icon::sized(Icon::Check, theme::on_accent(), None, zoom.rem_size(), size::GLYPH)
+pub fn sized(icon: Icon, color: Rgba, hover: Option<u64>, rem: Pixels, extent: f32) -> AnyElement {
+    let unit_px = rem * (extent / theme::REM / VIEWBOX);
     let animate = hover.filter(|_| !motion::reduced());
     div()
         .relative()
         .flex_none()
-        .size(unit(size::ICON))
+        .size(unit(extent))
         .children(
             icon.layers()
                 .iter()

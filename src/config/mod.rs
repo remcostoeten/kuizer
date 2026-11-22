@@ -150,15 +150,42 @@ impl Default for DuplicateConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeleteMode {
+    #[default]
+    Permanent,
+    Trash,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeleteConfig {
+    pub mode: DeleteMode,
     pub confirm: bool,
+}
+
+impl DeleteConfig {
+    /// @name DeleteConfig::cautious
+    /// @description The deletion settings used when the config file cannot be trusted: move to
+    /// the trash and always ask, because the file may have asked for exactly that.
+    ///
+    /// @example
+    /// config.delete = DeleteConfig::cautious();
+    pub fn cautious() -> Self {
+        Self {
+            mode: DeleteMode::Trash,
+            confirm: true,
+        }
+    }
 }
 
 impl Default for DeleteConfig {
     fn default() -> Self {
-        Self { confirm: true }
+        Self {
+            mode: DeleteMode::default(),
+            confirm: true,
+        }
     }
 }
 
@@ -190,6 +217,8 @@ pub struct AppearanceConfig {
     pub motion: bool,
     pub sidebar: Sidebar,
     pub theme: Theme,
+    pub accent: Accent,
+    pub density: Density,
 }
 
 impl Default for AppearanceConfig {
@@ -198,6 +227,8 @@ impl Default for AppearanceConfig {
             motion: true,
             sidebar: Sidebar::default(),
             theme: Theme::default(),
+            accent: Accent::default(),
+            density: Density::default(),
         }
     }
 }
@@ -227,6 +258,44 @@ pub enum Theme {
     #[default]
     Dark,
     Light,
+}
+
+/// The color the GUI marks the selection, the focus and its bars with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Accent {
+    #[default]
+    Purple,
+    Blue,
+    Teal,
+    Pink,
+}
+
+impl Accent {
+    pub const ALL: [Self; 4] = [Self::Purple, Self::Blue, Self::Teal, Self::Pink];
+
+    /// @name Accent::key
+    /// @description The value of `appearance.accent` that selects this color.
+    ///
+    /// @example
+    /// assert_eq!(Accent::Teal.key(), "teal");
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Purple => "purple",
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Pink => "pink",
+        }
+    }
+}
+
+/// How tightly the GUI packs rows and padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
 }
 
 /// How wide the GUI sidebar opens: with labels, or as a narrow strip of icons.
@@ -352,8 +421,10 @@ impl Config {
                 return Err(ConfigError::Read { path, source });
             }
             Err(source) => {
-                let mut config = Self::default();
-                config.delete.confirm = true;
+                let config = Self {
+                    delete: DeleteConfig::cautious(),
+                    ..Self::default()
+                };
                 return Ok(Loaded {
                     config,
                     warnings: vec![ConfigWarning::new(
@@ -435,6 +506,16 @@ impl Config {
         )?)
     }
 
+    /// @name usable_excludes
+    /// @description Returns the excludes built from every valid pattern. Loading the config
+    /// reports the invalid ones.
+    ///
+    /// @example
+    /// let excludes = config.usable_excludes();
+    pub fn usable_excludes(&self) -> Excludes {
+        Excludes::usable(&self.scan.exclude, &self.scan.exclude_extensions)
+    }
+
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_default()
     }
@@ -471,6 +552,7 @@ mod tests {
         assert_eq!(config.rules.len(), 1);
         assert_eq!(config.rules[0].safety, Safety::Review);
         assert!(config.delete.confirm);
+        assert_eq!(config.delete.mode, DeleteMode::Permanent);
         assert_eq!(config.git.min_gain, ByteSize(1024 * 1024));
         assert!(!config.git.aggressive);
         assert!(config.appearance.motion);
@@ -518,6 +600,11 @@ mod tests {
         assert_eq!(config.appearance.theme, Theme::Light);
         assert_eq!(Config::default().appearance.theme, Theme::Dark);
         assert!(parse("[appearance]\ntheme = \"sepia\"\n").is_err());
+        for accent in Accent::ALL {
+            let text = format!("[appearance]\naccent = \"{}\"\n", accent.key());
+            assert_eq!(parse(&text).expect("parses").appearance.accent, accent);
+        }
+        assert_eq!(Config::default().appearance.accent, Accent::Purple);
     }
 
     #[test]

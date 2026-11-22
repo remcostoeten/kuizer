@@ -228,6 +228,10 @@ struct Frame {
     splits: bool,
 }
 
+fn vanished(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
 fn newest_file(
     project: &Path,
     skip: &Skip,
@@ -248,18 +252,23 @@ fn newest_file(
         if cancel.is_cancelled() {
             return None;
         }
-        let Ok(dir) = Dir::open(&frame.path, frame.parent.is_none()) else {
-            continue;
+        let dir = match Dir::open(&frame.path, frame.parent.is_none()) {
+            Ok(dir) => dir,
+            Err(error) if vanished(&error) => continue,
+            Err(_) => return None,
         };
         let device = if frame.parent.is_none() {
             match dir.stat() {
                 Ok(stat) => stat.device,
-                Err(_) => continue,
+                Err(error) if vanished(&error) => continue,
+                Err(_) => return None,
             }
         } else if frame.probe {
             match context.same_device(&dir, frame.device, &frame.path) {
                 Ok(Some(device)) => device,
-                _ => continue,
+                Ok(None) => continue,
+                Err(error) if vanished(&error) => continue,
+                Err(_) => return None,
             }
         } else {
             frame.device
@@ -271,18 +280,22 @@ fn newest_file(
         } = scratch;
         names.clear();
         entries.clear();
-        let _ = dir.read(buffer, |name, kind, _| {
+        let listed = dir.read(buffer, |name, kind, _| {
             let start = names.len();
             names.extend_from_slice(name.as_bytes());
             entries.push((start, names.len(), kind));
         });
+        if listed.as_ref().is_err_and(|error| !vanished(error)) {
+            return None;
+        }
         let mut own = Listing::default();
         for (start, end, kind) in entries.iter_mut() {
             let name = OsStr::from_bytes(&names[*start..*end]);
             if *kind == EntryKind::Unknown {
                 match dir.kind_at(name) {
                     Ok(resolved) => *kind = resolved,
-                    Err(_) => continue,
+                    Err(error) if vanished(&error) => continue,
+                    Err(_) => return None,
                 }
             }
             scope.detector.note(&mut own, name);
@@ -326,8 +339,12 @@ fn newest_file(
                     {
                         continue;
                     }
-                    let Some(modified) = dir.stat_at(name).ok().and_then(|stat| stat.modified)
-                    else {
+                    let stat = match dir.stat_at(name) {
+                        Ok(stat) => stat,
+                        Err(error) if vanished(&error) => continue,
+                        Err(_) => return None,
+                    };
+                    let Some(modified) = stat.modified else {
                         continue;
                     };
                     newest = newest.max(Some(modified));
@@ -362,6 +379,27 @@ mod tests {
         let file = fs::File::options().write(true).open(path).expect("open");
         file.set_modified(SystemTime::now() - age)
             .expect("set mtime");
+    }
+
+    #[test]
+    fn an_unreadable_folder_makes_activity_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("app");
+        touch(&project.join("old.txt"), DAY * 400);
+        let locked = project.join("locked");
+        touch(&locked.join("recent.txt"), Duration::ZERO);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+        let config = crate::config::Config::default();
+        let mut found = vec![candidate(project.join("node_modules"))];
+        fs::create_dir_all(project.join("node_modules")).expect("modules");
+        let annotated = crate::scan::annotate(&mut found, &config, Some(SystemTime::now() - DAY));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+        annotated.expect("annotates");
+        assert_eq!(found[0].project_last_active, None);
     }
 
     fn candidate(path: PathBuf) -> Candidate {

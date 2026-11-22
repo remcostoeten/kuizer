@@ -13,6 +13,7 @@ use crate::scan::Candidate;
 use crate::units::ByteSize;
 
 pub mod restore;
+mod stored_path;
 
 const FILE_NAME: &str = ".kuizer-history.json";
 const LEGACY_FILE_NAME: &str = ".sweep-history.json";
@@ -42,6 +43,7 @@ pub struct Run {
     pub started_at: String,
     pub finished_at: String,
     pub command: String,
+    #[serde(with = "stored_path::many")]
     pub roots: Vec<PathBuf>,
     pub deleted: Vec<Entry>,
     pub total: Total,
@@ -50,6 +52,7 @@ pub struct Run {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub deleted_at: String,
+    #[serde(with = "stored_path")]
     pub path: PathBuf,
     pub rule: String,
     pub category: String,
@@ -798,7 +801,7 @@ struct Store {
 }
 
 impl Store {
-    fn write(&mut self, entries: Vec<Entry>, session: Option<u64>) -> Result<u64, HistoryError> {
+    fn write(&mut self, entries: &[Entry], session: Option<u64>) -> Result<u64, HistoryError> {
         let write_error = |source| HistoryError::Write {
             path: self.target.clone(),
             source,
@@ -827,13 +830,13 @@ impl Store {
             session.and_then(|session| history.runs.iter_mut().rev().find(|run| run.id == session));
         let session = match open {
             Some(run) => {
-                run.deleted.extend(entries);
+                run.deleted.extend_from_slice(entries);
                 run.total = Total::of(&run.deleted);
                 run.finished_at = now();
                 run.id
             }
             None => {
-                let mut run = Run::new(self.started_at.clone(), &self.roots, entries);
+                let mut run = Run::new(self.started_at.clone(), &self.roots, entries.to_vec());
                 run.id = history.next_session;
                 history.next_session += 1;
                 history.runs.push(run);
@@ -860,7 +863,7 @@ impl Shared {
 
     fn flush(&self) {
         let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
-        let (entries, session) = {
+        let (mut entries, session) = {
             let mut queue = self.queue();
             if queue.pending.is_empty() {
                 return;
@@ -869,14 +872,18 @@ impl Shared {
             (std::mem::take(&mut queue.pending), queue.session)
         };
         let started = Instant::now();
-        let result = store.write(entries, session);
+        let result = store.write(&entries, session);
         let mut queue = self.queue();
         match result {
             Ok(session) => {
                 queue.session = Some(session);
                 queue.write_cost = started.elapsed();
+                queue.error = None;
             }
             Err(error) => {
+                entries.append(&mut queue.pending);
+                queue.pending = entries;
+                queue.oldest = Some(Instant::now());
                 queue.error.get_or_insert(error);
             }
         }
@@ -1374,6 +1381,47 @@ mod tests {
         for missing in ["s1.3", "s1.0", "s2", "1", "s", "sx.1"] {
             assert_eq!(history.find(missing), None, "{missing}");
         }
+    }
+
+    #[test]
+    fn a_failed_write_keeps_its_entries_in_one_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let folder = dir.path().join("later");
+        let path = folder.join(FILE_NAME);
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        recorder.add(entry(1));
+        assert!(recorder.session().is_none());
+        fs::create_dir(&folder).expect("folder");
+        recorder.add(entry(2));
+        recorder.finish().expect("recovers");
+        let history = load(&path).expect("load");
+        assert_eq!(history.runs.len(), 1);
+        assert_eq!(history.runs[0].deleted.len(), 2);
+    }
+
+    #[test]
+    fn a_non_utf8_path_survives_the_history_file() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/tmp/caf\xE9/target".to_vec(),
+        ));
+        let mut item = entry(1);
+        item.path = odd.clone();
+        item.mode = Mode::Trash;
+        let mut recorder = Recorder::at(
+            path.clone(),
+            path.clone(),
+            now(),
+            std::slice::from_ref(&odd),
+        );
+        recorder.add(item);
+        recorder.finish().expect("writes");
+        let history = load(&path).expect("load");
+        assert_eq!(history.runs[0].roots, std::slice::from_ref(&odd));
+        assert_eq!(history.runs[0].deleted[0].path, odd);
+        assert_eq!(still_in_trash(&history, &[odd]).len(), 1);
     }
 
     #[test]

@@ -51,4 +51,4 @@ kuizer clean ~/projects --select python-venv --dry-run
 kuizer clean ~/projects --select python-venv
 ```
 
-The last command lists every environment, says how many are marked review, and asks before moving them to the trash. `kuizer cache` lists the pip and uv caches with the other tool caches, and `kuizer restore --last` puts a run back.
+The last command lists every environment, says how many are marked review, and asks before deleting them. Deletion is permanent by default; with `delete.mode = "trash"` in the [config file](/docs/configuration) the environments move to the trash and `kuizer restore --last` puts a run back. `kuizer cache` lists the pip and uv caches with the other tool caches.
