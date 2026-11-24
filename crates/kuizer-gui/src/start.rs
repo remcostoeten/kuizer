@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use kuizer::config::Config;
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::persist;
 
 const RECENT_LIMIT: usize = 8;
+const NUL_HEX_PREFIX: char = '\0';
 
 pub const SIZE_STEPS: [u64; 4] = [0, 1_000_000, 10_000_000, 100_000_000];
 pub const DEPTH_STEPS: [Option<usize>; 4] = [None, Some(3), Some(5), Some(8)];
@@ -159,12 +162,7 @@ impl Recent {
         let Some(file) = &self.file else {
             return;
         };
-        let text: String = self
-            .paths
-            .iter()
-            .filter_map(|path| path.to_str())
-            .map(|path| format!("{path}\n"))
-            .collect();
+        let text: String = self.paths.iter().map(|path| recent_line(path)).collect();
         persist::save(file.clone(), text);
     }
 
@@ -204,13 +202,48 @@ impl Recent {
 fn parse_recent(text: &str) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let path = PathBuf::from(line);
+        let Some(path) = recent_path(line) else {
+            continue;
+        };
         if !paths.contains(&path) {
             paths.push(path);
         }
     }
     paths.truncate(RECENT_LIMIT);
     paths
+}
+
+fn recent_line(path: &Path) -> String {
+    match path.to_str() {
+        Some(text) if text.trim() == text && !text.contains('\n') => format!("{text}\n"),
+        _ => {
+            let hex: String = path
+                .as_os_str()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{NUL_HEX_PREFIX}{hex}\n")
+        }
+    }
+}
+
+fn recent_path(line: &str) -> Option<PathBuf> {
+    let Some(hex) = line.strip_prefix(NUL_HEX_PREFIX) else {
+        return Some(PathBuf::from(line));
+    };
+    let (digits, rest) = hex.as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    let bytes = digits
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    if bytes.is_empty() || bytes.contains(&0) {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_vec(bytes)))
 }
 
 fn remember(recent: &mut Vec<PathBuf>, roots: &[PathBuf]) {
@@ -264,6 +297,16 @@ mod tests {
     fn parse_recent_skips_blanks_and_duplicates() {
         let parsed = parse_recent("/a\n\n /b \n/a\n");
         assert_eq!(parsed, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn recent_keeps_non_utf8_paths_beside_plain_lines() {
+        let odd = PathBuf::from(OsString::from_vec(b"/tmp/caf\xE9".to_vec()));
+        let text = [Path::new("/plain dir"), odd.as_path()]
+            .map(recent_line)
+            .concat();
+        assert!(text.starts_with("/plain dir\n"));
+        assert_eq!(parse_recent(&text), [PathBuf::from("/plain dir"), odd]);
     }
 
     #[test]

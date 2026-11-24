@@ -5,12 +5,12 @@ use std::time::SystemTime;
 use super::AppError;
 use crate::cli::{ScanArgs, SortKey};
 use crate::config::Config;
-use crate::detect::Safety;
+use crate::detect::{Category, Safety};
 use crate::output;
 use crate::platform;
 use crate::scan::{self, Cancel, Candidate, Issue, Summary};
 use crate::tui;
-use crate::units::Idle;
+use crate::units::{ByteSize, Idle};
 
 pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
     match key {
@@ -80,14 +80,28 @@ pub fn resolve_roots(config: &Config, paths: Vec<PathBuf>) -> Result<Vec<PathBuf
     Ok(vec![std::env::current_dir()?])
 }
 
+/// @name narrow
+/// @description Applies the `--category` and `--min-size` flags on top of the config. Flags can
+/// only narrow it: categories intersect and the larger minimum size wins. An empty intersection
+/// leaves no category, so nothing is reported.
+///
+/// @example
+/// commands::scan::narrow(&mut config, &args.categories, args.min_size);
+pub fn narrow(config: &mut Config, categories: &[Category], min_size: Option<ByteSize>) {
+    if !categories.is_empty() {
+        config
+            .detect
+            .categories
+            .retain(|category| categories.contains(category));
+    }
+    if let Some(min_size) = min_size {
+        config.scan.min_size = config.scan.min_size.max(min_size);
+    }
+}
+
 pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(), AppError> {
     let mut config = config.clone();
-    if !args.categories.is_empty() {
-        config.detect.categories = args.categories;
-    }
-    if let Some(min_size) = args.min_size {
-        config.scan.min_size = min_size;
-    }
+    narrow(&mut config, &args.categories, args.min_size);
     if let Some(Some(target)) = &args.report {
         refuse_overwrite(target, args.force)?;
     }

@@ -26,6 +26,10 @@ const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 const ABOUT_CACHE: &str = "List and remove global tool caches";
 const ABOUT_TOOLCHAIN: &str = "List and remove installed toolchain versions";
 const ABOUT_DOCKER: &str = "List and remove unused Docker and Podman objects";
+const ABOUT_CACHE_CLEAN: &str = "Remove the selected caches after a preview";
+const ABOUT_TOOLCHAIN_CLEAN: &str =
+    "Remove the selected versions after a preview, always permanently";
+const ABOUT_DOCKER_CLEAN: &str = "Remove the selected objects after a preview, always permanently";
 const ABOUT_GIT: &str = "Pack loose git objects and delete merged branches";
 const ABOUT_DUPLICATES: &str = "Find files with identical contents";
 const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
@@ -227,18 +231,18 @@ fn cache_examples() -> String {
     examples(&[
         ("kuizer cache", "", "List global tool caches"),
         (
-            "kuizer cache",
-            "--clean --dry-run",
+            "kuizer cache clean",
+            "--dry-run",
             "Show which caches would be removed",
         ),
         (
-            "kuizer cache",
-            "--clean",
+            "kuizer cache clean",
+            "",
             "Remove safe caches, after a confirmation",
         ),
         (
-            "kuizer cache",
-            "--clean --select npm --select pip",
+            "kuizer cache clean",
+            "--select npm --select pip",
             "Remove the npm and pip caches",
         ),
     ])
@@ -255,13 +259,13 @@ fn toolchain_help() -> String {
             ),
             ("kuizer toolchain", "~/apps", "Search ~/apps for pin files"),
             (
-                "kuizer toolchain",
-                "~/apps --clean --dry-run",
+                "kuizer toolchain clean",
+                "~/apps --dry-run",
                 "Show which unused versions would be removed",
             ),
             (
-                "kuizer toolchain",
-                "~/apps --clean --select nvm",
+                "kuizer toolchain clean",
+                "~/apps --select nvm",
                 "Remove every nvm Node version, after a confirmation",
             ),
         ])
@@ -278,13 +282,13 @@ fn docker_help() -> String {
                 "List what Docker and Podman could free"
             ),
             (
-                "kuizer docker",
-                "--clean --dry-run",
+                "kuizer docker clean",
+                "--dry-run",
                 "Show which objects would be removed",
             ),
             (
-                "kuizer docker",
-                "--clean --select image --select build-cache",
+                "kuizer docker clean",
+                "--select image --select build-cache",
                 "Remove dangling images and the build cache",
             ),
         ])
@@ -608,7 +612,7 @@ pub struct CleanArgs {
     pub command: Option<NestedCommand>,
 }
 
-#[derive(Debug, Args, Default)]
+#[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
 #[command(next_help_heading = "Removal")]
 pub struct RemovalArgs {
     #[arg(
@@ -622,6 +626,83 @@ pub struct RemovalArgs {
     pub dry_run: bool,
     #[arg(short, long, help = "Remove without asking for confirmation")]
     pub yes: bool,
+}
+
+#[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
+pub struct HiddenRemovalArgs {
+    #[arg(
+        long,
+        hide = true,
+        value_name = "WHAT",
+        value_parser = parse_selection,
+        help = "What to remove: safe, all or a rule name, repeatable [default: safe]"
+    )]
+    pub select: Vec<Selection>,
+    #[arg(
+        long,
+        hide = true,
+        help = "Show what would be removed without removing it"
+    )]
+    pub dry_run: bool,
+    #[arg(
+        short,
+        long,
+        hide = true,
+        help = "Remove without asking for confirmation"
+    )]
+    pub yes: bool,
+}
+
+impl From<HiddenRemovalArgs> for RemovalArgs {
+    fn from(args: HiddenRemovalArgs) -> Self {
+        Self {
+            select: args.select,
+            dry_run: args.dry_run,
+            yes: args.yes,
+        }
+    }
+}
+
+fn merge_removal(mut primary: RemovalArgs, fallback: &HiddenRemovalArgs) -> RemovalArgs {
+    primary.select.extend(fallback.select.iter().cloned());
+    primary.dry_run |= fallback.dry_run;
+    primary.yes |= fallback.yes;
+    primary
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalPlan {
+    pub cleaning: bool,
+    pub removal: RemovalArgs,
+}
+
+impl RemovalPlan {
+    /// @name RemovalPlan::unattended
+    /// @description Returns whether this plan removes items with `--yes` and no dry run, which a
+    /// config with rejected scope settings must refuse.
+    ///
+    /// @example
+    /// if args.plan().unattended() && !rejected.is_empty() {
+    ///     return Err(AppError::ScopeRejected(rejected.join(", ")));
+    /// }
+    pub fn unattended(&self) -> bool {
+        self.cleaning && self.removal.yes && !self.removal.dry_run
+    }
+}
+
+fn removal_plan(
+    clean: bool,
+    listing: &HiddenRemovalArgs,
+    nested: Option<&RemovalArgs>,
+) -> RemovalPlan {
+    let removal = match nested {
+        Some(nested) => merge_removal(nested.clone(), listing),
+        None => listing.clone().into(),
+    };
+    RemovalPlan {
+        cleaning: clean || nested.is_some() || removal.dry_run,
+        removal,
+    }
 }
 
 #[derive(Debug, Args, Default)]
@@ -695,16 +776,41 @@ pub struct DashboardArgs {
 #[derive(Debug, Args, Default)]
 #[command(subcommand_precedence_over_arg = true)]
 pub struct CacheArgs {
-    #[arg(
-        long,
-        help = "Remove the selected caches after a preview",
-        help_heading = "Removal"
-    )]
+    #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
     #[command(flatten)]
-    pub removal: RemovalArgs,
+    pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
-    pub command: Option<NestedCommand>,
+    pub command: Option<CacheAction>,
+}
+
+impl CacheArgs {
+    /// @name CacheArgs::plan
+    /// @description Combines the `clean` subcommand, the hidden `--clean` alias and flags given
+    /// before the subcommand. Only `clean`, `--clean` or `--dry-run` leave the plain listing.
+    ///
+    /// @example
+    /// let plan = args.plan();
+    pub fn plan(&self) -> RemovalPlan {
+        let nested = match &self.command {
+            Some(CacheAction::Clean(removal)) => Some(removal),
+            _ => None,
+        };
+        removal_plan(self.clean, &self.removal, nested)
+    }
+
+    pub fn wants_help(&self) -> bool {
+        self.command == Some(CacheAction::Help)
+    }
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum CacheAction {
+    #[command(about = ABOUT_CACHE_CLEAN)]
+    Clean(RemovalArgs),
+    #[command(hide = true)]
+    Help,
 }
 
 #[derive(Debug, Args, Default)]
@@ -715,12 +821,69 @@ pub struct ToolchainArgs {
         help = "Directories to search for pin files [default: scan.roots or the current directory]"
     )]
     pub paths: Vec<PathBuf>,
-    #[arg(
-        long,
-        help = "Remove the selected versions after a preview, always permanently",
-        help_heading = "Removal"
-    )]
+    #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
+    #[command(flatten)]
+    pub removal: HiddenRemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<ToolchainAction>,
+}
+
+impl ToolchainArgs {
+    /// @name ToolchainArgs::plan
+    /// @description Combines the `clean` subcommand, the hidden `--clean` alias and flags given
+    /// before the subcommand. Only `clean`, `--clean` or `--dry-run` leave the plain listing.
+    ///
+    /// @example
+    /// let plan = args.plan();
+    pub fn plan(&self) -> RemovalPlan {
+        let nested = match &self.command {
+            Some(ToolchainAction::Clean(clean)) => Some(&clean.removal),
+            _ => None,
+        };
+        removal_plan(self.clean, &self.removal, nested)
+    }
+
+    /// @name ToolchainArgs::pin_paths
+    /// @description Returns the folders to search for pin files, given before or after `clean`.
+    /// Dropping one would make a version pinned there look unused.
+    ///
+    /// @example
+    /// let roots = resolve_roots(config, args.pin_paths())?;
+    pub fn pin_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.paths.clone();
+        if let Some(ToolchainAction::Clean(clean)) = &self.command {
+            paths.extend(clean.paths.iter().cloned());
+        }
+        paths
+    }
+
+    pub fn wants_help(&self) -> bool {
+        match &self.command {
+            Some(ToolchainAction::Help) => true,
+            Some(ToolchainAction::Clean(clean)) => clean.command == Some(NestedCommand::Help),
+            None => false,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum ToolchainAction {
+    #[command(about = ABOUT_TOOLCHAIN_CLEAN)]
+    Clean(ToolchainCleanArgs),
+    #[command(hide = true)]
+    Help,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct ToolchainCleanArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to search for pin files [default: scan.roots or the current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
     #[command(flatten)]
     pub removal: RemovalArgs,
     #[command(subcommand)]
@@ -730,16 +893,41 @@ pub struct ToolchainArgs {
 #[derive(Debug, Args, Default)]
 #[command(subcommand_precedence_over_arg = true)]
 pub struct DockerArgs {
-    #[arg(
-        long,
-        help = "Remove the selected objects after a preview, always permanently",
-        help_heading = "Removal"
-    )]
+    #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
     #[command(flatten)]
-    pub removal: RemovalArgs,
+    pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
-    pub command: Option<NestedCommand>,
+    pub command: Option<DockerAction>,
+}
+
+impl DockerArgs {
+    /// @name DockerArgs::plan
+    /// @description Combines the `clean` subcommand, the hidden `--clean` alias and flags given
+    /// before the subcommand. Only `clean`, `--clean` or `--dry-run` leave the plain listing.
+    ///
+    /// @example
+    /// let plan = args.plan();
+    pub fn plan(&self) -> RemovalPlan {
+        let nested = match &self.command {
+            Some(DockerAction::Clean(removal)) => Some(removal),
+            _ => None,
+        };
+        removal_plan(self.clean, &self.removal, nested)
+    }
+
+    pub fn wants_help(&self) -> bool {
+        self.command == Some(DockerAction::Help)
+    }
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum DockerAction {
+    #[command(about = ABOUT_DOCKER_CLEAN)]
+    Clean(RemovalArgs),
+    #[command(hide = true)]
+    Help,
 }
 
 #[derive(Debug, Args, Default)]
@@ -966,6 +1154,50 @@ mod tests {
             [Selection::All, Selection::Rule("node-modules".to_owned())]
         );
         assert!(args.removal.dry_run && args.removal.yes);
+    }
+
+    #[test]
+    fn toolchain_clean_reads_the_same_in_every_spelling() {
+        let expected = RemovalPlan {
+            cleaning: true,
+            removal: RemovalArgs {
+                select: vec![Selection::Rule("nvm".to_owned())],
+                dry_run: true,
+                yes: true,
+            },
+        };
+        for argv in [
+            ["clean", "/tmp/a", "--select", "nvm", "--dry-run", "-y"],
+            ["/tmp/a", "clean", "--select", "nvm", "--dry-run", "-y"],
+            ["/tmp/a", "--select", "nvm", "--dry-run", "-y", "clean"],
+            ["/tmp/a", "--clean", "--select", "nvm", "--dry-run", "-y"],
+        ] {
+            let cli = Cli::try_parse_from(["kuizer", "toolchain"].into_iter().chain(argv))
+                .expect("parses");
+            let Some(Command::Toolchain(args)) = cli.command else {
+                panic!("expected toolchain");
+            };
+            assert_eq!(args.plan(), expected, "{argv:?}");
+            assert_eq!(args.pin_paths(), [PathBuf::from("/tmp/a")], "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn a_listing_never_becomes_a_removal() {
+        for argv in [
+            &["kuizer", "cache", "--select", "npm", "-y"][..],
+            &["kuizer", "docker", "--yes"][..],
+            &["kuizer", "toolchain", "/tmp/a", "-y"][..],
+        ] {
+            let plan = match Cli::try_parse_from(argv).expect("parses").command {
+                Some(Command::Cache(args)) => args.plan(),
+                Some(Command::Docker(args)) => args.plan(),
+                Some(Command::Toolchain(args)) => args.plan(),
+                _ => panic!("expected a source command"),
+            };
+            assert!(!plan.cleaning, "{argv:?}");
+        }
+        assert!(Cli::try_parse_from(["kuizer", "cache", "--select", "clean", "-y"]).is_err());
     }
 
     #[test]

@@ -22,13 +22,16 @@ const LIMIT: usize = 12;
 const BUDGET: u64 = 48 << 20;
 const EXTENSION: &str = "json";
 const SIDECAR: &str = "dupes.json";
+const TEMP_EXTENSION: &str = "tmp";
+const TEMP_STALE: Duration = Duration::from_secs(5 * 60);
 
 /// @name Snapshots
 /// @description The last finished scan for each set of folders, one JSON file per set in the
 /// GUI state folder, so the window can show it at once while a fresh scan runs. Duplicate files
 /// live in a sidecar file next to it, written only when a duplicate search ran and read only
-/// when the Duplicates section needs it. Keeps the newest files within a count and a size
-/// budget and ignores files written by another schema or kuizer version.
+/// when the Duplicates section needs it. Keeps the newest scans within a count and a size
+/// budget, each together with its sidecar, removes leftovers of interrupted writes and ignores
+/// files written by another schema or kuizer version.
 ///
 /// @example
 /// let snapshots = Snapshots::for_user();
@@ -201,6 +204,7 @@ impl Staged {
         ) else {
             return;
         };
+        let _writing = self.snapshots.writing.lock();
         if let Err(error) = write(dir, &file, &self.stored) {
             eprintln!("kuizer-gui: cannot save the duplicates for next time: {error}");
             return;
@@ -244,9 +248,11 @@ impl Recorder {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stored.saved = scanned;
         let _writing = snapshots.writing.lock();
-        if let Ok(forgotten) = self.forgotten.0.lock() {
-            stored.forget(&forgotten);
-        }
+        let forgotten = match self.forgotten.0.lock() {
+            Ok(forgotten) => forgotten.clone(),
+            Err(_) => HashSet::new(),
+        };
+        stored.forget(&forgotten);
         snapshots.write_unlocked(&stored);
     }
 }
@@ -283,43 +289,146 @@ fn write(dir: &Path, file: &Path, stored: &impl Serialize) -> std::io::Result<()
     std::fs::create_dir_all(dir)?;
     let bytes = serde_json::to_vec(stored)?;
     let temp = file.with_extension(format!(
-        "{}.{}.tmp",
+        "{}.{}.{TEMP_EXTENSION}",
         std::process::id(),
         WRITES.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, file).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp);
-    })
+    std::fs::write(&temp, bytes)
+        .and_then(|()| std::fs::rename(&temp, file))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
+}
+
+#[derive(Clone, Copy)]
+enum SavedKind {
+    Scan,
+    Sidecar,
+    Temp,
+}
+
+struct SavedFile {
+    path: PathBuf,
+    modified: SystemTime,
+    bytes: u64,
+}
+
+#[derive(Default)]
+struct SavedPair {
+    scan: Option<SavedFile>,
+    sidecar: Option<SavedFile>,
+}
+
+impl SavedPair {
+    fn files(&self) -> impl Iterator<Item = &SavedFile> {
+        self.sidecar.iter().chain(&self.scan)
+    }
+
+    fn modified(&self) -> SystemTime {
+        self.files()
+            .map(|file| file.modified)
+            .max()
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+
+    fn bytes(&self) -> u64 {
+        self.files().map(|file| file.bytes).sum()
+    }
+
+    fn remove(&self) {
+        for file in self.files() {
+            let _ = std::fs::remove_file(&file.path);
+        }
+    }
+}
+
+fn all_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn saved_name(name: &str) -> Option<(u64, SavedKind)> {
+    let (key, rest) = name.split_at_checked(16)?;
+    let is_hex = |byte: u8| matches!(byte, b'0'..=b'9' | b'a'..=b'f');
+    if !key.bytes().all(is_hex) {
+        return None;
+    }
+    let key = u64::from_str_radix(key, 16).ok()?;
+    let rest = rest.strip_prefix('.')?;
+    if rest == EXTENSION {
+        return Some((key, SavedKind::Scan));
+    }
+    if rest == SIDECAR {
+        return Some((key, SavedKind::Sidecar));
+    }
+    let counters = rest.strip_suffix(TEMP_EXTENSION)?.strip_suffix('.')?;
+    let counters = SIDECAR
+        .strip_suffix(EXTENSION)
+        .and_then(|stem| counters.strip_prefix(stem))
+        .unwrap_or(counters);
+    let (process, write) = counters.split_once('.')?;
+    (all_digits(process) && all_digits(write)).then_some((key, SavedKind::Temp))
+}
+
+fn is_stale(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified)
+        .is_ok_and(|age| age > TEMP_STALE)
 }
 
 fn prune(dir: &Path, keep: &Path) {
+    let Some((kept, _)) = keep
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(saved_name)
+    else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut others: Vec<(SystemTime, u64, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path != keep && path.extension().is_some_and(|ext| ext == EXTENSION))
-        .map(|path| {
-            let metadata = std::fs::metadata(&path).ok();
-            let modified = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            (
-                modified,
-                metadata.map_or(0, |metadata| metadata.len()),
-                path,
-            )
-        })
-        .collect();
-    others.sort_by_key(|(modified, _, _)| std::cmp::Reverse(*modified));
-    let mut used = std::fs::metadata(keep).map_or(0, |metadata| metadata.len());
-    for (index, (_, bytes, path)) in others.into_iter().enumerate() {
-        used += bytes;
-        if index + 1 >= LIMIT || used > BUDGET {
-            let _ = std::fs::remove_file(path);
+    let now = SystemTime::now();
+    let mut pairs: HashMap<u64, SavedPair> = HashMap::new();
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some((key, kind)) = name.to_str().and_then(saved_name) else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let file = SavedFile {
+            path: entry.path(),
+            modified,
+            bytes: metadata.len(),
+        };
+        match kind {
+            SavedKind::Scan => pairs.entry(key).or_default().scan = Some(file),
+            SavedKind::Sidecar => pairs.entry(key).or_default().sidecar = Some(file),
+            SavedKind::Temp => {
+                if is_stale(file.modified, now) {
+                    let _ = std::fs::remove_file(&file.path);
+                }
+            }
+        }
+    }
+    let newest = pairs.remove(&kept).unwrap_or_default();
+    let (orphans, mut others): (Vec<SavedPair>, Vec<SavedPair>) = pairs
+        .into_values()
+        .partition(|pair| pair.scan.is_none() && is_stale(pair.modified(), now));
+    orphans.iter().for_each(SavedPair::remove);
+    others.sort_by_key(|pair| std::cmp::Reverse(pair.modified()));
+    let mut scans = usize::from(newest.scan.is_some());
+    let mut used = newest.bytes();
+    for pair in others {
+        scans += usize::from(pair.scan.is_some());
+        used += pair.bytes();
+        if scans > LIMIT || used > BUDGET {
+            pair.remove();
         }
     }
 }
@@ -1137,7 +1246,7 @@ mod tests {
         let last = report(&format!("/p{}", LIMIT + 3));
         assert!(snapshots.load(&last.roots, &last.options).is_some());
 
-        let huge = dir.path().join("huge.json");
+        let huge = dir.path().join(format!("{:016x}.{EXTENSION}", u64::MAX));
         std::fs::File::create(&huge)
             .unwrap()
             .set_len(BUDGET)
@@ -1149,6 +1258,131 @@ mod tests {
                 .load(&[PathBuf::from("/fresh")], &last.options)
                 .is_some()
         );
+    }
+
+    fn set_age(path: &Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    fn set_size(path: &Path, bytes: u64) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(bytes)
+            .unwrap();
+    }
+
+    fn save_pair(snapshots: &Snapshots, root: &str) -> (PathBuf, PathBuf) {
+        save(snapshots, root);
+        let roots = [PathBuf::from(root)];
+        snapshots
+            .stage_duplicates(&roots, duplicate_options(), &duplicates())
+            .save();
+        (
+            snapshots.file(&roots, EXTENSION).unwrap(),
+            snapshots.file(&roots, SIDECAR).unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_scan_limit_prunes_scans_and_sidecars_as_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshots = Snapshots::new(Some(dir.path().to_path_buf()));
+        let total = LIMIT + 2;
+        let pairs: Vec<(PathBuf, PathBuf)> = (0..total)
+            .map(|index| {
+                let (scan, sidecar) = save_pair(&snapshots, &format!("/p{index}"));
+                let age = Duration::from_secs(600 * (total - index) as u64);
+                set_age(&scan, age);
+                set_age(&sidecar, age);
+                (scan, sidecar)
+            })
+            .collect();
+        for (index, (scan, sidecar)) in pairs.iter().enumerate() {
+            let expected = index >= total - LIMIT;
+            assert_eq!(scan.exists(), expected, "scan {index}");
+            assert_eq!(sidecar.exists(), expected, "sidecar {index}");
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), LIMIT * 2);
+    }
+
+    #[test]
+    fn a_pair_counts_as_one_against_the_budget_and_the_newest_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshots = Snapshots::new(Some(dir.path().to_path_buf()));
+        let (old_scan, old_sidecar) = save_pair(&snapshots, "/old");
+        for file in [&old_scan, &old_sidecar] {
+            set_size(file, BUDGET / 2);
+            set_age(file, Duration::from_secs(60));
+        }
+        let (new_scan, new_sidecar) = save_pair(&snapshots, "/new");
+        assert!(!old_scan.exists());
+        assert!(!old_sidecar.exists());
+
+        set_size(&new_scan, BUDGET + 1);
+        let roots = [PathBuf::from("/new")];
+        snapshots
+            .stage_duplicates(&roots, duplicate_options(), &duplicates())
+            .save();
+        assert!(new_scan.exists());
+        assert!(new_sidecar.exists());
+    }
+
+    #[test]
+    fn prune_clears_stale_leftovers_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let snapshots = Snapshots::new(Some(dir.path().to_path_buf()));
+        let stale = TEMP_STALE + Duration::from_secs(60);
+        let place = |name: &str, age: Duration| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            set_age(&path, age);
+            path
+        };
+        let removed = [
+            place("0000000000000001.dupes.json", stale),
+            place("0000000000000002.123.4.tmp", stale),
+            place("0000000000000003.dupes.123.4.tmp", stale),
+        ];
+        let kept = [
+            place("0000000000000004.dupes.json", Duration::ZERO),
+            place("0000000000000005.123.4.tmp", Duration::ZERO),
+            place("notes.json", stale),
+            place("notes.tmp", stale),
+            place("0000000000000006.backup.tmp", stale),
+            place("000000000000000G.json", stale),
+        ];
+        let target = outside.path().join("target");
+        std::fs::write(&target, b"x").unwrap();
+        set_size(&target, BUDGET + 1);
+        set_age(&target, stale);
+        let links = [
+            dir.path().join("0000000000000007.1.2.tmp"),
+            dir.path().join("0000000000000008.json"),
+        ];
+        for link in &links {
+            std::os::unix::fs::symlink(&target, link).unwrap();
+        }
+
+        save(&snapshots, "/fresh");
+
+        for path in &removed {
+            assert!(!path.exists(), "{} is removed", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{} stays", path.display());
+        }
+        for link in &links {
+            assert!(link.symlink_metadata().is_ok(), "{} stays", link.display());
+        }
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), BUDGET + 1);
     }
 
     #[test]

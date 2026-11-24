@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::cancel::Cancel;
 use super::pool::{Local, Queue};
 use super::types::Usage;
+use crate::config::MAX_SIZE_THREADS;
 use crate::platform::dir::{Buffer, Dir, Stat, stat_path};
 
 pub struct Measured {
@@ -31,7 +32,6 @@ pub fn measure(path: &Path, cancel: &Cancel) -> Measured {
 }
 
 const CHUNK: usize = 1024;
-const MAX_MEASURE_THREADS: usize = 64;
 const LINK_SHARDS: usize = 16;
 
 #[derive(Default)]
@@ -366,7 +366,7 @@ fn drain<T: Send + Sync>(
         }
     };
     thread::scope(|scope| {
-        for index in 1..threads.clamp(1, MAX_MEASURE_THREADS) {
+        for index in 1..threads.clamp(1, MAX_SIZE_THREADS) {
             let spawned = thread::Builder::new()
                 .name(format!("kuizer-size-{index}"))
                 .spawn_scoped(scope, worker);

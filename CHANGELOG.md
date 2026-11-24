@@ -26,6 +26,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - GUI: a control's tooltip also opens when the keyboard focus ring rests on it. Tab moves between the buttons of the branch-deletion dialog.
 - GUI: the Overview has a "Biggest safe wins" card. `w` selects the largest safe project artifacts and opens their list, without deleting anything.
 - `appearance.density` is `comfortable` (default) or `compact`, also in the settings. Rows and vertical padding are tighter than before in both.
+- GUI: Space moves the cursor on to the next unselected row, so it can be pressed again and again. Selected rows have a softer tint.
+- GUI: Select all takes `safe` items first, a further press adds `review` items, and the next clears. A list with only `review` items asks first, and the status bar shows when `review` items are selected.
+- GUI: vim motions work in the space map, the shortcuts overlay, the branch dialog and the focus ring.
+- GUI: saved scans and their duplicate results are pruned as pairs. Orphaned results and stale temp files are removed.
+- GUI: recent folders keep non-UTF-8 paths, and `xdg-open` can no longer hang a reveal.
+- TUI: Esc backs out one level and never quits. Quitting during a deletion asks first.
+- TUI: `P` selects a project's `safe` items first, a second press adds `review` items, and a third clears.
+- CLI: `cache clean`, `toolchain clean` and `docker clean` replace `--clean`, which stays as a hidden alias for one release.
+- CLI: `delete.confirm = false` is honored, except for `review` items and projects with uncommitted changes or an unknown git state.
+- CLI: `--category` and `--min-size` narrow the config instead of replacing it. `history` and `restore` honor `--config`.
+- `--idle` counts activity in nested projects toward their monorepo root.
+- Removal errors and other external text can no longer inject terminal escape sequences.
+- A permission error on one folder no longer turns off `openat2` for the rest of the deletion.
+- A failed thread spawn no longer aborts the app, and failed repository inspections are reported.
+- `scan.size_threads` above 64 is capped with a warning, and `docs/config.example.toml` lists every key.
+- Release binary sizes: `kuizer` 5.5 MB, `kuizer-gui` 19.8 MB.
 
 ## [0.1.3] - 2026-11-07
 

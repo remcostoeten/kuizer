@@ -5,20 +5,22 @@ mod size;
 mod types;
 pub(crate) mod walk;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 pub use activity::{ActivityScope, annotate, annotate_in};
 pub use cancel::Cancel;
 pub use size::{Measured, measure, measure_many, measure_parallel};
 pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary, Usage};
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, Excludes, ScanConfig};
+use crate::detect::Detector;
 use crate::platform::dir::EntryKind;
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
@@ -309,89 +311,159 @@ fn work<C: Companion>(
     sink.companion
 }
 
+type SpawnCoordinator = fn(Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>>;
+
+struct Coordinator<C> {
+    shared: Shared,
+    scan: ScanConfig,
+    detector: Detector,
+    excludes: Excludes,
+    roots: Vec<PathBuf>,
+    threads: usize,
+    started: Instant,
+    companion: C,
+    finished: Sender<C>,
+}
+
+impl<C: Companion> Coordinator<C> {
+    fn run(self) {
+        let Self {
+            shared,
+            scan,
+            detector,
+            excludes,
+            roots,
+            threads,
+            started,
+            mut companion,
+            finished,
+        } = self;
+        let mounts = MountTable::load();
+        let protected = Protected::for_user();
+        let context = Context::new(&scan, &detector, &excludes, &mounts, &protected);
+        let mut seeds = Vec::new();
+        {
+            let mut sink = Sink::new(&shared, ());
+            for root in &roots {
+                seeds.extend(context.root(&mut sink, root).map(Task::Walk));
+            }
+        }
+        if !seeds.is_empty() && !shared.cancel.is_cancelled() {
+            let queue = Queue::new(seeds);
+            let forks: Vec<C> = (0..threads).map(|_| companion.fork()).collect();
+            let done: Vec<C> = thread::scope(|scope| {
+                let workers: Vec<_> = forks
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, fork)| {
+                        let (shared, context, queue) = (&shared, &context, &queue);
+                        thread::Builder::new()
+                            .name(format!("kuizer-scan-{index}"))
+                            .spawn_scoped(scope, move || work(shared, context, queue, fork))
+                            .ok()
+                    })
+                    .collect();
+                if workers.is_empty() {
+                    return vec![work(&shared, &context, &queue, companion.fork())];
+                }
+                workers
+                    .into_iter()
+                    .filter_map(|worker| worker.join().ok())
+                    .collect()
+            });
+            for fork in done {
+                companion.merge(fork);
+            }
+        }
+        let _ = finished.send(companion);
+        let summary = Summary {
+            progress: shared.counters.snapshot(),
+            duration: started.elapsed(),
+            cancelled: shared.cancel.is_cancelled(),
+        };
+        let _ = shared.events.send(Event::Finished(summary));
+    }
+}
+
+fn spawn_coordinator(run: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("kuizer-scan".to_owned())
+        .spawn(run)
+}
+
 pub(crate) fn start_with<C: Companion>(
     config: &Config,
     roots: &[PathBuf],
     cancel: Cancel,
     companion: C,
 ) -> Result<(Scan, Receiver<C>), ConfigError> {
+    start_on(config, roots, cancel, companion, spawn_coordinator)
+}
+
+fn start_on<C: Companion>(
+    config: &Config,
+    roots: &[PathBuf],
+    cancel: Cancel,
+    companion: C,
+    spawn: SpawnCoordinator,
+) -> Result<(Scan, Receiver<C>), ConfigError> {
     let detector = config.detector()?;
     let excludes = config.excludes()?;
-    let scan_config = config.scan.clone();
     let roots = normalize_roots(roots);
     let threads = scan_threads(config, &roots);
     let counters = Arc::new(Counters::default());
     let current = Arc::new(Mutex::new(None));
     let (event_tx, event_rx) = bounded::<Event>(EVENT_CAPACITY);
-    let started = Instant::now();
     let (companion_tx, companion_rx) = bounded::<C>(1);
-    let shared = Shared {
-        cancel: cancel.clone(),
-        counters: Arc::clone(&counters),
-        current: Arc::clone(&current),
-        events: event_tx,
-        next_id: AtomicU64::new(1),
-        min_size: config.scan.min_size.0,
+    let job = Coordinator {
+        shared: Shared {
+            cancel: cancel.clone(),
+            counters: Arc::clone(&counters),
+            current: Arc::clone(&current),
+            events: event_tx,
+            next_id: AtomicU64::new(1),
+            min_size: config.scan.min_size.0,
+        },
+        scan: config.scan.clone(),
+        detector,
+        excludes,
+        roots,
+        threads,
+        started: Instant::now(),
+        companion,
+        finished: companion_tx,
     };
-
-    let coordinator = thread::Builder::new()
-        .name("kuizer-scan".to_owned())
-        .spawn(move || {
-            let mounts = MountTable::load();
-            let protected = Protected::for_user();
-            let context = Context::new(&scan_config, &detector, &excludes, &mounts, &protected);
-            let mut companion = companion;
-            let mut seeds = Vec::new();
-            {
-                let mut sink = Sink::new(&shared, ());
-                for root in &roots {
-                    seeds.extend(context.root(&mut sink, root).map(Task::Walk));
-                }
+    let slot = Arc::new(Mutex::new(Some(job)));
+    let handoff = Arc::clone(&slot);
+    let spawned = spawn(Box::new(move || {
+        let job = handoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(job) = job {
+            job.run();
+        }
+    }));
+    let (coordinator, events) = match spawned {
+        Ok(handle) => (Some(handle), event_rx),
+        Err(_) => {
+            let (inline_tx, inline_rx) = unbounded();
+            let job = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(mut job) = job {
+                job.shared.events = inline_tx;
+                job.run();
             }
-            if !seeds.is_empty() && !shared.cancel.is_cancelled() {
-                let queue = Queue::new(seeds);
-                let forks: Vec<C> = (0..threads).map(|_| companion.fork()).collect();
-                let done: Vec<C> = thread::scope(|scope| {
-                    let workers: Vec<_> = forks
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(index, fork)| {
-                            let (shared, context, queue) = (&shared, &context, &queue);
-                            thread::Builder::new()
-                                .name(format!("kuizer-scan-{index}"))
-                                .spawn_scoped(scope, move || work(shared, context, queue, fork))
-                                .ok()
-                        })
-                        .collect();
-                    if workers.is_empty() {
-                        return vec![work(&shared, &context, &queue, companion.fork())];
-                    }
-                    workers
-                        .into_iter()
-                        .filter_map(|worker| worker.join().ok())
-                        .collect()
-                });
-                for fork in done {
-                    companion.merge(fork);
-                }
-            }
-            let _ = companion_tx.send(companion);
-            let summary = Summary {
-                progress: shared.counters.snapshot(),
-                duration: started.elapsed(),
-                cancelled: shared.cancel.is_cancelled(),
-            };
-            let _ = shared.events.send(Event::Finished(summary));
-        })
-        .expect("spawn scan thread");
+            (None, inline_rx)
+        }
+    };
 
     Ok((
         Scan {
-            events: event_rx,
+            events,
             counters,
             current,
             cancel,
-            coordinator: Some(coordinator),
+            coordinator,
         },
         companion_rx,
     ))
@@ -744,6 +816,25 @@ mod tests {
         config.scan.size_threads = 1_000_000;
         assert_eq!(size_threads(&config), MAX_CONFIGURED_THREADS);
         assert_eq!(scan_threads(&config, &[]), MAX_CONFIGURED_THREADS);
+    }
+
+    fn refuse(_run: Box<dyn FnOnce() + Send>) -> io::Result<JoinHandle<()>> {
+        Err(io::Error::other("no threads left"))
+    }
+
+    #[test]
+    fn a_refused_coordinator_thread_still_delivers_every_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let projects = EVENT_CAPACITY + 8;
+        for index in 0..projects {
+            write(&root.join(format!("{index}/package.json")), 2);
+            write(&root.join(format!("{index}/node_modules/a.js")), 1);
+        }
+        let (handle, companion) =
+            start_on(&Config::default(), &[root], Cancel::new(), (), refuse).unwrap();
+        assert!(companion.recv().is_ok());
+        assert_eq!(collect(&handle, |_| {}).candidates.len(), projects);
     }
 
     #[test]

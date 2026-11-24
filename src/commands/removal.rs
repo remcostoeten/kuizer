@@ -1,5 +1,6 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::AppError;
 use super::interrupt::Interrupt;
@@ -8,6 +9,7 @@ use crate::cli::{RemovalArgs, Selection, SortKey};
 use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
+use crate::git;
 use crate::history::{self, Entry, Recorder};
 use crate::output;
 use crate::scan::{Candidate, Issue};
@@ -19,6 +21,7 @@ pub struct Request<'a> {
     pub roots: &'a [PathBuf],
     pub mode: Mode,
     pub yes: bool,
+    pub confirm: bool,
     pub json: bool,
     pub remove: Remove,
 }
@@ -72,18 +75,66 @@ pub fn select(mut candidates: Vec<Candidate>, selections: &[Selection]) -> Vec<C
     candidates
 }
 
-fn confirm(candidates: &[Candidate]) -> Result<bool, AppError> {
-    if !io::stdin().is_terminal() {
+fn is_review(candidate: &Candidate) -> bool {
+    candidate.rule.safety == Safety::Review
+}
+
+fn repository_of(project: &Path) -> io::Result<Option<&Path>> {
+    for dir in project.ancestors() {
+        match dir.join(".git").symlink_metadata() {
+            Ok(_) => return Ok(Some(dir)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+fn git_is_redirected() -> bool {
+    ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}
+
+fn has_changes(repository: &Path) -> bool {
+    git_is_redirected() || git::uncommitted_changes(repository) != Some(0)
+}
+
+fn dirty_projects(candidates: &[Candidate]) -> usize {
+    let projects: HashSet<&Path> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.project.as_deref())
+        .collect();
+    let mut repositories: HashMap<&Path, bool> = HashMap::new();
+    let mut dirty = 0;
+    for project in projects {
+        let changed = match repository_of(project) {
+            Ok(Some(repository)) => *repositories
+                .entry(repository)
+                .or_insert_with(|| has_changes(repository)),
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        dirty += usize::from(changed);
+    }
+    dirty
+}
+
+fn confirm(candidates: &[Candidate], dirty: usize) -> Result<bool, AppError> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err(AppError::NeedsConfirmation);
     }
     let count = candidates.len();
     let review = candidates
         .iter()
-        .filter(|candidate| candidate.rule.safety == Safety::Review)
+        .filter(|candidate| is_review(candidate))
         .count();
-    let prompt = match review {
-        0 => format!("Remove {count} items? [y/N] "),
-        review => format!(
+    let prompt = match (review, dirty) {
+        (0, 0) => format!("Remove {count} items? [y/N] "),
+        (0, dirty) => format!(
+            "Uncommitted changes or unknown state in {dirty} projects. Remove {count} items? [y/N] "
+        ),
+        (review, _) => format!(
             "{review} of these are marked review. Type {count} to remove all {count} items: "
         ),
     };
@@ -108,9 +159,10 @@ fn target(candidate: &Candidate) -> Target {
 }
 
 /// @name run
-/// @description Previews the selected candidates, asks for confirmation unless `yes` is set,
-/// then removes each one through the delete guard and records what was removed in the history
-/// file. A dry run prints the preview and touches nothing.
+/// @description Previews the selected candidates and removes each one through the delete guard,
+/// recording what was removed in the history file. Asks first unless `yes` is set. With `confirm`
+/// off it still asks for `review` items and for projects with uncommitted changes or whose state
+/// cannot be read. A dry run prints the preview and touches nothing.
 ///
 /// @example
 /// removal::run(&request, removal::select(candidates, &args.select), &issues)?;
@@ -154,7 +206,13 @@ pub fn run(
         }
         return Ok(());
     }
-    if !request.yes && !confirm(&candidates)? {
+    let dirty = if request.yes || request.confirm {
+        0
+    } else {
+        dirty_projects(&candidates)
+    };
+    let asks = !request.yes && (request.confirm || dirty > 0 || candidates.iter().any(is_review));
+    if asks && !confirm(&candidates, dirty)? {
         if request.json {
             println!(
                 "{}",

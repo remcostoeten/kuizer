@@ -398,7 +398,7 @@ impl Kuizer {
         let path = if self.whole_home {
             platform::home_dir()
         } else {
-            start::expand(&self.folder)
+            self.picked_path().or_else(|| start::expand(&self.folder))
         };
         let Some(path) = path else {
             self.folder_error = Some("Type a folder or choose one".to_owned());
@@ -500,8 +500,21 @@ impl Kuizer {
         .detach();
     }
 
+    pub(super) fn show_folder(&mut self, path: &Path) {
+        let shown = display_path(path);
+        self.picked_folder = Some((shown.clone(), path.to_path_buf()));
+        self.folder = shown;
+    }
+
+    fn picked_path(&self) -> Option<PathBuf> {
+        self.picked_folder
+            .as_ref()
+            .filter(|(shown, _)| *shown == self.folder)
+            .map(|(_, path)| path.clone())
+    }
+
     pub(super) fn pick_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.folder = display_path(path);
+        self.show_folder(path);
         self.whole_home = false;
         self.folder_error = None;
         cx.notify();

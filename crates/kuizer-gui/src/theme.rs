@@ -196,25 +196,25 @@ fn tint_of(accent: Accent) -> Tint {
         Accent::Purple => Tint {
             accent: (0x007e_64fb, 0x006c_35f5),
             focus: (0x0096_8dfa, 0x006c_35f5),
-            selected: (0x001f_1342, 0x00ee_effd),
+            selected: (0x001a_1726, 0x00f5_f5fd),
             tile: (0x0033_2d5d, 0x00dc_dcfa),
         },
         Accent::Blue => Tint {
             accent: (0x003b_82f6, 0x0014_63e6),
             focus: (0x005a_96ff, 0x0014_63e6),
-            selected: (0x0014_213a, 0x00e3_edff),
+            selected: (0x0015_1a24, 0x00f0_f5ff),
             tile: (0x002c_3a55, 0x00bc_d2f5),
         },
         Accent::Teal => Tint {
             accent: (0x000f_9f92, 0x000a_8577),
             focus: (0x0022_b8a9, 0x000a_8577),
-            selected: (0x0010_292a, 0x00dc_f5f1),
+            selected: (0x0014_1e1e, 0x00ed_f9f7),
             tile: (0x0027_474a, 0x00b3_e3dc),
         },
         Accent::Pink => Tint {
             accent: (0x00e8_508f, 0x00d6_246e),
             focus: (0x00f0_66a0, 0x00d6_246e),
-            selected: (0x0033_1626, 0x00ff_e5ef),
+            selected: (0x0022_1720, 0x00ff_f1f6),
             tile: (0x004f_2f40, 0x00f2_bdd2),
         },
     }
@@ -287,7 +287,7 @@ fn pick_alpha(dark: u32, light_value: u32) -> Rgba {
 }
 
 fn background_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x000d_0d0d, 0x00ff_ffff)
+    pick_in(theme, 0x000f_1011, 0x00ff_ffff)
 }
 
 pub fn background() -> Rgba {
@@ -312,7 +312,7 @@ pub fn scrim() -> Rgba {
 }
 
 fn panel_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x0014_1414, 0x00fa_fafa)
+    pick_in(theme, 0x0018_191b, 0x00fa_fafa)
 }
 
 pub fn panel() -> Rgba {
@@ -320,11 +320,11 @@ pub fn panel() -> Rgba {
 }
 
 pub fn elevated() -> Rgba {
-    pick(0x001a_1a1a, 0x00ff_ffff)
+    pick(0x001d_1e21, 0x00ff_ffff)
 }
 
 pub fn hover() -> Rgba {
-    pick(0x0022_2222, 0x00f0_f0f0)
+    pick(0x0025_262a, 0x00f0_f0f0)
 }
 
 /// The faint tint under a pointer resting on a list row or a sidebar item, softer than `hover`
@@ -353,15 +353,15 @@ pub fn cursor() -> Rgba {
 }
 
 pub fn border() -> Rgba {
-    pick(0x0027_2727, 0x00e3_e3e3)
+    pick(0x0026_272b, 0x00e3_e3e3)
 }
 
 pub fn border_strong() -> Rgba {
-    pick(0x003d_3d3d, 0x00c7_c7c7)
+    pick(0x003a_3c42, 0x00c7_c7c7)
 }
 
 fn text_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x00ff_ffff, 0x000d_0d0d)
+    pick_in(theme, 0x00f7_f8f8, 0x000d_0d0d)
 }
 
 pub fn text() -> Rgba {
@@ -369,7 +369,7 @@ pub fn text() -> Rgba {
 }
 
 fn muted_in(theme: Theme) -> Rgba {
-    pick_in(theme, 0x00b3_b3b3, 0x004d_4d4d)
+    pick_in(theme, 0x00a3_a7ae, 0x004d_4d4d)
 }
 
 pub fn muted() -> Rgba {
@@ -377,7 +377,7 @@ pub fn muted() -> Rgba {
 }
 
 pub fn faint() -> Rgba {
-    pick(0x006b_6b6b, 0x008f_8f8f)
+    pick(0x006b_6f76, 0x008f_8f8f)
 }
 
 fn bar_in(theme: Theme) -> Rgba {
@@ -399,23 +399,23 @@ pub fn ok() -> Rgba {
 }
 
 pub fn bar_strong() -> Rgba {
-    pick(0x00c6_c6c6, 0x004d_4d4d)
+    pick(0x00c4_c7cc, 0x004d_4d4d)
 }
 
 pub fn bar_mid() -> Rgba {
-    pick(0x0074_7474, 0x008f_8f8f)
+    pick(0x0072_767d, 0x008f_8f8f)
 }
 
 pub fn bar_soft() -> Rgba {
-    pick(0x0060_6060, 0x00b0_b0b0)
+    pick(0x005e_6168, 0x00b0_b0b0)
 }
 
 pub fn bar_rest() -> Rgba {
-    pick(0x0037_3737, 0x00d4_d4d4)
+    pick(0x0035_373c, 0x00d4_d4d4)
 }
 
 pub fn track() -> Rgba {
-    pick(0x0025_2525, 0x00ec_ecec)
+    pick(0x0023_2428, 0x00ec_ecec)
 }
 
 pub fn review() -> Rgba {

@@ -128,15 +128,7 @@ impl Kuizer {
                     ),
                 )
             });
-        let brand = div()
-            .debug_selector(|| "brand".to_owned())
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(unit(space::M))
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(logo())
-            .child("kuizer");
+        let toggle_here = !start && frame::inset(window).is_some();
         let place = if start {
             div()
                 .id("roots")
@@ -164,10 +156,11 @@ impl Kuizer {
         let left = div()
             .flex()
             .flex_1()
+            .h_full()
             .items_center()
             .gap(unit(space::L))
-            .when(!start, |this| this.child(self.sidebar_toggle(cx)))
-            .child(brand)
+            .when(toggle_here, |this| this.child(self.sidebar_toggle(cx)))
+            .when(start, |this| this.child(self.brand()))
             .child(
                 // Absolute, so the path never sets how narrow this side can get.
                 div().relative().flex_1().h_full().child(
@@ -201,8 +194,10 @@ impl Kuizer {
             .h(unit(size::BAR))
             .min_h(frame::TITLEBAR)
             .pl(unit(space::L))
-            .when_some(frame::inset(window), |this, inset| this.pl(inset))
-            .pr(unit(if custom { space::S } else { space::SURFACE }))
+            .when(start, |this| {
+                this.when_some(frame::inset(window), |this, inset| this.pl(inset))
+            })
+            .pr(unit(if custom { space::S } else { space::L }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
             .on_mouse_move(cx.listener(Self::titlebar_move))
@@ -214,6 +209,40 @@ impl Kuizer {
             .child(left)
             .child(self.render_search(cx))
             .child(right)
+    }
+
+    pub(super) fn brand(&self) -> Div {
+        div()
+            .debug_selector(|| "brand".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(unit(space::M))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(logo())
+            .child("kuizer")
+    }
+
+    fn render_sidebar_head(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let collapsed = self.collapsed;
+        let toggle_here = frame::inset(window).is_none();
+        div()
+            .id("sidebar-head")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .h(unit(size::BAR))
+            .min_h(frame::TITLEBAR)
+            .when(collapsed, |this| this.justify_center())
+            .when_some(frame::inset(window), |this, inset| this.pl(inset))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::titlebar_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::titlebar_up))
+            .on_mouse_move(cx.listener(Self::titlebar_move))
+            .when(!collapsed, |this| {
+                this.child(div().pl(unit(space::M)).child(self.brand()))
+            })
+            .when(toggle_here, |this| this.child(self.sidebar_toggle(cx)))
     }
 
     /// Where the scan stands, as a dot and a few words after the root path in the titlebar.
@@ -459,8 +488,9 @@ impl Kuizer {
         )
     }
 
-    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let collapsed = self.collapsed;
+        let head = self.render_sidebar_head(window, cx);
         self.stops
             .borrow_mut()
             .within(Some(self.sidebar_scroll.clone()));
@@ -518,9 +548,12 @@ impl Kuizer {
             } else {
                 size::SIDEBAR
             }))
-            .pt(unit(space::XS))
+            .when_some(frame::inset(window).filter(|_| collapsed), |this, inset| {
+                this.min_w(inset)
+            })
             .pb(unit(space::SURFACE))
             .px(unit(space::INSET))
+            .child(head)
             .child(
                 div()
                     .id("sidebar-items")
@@ -625,6 +658,7 @@ impl Kuizer {
 
     pub(super) fn render_mode(&self) -> Div {
         let mode = self.mode();
+        let review = self.selection.stats().total().review.count;
         let (fill, color) = match mode {
             keys::Mode::Normal => (theme::hover(), theme::muted()),
             keys::Mode::Visual => (theme::bar(), theme::on_accent()),
@@ -684,6 +718,30 @@ impl Kuizer {
                                 .text_color(theme::focus())
                                 .child("count"),
                         ),
+                )
+            })
+            .when_some(self.asking(), |this, left| {
+                this.child(
+                    ui::tag(
+                        "mode-asking",
+                        format!(
+                            "Only review items. {} again selects {left}",
+                            hint(&Command::SelectAll)
+                        ),
+                        ui::Tone::Review,
+                    )
+                    .debug_selector(|| "mode-asking".to_owned()),
+                )
+            })
+            .when(review > 0, |this| {
+                this.child(
+                    ui::tag(
+                        "mode-review",
+                        format!("{review} review selected"),
+                        ui::Tone::Review,
+                    )
+                    .debug_selector(|| "mode-review".to_owned())
+                    .tip(tooltip::term(Term::Review)),
                 )
             })
     }

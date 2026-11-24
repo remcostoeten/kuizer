@@ -17,6 +17,7 @@ pub use exclude::{ExcludeError, Excludes};
 pub use lenient::{ConfigWarning, rejected_scope};
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
+pub const MAX_SIZE_THREADS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -523,11 +524,63 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
-    use crate::detect::Safety;
+    use crate::detect::{Kind, Safety};
 
     fn parse(text: &str) -> Result<Config, ConfigError> {
         Config::parse(text, Path::new("test.toml"))
+    }
+
+    fn collect_json_keys(value: &serde_json::Value, prefix: &str, out: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    collect_json_keys(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) if items.iter().any(serde_json::Value::is_object) => {
+                for item in items {
+                    collect_json_keys(item, prefix, out);
+                }
+            }
+            _ => {
+                if !prefix.is_empty() {
+                    out.insert(prefix.to_owned());
+                }
+            }
+        }
+    }
+
+    fn collect_toml_keys(value: &toml::Value, prefix: &str, out: &mut BTreeSet<String>) {
+        match value {
+            toml::Value::Table(table) => {
+                for (key, child) in table {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    collect_toml_keys(child, &path, out);
+                }
+            }
+            toml::Value::Array(items) if items.iter().any(toml::Value::is_table) => {
+                for item in items {
+                    collect_toml_keys(item, prefix, out);
+                }
+            }
+            _ => {
+                if !prefix.is_empty() {
+                    out.insert(prefix.to_owned());
+                }
+            }
+        }
     }
 
     #[test]
@@ -549,6 +602,11 @@ mod tests {
     fn parses_full_example() {
         let config = parse(include_str!("../../docs/config.example.toml")).expect("parses");
         assert_eq!(config.scan.min_size, ByteSize(1_000_000));
+        assert_eq!(config.scan.max_depth, Some(16));
+        assert_eq!(
+            config.scan.excluded_fs_types,
+            ScanConfig::default().excluded_fs_types
+        );
         assert_eq!(config.rules.len(), 1);
         assert_eq!(config.rules[0].safety, Safety::Review);
         assert!(config.delete.confirm);
@@ -557,6 +615,43 @@ mod tests {
         assert!(!config.git.aggressive);
         assert!(config.appearance.motion);
         assert!(!config.duplicates.enabled);
+    }
+
+    #[test]
+    fn example_config_covers_every_schema_key() {
+        let schema = Config {
+            scan: ScanConfig {
+                max_depth: Some(16),
+                ..ScanConfig::default()
+            },
+            rules: vec![RuleSpec {
+                name: "example".to_owned(),
+                kind: Kind::Dir,
+                pattern: "_site".to_owned(),
+                markers: Vec::new(),
+                contains: Vec::new(),
+                category: Category::Build,
+                safety: Safety::Review,
+                ecosystem: "custom".to_owned(),
+            }],
+            ..Config::default()
+        };
+        let schema_value = serde_json::to_value(&schema).expect("serializes");
+        let mut schema_keys = BTreeSet::new();
+        collect_json_keys(&schema_value, "", &mut schema_keys);
+
+        let example_table: toml::Table = include_str!("../../docs/config.example.toml")
+            .parse()
+            .expect("parses");
+        let mut example_keys = BTreeSet::new();
+        collect_toml_keys(&toml::Value::Table(example_table), "", &mut example_keys);
+
+        let missing: Vec<&String> = schema_keys.difference(&example_keys).collect();
+        let extra: Vec<&String> = example_keys.difference(&schema_keys).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "docs/config.example.toml does not match Config schema\nmissing: {missing:?}\nextra: {extra:?}"
+        );
     }
 
     #[test]

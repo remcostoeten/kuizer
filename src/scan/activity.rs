@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::SystemTime;
 
@@ -61,18 +61,20 @@ pub fn annotate(
 
 /// @name annotate_in
 /// @description Fills `project_last_active` on every candidate with the activity of its project:
-/// the later of the newest file modification outside the project's artifacts and nested
-/// projects, and the last commit of its git repository. Anything `scope.detector` recognises as
-/// an artifact is skipped, reported or not, because installs and builds refresh those times in
-/// projects that are otherwise abandoned. Folders and files the scan itself would not enter
-/// (other filesystems, excluded mounts, excludes, ignore files, protected folders) do not count.
-/// With a `cutoff`, a project stops being walked at the first file newer than it. A project
-/// without readable files or git history keeps `None`.
+/// the later of the newest file modification outside its artifacts (including nested projects),
+/// and the last commit of its git repository. Anything `scope.detector` recognises as an artifact
+/// is skipped, reported or not, because installs and builds refresh those times in projects that
+/// are otherwise abandoned. Folders and files the scan itself would not enter (other filesystems,
+/// excluded mounts, excludes, ignore files, protected folders) do not count. With a `cutoff`, a
+/// project stops being walked at the first file newer than it. A project without readable files
+/// or git history, or with an unreadable folder in itself or a nested project (unless activity
+/// newer than `cutoff` is already known), keeps `None`.
 ///
-/// `on_project` gets each project and its activity as soon as it is known, from the worker
-/// threads, so a frontend can show results while the rest still runs. Once `cancel` is raised
-/// no further results are reported, and candidates whose project was not finished by then are
-/// left unknown.
+/// `on_project` gets each project and its activity once, as soon as the project and everything
+/// nested in it are known, so nested projects come before their parents and a frontend can show
+/// results while the rest still runs. Calls come from the worker threads, one at a time. Once
+/// `cancel` is raised no further results are reported, and candidates whose project was not
+/// finished by then are left unknown.
 ///
 /// @example
 /// scan::annotate_in(&mut candidates, &scope, None, 4, &cancel, |project, active| show(project, active));
@@ -91,6 +93,7 @@ pub fn annotate_in(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let (parents, states) = project_tree(&projects);
     let context = Context::new(
         scope.scan,
         scope.detector,
@@ -100,7 +103,7 @@ pub fn annotate_in(
     );
     let roots = RootFinder::from_env();
     let commits = Commits::default();
-    let activity = Mutex::new(BTreeMap::new());
+    let states = Mutex::new(states);
     let next = AtomicUsize::new(0);
     let worker = || {
         let mut scratch = Scratch::default();
@@ -118,15 +121,23 @@ pub fn annotate_in(
                 nested,
             };
             let commit = roots.find(project).and_then(|root| commits.at(&root));
-            let last = project_activity(project, &skip, commit, cutoff, cancel, &mut scratch);
+            let own = project_activity(project, &skip, commit, cutoff, cancel, &mut scratch);
             if cancel.is_cancelled() {
                 break;
             }
-            on_project(project, last);
-            activity
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .insert(project.clone(), last);
+            let mut states = states.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut current = Some((index, own));
+            while let Some((idx, incoming)) = current {
+                let state = &mut states[idx];
+                state.activity = state.activity.merge(incoming, cutoff);
+                state.remaining -= 1;
+                if state.remaining > 0 || cancel.is_cancelled() {
+                    break;
+                }
+                let resolved = state.activity;
+                on_project(&projects[idx], resolved.time());
+                current = parents[idx].map(|parent| (parent, resolved));
+            }
         }
     };
     thread::scope(|threads_scope| {
@@ -143,15 +154,79 @@ pub fn annotate_in(
         }
         worker();
     });
-    let activity = activity
-        .into_inner()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let states = states.into_inner().unwrap_or_else(PoisonError::into_inner);
     for candidate in candidates {
         candidate.project_last_active = candidate
             .project
             .as_ref()
-            .and_then(|project| activity.get(project).copied().flatten());
+            .and_then(|project| projects.binary_search(project).ok())
+            .filter(|&index| states[index].remaining == 0)
+            .and_then(|index| states[index].activity.time());
     }
+}
+
+#[derive(Clone, Copy)]
+enum Activity {
+    Known(Option<SystemTime>),
+    Unknown,
+}
+
+impl Activity {
+    fn merge(self, other: Self, cutoff: Option<SystemTime>) -> Self {
+        match (self, other) {
+            (Self::Known(a), Self::Known(b)) => Self::Known(a.max(b)),
+            (Self::Known(time), Self::Unknown) | (Self::Unknown, Self::Known(time))
+                if newer_than(time, cutoff) =>
+            {
+                Self::Known(time)
+            }
+            _ => Self::Unknown,
+        }
+    }
+
+    fn time(self) -> Option<SystemTime> {
+        match self {
+            Self::Known(time) => time,
+            Self::Unknown => None,
+        }
+    }
+}
+
+fn newer_than(time: Option<SystemTime>, cutoff: Option<SystemTime>) -> bool {
+    matches!((time, cutoff), (Some(time), Some(cutoff)) if time > cutoff)
+}
+
+#[derive(Clone, Copy)]
+struct ProjectState {
+    activity: Activity,
+    remaining: usize,
+}
+
+fn project_tree(projects: &[PathBuf]) -> (Vec<Option<usize>>, Vec<ProjectState>) {
+    let mut parents = Vec::with_capacity(projects.len());
+    let mut states = vec![
+        ProjectState {
+            activity: Activity::Known(None),
+            remaining: 1,
+        };
+        projects.len()
+    ];
+    let mut ancestors: Vec<usize> = Vec::new();
+    for (index, project) in projects.iter().enumerate() {
+        while ancestors
+            .last()
+            .is_some_and(|&top| !project.starts_with(&projects[top]))
+        {
+            ancestors.pop();
+        }
+        let parent = ancestors.last().copied();
+        if let Some(parent) = parent {
+            states[parent].remaining += 1;
+        }
+        parents.push(parent);
+        ancestors.push(index);
+    }
+    (parents, states)
 }
 
 #[derive(Default)]
@@ -202,15 +277,12 @@ fn project_activity(
     cutoff: Option<SystemTime>,
     cancel: &Cancel,
     scratch: &mut Scratch,
-) -> Option<SystemTime> {
-    if commit
-        .zip(cutoff)
-        .is_some_and(|(time, cutoff)| time > cutoff)
-    {
-        return commit;
+) -> Activity {
+    if newer_than(commit, cutoff) {
+        return Activity::Known(commit);
     }
     let files = newest_file(project, skip, cutoff, cancel, scratch);
-    commit.max(files)
+    Activity::Known(commit).merge(files, cutoff)
 }
 
 #[derive(Default)]
@@ -238,7 +310,7 @@ fn newest_file(
     cutoff: Option<SystemTime>,
     cancel: &Cancel,
     scratch: &mut Scratch,
-) -> Option<SystemTime> {
+) -> Activity {
     let (scope, context) = (skip.scope, skip.context);
     let mut newest: Option<SystemTime> = None;
     let mut pending = vec![Frame {
@@ -250,25 +322,25 @@ fn newest_file(
     }];
     while let Some(frame) = pending.pop() {
         if cancel.is_cancelled() {
-            return None;
+            return Activity::Unknown;
         }
         let dir = match Dir::open(&frame.path, frame.parent.is_none()) {
             Ok(dir) => dir,
             Err(error) if vanished(&error) => continue,
-            Err(_) => return None,
+            Err(_) => return Activity::Unknown,
         };
         let device = if frame.parent.is_none() {
             match dir.stat() {
                 Ok(stat) => stat.device,
                 Err(error) if vanished(&error) => continue,
-                Err(_) => return None,
+                Err(_) => return Activity::Unknown,
             }
         } else if frame.probe {
             match context.same_device(&dir, frame.device, &frame.path) {
                 Ok(Some(device)) => device,
                 Ok(None) => continue,
                 Err(error) if vanished(&error) => continue,
-                Err(_) => return None,
+                Err(_) => return Activity::Unknown,
             }
         } else {
             frame.device
@@ -286,7 +358,7 @@ fn newest_file(
             entries.push((start, names.len(), kind));
         });
         if listed.as_ref().is_err_and(|error| !vanished(error)) {
-            return None;
+            return Activity::Unknown;
         }
         let mut own = Listing::default();
         for (start, end, kind) in entries.iter_mut() {
@@ -295,7 +367,7 @@ fn newest_file(
                 match dir.kind_at(name) {
                     Ok(resolved) => *kind = resolved,
                     Err(error) if vanished(&error) => continue,
-                    Err(_) => return None,
+                    Err(_) => return Activity::Unknown,
                 }
             }
             scope.detector.note(&mut own, name);
@@ -342,21 +414,21 @@ fn newest_file(
                     let stat = match dir.stat_at(name) {
                         Ok(stat) => stat,
                         Err(error) if vanished(&error) => continue,
-                        Err(_) => return None,
+                        Err(_) => return Activity::Unknown,
                     };
                     let Some(modified) = stat.modified else {
                         continue;
                     };
                     newest = newest.max(Some(modified));
                     if cutoff.is_some_and(|cutoff| modified > cutoff) {
-                        return newest;
+                        return Activity::Known(newest);
                     }
                 }
                 _ => {}
             }
         }
     }
-    newest
+    Activity::Known(newest)
 }
 
 #[cfg(test)]
@@ -433,20 +505,90 @@ mod tests {
     }
 
     #[test]
-    fn ignores_the_artifact_and_nested_projects() {
+    fn nested_project_activity_counts_toward_its_parent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let app = tmp.path().join("app");
+        let web = app.join("packages/web");
+        let sibling = tmp.path().join("app-old");
         touch(&app.join("src/index.js"), DAY * 100);
         touch(&app.join("node_modules/pkg/index.js"), Duration::ZERO);
-        touch(&app.join("packages/web/main.js"), Duration::ZERO);
         touch(&app.join(".git/HEAD"), Duration::ZERO);
+        touch(&web.join("main.js"), DAY * 20);
+        touch(&web.join("node_modules/pkg/index.js"), Duration::ZERO);
+        touch(&sibling.join("main.js"), DAY * 200);
+        touch(&sibling.join("node_modules/pkg/index.js"), Duration::ZERO);
         let mut candidates = [
             candidate(app.join("node_modules")),
-            candidate(app.join("packages/web/node_modules")),
+            candidate(web.join("node_modules")),
+            candidate(sibling.join("node_modules")),
         ];
-        annotate(&mut candidates, &Config::default(), None).expect("annotate");
-        assert_eq!(days_idle(&candidates[0]), Some(100));
-        assert_eq!(days_idle(&candidates[1]), Some(0));
+        let detector = detector();
+        let scan = ScanConfig::default();
+        let excludes = Excludes::new(&[], &[]).expect("excludes");
+        let mounts = MountTable::load();
+        let protected = Protected::default();
+        let reported = Mutex::new(Vec::new());
+        annotate_in(
+            &mut candidates,
+            &ActivityScope {
+                detector: &detector,
+                scan: &scan,
+                excludes: &excludes,
+                mounts: &mounts,
+                protected: &protected,
+            },
+            None,
+            2,
+            &Cancel::new(),
+            |project, _| reported.lock().unwrap().push(project.to_path_buf()),
+        );
+        assert_eq!(days_idle(&candidates[0]), Some(20));
+        assert_eq!(days_idle(&candidates[1]), Some(20));
+        assert_eq!(days_idle(&candidates[2]), Some(200));
+        let reported = reported.into_inner().unwrap();
+        assert_eq!(reported.len(), 3);
+        let web_at = reported.iter().position(|seen| *seen == web);
+        let app_at = reported.iter().position(|seen| *seen == app);
+        assert!(web_at.is_some() && web_at < app_at);
+    }
+
+    #[test]
+    fn an_unreadable_nested_project_keeps_its_parent_unknown_unless_active() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path().join("app");
+        let web = app.join("packages/web");
+        touch(&app.join("old.txt"), DAY * 400);
+        touch(&web.join("old.txt"), DAY * 400);
+        let locked = web.join("locked");
+        touch(&locked.join("recent.txt"), Duration::ZERO);
+        fs::create_dir_all(app.join("node_modules")).expect("modules");
+        fs::create_dir_all(web.join("node_modules")).expect("modules");
+        let targets = || {
+            [
+                candidate(app.join("node_modules")),
+                candidate(web.join("node_modules")),
+            ]
+        };
+        let config = Config::default();
+        let cutoff = SystemTime::now() - DAY * 30;
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+        let mut idle = targets();
+        let idle_result = annotate(&mut idle, &config, Some(cutoff));
+        let wrote = fs::write(app.join("new.txt"), "x");
+        let mut active = targets();
+        let active_result = annotate(&mut active, &config, Some(cutoff));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+        idle_result.expect("annotates");
+        wrote.expect("write");
+        active_result.expect("annotates");
+        assert_eq!(idle[0].project_last_active, None);
+        assert_eq!(idle[1].project_last_active, None);
+        assert_eq!(days_idle(&active[0]), Some(0));
+        assert_eq!(active[1].project_last_active, None);
     }
 
     #[test]

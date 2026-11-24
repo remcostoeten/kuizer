@@ -145,6 +145,75 @@ fn refuses_yes_when_the_config_rejects_a_scope_setting() {
         ],
     );
     assert!(output.status.success(), "{output:?}");
+
+    let output = kuizer(&home, &["--config", config_arg, "cache", "clean", "--yes"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to remove with --yes"));
+}
+
+#[test]
+fn flags_narrow_the_config_and_never_widen_it() {
+    let (_tmp, home, root) = setup();
+    let config = home.join("kuizer.toml");
+    let before = snapshot(&root);
+
+    for (text, flag, value) in [
+        (
+            "[detect]\ncategories = [\"dependencies\"]\n",
+            "--category",
+            "build",
+        ),
+        ("[scan]\nmin_size = \"1GB\"\n", "--min-size", "1KB"),
+    ] {
+        fs::write(&config, text).unwrap();
+        let output = kuizer(
+            &home,
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "clean",
+                root.to_str().unwrap(),
+                flag,
+                value,
+                "--select",
+                "all",
+                "-y",
+            ],
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Nothing to remove"));
+        assert_eq!(snapshot(&root), before);
+    }
+}
+
+#[test]
+fn confirm_off_still_asks_for_review_items_and_unknown_repositories() {
+    let (_tmp, home, root) = setup();
+    let config = home.join("kuizer.toml");
+    fs::write(&config, "[delete]\nconfirm = false\n").unwrap();
+    let config = config.to_str().unwrap();
+    let root_arg = root.to_str().unwrap();
+    let before = snapshot(&root);
+
+    let output = kuizer(
+        &home,
+        &["--config", config, "clean", root_arg, "--select", "all"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(snapshot(&root), before);
+
+    fs::create_dir(root.join(".git")).unwrap();
+    let before = snapshot(&root);
+    let output = kuizer(&home, &["--config", config, "clean", root_arg]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(snapshot(&root), before);
+
+    fs::remove_dir(root.join(".git")).unwrap();
+    let output = kuizer(&home, &["--config", config, "clean", root_arg]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!root.join("web/node_modules").exists());
+    assert!(root.join("web/dist/app.js").exists());
 }
 
 #[test]
@@ -298,4 +367,24 @@ fn cache_lists_and_cleans_known_caches_only() {
     assert!(home.join(PIP_CACHE).exists());
     assert_eq!(snapshot(&home.join(".config/BraveSoftware")), brave);
     assert_eq!(snapshot(&home.join(".cache/BraveSoftware")), brave_cache);
+}
+
+#[test]
+fn cache_clean_subcommand_removes_only_without_a_dry_run() {
+    let (_tmp, home, _root) = setup();
+    file(&home, ".npm/_cacache/index-v5/a", 100);
+
+    for args in [
+        &["cache", "--select", "npm", "-y"][..],
+        &["cache", "clean", "--select", "npm", "--dry-run", "-y"][..],
+        &["cache", "--dry-run", "clean", "--select", "npm", "-y"][..],
+    ] {
+        let output = kuizer(&home, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(home.join(".npm/_cacache").exists(), "{args:?}");
+    }
+
+    let output = kuizer(&home, &["cache", "clean", "--select", "npm", "-y"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!home.join(".npm/_cacache").exists());
 }

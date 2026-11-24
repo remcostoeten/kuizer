@@ -243,19 +243,33 @@ fn is_directory(node: &Node, kind: FileType, name: &CStr) -> bool {
 }
 
 fn open_below(parent: impl AsFd, name: &CStr) -> Result<OwnedFd, Errno> {
-    if !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed) {
-        match openat2(
-            &parent,
-            name,
-            OPEN_DIR,
-            Mode::empty(),
-            ResolveFlags::NO_XDEV,
-        ) {
-            Err(Errno::NOSYS | Errno::PERM) => OPENAT2_UNAVAILABLE.store(true, Ordering::Relaxed),
+    let parent = parent.as_fd();
+    open_below_with(
+        &OPENAT2_UNAVAILABLE,
+        || openat2(parent, name, OPEN_DIR, Mode::empty(), ResolveFlags::NO_XDEV),
+        || openat(parent, name, OPEN_DIR, Mode::empty()),
+    )
+}
+
+fn open_below_with<T>(
+    unavailable: &AtomicBool,
+    try_openat2: impl FnOnce() -> Result<T, Errno>,
+    try_openat: impl FnOnce() -> Result<T, Errno>,
+) -> Result<T, Errno> {
+    if !unavailable.load(Ordering::Relaxed) {
+        match try_openat2() {
+            Err(Errno::NOSYS) => unavailable.store(true, Ordering::Relaxed),
+            Err(Errno::PERM) => {
+                let opened = try_openat();
+                if opened.is_ok() {
+                    unavailable.store(true, Ordering::Relaxed);
+                }
+                return opened;
+            }
             opened => return opened,
         }
     }
-    openat(parent, name, OPEN_DIR, Mode::empty())
+    try_openat()
 }
 
 /// @name remove
@@ -441,5 +455,47 @@ mod tests {
         remove(&file, identity(&file), 4).unwrap();
         assert!(!tree.exists());
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn per_path_eperm_does_not_disable_openat2() {
+        let flag = AtomicBool::new(false);
+
+        let result = open_below_with::<()>(&flag, || Err(Errno::PERM), || Err(Errno::PERM));
+        assert_eq!(result, Err(Errno::PERM));
+        assert!(!flag.load(Ordering::Relaxed));
+
+        let result = open_below_with::<()>(&flag, || Err(Errno::PERM), || Err(Errno::ACCESS));
+        assert_eq!(result, Err(Errno::ACCESS));
+        assert!(!flag.load(Ordering::Relaxed));
+
+        let mut tried_openat2 = false;
+        let result = open_below_with(
+            &flag,
+            || {
+                tried_openat2 = true;
+                Ok(1)
+            },
+            || panic!("fallback should not run when openat2 succeeds"),
+        );
+        assert_eq!(result, Ok(1));
+        assert!(tried_openat2);
+        assert!(!flag.load(Ordering::Relaxed));
+
+        let result = open_below_with(&flag, || Err(Errno::PERM), || Ok(2));
+        assert_eq!(result, Ok(2));
+        assert!(flag.load(Ordering::Relaxed));
+
+        let result = open_below_with(
+            &flag,
+            || panic!("openat2 should be skipped once latched"),
+            || Ok(3),
+        );
+        assert_eq!(result, Ok(3));
+
+        let nosys = AtomicBool::new(false);
+        let result = open_below_with::<()>(&nosys, || Err(Errno::NOSYS), || Err(Errno::NOENT));
+        assert_eq!(result, Err(Errno::NOENT));
+        assert!(nosys.load(Ordering::Relaxed));
     }
 }

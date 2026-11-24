@@ -16,8 +16,8 @@ pub(super) type Press = Rc<dyn Fn(&mut Kuizer, &mut Window, &mut Context<Kuizer>
 /// The parts of the window that hold controls, in Tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Region {
-    Titlebar,
     Sidebar,
+    Titlebar,
     Content,
     Statusbar,
     Toast,
@@ -207,9 +207,12 @@ impl Kuizer {
         let Some(ring) = self.ring.clone() else {
             return false;
         };
+        let vim = plain && !modifiers.shift && !matches!(self.phase, Phase::Start);
         let back = match keystroke.key.as_str() {
             "left" | "up" if plain && !modifiers.shift => Some(true),
             "right" | "down" if plain && !modifiers.shift => Some(false),
+            "h" | "k" if vim => Some(true),
+            "l" | "j" if vim => Some(false),
             _ => None,
         };
         if let Some(back) = back {
@@ -285,18 +288,20 @@ mod tests {
             (Region::Statusbar, &["trash"]),
             (Region::Content, &["filter", "safe"]),
             (Region::Titlebar, &["search"]),
+            (Region::Sidebar, &["sidebar-toggle"]),
         ]);
         let ring = |from: Option<&'static str>, motion| {
             stops.moved(from.map(ElementId::from).as_ref(), motion)
         };
         let tab = Move::Cycle { back: false };
         let shift_tab = Move::Cycle { back: true };
-        assert_eq!(ring(None, tab), Some("search".into()));
+        assert_eq!(ring(None, tab), Some("sidebar-toggle".into()));
+        assert_eq!(ring(Some("sidebar-toggle"), tab), Some("search".into()));
         assert_eq!(ring(Some("search"), tab), Some("filter".into()));
         assert_eq!(ring(Some("safe"), tab), Some("trash".into()));
         assert_eq!(ring(Some("trash"), tab), None, "past the end is the list");
         assert_eq!(ring(None, shift_tab), Some("trash".into()));
-        assert_eq!(ring(Some("search"), shift_tab), None);
+        assert_eq!(ring(Some("sidebar-toggle"), shift_tab), None);
         assert_eq!(
             ring(Some("trash"), Move::Step { back: false }),
             Some("trash".into())
@@ -360,6 +365,13 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert_eq!(ring(&view, cx), None);
 
+        cx.simulate_keystrokes("shift-tab");
+        type_text(cx, "h");
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.ring, None, "a motion letter types on the start screen");
+            assert_eq!(app.folder, "~h");
+        });
+
         cx.simulate_keystrokes("ctrl-,");
         view.read_with(cx, |app, _| {
             assert!(
@@ -380,6 +392,13 @@ mod tests {
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::History));
         cx.simulate_keystrokes("j");
+        assert_ne!(ring(&view, cx), Some(Tab::History.label().into()));
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.tab, Tab::History, "a motion moves without pressing");
+        });
+        cx.simulate_keystrokes("k");
+        assert_eq!(ring(&view, cx), Some(Tab::History.label().into()));
+        cx.simulate_keystrokes("g");
         assert_eq!(ring(&view, cx), None, "a list key gives the keyboard back");
 
         tab_to(&view, cx, "new-scan");

@@ -73,7 +73,7 @@ The look is a feature, not polish added at the end.
 - Motion shows state changes only: selection, expand and collapse, an item leaving after deletion, a view appearing. Keep it short (under 150ms) and never animate in response to typing or plain navigation.
 - Stateful behavior transitions instead of jumping. When an item moves from idle to marked to deleting to gone, each step animates from the previous one, and nothing pops in or out.
 - Confirmations and other follow-up actions happen inline, in place, as motion. A delete confirm expands in the row or the footer where the action was triggered; it is not a modal or popup. Reach for a modal only when there is no sensible place inline, and justify it in the summary.
-- Motion can be turned off in config (`ui.motion`). GPUI 0.2.2 cannot read the system reduced-motion setting, so this config key is the only switch; do not build OS detection. With motion off, state changes still happen, just instantly.
+- Motion can be turned off in config (`appearance.motion`). GPUI 0.2.2 cannot read the system reduced-motion setting, so this config key is the only switch; do not build OS detection. With motion off, state changes still happen, just instantly.
 - Consistency over novelty. A new view reuses existing components and spacing before it introduces its own.
 
 ## Testing

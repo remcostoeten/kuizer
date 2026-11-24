@@ -27,17 +27,44 @@ const REFRESH: Duration = Duration::from_millis(100);
 const EVENTS_PER_FRAME: usize = 5_000;
 const PAGE: isize = 20;
 
-fn dispatch(app: &App, jobs: &Sender<Job>, batch: Vec<(u64, Target, Mode)>) {
+fn dispatch(app: &mut App, jobs: &Sender<Job>, batch: Vec<(u64, Target, Mode)>) {
     for (id, target, mode) in batch {
         let Some(item) = app.item(id) else {
             continue;
         };
-        let _ = jobs.send(Job {
+        let job = Job {
             id,
             target,
             mode,
             candidate: item.candidate.clone(),
-        });
+        };
+        if jobs.send(job).is_err() {
+            app.restore_deleting();
+            return;
+        }
+    }
+}
+
+fn notify(app: &mut App, problem: String) {
+    app.message = Some(match app.message.take() {
+        Some(existing) => format!("{existing}; {problem}"),
+        None => problem,
+    });
+}
+
+fn handle_quit_prompt(app: &mut App, key: KeyEvent) {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return;
+    }
+    let held_enter = key.code == KeyCode::Enter && app.enter_repeats(Instant::now());
+    match key.code {
+        KeyCode::Char('y') => app.quit = true,
+        KeyCode::Enter if !held_enter => app.quit = true,
+        KeyCode::Enter | KeyCode::Char('q') => {}
+        _ => app.overlay = Overlay::None,
     }
 }
 
@@ -78,16 +105,30 @@ fn handle_chord(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
-    {
-        app.quit = true;
+    if app.overlay == Overlay::Quit {
+        handle_quit_prompt(app, key);
         return;
     }
-    if key
+    let chord = key
         .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    if chord || key.code != KeyCode::Char('P') {
+        app.disarm_widen();
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
     {
+        app.request_quit();
+        return;
+    }
+    if chord {
         handle_chord(app, key);
+        return;
+    }
+    if key.code == KeyCode::Char('P')
+        && !app.filtering
+        && app.overlay == Overlay::None
+        && app.project_key_repeats(Instant::now())
+    {
         return;
     }
     app.message = None;
@@ -110,12 +151,14 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         (Overlay::Confirm { .. }, _) => app.overlay = Overlay::None,
         (Overlay::Help, _) => app.overlay = Overlay::None,
+        (Overlay::Quit, _) => {}
         (Overlay::None, code) => match code {
             KeyCode::Char('J') => app.extend(1),
             KeyCode::Char('K') => app.extend(-1),
             KeyCode::Down if shift => app.extend(1),
             KeyCode::Up if shift => app.extend(-1),
-            KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+            KeyCode::Char('q') => app.request_quit(),
+            KeyCode::Esc => app.back_out(),
             KeyCode::Char('j') | KeyCode::Down => app.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => app.move_by(-1),
             KeyCode::PageDown => app.move_by(PAGE),
@@ -185,13 +228,27 @@ pub fn run_with_notice(
     let (job_tx, job_rx) = unbounded::<Job>();
     let (result_tx, result_rx) = unbounded::<Outcome>();
     let stop = Arc::new(AtomicBool::new(false));
-    let deleter = jobs::spawn_deleters(roots.to_vec(), job_rx, result_tx, Arc::clone(&stop));
+    let deleter = match jobs::spawn_deleters(roots.to_vec(), job_rx, result_tx, Arc::clone(&stop)) {
+        Ok(deleter) => Some(deleter),
+        Err(error) => {
+            notify(
+                &mut app,
+                format!("could not start the delete worker: {error}"),
+            );
+            None
+        }
+    };
     let (project_tx, project_rx) = unbounded::<PathBuf>();
     let (changes_tx, changes_rx) = unbounded::<Changes>();
-    jobs::spawn_status(project_rx, changes_tx);
+    if let Err(error) = jobs::spawn_status(project_rx, changes_tx) {
+        app.set_changes_unknown();
+        notify(&mut app, format!("could not start the git check: {error}"));
+    }
     let (nudge_tx, nudge_rx) = unbounded::<()>();
     let (free_tx, free_rx) = unbounded::<Option<u64>>();
-    jobs::spawn_disk(roots.to_vec(), nudge_rx, free_tx);
+    if let Err(error) = jobs::spawn_disk(roots.to_vec(), nudge_rx, free_tx) {
+        notify(&mut app, format!("could not start the disk check: {error}"));
+    }
 
     let outcome = (|| -> std::io::Result<()> {
         let mut scanning = true;
@@ -228,9 +285,19 @@ pub fn run_with_notice(
                 redraw = true;
             }
             let mut removed = false;
-            while let Ok((id, mode, result)) = result_rx.try_recv() {
-                app.finish(id, mode, result);
-                removed = true;
+            loop {
+                match result_rx.try_recv() {
+                    Ok((id, mode, result)) => {
+                        app.finish(id, mode, result);
+                        removed = true;
+                    }
+                    Err(TryRecvError::Disconnected) if app.deleting() > 0 => {
+                        app.restore_deleting();
+                        redraw = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
             }
             if removed {
                 let _ = nudge_tx.send(());
@@ -269,7 +336,7 @@ pub fn run_with_notice(
                     handle_key(&mut app, key, &job_tx);
                 }
                 redraw = true;
-                let confirming = matches!(app.overlay, Overlay::Confirm { .. });
+                let confirming = matches!(app.overlay, Overlay::Confirm { .. } | Overlay::Quit);
                 if app.quit || confirming || !event::poll(Duration::ZERO)? {
                     break;
                 }
@@ -284,7 +351,9 @@ pub fn run_with_notice(
     drop(project_tx);
     drop(nudge_tx);
     drop(handle);
-    if let Ok(Some(error)) = deleter.join() {
+    if let Some(deleter) = deleter
+        && let Ok(Some(error)) = deleter.join()
+    {
         eprintln!("kuizer: {error}");
     }
     outcome
@@ -345,6 +414,77 @@ mod tests {
         press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(app.overlay, Overlay::Confirm { .. }));
         assert!(queued.try_recv().is_err());
+    }
+
+    #[test]
+    fn esc_backs_out_one_level_and_never_quits() {
+        let (jobs, _queued) = unbounded::<Job>();
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
+        app.set_filter("node".to_owned());
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.filtered());
+        assert_eq!(app.selected_count(), 1);
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.selected_count(), 0);
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.quit);
+    }
+
+    #[test]
+    fn quitting_during_a_deletion_asks_and_a_held_key_never_confirms() {
+        let (jobs, _queued) = unbounded::<Job>();
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.deleting(), 1);
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::Quit);
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Char('q'), KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.overlay, Overlay::Quit);
+        assert!(!app.quit);
+        press(&mut app, &jobs, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.quit);
+        press(&mut app, &jobs, KeyCode::Char('q'), KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn holding_p_never_widens_to_review_items() {
+        let (jobs, _queued) = unbounded::<Job>();
+        let mut app = App::new(Mode::Permanent, false);
+        app.push(candidate(1, "/p/x/node_modules"));
+        let mut review = candidate(2, "/p/x/dist");
+        review.rule = Arc::new(RuleInfo {
+            name: "dist".to_owned(),
+            category: Category::Build,
+            safety: Safety::Review,
+            ecosystem: "node".to_owned(),
+        });
+        app.push(review);
+        app.refresh();
+        press(&mut app, &jobs, KeyCode::Char('P'), KeyModifiers::SHIFT);
+        press(&mut app, &jobs, KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_eq!(app.selected_count(), 1);
+        assert_eq!(app.selected_review(), 0);
+    }
+
+    #[test]
+    fn a_dead_delete_worker_keeps_the_queue_selected() {
+        let (jobs, queued) = unbounded::<Job>();
+        drop(queued);
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.deleting(), 0);
+        assert_eq!(app.selected_count(), 2);
+        assert!(app.items.iter().all(|item| item.status == Status::Ready));
+        assert!(app.message.is_some());
     }
 
     #[test]

@@ -54,7 +54,14 @@ fn plan(found: &[Repository], args: &GitArgs, min_gain: u64) -> String {
 
 pub fn run(config: &Config, args: GitArgs, json: bool, quiet: bool) -> Result<(), AppError> {
     let roots = resolve_roots(config, args.paths.clone())?;
-    let found = repos::inspect_all(repos::find(config, &roots)?, &config.git, &Cancel::new());
+    let inspected = repos::inspect_all_collecting(
+        repos::find(config, &roots)?,
+        &config.git,
+        &Cancel::new(),
+        |_| {},
+    );
+    output::print_issues(&inspected.issues);
+    let found = inspected.repositories;
     let acting = (args.gc || args.branches) && !args.dry_run;
     if !acting {
         if json {

@@ -304,6 +304,7 @@ pub struct Kuizer {
     roots: Vec<PathBuf>,
     options: ScanOptions,
     folder: String,
+    picked_folder: Option<(String, PathBuf)>,
     whole_home: bool,
     collapsed: bool,
     icon_hovers: HashMap<&'static str, u64>,
@@ -347,6 +348,7 @@ pub struct Kuizer {
     range: Option<Span>,
     visual: bool,
     count: String,
+    asked: Option<keys::Asked>,
     dialog: Option<Dialog>,
     held: keys::Held,
     cleaning: Option<Cleaning>,
@@ -373,6 +375,7 @@ pub struct Kuizer {
     reveal_ring: Rc<Cell<bool>>,
     start_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
+    shortcuts_scroll: ScrollHandle,
     config_path: Option<PathBuf>,
     excluded: Vec<PathBuf>,
     excluding: HashSet<PathBuf>,
@@ -415,6 +418,7 @@ impl Kuizer {
             config,
             roots,
             folder,
+            picked_folder: None,
             whole_home: false,
             collapsed,
             icon_hovers: HashMap::new(),
@@ -458,6 +462,7 @@ impl Kuizer {
             range: None,
             visual: false,
             count: String::new(),
+            asked: None,
             dialog: None,
             held: keys::Held::default(),
             cleaning: None,
@@ -495,6 +500,7 @@ impl Kuizer {
             reveal_ring: Rc::new(Cell::new(false)),
             start_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
+            shortcuts_scroll: ScrollHandle::new(),
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
             excluding: HashSet::new(),
@@ -663,6 +669,7 @@ impl Kuizer {
     }
 
     fn refresh_rows(&mut self) {
+        self.asked = None;
         self.rows_generation += 1;
         let Phase::Ready(report) = &self.phase else {
             self.rows.clear();
@@ -808,63 +815,9 @@ impl Kuizer {
     }
 
     fn select_safe(&mut self, cx: &mut Context<Self>) {
-        let Some(report) = self.report() else {
-            return;
-        };
-        let keys: Vec<(Source, u64)> = match self.tab {
-            Tab::Caches => self
-                .listed(Tab::Caches)
-                .slots
-                .iter()
-                .filter_map(|&(at, _)| report.caches.get(at))
-                .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
-                .map(|(_, candidate)| (Source::Cache, candidate.id))
-                .collect(),
-            Tab::Toolchains => self
-                .listed(Tab::Toolchains)
-                .slots
-                .iter()
-                .filter_map(|&(at, _)| report.toolchains.get(at))
-                .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
-                .map(|(_, candidate)| (Source::Toolchain, candidate.id))
-                .collect(),
-            Tab::Docker => self
-                .listed(Tab::Docker)
-                .slots
-                .iter()
-                .filter_map(|&(at, _)| report.docker.get(at))
-                .filter(|(_, candidate)| candidate.rule.safety == Safety::Safe)
-                .map(|(_, candidate)| (Source::Docker, candidate.id))
-                .collect(),
-            _ => self
-                .rows
-                .iter()
-                .map(|&index| &report.candidates[index])
-                .filter(|candidate| candidate.rule.safety == Safety::Safe)
-                .map(|candidate| (Source::Artifact, candidate.id))
-                .collect(),
-        };
-        for key in keys {
-            self.select(key);
-        }
-        cx.notify();
-    }
-
-    fn toggle_visible(&mut self, cx: &mut Context<Self>) {
-        let Some(report) = self.report() else {
-            return;
-        };
-        let keys: Vec<(Source, u64)> = self
-            .rows
-            .iter()
-            .map(|&index| (Source::Artifact, report.candidates[index].id))
-            .collect();
-        if self.all_rows_checked() {
-            for key in &keys {
-                self.selection.remove(key);
-            }
-        } else {
-            for key in keys {
+        self.asked = None;
+        for (key, safety) in self.list_items() {
+            if safety == Safety::Safe {
                 self.select(key);
             }
         }
@@ -1128,13 +1081,16 @@ impl Kuizer {
                 self.control(
                     div()
                         .id("select-visible")
+                        .debug_selector(|| "select-visible".to_owned())
                         .cursor_pointer()
-                        .tip(tooltip::plain("Select or clear every item in this list"))
+                        .tip(tooltip::plain(
+                            "Select the safe items, then the review items, then clear",
+                        ))
                         .child(ui::checkbox(all_checked)),
                     cx,
                     |app, _, cx| {
                         if !app.busy() {
-                            app.toggle_visible(cx);
+                            app.select_step(cx);
                         }
                     },
                 ),
@@ -1490,7 +1446,7 @@ impl Render for Kuizer {
         self.region(Region::Titlebar);
         let titlebar = self.render_titlebar(window, cx);
         self.region(Region::Sidebar);
-        let sidebar = (!start).then(|| self.render_sidebar(cx));
+        let sidebar = (!start).then(|| self.render_sidebar(window, cx));
         self.region(Region::Statusbar);
         let statusbar = (!start).then(|| self.render_statusbar());
         let summary = if start { None } else { self.render_summary(cx) };
@@ -1531,12 +1487,12 @@ impl Render for Kuizer {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::quit))
             .child(wheel)
-            .child(titlebar)
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .pt(unit(space::SURFACE))
                     .when(sidebar.is_none(), |this| this.pl(unit(space::SURFACE)))
                     .children(sidebar)
                     .child(
@@ -1552,6 +1508,7 @@ impl Render for Kuizer {
                             .border_1()
                             .border_color(theme::border())
                             .overflow_hidden()
+                            .child(titlebar)
                             .child(
                                 div()
                                     .relative()

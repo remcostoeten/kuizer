@@ -51,6 +51,68 @@ fn step(motion: Motion, current: usize, count: usize, page: usize) -> usize {
     }
 }
 
+fn scrolled(
+    command: &Command,
+    from: Pixels,
+    end: Pixels,
+    line: Pixels,
+    page: Pixels,
+) -> Option<Pixels> {
+    let to = match command {
+        Command::Down => from + line,
+        Command::Up => from - line,
+        Command::PageDown => from + page,
+        Command::PageUp => from - page,
+        Command::First => px(0.),
+        Command::Last => end,
+        _ => return None,
+    };
+    Some(to.min(end).max(px(0.)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkStep {
+    Safe,
+    Ask,
+    Everything,
+    Clear,
+    Nothing,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Coverage {
+    safe: usize,
+    safe_on: usize,
+    review: usize,
+    review_on: usize,
+}
+
+impl Coverage {
+    fn press(self, asked: bool) -> BulkStep {
+        if self.safe_on < self.safe {
+            BulkStep::Safe
+        } else if self.review_on < self.review {
+            if self.safe == 0 && !asked {
+                BulkStep::Ask
+            } else {
+                BulkStep::Everything
+            }
+        } else if self.safe + self.review > 0 {
+            BulkStep::Clear
+        } else {
+            BulkStep::Nothing
+        }
+    }
+}
+
+pub(super) struct Asked {
+    tab: Tab,
+    report: u64,
+    selection: u64,
+    left: usize,
+    keys: Vec<(Source, u64)>,
+}
+
 /// Whether any field contains the lowercase filter text, or there is no filter.
 pub(super) fn found(needle: Option<&str>, fields: &[&str]) -> bool {
     needle.is_none_or(|needle| fields.iter().any(|field| contains(field, needle)))
@@ -226,12 +288,7 @@ impl Kuizer {
             return;
         }
         if self.shortcuts {
-            if matches!(keystroke.key.as_str(), "escape" | "enter")
-                || commands::matches("?", keystroke)
-            {
-                self.shortcuts = false;
-                cx.notify();
-            }
+            self.shortcuts_key(keystroke, window, cx);
             return;
         }
         if self.filtering {
@@ -265,7 +322,7 @@ impl Kuizer {
         }
         if let Some(command) = commands::lookup(keystroke, self.map_active())
             && (self.config.route_shortcuts.enabled || !matches!(command, Command::GoTo(_)))
-            && !(repeat && matches!(command, Command::Trash))
+            && !(repeat && matches!(command, Command::Trash | Command::SelectAll))
         {
             self.run(command, window, cx);
         }
@@ -273,6 +330,26 @@ impl Kuizer {
             self.count.clear();
             cx.notify();
         }
+    }
+
+    fn shortcuts_key(&mut self, keystroke: &Keystroke, window: &Window, cx: &mut Context<Self>) {
+        if matches!(keystroke.key.as_str(), "escape" | "enter") || commands::matches("?", keystroke)
+        {
+            self.shortcuts = false;
+            cx.notify();
+            return;
+        }
+        let scroll = &self.shortcuts_scroll;
+        let line = unit(size::SEGMENT).to_pixels(window.rem_size());
+        let page = (scroll.bounds().size.height - line).max(line);
+        let (from, end) = (-scroll.offset().y, scroll.max_offset().height);
+        let Some(to) = commands::lookup(keystroke, false)
+            .and_then(|command| scrolled(&command, from, end, line, page))
+        else {
+            return;
+        };
+        scroll.set_offset(point(px(0.), -to));
+        cx.notify();
     }
 
     /// Takes a digit as part of a count before a motion, as in `10j`. A leading zero is not a
@@ -345,7 +422,10 @@ impl Kuizer {
 
     fn escape(&mut self, cx: &mut Context<Self>) {
         self.count.clear();
-        if self.visual {
+        if self.asking().is_some() {
+            self.asked = None;
+            cx.notify();
+        } else if self.visual {
             self.visual = false;
             self.range = None;
             cx.notify();
@@ -370,11 +450,13 @@ impl Kuizer {
 
     fn dialog_key(&mut self, keystroke: &Keystroke, repeat: bool, cx: &mut Context<Self>) {
         let key = keystroke.key.as_str();
+        let plain = !keystroke.modifiers.modified();
         match &mut self.dialog {
             Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
             Some(Dialog::Branches { cancel, .. }) => match key {
                 "escape" => self.dialog = None,
                 "tab" | "left" | "right" => *cancel = !*cancel,
+                "up" | "down" | "h" | "j" | "k" | "l" if plain => *cancel = !*cancel,
                 "enter" if *cancel => self.dialog = None,
                 "enter" => {
                     if !repeat {
@@ -516,6 +598,7 @@ impl Kuizer {
 
     /// Applies a changed filter to the rows on screen.
     pub(super) fn filtered(&mut self) {
+        self.asked = None;
         if self.tab == Tab::Artifacts {
             self.refresh_rows();
         }
@@ -536,6 +619,7 @@ impl Kuizer {
     pub(super) fn go_to(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.filtering = false;
+            self.asked = None;
         }
         self.tab = tab;
         if tab == Tab::Duplicates {
@@ -709,6 +793,9 @@ impl Kuizer {
         if self.blocked(&command).is_some() {
             return;
         }
+        if command != Command::SelectAll {
+            self.asked = None;
+        }
         let times = std::mem::take(&mut self.count).parse::<usize>().ok();
         let motion = self.motion(&command, times);
         let extends = matches!(command, Command::ExtendDown | Command::ExtendUp)
@@ -732,6 +819,7 @@ impl Kuizer {
             Command::Shortcuts => {
                 self.palette = None;
                 self.shortcuts = true;
+                self.shortcuts_scroll.set_offset(point(px(0.), px(0.)));
             }
             Command::Settings => self.open_settings(cx),
             Command::GoTo(tab) => self.go_to(tab, cx),
@@ -757,15 +845,12 @@ impl Kuizer {
             Command::Toggle => {
                 if let Some(Target::Item(source, id, _)) = self.cursor_target() {
                     self.toggle(source, id, cx);
+                    self.advance_past_selected();
                 }
             }
-            Command::SelectAll => {
-                for key in self.list_keys() {
-                    self.select(key);
-                }
-            }
+            Command::SelectAll => self.select_step(cx),
             Command::SelectNone => {
-                for key in self.list_keys() {
+                for (key, _) in self.list_items() {
                     self.selection.remove(&key);
                 }
             }
@@ -844,7 +929,7 @@ impl Kuizer {
         self.toast = None;
         self.stale = None;
         self.set_phase(Phase::Start, cx);
-        self.folder = display_path(path);
+        self.show_folder(path);
         self.whole_home = false;
         self.folder_error = None;
         self.start_scan(cx);
@@ -1002,6 +1087,28 @@ impl Kuizer {
         self.place_cursor(listed, current, next);
     }
 
+    fn advance_past_selected(&mut self) {
+        let listed = self.listing(self.tab);
+        let listed = listed.as_deref();
+        let count = self.listed_count(listed);
+        let Some(current) = self
+            .cursor_target()
+            .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row))
+        else {
+            return;
+        };
+        if current + 1 >= count {
+            return;
+        }
+        let next = (current + 1..count)
+            .find(|&row| {
+                self.listed_key(listed, row)
+                    .is_some_and(|key| !self.selection.contains(&key))
+            })
+            .unwrap_or(current + 1);
+        self.place_cursor(listed, current, next);
+    }
+
     fn place_cursor(&mut self, listed: Option<&[Target]>, current: usize, next: usize) {
         let Some(target) = self.listed_target(listed, next) else {
             return;
@@ -1119,14 +1226,105 @@ impl Kuizer {
     }
 
     /// The selectable items of the current list, after its filters.
-    fn list_keys(&self) -> Vec<(Source, u64)> {
-        self.targets(self.tab)
-            .iter()
-            .filter_map(|target| match target {
-                Target::Item(source, id, _) => Some((*source, *id)),
-                _ => None,
-            })
-            .collect()
+    pub(super) fn list_items(&self) -> Vec<((Source, u64), Safety)> {
+        let Some(report) = self.report() else {
+            return Vec::new();
+        };
+        let item = |source, candidate: &Candidate| ((source, candidate.id), candidate.rule.safety);
+        match self.tab {
+            Tab::Artifacts => self
+                .rows
+                .iter()
+                .map(|&index| item(Source::Artifact, &report.candidates[index]))
+                .collect(),
+            Tab::Caches => self
+                .listed(Tab::Caches)
+                .slots
+                .iter()
+                .filter_map(|&(at, _)| report.caches.get(at))
+                .map(|(_, candidate)| item(Source::Cache, candidate))
+                .collect(),
+            Tab::Toolchains => self
+                .listed(Tab::Toolchains)
+                .slots
+                .iter()
+                .filter_map(|&(at, _)| report.toolchains.get(at))
+                .map(|(_, candidate)| item(Source::Toolchain, candidate))
+                .collect(),
+            Tab::Docker => self
+                .listed(Tab::Docker)
+                .slots
+                .iter()
+                .filter_map(|&(at, _)| report.docker.get(at))
+                .map(|(_, candidate)| item(Source::Docker, candidate))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn asked_holds(&self, asked: &Asked) -> bool {
+        self.report().is_some()
+            && asked.tab == self.tab
+            && asked.report == self.report_generation
+            && asked.selection == self.selection.generation()
+    }
+
+    pub(super) fn asking(&self) -> Option<usize> {
+        self.asked
+            .as_ref()
+            .filter(|asked| self.asked_holds(asked))
+            .map(|asked| asked.left)
+    }
+
+    pub(super) fn select_step(&mut self, cx: &mut Context<Self>) {
+        let items = self.list_items();
+        let asked = self.asked.take().is_some_and(|asked| {
+            self.asked_holds(&asked) && items.iter().map(|(key, _)| key).eq(&asked.keys)
+        });
+        let mut coverage = Coverage::default();
+        for (key, safety) in &items {
+            let selected = usize::from(self.selection.contains(key));
+            match safety {
+                Safety::Safe => {
+                    coverage.safe += 1;
+                    coverage.safe_on += selected;
+                }
+                Safety::Review => {
+                    coverage.review += 1;
+                    coverage.review_on += selected;
+                }
+            }
+        }
+        match coverage.press(asked) {
+            BulkStep::Safe => {
+                for (key, safety) in items {
+                    if safety == Safety::Safe {
+                        self.select(key);
+                    }
+                }
+            }
+            BulkStep::Everything => {
+                for (key, _) in items {
+                    self.select(key);
+                }
+            }
+            BulkStep::Clear => {
+                for (key, _) in &items {
+                    self.selection.remove(key);
+                }
+            }
+            BulkStep::Ask => {
+                self.asked = Some(Asked {
+                    tab: self.tab,
+                    report: self.report_generation,
+                    selection: self.selection.generation(),
+                    left: coverage.review - coverage.review_on,
+                    keys: items.into_iter().map(|(key, _)| key).collect(),
+                });
+            }
+            BulkStep::Nothing => {}
+        }
+        cx.notify();
     }
 
     /// Rows shown in a list and rows it has without its text filter.
@@ -1535,7 +1733,12 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        cx.simulate_keystrokes("j j space j");
+        cx.simulate_keystrokes("j j space");
+        assert_eq!(
+            cursor_row(&view, cx),
+            3,
+            "Space moves on to the next unselected row"
+        );
         cx.simulate_keystrokes("K K K");
         assert_eq!(selected(&view, cx), vec![0, 1, 2, 3]);
         cx.simulate_keystrokes("shift-down shift-down");
@@ -1941,7 +2144,7 @@ mod tests {
         }
         cx.simulate_keystrokes("j");
         view.read_with(cx, |app, _| {
-            assert!(app.shortcuts, "other keys are ignored")
+            assert!(app.shortcuts, "a motion keeps it open")
         });
         cx.simulate_keystrokes("escape");
         view.read_with(cx, |app, _| assert!(!app.shortcuts));
@@ -1953,5 +2156,134 @@ mod tests {
             assert!(app.shortcuts, "the palette opens it too");
             assert!(app.palette.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn the_shortcuts_overlay_scrolls_from_the_keyboard(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = scan_root(cx, dir.path(), &root, Tab::Artifacts);
+        cx.simulate_resize(size(px(860.), px(520.)));
+        cx.simulate_keystrokes("?");
+        draw(cx);
+        let read = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| {
+                (
+                    -app.shortcuts_scroll.offset().y,
+                    app.shortcuts_scroll.max_offset().height,
+                )
+            })
+        };
+        let (top, end) = read(&view, cx);
+        assert_eq!(top, px(0.));
+        assert!(end > px(0.), "the overlay is taller than the window");
+        cx.simulate_keystrokes("j");
+        assert!(read(&view, cx).0 > px(0.));
+        cx.simulate_keystrokes("shift-g");
+        assert_eq!(read(&view, cx).0, end, "G reaches the last group");
+        cx.simulate_keystrokes("ctrl-u");
+        assert!(read(&view, cx).0 < end);
+        cx.simulate_keystrokes("g");
+        assert_eq!(read(&view, cx).0, px(0.));
+        view.read_with(cx, |app, _| assert!(app.shortcuts));
+    }
+
+    fn graded_list(view: &Entity<Kuizer>, cx: &mut VisualTestContext, grades: &[Safety]) {
+        view.update(cx, |app, cx| {
+            app.roots = vec![PathBuf::from("/p")];
+            let mut report = Report::empty(&app.roots, &app.options);
+            report.candidates = grades
+                .iter()
+                .zip(1u64..)
+                .map(|(&safety, id)| {
+                    let mut candidate = artifact(id, &PathBuf::from(format!("/p/item-{id}")));
+                    let rule = kuizer::detect::RuleInfo {
+                        safety,
+                        ..(*candidate.rule).clone()
+                    };
+                    candidate.rule = std::sync::Arc::new(rule);
+                    candidate
+                })
+                .collect();
+            app.selection.clear();
+            app.phase = Phase::Ready(Box::new(report));
+            app.refresh_stats();
+            app.refresh_rows();
+            app.go_to(Tab::Artifacts, cx);
+        });
+        draw(cx);
+    }
+
+    #[gpui::test]
+    fn select_all_widens_to_review_items_one_press_at_a_time(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        let counts = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| {
+                let total = app.selection.stats().total();
+                (total.safe.count, total.review.count)
+            })
+        };
+        let asking = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |app, _| app.asking())
+        };
+
+        graded_list(&view, cx, &[Safety::Safe, Safety::Review, Safety::Safe]);
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (2, 0), "safe items come first");
+        let held = KeyDownEvent {
+            keystroke: Keystroke::parse("ctrl-a").unwrap(),
+            is_held: true,
+        };
+        cx.update(|window, cx| view.update(cx, |app, cx| app.on_key(&held, window, cx)));
+        assert_eq!(counts(&view, cx), (2, 0), "a held key never widens");
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (2, 1), "the next press takes the rest");
+        draw(cx);
+        assert!(cx.debug_bounds("mode-review").is_some());
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (0, 0), "a full list clears");
+
+        graded_list(&view, cx, &[Safety::Review, Safety::Review]);
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (0, 0), "review items are never silent");
+        assert_eq!(asking(&view, cx), Some(2));
+        draw(cx);
+        assert!(cx.debug_bounds("mode-asking").is_some());
+        cx.simulate_keystrokes("j ctrl-a");
+        assert_eq!(counts(&view, cx), (0, 0), "another key asks again");
+        assert_eq!(asking(&view, cx), Some(2));
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (0, 2));
+        assert_eq!(asking(&view, cx), None);
+        cx.simulate_keystrokes("ctrl-a");
+        assert_eq!(counts(&view, cx), (0, 0));
+
+        draw(cx);
+        let checkbox = cx.debug_bounds("select-visible").expect("the checkbox");
+        cx.simulate_click(checkbox.center(), gpui::Modifiers::default());
+        assert_eq!(counts(&view, cx), (0, 0), "the checkbox asks first too");
+        assert_eq!(asking(&view, cx), Some(2));
+    }
+
+    #[gpui::test]
+    fn vim_motions_move_the_branch_dialog_focus_and_never_confirm(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = scanned(cx, dir.path(), Tab::Repos);
+        view.update(cx, |app, cx| {
+            app.dialog = Some(Dialog::Branches {
+                scope: GitScope::All,
+                cancel: true,
+            });
+            cx.notify();
+        });
+        for (key, cancel) in [("h", false), ("j", true), ("k", false), ("l", true)] {
+            cx.simulate_keystrokes(key);
+            let focus = view.read_with(cx, |app, _| match app.dialog {
+                Some(Dialog::Branches { cancel, .. }) => Some(cancel),
+                _ => None,
+            });
+            assert_eq!(focus, Some(cancel), "{key} moves focus, confirms nothing");
+        }
     }
 }

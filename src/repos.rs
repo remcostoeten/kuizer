@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConfigError, GitConfig};
 use crate::dupes::{Files, Options};
+use crate::platform::dir::EntryKind;
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
-use crate::scan::walk::{Companion, Flow, Visitor, Walker};
-use crate::scan::{self, Cancel, Issue, Scan};
+use crate::scan::walk::{Companion, FileEntry, Flow, Visitor, Walker};
+use crate::scan::{self, Cancel, Issue, IssueKind, Scan};
 use crate::toolchains::PinFinder;
 
 const KIB: u64 = 1024;
@@ -159,20 +160,64 @@ impl Visitor for Repositories {
     }
 }
 
-impl Companion for Repositories {
-    fn fork(&self) -> Self {
-        Self::default()
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.roots.extend(other.roots);
-    }
-}
-
 pub struct Walked {
     pub files: Option<Files>,
     pub pins: Option<PinFinder>,
     pub repositories: Vec<PathBuf>,
+}
+
+impl Visitor for Walked {
+    fn wants_files(&self) -> bool {
+        self.files.wants_files() || self.pins.wants_files()
+    }
+
+    fn issue(&mut self, issue: Issue) -> Flow {
+        match (self.files.issue(issue.clone()), self.pins.issue(issue)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+
+    fn counted(&mut self, kind: EntryKind) {
+        self.files.counted(kind);
+        self.pins.counted(kind);
+    }
+
+    fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
+        match (self.files.file(path, kind), self.pins.file(path, kind)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+
+    fn entry(&mut self, entry: &FileEntry<'_>) -> Flow {
+        match (self.files.entry(entry), self.pins.entry(entry)) {
+            (Flow::Continue, Flow::Continue) => Flow::Continue,
+            _ => Flow::Stop,
+        }
+    }
+
+    fn repository(&mut self, root: &Path) {
+        self.files.repository(root);
+        self.pins.repository(root);
+        self.repositories.push(root.to_path_buf());
+    }
+}
+
+impl Companion for Walked {
+    fn fork(&self) -> Self {
+        Self {
+            files: self.files.fork(),
+            pins: self.pins.fork(),
+            repositories: Vec::new(),
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.files.merge(other.files);
+        self.pins.merge(other.pins);
+        self.repositories.extend(other.repositories);
+    }
 }
 
 /// @name start_scan
@@ -191,32 +236,16 @@ pub fn start_scan(
     duplicates: Option<Options>,
     pins: bool,
 ) -> Result<(Scan, Receiver<Walked>), ConfigError> {
-    let (scan, companion) = scan::start_with(
+    scan::start_with(
         config,
         roots,
         cancel,
-        (
-            (
-                duplicates.map(|options| Files::for_roots(options, roots)),
-                pins.then(PinFinder::new),
-            ),
-            Repositories::default(),
-        ),
-    )?;
-    let (sender, receiver) = crossbeam_channel::bounded(1);
-    thread::Builder::new()
-        .name("kuizer-repos".to_owned())
-        .spawn(move || {
-            if let Ok(((files, pins), repositories)) = companion.recv() {
-                let _ = sender.send(Walked {
-                    files,
-                    pins,
-                    repositories: repositories.roots,
-                });
-            }
-        })
-        .expect("spawn repository thread");
-    Ok((scan, receiver))
+        Walked {
+            files: duplicates.map(|options| Files::for_roots(options, roots)),
+            pins: pins.then(PinFinder::new),
+            repositories: Vec::new(),
+        },
+    )
 }
 
 /// @name find
@@ -264,6 +293,12 @@ fn threads(config: &GitConfig, roots: &[PathBuf]) -> usize {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Inspected {
+    pub repositories: Vec<Repository>,
+    pub issues: Vec<Issue>,
+}
+
 /// @name inspect_all
 /// @description Inspects every repository in parallel and keeps the ones worth cleaning, largest
 /// gain first. Stops early once `cancel` is set.
@@ -286,39 +321,91 @@ pub fn inspect_all_with(
     cancel: &Cancel,
     on_inspected: impl Fn(&Path) + Sync,
 ) -> Vec<Repository> {
-    let workers = threads(config, &roots);
+    inspect_all_collecting(roots, config, cancel, on_inspected).repositories
+}
+
+/// @name inspect_all_collecting
+/// @description Like `inspect_all_with`, and returns any repository inspection failures as
+/// [`Issue`] entries instead of dropping them.
+///
+/// @example
+/// let inspected = repos::inspect_all_collecting(roots, &config.git, &cancel, |_| {});
+pub fn inspect_all_collecting(
+    roots: Vec<PathBuf>,
+    config: &GitConfig,
+    cancel: &Cancel,
+    on_inspected: impl Fn(&Path) + Sync,
+) -> Inspected {
+    if roots.is_empty() {
+        return Inspected::default();
+    }
+    let workers = threads(config, &roots).min(roots.len());
     let queue = Mutex::new(roots);
     let found = Mutex::new(Vec::new());
+    let issues = Mutex::new(Vec::new());
     thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let Some(root) = queue.lock().ok().and_then(|mut queue| queue.pop()) else {
-                        return;
-                    };
-                    if let Ok(repository) = inspect(&root, config)
-                        && repository.worth(config.min_gain.0)
-                        && let Ok(mut found) = found.lock()
-                    {
-                        found.push(repository);
-                    }
-                    on_inspected(&root);
+        let run_worker = || loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Some(root) = queue.lock().unwrap_or_else(PoisonError::into_inner).pop() else {
+                return;
+            };
+            match inspect(&root, config) {
+                Ok(repository) if repository.worth(config.min_gain.0) => {
+                    found
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(repository);
                 }
-            });
+                Ok(_) => {}
+                Err(error) => {
+                    let kind = match &error {
+                        RepoError::NotRepository(_) if !root.join(".git").exists() => {
+                            IssueKind::Vanished
+                        }
+                        _ => IssueKind::Io,
+                    };
+                    issues
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(Issue {
+                            path: root.clone(),
+                            kind,
+                            message: error.to_string(),
+                        });
+                }
+            }
+            on_inspected(&root);
+        };
+        let mut spawned = 0usize;
+        for index in 0..workers {
+            if thread::Builder::new()
+                .name(format!("kuizer-repo-{index}"))
+                .spawn_scoped(scope, run_worker)
+                .is_ok()
+            {
+                spawned += 1;
+            }
+        }
+        if spawned == 0 {
+            run_worker();
         }
     });
-    let mut found = found.into_inner().unwrap_or_default();
-    found.sort_by(|a, b| {
+    let mut repositories = found.into_inner().unwrap_or_else(PoisonError::into_inner);
+    repositories.sort_by(|a, b| {
         b.objects
             .gain()
             .cmp(&a.objects.gain())
             .then_with(|| b.merged.len().cmp(&a.merged.len()))
             .then_with(|| a.root.cmp(&b.root))
     });
-    found
+    let mut issues = issues.into_inner().unwrap_or_else(PoisonError::into_inner);
+    issues.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.message.cmp(&b.message)));
+    Inspected {
+        repositories,
+        issues,
+    }
 }
 
 /// @name inspect
@@ -1261,6 +1348,23 @@ mod tests {
         assert!(found.is_empty());
         assert_eq!(seen, [other, plain]);
     }
+
+    #[test]
+    fn failed_inspections_are_reported_as_issues() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gone = dir.path().join("gone");
+        let inspected = inspect_all_collecting(
+            vec![gone.clone()],
+            &GitConfig::default(),
+            &Cancel::new(),
+            |_| {},
+        );
+        assert!(inspected.repositories.is_empty());
+        assert_eq!(inspected.issues.len(), 1);
+        assert_eq!(inspected.issues[0].path, gone);
+        assert!(matches!(inspected.issues[0].kind, IssueKind::Vanished));
+    }
+
     #[test]
     fn reads_the_git_folder_like_git_does() {
         let dir = tempfile::tempdir().expect("tempdir");

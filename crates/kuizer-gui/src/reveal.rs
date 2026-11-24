@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -22,6 +22,7 @@ impl Os {
 pub struct Launch {
     pub program: &'static str,
     pub args: Vec<OsString>,
+    pub detach: bool,
 }
 
 impl Launch {
@@ -29,6 +30,17 @@ impl Launch {
         Self {
             program,
             args: args.into_iter().map(Into::into).collect(),
+            detach: false,
+        }
+    }
+
+    fn detached(
+        program: &'static str,
+        args: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Self {
+        Self {
+            detach: true,
+            ..Self::new(program, args)
         }
     }
 }
@@ -103,7 +115,7 @@ pub fn commands(path: &Path, os: Os) -> Vec<Launch> {
                         "string:".to_owned(),
                     ],
                 ),
-                Launch::new("xdg-open", [parent]),
+                Launch::detached("xdg-open", [parent]),
             ]
         }
     }
@@ -111,26 +123,49 @@ pub fn commands(path: &Path, os: Os) -> Vec<Launch> {
 
 /// @name run
 /// @description Tries each command until one works and says why the last one failed otherwise.
-/// It waits for the commands, so call it off the UI thread.
+/// It waits for the D-Bus and `open` commands, so call it off the UI thread. A detached command
+/// such as `xdg-open` counts as working once it starts, because it can run for as long as the
+/// application it opens.
 ///
 /// @example
 /// run(&commands(&path, Os::current()))?;
 pub fn run(tries: &[Launch]) -> Result<(), String> {
     let mut last = "no file manager command for this system".to_owned();
     for launch in tries {
-        let status = Command::new(launch.program)
-            .args(&launch.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(status) => last = format!("{} exited with {status}", launch.program),
-            Err(error) => last = format!("cannot run {}: {error}", launch.program),
+        match attempt(launch) {
+            Ok(()) => return Ok(()),
+            Err(error) => last = error,
         }
     }
     Err(last)
+}
+
+fn attempt(launch: &Launch) -> Result<(), String> {
+    let mut command = Command::new(launch.program);
+    command
+        .args(&launch.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let cannot_run = |error: std::io::Error| format!("cannot run {}: {error}", launch.program);
+    if launch.detach {
+        reap(command.spawn().map_err(cannot_run)?);
+        return Ok(());
+    }
+    let status = command.status().map_err(cannot_run)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} exited with {status}", launch.program))
+    }
+}
+
+fn reap(mut child: Child) {
+    let _ = std::thread::Builder::new()
+        .name("kuizer-gui-reap".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 /// @name reveal
@@ -192,5 +227,12 @@ mod tests {
         let missing = Launch::new("kuizer-no-such-program", ["x"]);
         let error = run(&[missing]).unwrap_err();
         assert!(error.starts_with("cannot run kuizer-no-such-program"));
+    }
+
+    #[test]
+    fn a_detached_command_is_not_waited_for() {
+        let started = std::time::Instant::now();
+        assert_eq!(run(&[Launch::detached("sleep", ["5"])]), Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 }

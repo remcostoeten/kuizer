@@ -16,7 +16,7 @@ mod ui;
 
 use std::path::PathBuf;
 
-use crate::cli::{Cli, Command, HistoryAction, NestedCommand, RemovalArgs, ScanArgs};
+use crate::cli::{Cli, Command, HistoryAction, NestedCommand, ScanArgs};
 use crate::config::{Config, ConfigError, Loaded, rejected_scope};
 use crate::history::HistoryError;
 use clap::CommandFactory;
@@ -40,7 +40,7 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("unknown selection `{name}`, expected safe, all or one of: {known}")]
     UnknownSelection { name: String, known: String },
-    #[error("refusing to remove without confirmation: stdin is not a terminal, pass --yes")]
+    #[error("refusing to remove without confirmation: no terminal to ask on, pass --yes")]
     NeedsConfirmation,
     #[error(
         "refusing to remove with --yes: the config rejected {0}, which may widen what gets removed; fix the config or run without --yes to confirm"
@@ -84,9 +84,9 @@ fn nested_help(command: &Command) -> Option<&'static str> {
             Some("duplicates")
         }
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
-        Command::Cache(args) if args.command == Some(NestedCommand::Help) => Some("cache"),
-        Command::Toolchain(args) if args.command == Some(NestedCommand::Help) => Some("toolchain"),
-        Command::Docker(args) if args.command == Some(NestedCommand::Help) => Some("docker"),
+        Command::Cache(args) if args.wants_help() => Some("cache"),
+        Command::Toolchain(args) if args.wants_help() => Some("toolchain"),
+        Command::Docker(args) if args.wants_help() => Some("docker"),
         Command::Git(args) if args.command == Some(NestedCommand::Help) => Some("git"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
@@ -106,16 +106,12 @@ fn print_subcommand_help(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn unattended(clean: bool, removal: &RemovalArgs) -> bool {
-    clean && removal.yes && !removal.dry_run
-}
-
 fn removes_unattended(command: Option<&Command>) -> bool {
     match command {
-        Some(Command::Clean(args)) => unattended(true, &args.removal),
-        Some(Command::Cache(args)) => unattended(args.clean, &args.removal),
-        Some(Command::Toolchain(args)) => unattended(args.clean, &args.removal),
-        Some(Command::Docker(args)) => unattended(args.clean, &args.removal),
+        Some(Command::Clean(args)) => args.removal.yes && !args.removal.dry_run,
+        Some(Command::Cache(args)) => args.plan().unattended(),
+        Some(Command::Toolchain(args)) => args.plan().unattended(),
+        Some(Command::Docker(args)) => args.plan().unattended(),
         Some(Command::Git(args)) => args.yes && !args.dry_run && (args.gc || args.branches),
         _ => false,
     }
@@ -135,10 +131,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     if let Some(name) = cli.command.as_ref().and_then(nested_help) {
         return print_subcommand_help(name);
     }
-    let loaded = match cli.command {
-        Some(Command::History(_) | Command::Restore(_)) => Loaded::default(),
-        _ => Config::load(cli.config.as_deref())?,
-    };
+    let loaded = Config::load(cli.config.as_deref())?;
     for warning in &loaded.warnings {
         eprintln!("kuizer: config: {warning}");
     }

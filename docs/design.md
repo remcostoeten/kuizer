@@ -1,6 +1,6 @@
 # kuizer design
 
-Status: Phase 1 done. Phase 2 to 6 are in progress: live scan output, the interactive list with selection, guarded deletion with trash and permanent modes, a deletion history, `kuizer clean`, `kuizer duplicates` and `kuizer cache` exist; category selection, exclusion from the UI, the duplicates and caches views in the TUI, and `--json-lines` are still open. Later phases are specified here and land one pull request at a time.
+Status: CLI, Ratatui TUI and GPUI desktop app (`kuizer-gui`) are shipped on Linux and macOS: project artifacts, global caches, toolchains, Docker/Podman, git repositories, duplicates, `--idle`, HTML reports and dashboard, guarded deletion (permanent by default, opt-in trash), deletion history with ids, and `restore`. Still open from this spec: shared keymap, `--json-lines`, `big`, policies, `--rule`/`--project`/`--exclude` filters and filters on non-project sources, `cache`/`toolchain`/`docker` `clean` subcommands, a JSON schema file, exclusion from the UI, and the caches/duplicates/issues views in the TUI.
 
 ## 1. Product specification
 
@@ -58,21 +58,25 @@ Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the p
 | `dupes` (phase 5) | size grouping, partial and full BLAKE3 hashing, byte compare | artifact rules |
 | `repos` | git repositories noted during the walk, `count-objects` estimates, merged branches, busy checks, `git gc` and branch deletion with revalidation | artifact rules, the trash |
 
-Scan pipeline:
+Scan pipeline (`src/scan/mod.rs`, `src/scan/pool.rs`, `src/scan/size.rs`):
 
 ```text
-walk thread ──Found──► bounded(256) ──► N sizing threads ──Event──► bounded(1024) ──► consumer
-     │                                         │
-     └──────── Issue events ───────────────────┘          atomics: dirs, files, candidates, bytes
+                        work-stealing Queue<Task> (Walk + Size)
+                                         │
+coordinator ──seeds──► N worker threads (local LIFO stacks + shared spill)
+                                         │
+                           Event ──► bounded(1024) ──► consumer
+                                     atomics: dirs, files, candidates, bytes, issues
 ```
 
-- One discovery thread walks with `read_dir`, using `d_type` from directory entries so plain files cost no `stat`. Each directory listing is kept as a sorted name list, shared with its children through an `Arc`, so marker checks (`package.json` beside `node_modules`) and content checks (`CACHEDIR.TAG` inside `target`) need no extra syscalls.
-- A matched directory is pruned: the walker never descends into `node_modules`. Most of the bytes on a developer disk sit inside artifacts, so the walk itself stays small.
-- Sizing threads (default: available cores, capped at 8) measure each artifact with `lstat`, count allocated blocks, and count a hard-linked inode once.
-- Channels are bounded, so a slow consumer slows the scan instead of growing memory.
-- Progress is read from atomics, never pushed as events, so a UI can poll it every frame at no cost to the scan.
-- Cancellation is one `AtomicBool` checked per directory in both the walker and the sizers. Dropping a `Scan` cancels it, drains it and joins the threads.
-- Memory is bounded by the walk stack plus results; the tree is never held in memory.
+- A coordinator thread (`kuizer-scan`) loads the mount table and protection rules, seeds a work-stealing `Queue<Task>` (`src/scan/pool.rs`) with the scan roots, and spawns `N` worker threads inside `thread::scope`. Default `N` is twice the available cores, capped at 16 (or 2 when any root sits on a spinning disk); `scan.size_threads` overrides it, capped at 64.
+- Every worker runs both discovery (`Task::Walk`) and artifact sizing (`Task::Size`). Each keeps a local LIFO stack and spills the bottom half to a shared list whenever another worker is idle or its stack grows past 64 while the shared list is empty; idle workers steal half of the shared list, so one deep or wide subtree never pins a single thread.
+- Discovery reads directories using `d_type` from directory entries so plain files cost no `stat`. Each directory listing is kept as a sorted name list, so marker checks (`package.json` beside `node_modules`) and content checks (`CACHEDIR.TAG` inside `target`) need no extra syscalls.
+- A matched directory is pruned from discovery: the walker never descends into `node_modules`. Single-file matches are delivered immediately; matched directories are queued as `Task::Size` tasks whose `Total` aggregates allocated blocks, apparent bytes, entries, newest mtime and a sharded hard-link set across threads.
+- Workers send `Event::Candidate` and `Event::Issue` into a single `bounded(1024)` channel so a slow consumer slows the scan instead of growing memory; once the workers finish, the coordinator sends `Event::Finished`.
+- Progress is read from atomics (flushed by workers in batches of 256 directories) rather than pushed as events, so a UI can poll it every frame at no cost to the scan; a recent directory path is sampled every 32 entries.
+- Cancellation is a shared `Cancel` (`Arc<AtomicBool>`) checked per task and directory and propagated to `Queue::stop()`. Dropping a `Scan` cancels it, drains the event channel and joins the coordinator thread.
+- Memory is bounded by the work stacks plus emitted results; the filesystem tree is never held in memory.
 
 ## 3. Directory structure
 
@@ -121,7 +125,7 @@ It stays one crate until compile times or reuse justify a workspace split (`kuiz
 
 ## 5. Configuration
 
-File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is optional; unknown keys are an error so typos never silently disable a safety setting. `kuizer config show` prints the effective config, `kuizer config check` validates, `kuizer config init` writes the defaults. A full example is in [`config.example.toml`](config.example.toml).
+File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is optional. Normal runs use the lenient loader (`src/config/lenient.rs`): unknown or invalid keys are warned and ignored, each bad setting falls back to its default (and list entries are dropped one by one), and the app keeps running. When a rejected setting could widen what gets removed (`scan.*`, `detect.*`, `delete.*`, `git.*`, `toolchains.*`, `docker.*`, or an unknown section), `delete.confirm` is forced on and unattended `--yes` removal is refused until fixed; an unreadable or unparseable file, or an invalid `delete.mode`, also falls back to `delete.mode = "trash"`. `kuizer config show` prints the effective config, `kuizer config check` validates strictly and fails on any warning (including unknown keys), and `kuizer config init` writes the defaults. A full example is in [`config.example.toml`](config.example.toml).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -129,25 +133,40 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `scan.exclude` | `[]` | Globs. Without `/` they match a file or directory name at any depth, with `/` the absolute path. `~` expands. |
 | `scan.exclude_extensions` | `[]` | File extensions never reported |
 | `scan.skip_dirs` | `.git .hg .svn .jj` | Directory names never entered |
-| `scan.ignore_file` | `.kuizerignore` | A directory containing this file, or the ignore file from before the rename, is skipped with its subtree |
+| `scan.ignore_file` | `.kuizerignore` | A directory containing this file, or the ignore file from before the rename (`.sweepignore`), is skipped with its subtree |
 | `scan.min_size` | `0` | Candidates smaller than this are dropped; bytes or `10MB`, `1.5GiB` |
 | `scan.max_depth` | none | Depth limit for discovery |
 | `scan.one_file_system` | `true` | Never cross into another mount |
 | `scan.excluded_fs_types` | proc, sysfs, devtmpfs, cgroup, nfs, cifs, fuse.sshfs and others | Mounts of these types are never entered |
 | `scan.excluded_mounts` | `/proc /sys /dev /run` | Paths never entered |
-| `scan.size_threads` | `0` (twice the cores, max 16; 2 on a spinning disk) | Threads that walk and size a scan; idle-activity checks use cores, max 8 |
+| `scan.size_threads` | `0` (twice the cores, max 16; 2 on a spinning disk) | Threads that walk and size a scan (explicit values capped at 64); idle-activity checks use cores, max 8 |
 | `detect.categories` | all | `dependencies`, `build`, `cache`, `temp` |
 | `detect.builtin_rules` | `true` | Turn off to use only custom rules |
-| `detect.disabled_rules` | `[]` | Built-in or custom rule names to skip; unknown names are an error |
+| `detect.disabled_rules` | `[]` | Built-in or custom rule names to skip; unknown names warn and are ignored on load, rejected by `config check` |
 | `[[rules]]` | none | Custom rules, checked before built-ins |
-| `duplicates.min_size` | `4KiB` | Phase 5 |
-| `duplicates.threads` | `0` | Phase 5 |
-| `duplicates.verify` | `false` | Byte compare after hash match, phase 5 |
+| `duplicates.enabled` | `false` | Run the duplicate search automatically after each GUI scan once results are on screen; `kuizer duplicates` is not affected |
+| `duplicates.min_size` | `4KiB` | Skip files smaller than this when searching for duplicates |
+| `duplicates.threads` | `0` | Hashing threads (`0` = automatic) |
+| `duplicates.verify` | `false` | Compare matched files byte by byte after hashing |
 | `duplicates.include_hidden` | `false` | Look inside hidden home folders and tool-managed cache and toolchain folders |
 | `delete.mode` | `permanent` | `permanent` deletes for good, `trash` moves project artifacts and caches to the trash. Toolchains, Docker objects and git branches are always removed for good |
-| `delete.confirm` | `true` | Ask before deleting in the TUI. `review` items and projects with uncommitted changes always ask |
+| `delete.confirm` | `true` | Ask before deleting in the CLI and the TUI. `review` items and projects with uncommitted changes always ask |
+| `git.min_gain` | `1MiB` | Minimum estimated `git gc` savings before a repository is listed |
+| `git.aggressive` | `false` | Pass `--aggressive` to `git gc` |
+| `git.keep_branches` | `["main", "master", "develop", "trunk"]` | Branch names never offered for merged-branch deletion |
+| `git.threads` | `0` | Threads inspecting git repositories (`0` = automatic) |
+| `appearance.motion` | `true` | Animations in the GUI: state transitions, tooltips, loaders and skeletons. GPUI 0.2.2 cannot read the system reduced-motion setting, so this key is the only switch; off makes state changes instant |
+| `appearance.sidebar` | `expanded` | `expanded` shows the GUI sidebar with labels, `collapsed` opens it as a strip of icons |
+| `appearance.theme` | `dark` | `dark` or `light` color theme in the GUI |
 | `appearance.accent` | `purple` | `purple`, `blue`, `teal` or `pink`: the color of the selection, the focus outline and the bars in the GUI |
-| `appearance.motion` | `true` | Animations in the GUI: tooltips, loaders and skeletons. Off, or the desktop asking for reduced motion, shows them without movement |
+| `appearance.density` | `comfortable` | `comfortable` or `compact`: `compact` uses shorter list rows and less vertical padding |
+| `route_shortcuts.enabled` | `true` | Whether `Shift+1` to `Shift+9` switch GUI sidebar sections |
+| `route_shortcuts.hints` | `true` | Whether key badges appear in the GUI sidebar and section tooltips |
+| `toolchains.tools` | `["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]` | Toolchain managers to inspect |
+| `toolchains.pins` | `true` | Search scanned roots for version pin files (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, etc.) and mark pinned versions `review` |
+| `docker.engines` | `["docker", "podman"]` | Container engine CLIs to inspect |
+| `docker.timeout_secs` | `10` | Per-command timeout in seconds for engine CLI calls (minimum 1) |
+| `docker.recent_hours` | `24` | Containers stopped within this window are marked `review` |
 
 A rule:
 
@@ -177,10 +196,9 @@ idle = "60d"
 min_size = "50MB"
 exclude = []              # globs, added to scan.exclude
 select = "safe"           # safe, all or a list of rule names
-permanent = false
 ```
 
-Every key except `source` is optional. Unknown keys and unknown rule names are an error, as everywhere else in the config.
+Every key except `source` is optional. Policies are not yet implemented; when added, unknown policy keys and unknown rule names will be warned on load and rejected by `config check`.
 
 ## 6. CLI
 
@@ -192,40 +210,51 @@ kuizer scan  [PATHS...] [FILTERS]         list project items
     --sort size|path|category|idle
     --limit N
     --no-live
+    --safe-only
+    --report[=FILE] [--no-open] [--force] write an interactive HTML report and open it
 kuizer clean [PATHS...] [FILTERS] [REMOVAL]
-    --policy NAME                        filters and selection from the config
+    --policy NAME                         filters and selection from the config (planned)
 
 kuizer cache            [FILTERS]                  list global tool caches
-kuizer cache clean      [FILTERS] [REMOVAL]
-kuizer toolchain        [FILTERS]                  list installed toolchain versions
-kuizer toolchain clean  [FILTERS] [REMOVAL]
-kuizer docker           [FILTERS]                  list Docker images, build cache, containers
-kuizer docker clean     [FILTERS] [REMOVAL]
+kuizer cache clean      [FILTERS] [REMOVAL]        (`--clean` is a hidden alias per D8)
+kuizer toolchain        [PATHS...] [FILTERS]       list installed toolchain versions; `toolchains` is an alias
+kuizer toolchain clean  [PATHS...] [FILTERS] [REMOVAL] (`--clean` is a hidden alias per D8)
+kuizer docker           [FILTERS]                  list Docker/Podman images, build cache, containers, volumes; `podman` is an alias
+kuizer docker clean     [FILTERS] [REMOVAL]        (`--clean` is a hidden alias per D8)
+kuizer git              [PATHS...]                 list git repos with loose objects or merged branches; `repos` is an alias
+    --gc                                           run `git gc` in listed repositories
+    --branches                                     delete listed merged local branches
+    --dry-run                                      print what would run, touch nothing
+    -y, --yes                                      skip the confirmation
 
-kuizer duplicates [PATHS...] --min-size SIZE --verify --limit N    report only
-kuizer big        [PATHS...] --min-size SIZE --limit N             report only
+kuizer duplicates [PATHS...] --min-size SIZE --verify --limit N    report only; `deduplicate` is an alias
+kuizer big        [PATHS...] --min-size SIZE --limit N             report only (planned)
+
+kuizer dashboard [PATHS...]               offline HTML overview (or `--json`); `web` is an alias
+    --no-duplicates                       skip the duplicate search
+    --min-size SIZE                       minimum duplicate size
+    --out=FILE [--no-open] [--force]      write to FILE instead of the cache directory
 
 kuizer history                            sessions with their ids; `insight` is an alias
 kuizer history show SESSION               every item of one session
-kuizer restore ID... | --last             put trashed items back
+kuizer restore ID... | --last [--dry-run] put trashed items back
 
-kuizer policy list | show NAME
+kuizer policy list | show NAME            (planned)
 
 kuizer rules                              active detection rules
 kuizer config show | path | init | check
 
 FILTERS
     --category NAME                      repeatable: dependencies, build, cache, temp
-    --rule NAME                          repeatable
+    --rule NAME                          repeatable (planned)
     --min-size SIZE                      10MB, 1.5GiB
-    --idle DURATION                      30d, 2w, 6mo; `--older-than` is an alias
-    --project GLOB                       repeatable, matched on the project path
-    --exclude GLOB                       repeatable, added to scan.exclude
+    --idle DURATION                      30d, 2w, 6mo, 1y; `--older-than` is an alias
+    --project GLOB                       repeatable, matched on the project path (planned)
+    --exclude GLOB                       repeatable, added to scan.exclude (planned)
 
 REMOVAL
     --select safe|all|RULE               repeatable, default safe
     --dry-run                            print the selection, touch nothing
-    --permanent                          skip the trash
     -y, --yes                            skip the confirmation
 ```
 
@@ -235,15 +264,17 @@ Filters decide which items are listed; `--select` decides which listed items are
 
 ### 6.2 Sources
 
-A source other than projects is a subcommand whose bare form lists and whose `clean` sub-verb removes. `cache --clean` stays as a hidden alias of `cache clean` for one minor release. A listing never gains a flag that turns it into a deletion.
+A source other than projects is a subcommand whose bare form lists and whose `clean` sub-verb removes: `cache clean`, `toolchain clean`, and `docker clean`. Per decision D8, `--clean` stays as a hidden alias for one minor release. A listing never gains a flag that turns it into a deletion.
 
 `duplicates` and `big` have no `clean`: removing the wrong copy of a file cannot be regenerated. Duplicate handling, when it comes, is `duplicates link`, which replaces copies with hard links or reflinks and deletes no content.
 
-`docker clean` removes through `docker image rm`, `docker builder prune` and `docker container rm`, never by deleting files under `/var/lib/docker`. Without a `docker` binary the source lists nothing and reports one issue.
+`docker clean` removes through `docker image rm`, `docker builder prune`, `docker container rm` and `docker volume rm` (and the equivalent `podman` commands), never by deleting files under `/var/lib/docker`. Without an engine binary the source lists nothing and reports one issue.
+
+`kuizer git` (`repos` alias) lists repositories with reclaimable loose objects (`--gc`) or merged local branches (`--branches`), and runs directly through `git` rather than the trash.
 
 ### 6.3 Idle time
 
-`--idle 60d` keeps items whose project has had no activity for 60 days. Project activity is the later of the newest modification time outside the project's artifacts and the last commit in its git repository. An artifact's own modification time is not used, because `npm install` and `cargo build` refresh it in a project that is otherwise abandoned. Activity only counts what the scan itself would enter: `scan.exclude`, `scan.exclude_extensions`, skipped folders, ignore files, excluded mounts and `scan.one_file_system` apply to it the same way. Other sources use their own signal: a toolchain's last use from its shims or tool metadata, a cache's newest entry, an image's last use by a container. An item whose activity cannot be determined never matches `--idle`.
+`--idle 60d` keeps items whose project has had no activity for 60 days. Project activity is the later of the newest modification time outside the project's artifacts, the activity of its nested projects and the last commit in its git repository. An artifact's own modification time is not used, because `npm install` and `cargo build` refresh it in a project that is otherwise abandoned. Activity only counts what the scan itself would enter: `scan.exclude`, `scan.exclude_extensions`, skipped folders, ignore files, excluded mounts and `scan.one_file_system` apply to it the same way. Other sources use their own signal: a toolchain's last use from its shims or tool metadata, a cache's newest entry, an image's last use by a container. An item whose activity cannot be determined never matches `--idle`.
 
 Durations accept `d`, `w`, `mo` (30 days) and `y` (365 days).
 
@@ -293,11 +324,12 @@ Rendering runs at most every 50 ms or on input. The scan runs on its own threads
 | `g` `G` | top, bottom |
 | `J` `K` / shift ↑ ↓ | move and select the rows passed |
 | `space` | toggle selection |
-| `a` | select all `safe` in the current view |
-| `A` | select everything in the current view, after a confirmation |
+| `a` | select all `safe` in the current view; press again to add `review` items, again to clear |
+| `P` | the same three steps for the current project |
 | `c` | select or clear the current category |
 | `u` | clear selection |
 | `/` | filter by path or rule; `esc` clears |
+| `esc` | back out one level; never quits |
 | `s` | cycle sort: size, path, category, idle |
 | `1` `2` `3` `4` | views: artifacts, caches, duplicates, issues |
 | `enter` / `l` | expand detail or duplicate group |

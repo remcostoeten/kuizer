@@ -95,7 +95,8 @@ fn parents(candidates: &[Candidate]) -> Vec<PathBuf> {
 }
 
 pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<(), AppError> {
-    removal::check_selection(&args.removal.select, &caches::names().collect::<Vec<_>>())?;
+    let plan = args.plan();
+    removal::check_selection(&plan.removal.select, &caches::names().collect::<Vec<_>>())?;
     let locations = Locations::for_user().ok_or(AppError::NoHome)?;
     let entries = measure_threaded(
         caches::find(&locations, &Protected::for_user()),
@@ -103,8 +104,7 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         scan::size_threads(config),
         |_| {},
     );
-    let cleaning = args.clean || args.removal.dry_run;
-    if !cleaning {
+    if !plan.cleaning {
         if json {
             println!("{}", output::cache_report(&entries)?);
         } else {
@@ -116,13 +116,14 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         .into_iter()
         .map(|(_, candidate)| candidate)
         .collect();
-    let selected = removal::select(candidates, &args.removal.select);
+    let selected = removal::select(candidates, &plan.removal.select);
     let roots = parents(&selected);
     let request = Request {
         command: "cache",
         roots: &roots,
-        mode: removal::mode(&args.removal, config),
-        yes: args.removal.yes,
+        mode: removal::mode(&plan.removal, config),
+        yes: plan.removal.yes,
+        confirm: config.delete.confirm,
         json,
         remove: removal::files,
     };

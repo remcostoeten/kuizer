@@ -339,7 +339,7 @@ fn key_hints(hints: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
 
 fn mode_chip(app: &App) -> Span<'static> {
     let (label, fill) = match app.overlay {
-        Overlay::Confirm { .. } => ("Confirm", WARNING),
+        Overlay::Confirm { .. } | Overlay::Quit => ("Confirm", WARNING),
         Overlay::Help => ("Help", MUTED),
         Overlay::None if app.filtering => ("Filter", MUTED),
         Overlay::None => ("Normal", MUTED),
@@ -353,7 +353,26 @@ fn mode_chip(app: &App) -> Span<'static> {
     )
 }
 
+fn quit_prompt(app: &App) -> Line<'static> {
+    let deleting = app.deleting();
+    let mut spans = vec![
+        mode_chip(app),
+        Span::styled(
+            format!(
+                " Quit with {deleting} unfinished deletion{}? Queued ones are cancelled.  ",
+                if deleting == 1 { "" } else { "s" }
+            ),
+            Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    spans.extend(key_hints(&[("y", "quit"), ("n", "keep deleting")]));
+    Line::from(spans)
+}
+
 fn footer(app: &App) -> Line<'static> {
+    if app.overlay == Overlay::Quit {
+        return quit_prompt(app);
+    }
     if app.filtering {
         let mut spans = vec![mode_chip(app), Span::raw(format!(" {}█   ", app.filter))];
         spans.extend(key_hints(&[("enter", "apply"), ("esc", "clear")]));
@@ -361,6 +380,16 @@ fn footer(app: &App) -> Line<'static> {
     }
     let selected = app.selected_count();
     let mut spans = vec![mode_chip(app), Span::raw(" ")];
+    let review = app.selected_review();
+    if review > 0 {
+        spans.push(Span::styled(
+            format!(" {review} review selected  "),
+            Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(message) = &app.message {
+        spans.push(Span::raw(format!(" {message}  ")));
+    }
     let delete_hint = if selected > 0 {
         ("enter", "delete selected")
     } else {
@@ -376,6 +405,9 @@ fn footer(app: &App) -> Line<'static> {
         ("?", "help"),
         ("q", "quit"),
     ]));
+    if app.filtered() || selected > 0 {
+        spans.extend(key_hints(&[("esc", "back")]));
+    }
     if app.filtered() {
         spans.extend(key_hints(&[("x", "clear filters")]));
     }
@@ -398,9 +430,6 @@ fn footer(app: &App) -> Line<'static> {
             Style::new().fg(MUTED),
         ));
     }
-    if let Some(message) = &app.message {
-        spans.push(Span::styled(format!(" {message} "), Style::new().fg(MUTED)));
-    }
     Line::from(spans)
 }
 
@@ -421,7 +450,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::delete::Mode) {
     const DIRTY_SHOWN: usize = 3;
-    let checking_lines = usize::from(stats.checking > 0);
+    let checking_lines = usize::from(stats.checking > 0 || app.changes_unknown());
     let dirty_lines = stats.dirty.len().min(DIRTY_SHOWN + 1);
     let area = centered(
         frame.area(),
@@ -494,6 +523,12 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
             Style::new().fg(WARNING),
         ));
     }
+    if app.changes_unknown() {
+        lines.push(Line::styled(
+            "  Could not check these projects for uncommitted changes.",
+            Style::new().fg(WARNING),
+        ));
+    }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "  y confirm   n cancel",
@@ -530,7 +565,7 @@ fn help(frame: &mut Frame) {
             &[
                 (&["space"], "toggle and move down"),
                 (&["a"], "select every safe item in view"),
-                (&["P"], "select every item in the cursor's project"),
+                (&["P"], "project: safe, then add review, then clear"),
                 (&["u"], "clear selection"),
             ],
         ),
@@ -553,7 +588,8 @@ fn help(frame: &mut Frame) {
                 (&["enter"], "delete selection"),
                 (&["s"], "cycle sort: size, path, category"),
                 (&["p"], "group by rule or by project"),
-                (&["q", "esc", "ctrl-c", "ctrl-q"], "quit and stop the scan"),
+                (&["esc"], "back out: filters, then selection"),
+                (&["q", "ctrl-c", "ctrl-q"], "quit, asks while deleting"),
             ],
         ),
     ];
@@ -630,7 +666,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             }
         }
         Overlay::Help => help(frame),
-        Overlay::None => {}
+        Overlay::None | Overlay::Quit => {}
     }
 }
 

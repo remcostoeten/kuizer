@@ -8,8 +8,9 @@ use crate::output;
 use crate::scan::{Candidate, Issue, IssueKind};
 
 pub fn run(config: &Config, args: DockerArgs, json: bool, quiet: bool) -> Result<(), AppError> {
+    let plan = args.plan();
     let names: Vec<&str> = Object::ALL.iter().map(|object| object.name()).collect();
-    removal::check_selection(&args.removal.select, &names)?;
+    removal::check_selection(&plan.removal.select, &names)?;
     if !quiet && !json {
         output::print_status("asking docker and podman");
     }
@@ -22,8 +23,7 @@ pub fn run(config: &Config, args: DockerArgs, json: bool, quiet: bool) -> Result
         output::clear_progress();
     }
     let entries = docker::entries(listing.items);
-    let cleaning = args.clean || args.removal.dry_run;
-    if !cleaning {
+    if !plan.cleaning {
         if json {
             println!("{}", output::docker_report(&entries, &listing.issues)?);
         } else {
@@ -49,16 +49,17 @@ pub fn run(config: &Config, args: DockerArgs, json: bool, quiet: bool) -> Result
         .into_iter()
         .map(|(_, candidate)| candidate)
         .collect();
-    let selected = removal::select(candidates, &args.removal.select);
+    let selected = removal::select(candidates, &plan.removal.select);
     let request = Request {
         command: "docker",
         roots: &[],
-        mode: if args.removal.dry_run {
+        mode: if plan.removal.dry_run {
             Mode::DryRun
         } else {
             Mode::Permanent
         },
-        yes: args.removal.yes,
+        yes: plan.removal.yes,
+        confirm: config.delete.confirm,
         json,
         remove: docker::remove,
     };

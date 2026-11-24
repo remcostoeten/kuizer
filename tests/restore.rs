@@ -226,6 +226,22 @@ fn never_overwrites_a_reoccupied_path() {
 }
 
 #[test]
+fn history_and_restore_honor_the_config_flag() {
+    let (_tmp, home, _root) = setup();
+    let missing = home.join("missing.toml");
+    let missing = missing.to_str().unwrap();
+
+    for args in [
+        &["--config", missing, "history"][..],
+        &["--config", missing, "restore", "--last"][..],
+    ] {
+        let output = kuizer(&home, args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read config"));
+    }
+}
+
+#[test]
 fn permanent_deletions_cannot_be_restored() {
     let (_tmp, home, root) = setup();
     let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);

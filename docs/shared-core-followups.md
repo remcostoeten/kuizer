@@ -54,7 +54,7 @@ Build each in `src/` with tests, then switch all three frontends over.
 
 ## GUI work blocked on core pieces
 
-- **Cancellable duplicate search (P4-05).** `model::find_duplicates` takes a `&Cancel` and calls `dupes::find_cancellable`; `app.rs` stores a `Cancel` in `Search`, cancels it on drop and skips `staged.save()` when cancelled.
+- **Cancellable duplicate search (P4-05, #48): done.** `model::find_duplicates` takes a `&Cancel` and calls `dupes::find_cancellable`; `crates/kuizer-gui/src/app.rs` stores a `Cancel` in `Search` and cancels it on drop, and `crates/kuizer-gui/src/app/duplicates.rs` passes `&Cancel` and skips `staged.save()` when cancelled.
 - **Idle-since chart (P1-08).** Run `annotate_in` on a background thread after the walk and refresh `Charts`; only then make `stats::idle` use `project_last_active`. Land both together.
 - **ReportStats aggregates (P4-14, P5-10, P5-14).** Add duplicates reclaimable, repos gain and merged count to `ReportStats`, call `ReportStats::grow` from `grow_stats`, then delete `cache_total`, `toolchain_total` and `docker_total` in `model.rs:365-387`.
 - **Streaming scan pipeline.**
@@ -65,7 +65,7 @@ Build each in `src/` with tests, then switch all three frontends over.
 - **Foreground work.** `App::start_scan` calls `scan::normalize_roots` (a `canonicalize`) on the foreground thread. Move it into the `background_spawn` next to `check_folder`. `model::short_path` clones the home dir per row; return `Option<&'static Path>` from `platform::home_dir()`.
 - **Virtualize the single-page views.** Duplicates, History and Issues rebuild only on real content changes now but are not virtualized. They need `gpui::list` with a `ListState`, or splitting the stat cards from the table. Needs a visual check. A lazy `tooltip::path` lets non-virtualized rows hold only a key.
 - **Split the `Kuizer` app struct (P4-11).** Group the 64 fields into `ScanSession`, `StartForm`, `ListView`, `Overlays` and `Chrome`, and merge the per-source row renderers where they genuinely match.
-- **Invalid config banner.** The GUI now falls back to defaults on a bad file but does not show per-key warnings. Wire the lenient loader's warnings into the banner.
+- **Invalid config banner: done.** `crates/kuizer-gui/src/main.rs` wires `loaded.warnings` from the lenient loader into `fallback::notice` and `fallback::remember`, rendered at the top of the window via `fallback::wrap` in `crates/kuizer-gui/src/frame.rs`. (Expanding the banner to list every warning individually is tracked in #102.)
 
 ## Smaller items
 
@@ -77,7 +77,7 @@ Build each in `src/` with tests, then switch all three frontends over.
 - JSON and HTML reports are not streamed through a `BufWriter` (P3-03); measure peak RSS first. The HTML path needs a custom escaping writer.
 - TUI main loop input on its own thread or zero-timeout polling (P3-12); needs an interactive check of input latency.
 - Consolidate `Metadata` helpers into `Stat::from_metadata` (callers in `src/delete`, `repos.rs`, `dupes`, `tui`).
-- Docs: `docs/design.md` section 2 describes a single discovery thread and a bounded(256) channel, but the code runs one work-stealing pool (`scan/pool.rs`). Section 5 still says unknown config keys are errors. AGENTS.md says `ui.motion` while config and design.md use `appearance.motion`; settle on `appearance.motion` and drop the "desktop asking for reduced motion" clause.
+- Docs (#119), done: `docs/design.md` section 2 updated to the work-stealing pool (`src/scan/pool.rs`), section 5 updated to the lenient loader and current config keys (without the reduced-motion clause), section 6 updated to match `src/cli.rs`, and `AGENTS.md` updated to `appearance.motion`.
 
 ## Measured and rejected
 

@@ -33,7 +33,10 @@ pub fn titlebar() -> TitlebarOptions {
     TitlebarOptions {
         title: Some("kuizer".into()),
         appears_transparent: true,
-        traffic_light_position: Some(point(px(12.), (TITLEBAR - px(14.)) / 2.)),
+        traffic_light_position: Some(point(
+            px(12.),
+            (TITLEBAR - px(14.)) / 2. + px(space::SURFACE),
+        )),
     }
 }
 

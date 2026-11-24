@@ -394,27 +394,27 @@ From `design.md` and `plans/README.md`, kept here so nobody re-proposes them wit
 
 ## 15. Milestones
 
-A suggested order. Each milestone is one release.
+A suggested order. Each milestone is one release. Releases bump only the patch version (0.1.x) until a minor bump is decided.
 
 ### 0.1.4: safe and honest
 
 Everything P0 in section 3 with its tests, decisions D4, D5 and D7, the config example and spec fixes from section 10, the `shared-core-followups.md` bookkeeping, and the CI workspace fix. No new features.
 
-### 0.2.0: one core
+### 0.1.5: one core
 
 Shared keymap (4.1, plans 009, 015, 016), delete executor and confirmation policy (4.2), sort and filter in core (4.3), GUI logic moved into the core (4.9, 4.10), process runner and atomic write (4.11, 4.12), GUI input path fixes (6.1), the file splits that those changes touch anyway. TUI key drift resolved.
 
-### 0.3.0: the spec, delivered
+### 0.1.6: the spec, delivered
 
 `--json-lines`, the missing filters, `cache clean` subcommands (D8), one JSON `candidates` shape with a schema file, policies, completions and a man page, history in XDG state, TUI views for caches, duplicates and issues, the missing GUI settings sections, benchmarks in CI. macOS `.app` bundle with signing, Homebrew and AUR.
 
-### 0.4.0 and on: general cleanup
+### 0.1.7 and on: general cleanup
 
 Plans 001 to 019 in their waves, after D1 to D3, then `duplicates link`, per-project rules and `kuizer explain`.
 
-### 1.0
+### Later: 1.0
 
-The design's phase acceptance criteria all met, the JSON schema frozen at version 1 or 2, no P0 or P1 item open, and the docs at kuizer.app matching the shipped behavior.
+When the minor bump is decided. The design's phase acceptance criteria all met, the JSON schema frozen at version 1 or 2, no P0 or P1 item open, and the docs at kuizer.app matching the shipped behavior.
 
 ## 16. Issues
 
@@ -448,7 +448,7 @@ Every item above is tracked on GitHub, grouped by milestone. Labels carry the pr
 | [#119](https://github.com/remcostoeten/kuizer/issues/119) | P1 | Bring design.md, AGENTS.md and the follow-ups in line with the code |
 | [#123](https://github.com/remcostoeten/kuizer/issues/123) | P2 | CI: run clippy and tests for the whole workspace in the first job |
 
-### 0.2.0
+### 0.1.5
 
 | Issue | Priority | Title |
 | --- | --- | --- |
@@ -484,7 +484,7 @@ Every item above is tracked on GitHub, grouped by milestone. Labels carry the pr
 | [#101](https://github.com/remcostoeten/kuizer/issues/101) | P2 | GUI: branch deletion confirm is a modal that pops in |
 | [#102](https://github.com/remcostoeten/kuizer/issues/102) | P2 | GUI: invalid config banner lists every bad key |
 
-### 0.3.0
+### 0.1.6
 
 | Issue | Priority | Title |
 | --- | --- | --- |
@@ -505,7 +505,7 @@ Every item above is tracked on GitHub, grouped by milestone. Labels carry the pr
 | [#128](https://github.com/remcostoeten/kuizer/issues/128) | P2 | AUR packages: kuizer and kuizer-bin |
 | [#129](https://github.com/remcostoeten/kuizer/issues/129) | P2 | Install the desktop file and icons on Linux |
 
-### 0.4.0
+### 0.1.7
 
 | Issue | Priority | Title |
 | --- | --- | --- |

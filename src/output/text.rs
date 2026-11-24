@@ -22,6 +22,16 @@ fn home() -> Option<&'static Path> {
     HOME.get_or_init(platform::home_dir).as_deref()
 }
 
+fn push_sanitized(out: &mut String, text: &str) {
+    out.extend(text.chars().map(|c| if c.is_control() { '?' } else { c }));
+}
+
+fn sanitize(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    push_sanitized(&mut out, text);
+    out
+}
+
 pub fn display_path(path: &Path) -> String {
     let mut display = String::with_capacity(path.as_os_str().len() + 2);
     let rest = match home().and_then(|home| path.strip_prefix(home).ok()) {
@@ -34,11 +44,7 @@ pub fn display_path(path: &Path) -> String {
         }
         None => path,
     };
-    display.extend(
-        rest.to_string_lossy()
-            .chars()
-            .map(|c| if c.is_control() { '?' } else { c }),
-    );
+    push_sanitized(&mut display, &rest.to_string_lossy());
     display
 }
 
@@ -103,7 +109,7 @@ fn row(candidate: &Candidate, idle: bool) -> String {
             ByteSize(candidate.usage.allocated).to_string()
         )),
         candidate.rule.category.as_str(),
-        candidate.rule.name,
+        sanitize(&candidate.rule.name),
         display_path(&candidate.path),
         pad = 6 + safety.len() - candidate.rule.safety.as_str().len(),
     )
@@ -146,7 +152,8 @@ fn bar(bucket: &Bucket, total: u64) -> String {
 
 fn bucket_line(label: &str, bucket: &Bucket, total: u64) -> String {
     format!(
-        "  {label:<22} {:>5}  {:>10}  {}",
+        "  {:<22} {:>5}  {:>10}  {}",
+        sanitize(label),
         bucket.count,
         ByteSize(bucket.bytes).to_string(),
         bar(bucket, total),
@@ -270,14 +277,22 @@ fn print_totals(candidates: &[Candidate], summary: &Summary) {
     );
 }
 
-fn print_issues(issues: &[Issue]) {
+fn format_issue(issue: &Issue) -> String {
+    format!(
+        "  {}: {}",
+        display_path(&issue.path),
+        sanitize(&issue.message)
+    )
+}
+
+pub fn print_issues(issues: &[Issue]) {
     if issues.is_empty() {
         return;
     }
     let mut err = io::stderr().lock();
     let _ = writeln!(err, "{} paths could not be read:", issues.len());
     for issue in issues.iter().take(MAX_ISSUES) {
-        let _ = writeln!(err, "  {}: {}", display_path(&issue.path), issue.message);
+        let _ = writeln!(err, "{}", format_issue(issue));
     }
     if issues.len() > MAX_ISSUES {
         let _ = writeln!(
@@ -316,17 +331,24 @@ pub fn print_removal_plan(candidates: &[Candidate], mode: Mode) {
     );
 }
 
-pub fn print_removal(removal: &Removal) {
+fn format_removal(removal: &Removal) -> String {
     let size = ByteSize(removal.candidate.usage.allocated).to_string();
     let path = display_path(&removal.candidate.path);
     match (removal.status, &removal.error) {
-        (Status::Failed, error) => eprintln!(
-            "{:>10}  failed   {path}: {}",
-            size,
-            error.as_deref().unwrap_or("unknown error")
+        (Status::Failed, error) => format!(
+            "{size:>10}  failed   {path}: {}",
+            sanitize(error.as_deref().unwrap_or("unknown error"))
         ),
-        (Status::Removed, _) => println!("{:>10}  removed  {path}", size),
-        (Status::WouldRemove, _) => println!("{:>10}  kept     {path}", size),
+        (Status::Removed, _) => format!("{size:>10}  removed  {path}"),
+        (Status::WouldRemove, _) => format!("{size:>10}  kept     {path}"),
+    }
+}
+
+pub fn print_removal(removal: &Removal) {
+    let line = format_removal(removal);
+    match removal.status {
+        Status::Failed => eprintln!("{line}"),
+        Status::Removed | Status::WouldRemove => println!("{line}"),
     }
 }
 
@@ -366,7 +388,7 @@ pub fn print_removal_summary(removals: &[Removal], mode: Mode) {
 
 pub fn print_status(text: &str) {
     let mut err = io::stderr().lock();
-    let _ = write!(err, "\r\x1b[2K{}", dim(text));
+    let _ = write!(err, "\r\x1b[2K{}", dim(&sanitize(text)));
     let _ = err.flush();
 }
 
@@ -514,12 +536,12 @@ pub fn print_toolchains(entries: &[(Toolchain, Candidate)], quiet: bool) {
             )),
             toolchain.safety().as_str(),
             toolchain.tool.name(),
-            toolchain.version,
+            sanitize(&toolchain.version),
             display_path(&toolchain.path),
         );
         let note = toolchain.note();
         if !note.is_empty() {
-            let _ = writeln!(out, "{}", dim(&format!("{:>12}{note}", "")));
+            let _ = writeln!(out, "{}", dim(&format!("{:>12}{}", "", sanitize(&note))));
         }
     }
     drop(out);
@@ -549,7 +571,7 @@ pub fn print_toolchains(entries: &[(Toolchain, Candidate)], quiet: bool) {
 
 pub fn print_docker(entries: &[(Item, Candidate)], issues: &[String], quiet: bool) {
     for issue in issues {
-        eprintln!("kuizer: {issue}");
+        eprintln!("kuizer: {}", sanitize(issue));
     }
     if entries.is_empty() {
         if issues.is_empty() {
@@ -575,12 +597,16 @@ pub fn print_docker(entries: &[(Item, Candidate)], issues: &[String], quiet: boo
                 ByteSize(candidate.usage.allocated).to_string()
             )),
             item.safety.as_str(),
-            item.engine,
+            sanitize(&item.engine),
             item.object.name(),
-            item.label,
+            sanitize(&item.label),
         );
         if !item.note.is_empty() {
-            let _ = writeln!(out, "{}", dim(&format!("{:>12}{}", "", item.note)));
+            let _ = writeln!(
+                out,
+                "{}",
+                dim(&format!("{:>12}{}", "", sanitize(&item.note)))
+            );
         }
     }
     drop(out);
@@ -606,4 +632,78 @@ pub fn print_docker(entries: &[(Item, Candidate)], issues: &[String], quiet: boo
             "Removal is permanent and goes through the engine, which refuses anything in use. Clean with `kuizer docker --clean`."
         )
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::detect::{Kind, RuleInfo};
+    use crate::scan::{IssueKind, Usage};
+
+    #[test]
+    fn removal_failure_sanitizes_terminal_escape_sequences_and_control_chars() {
+        let candidate = Candidate {
+            id: 1,
+            path: PathBuf::from("/tmp/app/\x1b[32mnode_modules\x1b[0m"),
+            kind: Kind::Dir,
+            rule: Arc::new(RuleInfo {
+                name: "node_modules".to_owned(),
+                category: Category::Dependencies,
+                safety: Safety::Safe,
+                ecosystem: "node".to_owned(),
+            }),
+            project: None,
+            usage: Usage {
+                allocated: 4096,
+                apparent: 4096,
+                entries: 2,
+                partial: false,
+            },
+            newest: None,
+            identity: None,
+            project_last_active: None,
+        };
+        let removal = Removal {
+            candidate,
+            status: Status::Failed,
+            error: Some(
+                "/tmp/app/node_modules/\x1b[31mevil\x1b[0m/\rfake\n\u{009b}2J\x07\x7f: Permission denied"
+                    .to_owned(),
+            ),
+        };
+
+        let rendered = format_removal(&removal);
+
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "raw control char in: {rendered:?}"
+        );
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\r'));
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\u{009b}'));
+        assert!(rendered.contains("failed"));
+        assert!(rendered.contains("?[32mnode_modules?[0m"));
+        assert!(rendered.contains("?[31mevil?[0m/?fake??2J??: Permission denied"));
+    }
+
+    #[test]
+    fn issue_message_sanitizes_control_characters() {
+        let issue = Issue {
+            path: PathBuf::from("/tmp/\x1b[33mdir"),
+            kind: IssueKind::PermissionDenied,
+            message: "denied\r\n\x1b[31mspoof\u{009b}0m".to_owned(),
+        };
+
+        let rendered = format_issue(&issue);
+
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "raw control char in: {rendered:?}"
+        );
+        assert!(rendered.contains("?[33mdir"));
+        assert!(rendered.contains("denied???[31mspoof?0m"));
+    }
 }

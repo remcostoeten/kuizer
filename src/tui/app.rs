@@ -10,7 +10,7 @@ use crate::detect::{Category, Safety};
 use crate::scan::{Candidate, Progress, Summary};
 
 const SHOWN: usize = 8;
-const ENTER_HOLD: Duration = Duration::from_millis(600);
+const KEY_HOLD: Duration = Duration::from_millis(600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -55,6 +55,7 @@ struct Span {
 pub enum Overlay {
     None,
     Confirm { ids: Vec<u64>, mode: Mode },
+    Quit,
     Help,
 }
 
@@ -85,8 +86,20 @@ pub struct ConfirmStats {
 
 type Job = (u64, Target, Mode);
 
+fn repeats(last: &mut Option<Instant>, now: Instant) -> bool {
+    let repeat = last.is_some_and(|at| now.duration_since(at) < KEY_HOLD);
+    *last = Some(now);
+    repeat
+}
+
+fn review_items(count: usize) -> String {
+    format!("{count} review item{}", if count == 1 { "" } else { "s" })
+}
+
 pub struct App {
     last_enter: Option<Instant>,
+    last_project_press: Option<Instant>,
+    widen_armed: Option<PathBuf>,
     pub items: Vec<Item>,
     pub view: Vec<usize>,
     pub rows: Vec<Row>,
@@ -128,7 +141,9 @@ pub struct App {
     total_bytes: u64,
     selected_count: usize,
     selected_bytes: u64,
+    selected_review: usize,
     deleting_count: usize,
+    changes_unknown: bool,
     dirty: bool,
     grown: bool,
 }
@@ -137,6 +152,8 @@ impl App {
     pub fn new(mode: Mode, confirm_before_delete: bool) -> Self {
         Self {
             last_enter: None,
+            last_project_press: None,
+            widen_armed: None,
             items: Vec::new(),
             view: Vec::new(),
             rows: Vec::new(),
@@ -178,7 +195,9 @@ impl App {
             total_bytes: 0,
             selected_count: 0,
             selected_bytes: 0,
+            selected_review: 0,
             deleting_count: 0,
+            changes_unknown: false,
             dirty: false,
             grown: false,
         }
@@ -469,12 +488,15 @@ impl App {
         }
         item.selected = on;
         let bytes = item.candidate.usage.allocated;
+        let review = usize::from(item.candidate.rule.safety == Safety::Review);
         if on {
             self.selected_count += 1;
             self.selected_bytes += bytes;
+            self.selected_review += review;
         } else {
             self.selected_count -= 1;
             self.selected_bytes -= bytes;
+            self.selected_review -= review;
         }
     }
 
@@ -506,12 +528,88 @@ impl App {
         else {
             return;
         };
-        for position in 0..self.view.len() {
-            let index = self.view[position];
+        let armed = self.widen_armed.take().is_some_and(|path| path == project);
+        let members = self.view.iter().copied().filter(|&index| {
             let item = &self.items[index];
-            if item.status == Status::Ready && project_of(&item.candidate) == project {
-                self.mark(index, true);
-            }
+            item.status == Status::Ready && project_of(&item.candidate) == project
+        });
+        let (review, safe): (Vec<usize>, Vec<usize>) =
+            members.partition(|&index| self.items[index].candidate.rule.safety == Safety::Review);
+        let safe_left = self.unselected(&safe);
+        let review_left = self.unselected(&review);
+        if safe.is_empty() && review.is_empty() {
+            self.message = Some("nothing to select in this project".to_owned());
+        } else if safe_left > 0 {
+            self.mark_all(&safe, true);
+            self.message = Some(if review_left > 0 {
+                format!(
+                    "selected {} safe, P again adds {}",
+                    safe.len(),
+                    review_items(review_left)
+                )
+            } else {
+                format!("selected {} safe", safe.len())
+            });
+        } else if review_left > 0 && safe.is_empty() && !armed {
+            self.widen_armed = Some(project);
+            self.message = Some(format!(
+                "only review items here, P again selects {}",
+                review_items(review_left)
+            ));
+        } else if review_left > 0 {
+            self.mark_all(&review, true);
+            self.message = Some(format!(
+                "selection widened to include {}",
+                review_items(review_left)
+            ));
+        } else {
+            self.mark_all(&safe, false);
+            self.mark_all(&review, false);
+            self.message = Some("project selection cleared".to_owned());
+        }
+    }
+
+    fn unselected(&self, indices: &[usize]) -> usize {
+        indices
+            .iter()
+            .filter(|&&index| !self.items[index].selected)
+            .count()
+    }
+
+    fn mark_all(&mut self, indices: &[usize], on: bool) {
+        for &index in indices {
+            self.mark(index, on);
+        }
+    }
+
+    pub fn disarm_widen(&mut self) {
+        self.widen_armed = None;
+    }
+
+    pub fn project_key_repeats(&mut self, now: Instant) -> bool {
+        repeats(&mut self.last_project_press, now)
+    }
+
+    pub fn selected_review(&self) -> usize {
+        self.selected_review
+    }
+
+    pub fn back_out(&mut self) {
+        if self.filtered() {
+            self.reset_filters();
+        } else if self.selected_count > 0 {
+            self.clear_selection();
+        } else {
+            self.message = Some("nothing to back out of, q quits".to_owned());
+        }
+    }
+
+    pub fn request_quit(&mut self) {
+        if self.deleting_count == 0 {
+            self.quit = true;
+        } else {
+            self.overlay = Overlay::Quit;
+            self.confirm_stats = None;
         }
     }
 
@@ -531,9 +629,18 @@ impl App {
     }
 
     pub fn expect_status(&mut self, project: PathBuf) {
-        if !self.changes.contains_key(&project) {
+        if !self.changes_unknown && !self.changes.contains_key(&project) {
             self.unchecked.insert(project);
         }
+    }
+
+    pub fn set_changes_unknown(&mut self) {
+        self.changes_unknown = true;
+        self.unchecked.clear();
+    }
+
+    pub fn changes_unknown(&self) -> bool {
+        self.changes_unknown
     }
 
     pub fn set_statuses(&mut self, updates: impl IntoIterator<Item = (PathBuf, Option<usize>)>) {
@@ -558,6 +665,7 @@ impl App {
         }
         self.selected_count = 0;
         self.selected_bytes = 0;
+        self.selected_review = 0;
     }
 
     pub fn cycle_sort(&mut self) {
@@ -682,11 +790,12 @@ impl App {
         let Overlay::Confirm { ids, .. } = &self.overlay else {
             return false;
         };
-        ids.iter().filter_map(|&id| self.item(id)).any(|item| {
-            item.candidate.rule.safety == Safety::Review
-                || self.changes_in(&item.candidate).is_some()
-                || self.unchecked.contains(project_of(&item.candidate))
-        })
+        self.changes_unknown
+            || ids.iter().filter_map(|&id| self.item(id)).any(|item| {
+                item.candidate.rule.safety == Safety::Review
+                    || self.changes_in(&item.candidate).is_some()
+                    || self.unchecked.contains(project_of(&item.candidate))
+            })
     }
 
     pub fn delete_selected(&mut self) -> Vec<Job> {
@@ -701,11 +810,7 @@ impl App {
     }
 
     pub fn enter_repeats(&mut self, now: Instant) -> bool {
-        let repeat = self
-            .last_enter
-            .is_some_and(|at| now.duration_since(at) < ENTER_HOLD);
-        self.last_enter = Some(now);
-        repeat
+        repeats(&mut self.last_enter, now)
     }
 
     pub fn confirm(&mut self) -> Vec<Job> {
@@ -754,6 +859,10 @@ impl App {
             );
             if before == Status::Deleting {
                 self.deleting_count -= 1;
+                if self.deleting_count == 0 && self.overlay == Overlay::Quit {
+                    self.overlay = Overlay::None;
+                    self.message = Some("deletions finished, q quits".to_owned());
+                }
             }
             match (before == Status::Deleted, now_deleted) {
                 (false, true) => self.total_bytes -= bytes,
@@ -768,6 +877,27 @@ impl App {
             Mode::Permanent => self.freed += removed,
             Mode::Trash => self.trashed += removed,
             Mode::DryRun => {}
+        }
+    }
+
+    pub fn restore_deleting(&mut self) {
+        let mut restored = 0;
+        for index in 0..self.items.len() {
+            if self.items[index].status == Status::Deleting {
+                self.items[index].status = Status::Ready;
+                self.mark(index, true);
+                restored += 1;
+            }
+        }
+        self.deleting_count = 0;
+        if self.overlay == Overlay::Quit {
+            self.overlay = Overlay::None;
+        }
+        if restored > 0 {
+            self.message = Some(format!(
+                "delete worker unavailable, {restored} item{} kept selected",
+                if restored == 1 { "" } else { "s" }
+            ));
         }
     }
 
@@ -1056,10 +1186,32 @@ mod tests {
         assert_eq!(order, [4, 1, 2]);
 
         app.move_to(1);
+        let selected =
+            |app: &App| -> Vec<u64> { app.selected().map(|item| item.candidate.id).collect() };
         app.select_project();
-        let selected: Vec<u64> = app.selected().map(|item| item.candidate.id).collect();
-        assert_eq!(selected, [1, 4]);
+        assert_eq!(selected(&app), [1]);
+        app.select_project();
+        assert_eq!(selected(&app), [1, 4]);
         assert_eq!(app.selected_bytes(), 60);
+        assert_eq!(app.selected_review(), 1);
+        assert!(app.message.clone().unwrap_or_default().contains("widened"));
+        app.select_project();
+        assert!(selected(&app).is_empty());
+        assert_eq!(app.selected_review(), 0);
+    }
+
+    #[test]
+    fn a_review_only_project_warns_before_selecting() {
+        let mut app = app();
+        app.move_to(1);
+        app.select_project();
+        assert_eq!(app.selected_count(), 0);
+        assert!(app.message.clone().unwrap_or_default().contains("review"));
+        app.disarm_widen();
+        app.select_project();
+        assert_eq!(app.selected_count(), 0);
+        app.select_project();
+        assert_eq!(app.selected_review(), 1);
     }
 
     #[test]

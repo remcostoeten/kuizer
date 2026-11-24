@@ -244,7 +244,7 @@ fn build_table() -> Vec<Spec> {
         Spec::new(Command::Toggle, "Select or deselect the row", Lists)
             .keys(&["space"])
             .hidden(),
-        Spec::new(Command::SelectAll, "Select all in this list", Lists).keys(&["secondary-a"]),
+        Spec::new(Command::SelectAll, "Select all, safe first", Lists).keys(&["secondary-a"]),
         Spec::new(Command::SelectNone, "Select none in this list", Lists)
             .keys(&["secondary-shift-a"]),
         Spec::new(
@@ -282,6 +282,7 @@ fn build_table() -> Vec<Spec> {
         .hidden(),
         Spec::new(Command::MapMove(Direction::Up), "Focus the tile above", Map)
             .keys(&["up"])
+            .extra(&["k"])
             .hidden(),
         Spec::new(
             Command::MapMove(Direction::Down),
@@ -289,6 +290,7 @@ fn build_table() -> Vec<Spec> {
             Map,
         )
         .keys(&["down"])
+        .extra(&["j"])
         .hidden(),
         Spec::new(Command::Gc, "Run git gc in the repository", Git).keys(&["c"]),
         Spec::new(Command::GcAll, "Run git gc in every listed repository", Git).keys(&["C"]),
@@ -338,8 +340,9 @@ pub fn lookup(keystroke: &Keystroke, map: bool) -> Option<Command> {
 
 /// Keys that only work inside the palette, a filter field or a dialog, listed in the shortcuts
 /// overlay next to the table.
-pub const HINTS: [(&str, &[&str]); 4] = [
+pub const HINTS: [(&str, &[&str]); 5] = [
     ("Move in the palette", &["up", "down", "ctrl-p", "ctrl-n"]),
+    ("Scroll this overlay", &["j", "k", "pagedown", "pageup"]),
     ("Run the command", &["enter"]),
     ("Leave the filter, keep it", &["enter"]),
     ("Close, clear the filter or cancel", &["escape"]),
@@ -349,7 +352,7 @@ pub const HINTS: [(&str, &[&str]); 4] = [
 /// shortcuts overlay next to the table.
 pub const CONTROLS: [(&str, &[&str]); 4] = [
     ("Next or previous control", &["tab", "shift-tab"]),
-    ("Move along the controls", &["left", "right"]),
+    ("Move along the controls", &["left", "right", "h", "l"]),
     ("Press the control", &["enter", "space"]),
     ("Back to the list", &["escape"]),
 ];
@@ -622,7 +625,15 @@ mod tests {
         );
         assert_eq!(lookup(&key("left"), false), None);
         assert_eq!(lookup(&key("backspace"), false), None);
-        assert_eq!(lookup(&key("j"), true), Some(Command::Down));
+        assert_eq!(
+            lookup(&key("j"), true),
+            Some(Command::MapMove(Direction::Down))
+        );
+        assert_eq!(
+            lookup(&key("k"), true),
+            Some(Command::MapMove(Direction::Up))
+        );
+        assert_eq!(lookup(&key("j"), false), Some(Command::Down));
         assert_eq!(lookup(&key("m"), false), Some(Command::SpaceMap));
         assert_eq!(label("backspace"), "Backspace");
     }

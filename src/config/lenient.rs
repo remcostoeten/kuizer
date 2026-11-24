@@ -3,7 +3,7 @@ use std::fmt;
 
 use toml::{Table, Value};
 
-use super::{Config, DeleteConfig, DeleteMode, Excludes};
+use super::{Config, DeleteConfig, DeleteMode, Excludes, MAX_SIZE_THREADS};
 use crate::detect::{Detector, builtin_rules};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +246,16 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
             }
         },
     );
+    if config.scan.size_threads > MAX_SIZE_THREADS {
+        warnings.push(ConfigWarning::note(
+            "scan.size_threads",
+            format!(
+                "{} exceeds the maximum of {MAX_SIZE_THREADS}, clamped to {MAX_SIZE_THREADS}",
+                config.scan.size_threads
+            ),
+        ));
+        config.scan.size_threads = MAX_SIZE_THREADS;
+    }
 }
 
 fn syntax_warning(text: &str, error: &toml::de::Error) -> ConfigWarning {
@@ -459,5 +469,25 @@ mod tests {
             Config::parse_lenient("[delete]\nconfirm = false\n[appearance]\nmotion = \"no\"\n");
         assert!(!config.delete.confirm);
         assert!(rejected_scope(&warnings).is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn oversized_size_threads_clamps_with_a_warning() {
+        let (config, warnings) =
+            Config::parse_lenient("[delete]\nconfirm = false\n[scan]\nsize_threads = 128\n");
+        assert_eq!(config.scan.size_threads, MAX_SIZE_THREADS);
+        assert_eq!(keys(&warnings), ["scan.size_threads"]);
+        assert!(warnings[0].message.contains("128"), "{warnings:?}");
+        assert!(
+            warnings[0].message.contains(&MAX_SIZE_THREADS.to_string()),
+            "{warnings:?}"
+        );
+        assert!(!config.delete.confirm);
+        assert!(rejected_scope(&warnings).is_empty(), "{warnings:?}");
+
+        let (at_cap, at_cap_warnings) =
+            Config::parse_lenient(&format!("[scan]\nsize_threads = {MAX_SIZE_THREADS}\n"));
+        assert_eq!(at_cap.scan.size_threads, MAX_SIZE_THREADS);
+        assert!(at_cap_warnings.is_empty(), "{at_cap_warnings:?}");
     }
 }

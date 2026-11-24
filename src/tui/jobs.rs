@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -31,38 +32,41 @@ pub fn spawn_deleters(
     jobs: Receiver<Job>,
     results: Sender<Outcome>,
     stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<Option<HistoryError>> {
+) -> io::Result<thread::JoinHandle<Option<HistoryError>>> {
     thread::Builder::new()
         .name("kuizer-delete".to_owned())
         .spawn(move || {
             let guard = Guard::new(&roots);
             let recorder = Mutex::new(Recorder::for_user(history::now(), &roots));
             let lanes = Lanes::default();
-            thread::scope(|scope| {
-                for _ in 0..delete::workers() {
-                    scope.spawn(|| {
-                        for job in &jobs {
-                            let result = if stop.load(Ordering::Relaxed) {
-                                Err("cancelled".to_owned())
-                            } else {
-                                let _lane = lanes.claim(&job.target.path);
-                                delete::delete(&guard, &job.target, job.mode)
-                                    .map_err(|error| error.to_string())
-                            };
-                            if result.is_ok() && job.mode != Mode::DryRun {
-                                let mut recorder =
-                                    recorder.lock().unwrap_or_else(PoisonError::into_inner);
-                                recorder.add(Entry::new(&job.candidate, job.mode));
-                                if jobs.is_empty() {
-                                    recorder.flush();
-                                }
-                            }
-                            if results.send((job.id, job.mode, result)).is_err() {
-                                break;
-                            }
+            let work = || {
+                for job in &jobs {
+                    let result = if stop.load(Ordering::Relaxed) {
+                        Err("cancelled".to_owned())
+                    } else {
+                        let _lane = lanes.claim(&job.target.path);
+                        delete::delete(&guard, &job.target, job.mode)
+                            .map_err(|error| error.to_string())
+                    };
+                    if result.is_ok() && job.mode != Mode::DryRun {
+                        let mut recorder = recorder.lock().unwrap_or_else(PoisonError::into_inner);
+                        recorder.add(Entry::new(&job.candidate, job.mode));
+                        if jobs.is_empty() {
+                            recorder.flush();
                         }
-                    });
+                    }
+                    if results.send((job.id, job.mode, result)).is_err() {
+                        break;
+                    }
                 }
+            };
+            thread::scope(|scope| {
+                for _ in 1..delete::workers() {
+                    if thread::Builder::new().spawn_scoped(scope, work).is_err() {
+                        break;
+                    }
+                }
+                work();
             });
             recorder
                 .into_inner()
@@ -70,7 +74,6 @@ pub fn spawn_deleters(
                 .finish()
                 .err()
         })
-        .expect("spawn delete thread")
 }
 
 fn repository_dir(project: &Path) -> Option<&Path> {
@@ -96,13 +99,13 @@ fn changes_in(project: &Path, known: &Mutex<HashMap<PathBuf, Option<usize>>>) ->
     count
 }
 
-pub fn spawn_status(projects: Receiver<PathBuf>, results: Sender<Changes>) {
+pub fn spawn_status(projects: Receiver<PathBuf>, results: Sender<Changes>) -> io::Result<()> {
     let known = Arc::new(Mutex::new(HashMap::new()));
     for index in 0..STATUS_WORKERS {
         let projects = projects.clone();
         let results = results.clone();
         let known = Arc::clone(&known);
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name(format!("kuizer-git-{index}"))
             .spawn(move || {
                 for project in projects {
@@ -111,9 +114,12 @@ pub fn spawn_status(projects: Receiver<PathBuf>, results: Sender<Changes>) {
                         break;
                     }
                 }
-            })
-            .expect("spawn git thread");
+            });
+        if let Err(error) = spawned {
+            return if index == 0 { Err(error) } else { Ok(()) };
+        }
     }
+    Ok(())
 }
 
 fn distinct_filesystems(roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -136,7 +142,11 @@ fn available_space(filesystems: &[PathBuf]) -> Option<u64> {
     (!sizes.is_empty()).then(|| sizes.iter().sum())
 }
 
-pub fn spawn_disk(roots: Vec<PathBuf>, nudges: Receiver<()>, results: Sender<Option<u64>>) {
+pub fn spawn_disk(
+    roots: Vec<PathBuf>,
+    nudges: Receiver<()>,
+    results: Sender<Option<u64>>,
+) -> io::Result<()> {
     thread::Builder::new()
         .name("kuizer-disk".to_owned())
         .spawn(move || {
@@ -151,7 +161,7 @@ pub fn spawn_disk(roots: Vec<PathBuf>, nudges: Receiver<()>, results: Sender<Opt
                 }
             }
         })
-        .expect("spawn disk thread");
+        .map(drop)
 }
 
 #[cfg(test)]

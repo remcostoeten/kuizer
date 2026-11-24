@@ -656,18 +656,29 @@ pub fn load(
         if options.repos {
             spawn_part(scope, "repos", move || {
                 let checked = found_repos.len();
-                let repos = repos::inspect_all_with(found_repos, &config.git, cancel, |root| {
-                    tracker.update(|activity| activity.advance(Step::Repos, root));
-                });
+                let inspected =
+                    repos::inspect_all_collecting(found_repos, &config.git, cancel, |root| {
+                        tracker.update(|activity| activity.advance(Step::Repos, root));
+                    });
+                let failed = inspected.issues.len();
+                let repos = inspected.repositories;
                 tracker.update_now(|activity| {
                     activity.finish(
                         Step::Repos,
                         started.elapsed(),
-                        format!(
-                            "{} of {} worth cleaning",
-                            repos.len(),
-                            plural(checked, "repository")
-                        ),
+                        if failed == 0 {
+                            format!(
+                                "{} of {} worth cleaning",
+                                repos.len(),
+                                plural(checked, "repository")
+                            )
+                        } else {
+                            format!(
+                                "{} of {} worth cleaning, {failed} could not be read",
+                                repos.len(),
+                                plural(checked, "repository")
+                            )
+                        },
                     );
                 });
                 emit(Loaded::Repos(repos));
