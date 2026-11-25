@@ -73,9 +73,6 @@ pub(super) enum Setting {
     ToolchainPins,
 }
 
-const THEMES: [&str; 2] = ["Dark", "Light"];
-const ACCENTS: [&str; 4] = ["Purple", "Blue", "Teal", "Pink"];
-const DENSITIES: [&str; 2] = ["Comfortable", "Compact"];
 const ZOOM_STEPS: usize = ((MAX_ZOOM - MIN_ZOOM) / zoom::STEP) as usize + 1;
 
 fn zoom_step(percent: u16) -> usize {
@@ -141,27 +138,36 @@ impl Setting {
         }
     }
 
-    fn choices(self) -> Option<&'static [&'static str]> {
+    fn choices(self) -> Option<Vec<&'static str>> {
         match self {
-            Self::Theme => Some(&THEMES),
-            Self::Accent => Some(&ACCENTS),
-            Self::Density => Some(&DENSITIES),
+            Self::Theme => Some(Theme::ALL.into_iter().map(Theme::label).collect()),
+            Self::Accent => Some(Accent::ALL.into_iter().map(Accent::label).collect()),
+            Self::Density => Some(Density::ALL.into_iter().map(Density::label).collect()),
             _ => None,
         }
     }
 
     fn stepped(self) -> bool {
-        self.choices().is_some() || self == Self::Zoom
+        matches!(
+            self,
+            Self::Theme | Self::Accent | Self::Density | Self::Zoom
+        )
     }
 
     fn value(self, config: &Config) -> usize {
         match self {
-            Self::Theme => usize::from(config.appearance.theme == Theme::Light),
+            Self::Theme => Theme::ALL
+                .iter()
+                .position(|theme| *theme == config.appearance.theme)
+                .unwrap_or(0),
             Self::Accent => Accent::ALL
                 .iter()
                 .position(|accent| *accent == config.appearance.accent)
                 .unwrap_or(0),
-            Self::Density => usize::from(config.appearance.density == Density::Compact),
+            Self::Density => Density::ALL
+                .iter()
+                .position(|density| *density == config.appearance.density)
+                .unwrap_or(0),
             Self::Motion => usize::from(config.appearance.motion),
             Self::SidebarCollapsed => usize::from(config.appearance.sidebar == Sidebar::Collapsed),
             Self::Zoom => zoom_step(config.appearance.zoom),
@@ -179,8 +185,11 @@ impl Setting {
 
     fn count(self) -> usize {
         match self {
+            Self::Theme => Theme::ALL.len(),
+            Self::Accent => Accent::ALL.len(),
+            Self::Density => Density::ALL.len(),
             Self::Zoom => ZOOM_STEPS,
-            _ => self.choices().map_or(2, <[_]>::len),
+            _ => 2,
         }
     }
 
@@ -201,7 +210,7 @@ impl Setting {
         let on = value == 1;
         match self {
             Self::Theme => {
-                config.appearance.theme = if on { Theme::Light } else { Theme::Dark };
+                config.appearance.theme = Theme::ALL[value.min(Theme::ALL.len() - 1)];
                 theme::configure(config.appearance.theme, config.appearance.accent);
             }
             Self::Accent => {
@@ -209,11 +218,7 @@ impl Setting {
                 theme::configure(config.appearance.theme, config.appearance.accent);
             }
             Self::Density => {
-                config.appearance.density = if on {
-                    Density::Compact
-                } else {
-                    Density::Comfortable
-                };
+                config.appearance.density = Density::ALL[value.min(Density::ALL.len() - 1)];
                 theme::set_density(config.appearance.density);
             }
             Self::Motion => {
@@ -253,7 +258,7 @@ impl Setting {
             Self::Theme => (
                 "appearance",
                 "theme",
-                text(if on { "light" } else { "dark" }),
+                text(Theme::ALL[value.min(Theme::ALL.len() - 1)].key()),
             ),
             Self::Accent => (
                 "appearance",
@@ -263,13 +268,17 @@ impl Setting {
             Self::Density => (
                 "appearance",
                 "density",
-                text(if on { "compact" } else { "comfortable" }),
+                text(Density::ALL[value.min(Density::ALL.len() - 1)].key()),
             ),
             Self::Motion => ("appearance", "motion", SettingValue::Bool(on)),
             Self::SidebarCollapsed => (
                 "appearance",
                 "sidebar",
-                text(if on { "collapsed" } else { "expanded" }),
+                text(if on {
+                    Sidebar::Collapsed.key()
+                } else {
+                    Sidebar::Expanded.key()
+                }),
             ),
             Self::Zoom => (
                 "appearance",
@@ -281,7 +290,11 @@ impl Setting {
             Self::Trash => (
                 "delete",
                 "mode",
-                text(if on { "trash" } else { "permanent" }),
+                text(if on {
+                    DeleteMode::Trash.key()
+                } else {
+                    DeleteMode::Permanent.key()
+                }),
             ),
             Self::CrossDevice => ("delete", "cross_device", SettingValue::Bool(on)),
             Self::DuplicatesAuto => ("duplicates", "enabled", SettingValue::Bool(on)),
@@ -873,16 +886,17 @@ pub(super) struct Settings {
 
 impl Kuizer {
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.palette = None;
-        self.menu = None;
-        self.shortcuts = false;
-        self.filtering = false;
-        self.settings = Some(Settings::default());
+        self.overlays.palette = None;
+        self.overlays.menu = None;
+        self.overlays.shortcuts = false;
+        self.list.filtering = false;
+        self.overlays.settings = Some(Settings::default());
         cx.notify();
     }
 
     pub(super) fn settings_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         if self
+            .overlays
             .settings
             .as_ref()
             .is_some_and(|state| state.editor.is_some())
@@ -895,6 +909,7 @@ impl Kuizer {
             return;
         }
         if self
+            .overlays
             .settings
             .as_ref()
             .is_some_and(|state| state.keys.filtering)
@@ -903,11 +918,11 @@ impl Kuizer {
             return;
         }
         if commands::lookup(&self.keymap, keystroke, false) == Some(Command::Settings) {
-            self.settings = None;
+            self.overlays.settings = None;
             cx.notify();
             return;
         }
-        let Some(state) = &mut self.settings else {
+        let Some(state) = &mut self.overlays.settings else {
             return;
         };
         let action = self
@@ -917,7 +932,7 @@ impl Kuizer {
         let last = page.len().saturating_sub(1);
         let row = page.get(state.row).copied();
         match action {
-            Some(Key::Back) => self.settings = None,
+            Some(Key::Back) => self.overlays.settings = None,
             Some(Key::SettingsNext) => move_to(state, (state.row + 1).min(last)),
             Some(Key::SettingsPrevious) => move_to(state, state.row.saturating_sub(1)),
             Some(Key::SettingsFirst) => move_to(state, 0),
@@ -985,13 +1000,14 @@ impl Kuizer {
 
     /// Whether the Keys page waits for the key combination that becomes a binding.
     pub(super) fn recording_keys(&self) -> bool {
-        self.settings
+        self.overlays
+            .settings
             .as_ref()
             .is_some_and(|state| state.keys.recording.is_some())
     }
 
     pub(super) fn settings_mode(&self) -> keys::Mode {
-        match &self.settings {
+        match &self.overlays.settings {
             Some(state) if state.keys.recording.is_some() => keys::Mode::Record,
             Some(state) if state.keys.filtering => keys::Mode::Filter,
             _ => keys::Mode::Settings,
@@ -999,7 +1015,7 @@ impl Kuizer {
     }
 
     fn key_filter_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        let Some(state) = &mut self.settings else {
+        let Some(state) = &mut self.overlays.settings else {
             return;
         };
         let last = rows(state, &self.keymap).len().saturating_sub(1);
@@ -1033,10 +1049,10 @@ impl Kuizer {
     }
 
     fn start_recording(&mut self, key: Key, record: Record, cx: &mut Context<Self>) {
-        if self.setting_writes.keys.is_some() {
+        if self.overlays.setting_writes.keys.is_some() {
             return;
         }
-        let Some(state) = &mut self.settings else {
+        let Some(state) = &mut self.overlays.settings else {
             return;
         };
         if self.config_path.is_none() {
@@ -1050,6 +1066,7 @@ impl Kuizer {
 
     fn record_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some((key, record)) = self
+            .overlays
             .settings
             .as_mut()
             .and_then(|state| state.keys.recording.take())
@@ -1080,14 +1097,14 @@ impl Kuizer {
             return;
         }
         list.push(text);
-        if let Some(state) = &mut self.settings {
+        if let Some(state) = &mut self.overlays.settings {
             state.keys.chip = list.len() - 1;
         }
         self.write_keys(key, Some(list), cx);
     }
 
     fn remove_key(&mut self, key: Key, cx: &mut Context<Self>) {
-        let Some(state) = &self.settings else {
+        let Some(state) = &self.overlays.settings else {
             return;
         };
         let mut list: Vec<String> = self
@@ -1118,14 +1135,14 @@ impl Kuizer {
     }
 
     fn refuse_keys(&mut self, key: Key, message: String, cx: &mut Context<Self>) {
-        if let Some(state) = &mut self.settings {
+        if let Some(state) = &mut self.overlays.settings {
             state.keys.error = Some((key, message));
         }
         cx.notify();
     }
 
     fn write_keys(&mut self, key: Key, list: Option<Vec<String>>, cx: &mut Context<Self>) {
-        if self.setting_writes.keys.is_some() {
+        if self.overlays.setting_writes.keys.is_some() {
             return;
         }
         let Some(file) = self.config_path.clone() else {
@@ -1146,10 +1163,10 @@ impl Kuizer {
                 return;
             }
         };
-        if let Some(state) = &mut self.settings {
+        if let Some(state) = &mut self.overlays.settings {
             state.keys.error = None;
         }
-        self.setting_writes.keys = Some(key);
+        self.overlays.setting_writes.keys = Some(key);
         let written = cx.background_spawn(async move {
             let _one_writer = CONFIG_WRITE
                 .lock()
@@ -1175,10 +1192,10 @@ impl Kuizer {
         result: Result<Overrides, String>,
         cx: &mut Context<Self>,
     ) {
-        self.setting_writes.keys = None;
+        self.overlays.setting_writes.keys = None;
         match result {
             Ok(keys) => self.apply_keys(keys, cx),
-            Err(error) if self.settings.is_some() => self.refuse_keys(key, error, cx),
+            Err(error) if self.overlays.settings.is_some() => self.refuse_keys(key, error, cx),
             Err(error) => self.tell(Notice::Failed(error), cx),
         }
         cx.notify();
@@ -1207,11 +1224,11 @@ impl Kuizer {
     }
 
     fn edit_field(&mut self, field: Field, cx: &mut Context<Self>) {
-        if self.setting_writes.field.is_some() {
+        if self.overlays.setting_writes.field.is_some() {
             return;
         }
         let text = field.text(&self.config);
-        let Some(state) = &mut self.settings else {
+        let Some(state) = &mut self.overlays.settings else {
             return;
         };
         if let Some(at) = rows(state, &self.keymap)
@@ -1229,14 +1246,14 @@ impl Kuizer {
     }
 
     pub(super) fn saving_protected_paths(&self) -> bool {
-        self.setting_writes.field == Some(Field::Protected)
+        self.overlays.setting_writes.field == Some(Field::Protected)
     }
 
     fn field_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        if self.setting_writes.field.is_some() {
+        if self.overlays.setting_writes.field.is_some() {
             return;
         }
-        let Some(state) = &mut self.settings else {
+        let Some(state) = &mut self.overlays.settings else {
             return;
         };
         match self
@@ -1265,6 +1282,7 @@ impl Kuizer {
 
     fn save_field(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self
+            .overlays
             .settings
             .as_mut()
             .and_then(|state| state.editor.as_mut())
@@ -1280,7 +1298,7 @@ impl Kuizer {
         let write = match field.request(&self.config, editor.text.trim()) {
             Ok(Some(write)) => write,
             Ok(None) => {
-                if let Some(state) = &mut self.settings {
+                if let Some(state) = &mut self.overlays.settings {
                     state.editor = None;
                 }
                 cx.notify();
@@ -1293,7 +1311,7 @@ impl Kuizer {
             }
         };
         editor.error = None;
-        self.setting_writes.field = Some(field);
+        self.overlays.setting_writes.field = Some(field);
         let written = cx.background_spawn(async move {
             let _one_writer = CONFIG_WRITE
                 .lock()
@@ -1314,14 +1332,14 @@ impl Kuizer {
         result: Result<Box<Config>, String>,
         cx: &mut Context<Self>,
     ) {
-        self.setting_writes.field = None;
+        self.overlays.setting_writes.field = None;
         match result {
             Ok(parsed) => {
                 field.apply(&mut self.config, *parsed);
                 if field == Field::MinSize {
-                    self.options.min_size = self.config.scan.min_size.0;
+                    self.session.options.min_size = self.config.scan.min_size.0;
                 }
-                if let Some(state) = &mut self.settings
+                if let Some(state) = &mut self.overlays.settings
                     && state
                         .editor
                         .as_ref()
@@ -1331,6 +1349,7 @@ impl Kuizer {
                 }
             }
             Err(error) => match self
+                .overlays
                 .settings
                 .as_mut()
                 .and_then(|state| state.editor.as_mut())
@@ -1359,11 +1378,11 @@ impl Kuizer {
         let was = setting.value(&self.config);
         self.apply_setting(setting, value);
         if setting == Setting::Zoom
-            && let Some(state) = &self.settings
+            && let Some(state) = &self.overlays.settings
         {
             state.reveal.set(true);
         }
-        self.setting_writes.queue(setting, was, value);
+        self.overlays.setting_writes.queue(setting, was, value);
         self.write_next_setting(file, cx);
         cx.notify();
     }
@@ -1371,12 +1390,12 @@ impl Kuizer {
     fn apply_setting(&mut self, setting: Setting, value: usize) {
         setting.set(&mut self.config, value);
         if setting == Setting::DuplicatesAuto {
-            self.options.duplicates = self.config.duplicates.enabled;
+            self.session.options.duplicates = self.config.duplicates.enabled;
         }
     }
 
     fn write_next_setting(&mut self, file: PathBuf, cx: &mut Context<Self>) {
-        let Some((setting, value)) = self.setting_writes.next() else {
+        let Some((setting, value)) = self.overlays.setting_writes.next() else {
             return;
         };
         let (table, key, entry) = setting.entry(value);
@@ -1406,6 +1425,7 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) {
         let rollback = self
+            .overlays
             .setting_writes
             .finished(setting, value, written.is_ok());
         if let Err(error) = written {
@@ -1421,7 +1441,7 @@ impl Kuizer {
     }
 
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.settings.as_ref()?;
+        let state = self.overlays.settings.as_ref()?;
         let nav = PAGES.iter().enumerate().map(|(index, page)| {
             let active = index == state.page;
             div()
@@ -1446,7 +1466,7 @@ impl Kuizer {
                 })
                 .child(page.title)
                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    if let Some(state) = &mut app.settings {
+                    if let Some(state) = &mut app.overlays.settings {
                         state.page = index;
                         state.row = 0;
                         state.editor = None;
@@ -1552,7 +1572,7 @@ impl Kuizer {
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
-            .font_family(self.font.clone())
+            .font_family(self.chrome.font.clone())
             .text_size(unit(font::BODY))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1626,7 +1646,7 @@ impl Kuizer {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|app, _: &MouseDownEvent, _, cx| {
-                        app.settings = None;
+                        app.overlays.settings = None;
                         cx.notify();
                     }),
                 )
@@ -1694,7 +1714,7 @@ impl Kuizer {
                     }))
             })
             .when_some(editor, |row, editor| {
-                let detail = if self.setting_writes.field == Some(field) {
+                let detail = if self.overlays.setting_writes.field == Some(field) {
                     "Saving".to_owned()
                 } else {
                     let keys = format!(
@@ -1756,7 +1776,7 @@ impl Kuizer {
                 )
                 .debug_selector(|| "keys-filter".to_owned())
                 .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                    if let Some(state) = &mut app.settings {
+                    if let Some(state) = &mut app.overlays.settings {
                         state.keys.filtering = true;
                         cx.notify();
                     }
@@ -1861,7 +1881,7 @@ impl Kuizer {
             if changed { "Changed. " } else { "" },
             labels(DEFAULT_KEYS.keys(home, key))
         );
-        let status = if self.setting_writes.keys == Some(key) {
+        let status = if self.overlays.setting_writes.keys == Some(key) {
             Some(("Saving".to_owned(), theme::muted()))
         } else if recording.is_some() {
             let cancel = self.key_hint(Scope::Settings, Key::Back);
@@ -1952,7 +1972,7 @@ impl Kuizer {
                 )
             }))
             .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                if let Some(state) = &mut app.settings {
+                if let Some(state) = &mut app.overlays.settings {
                     move_to(state, index);
                 }
                 app.start_recording(key, Record::Replace, cx);
@@ -2021,7 +2041,7 @@ impl Kuizer {
                 .child(label)
                 .child(ui::switch(value == 1))
                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                    if let Some(state) = &mut app.settings {
+                    if let Some(state) = &mut app.overlays.settings {
                         state.row = index;
                     }
                     app.change(setting, setting.next(&app.config), cx);
@@ -2281,6 +2301,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         view.read_with(cx, |app, _| {
             let editor = app
+                .overlays
                 .settings
                 .as_ref()
                 .and_then(|state| state.editor.as_ref());
@@ -2294,7 +2315,8 @@ mod tests {
         view.read_with(cx, |app, _| {
             assert_eq!(app.config.duplicates.min_size, ByteSize(8192));
             assert!(
-                app.settings
+                app.overlays
+                    .settings
                     .as_ref()
                     .is_some_and(|state| state.editor.is_none())
             );
@@ -2304,13 +2326,14 @@ mod tests {
         cx.simulate_keystrokes("enter escape");
         view.read_with(cx, |app, _| {
             assert!(
-                app.settings
+                app.overlays
+                    .settings
                     .as_ref()
                     .is_some_and(|state| state.editor.is_none())
             );
         });
         cx.simulate_keystrokes("escape");
-        view.read_with(cx, |app, _| assert!(app.settings.is_none()));
+        view.read_with(cx, |app, _| assert!(app.overlays.settings.is_none()));
     }
 
     #[gpui::test]
@@ -2339,8 +2362,11 @@ mod tests {
         assert!(written.contains("\"help.open\" = \"f1\""), "{written}");
         cx.simulate_keystrokes("escape f1");
         view.read_with(cx, |app, _| {
-            assert!(app.settings.is_none());
-            assert!(app.shortcuts, "the new key opens the shortcuts at once");
+            assert!(app.overlays.settings.is_none());
+            assert!(
+                app.overlays.shortcuts,
+                "the new key opens the shortcuts at once"
+            );
         });
     }
 }

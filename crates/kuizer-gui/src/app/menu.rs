@@ -34,7 +34,7 @@ impl Kuizer {
             .divided();
         match target {
             Target::Item(source, id, _) => {
-                let selected = self.selection.contains(&(*source, *id));
+                let selected = self.list.selection.contains(&(*source, *id));
                 let external = *source == Source::Docker;
                 let remove = MenuItem::new(
                     Choice::Trash,
@@ -109,7 +109,7 @@ impl Kuizer {
         keyboard: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.dialog.is_some() || !self.known(&target) {
+        if self.overlays.dialog.is_some() || !self.known(&target) {
             return;
         }
         let active = if keyboard {
@@ -119,8 +119,8 @@ impl Kuizer {
         } else {
             None
         };
-        self.cursors.insert(target.tab(), target.clone());
-        self.menu = Some(Menu {
+        self.list.cursors.insert(target.tab(), target.clone());
+        self.overlays.menu = Some(Menu {
             target,
             position,
             active,
@@ -133,7 +133,7 @@ impl Kuizer {
             return;
         };
         let indent = unit(space::XXL).to_pixels(window.rem_size());
-        let position = self.cursor_bounds.get().map_or_else(
+        let position = self.list.cursor_bounds.get().map_or_else(
             || {
                 let size = window.viewport_size();
                 point(size.width / 2., size.height / 3.)
@@ -144,13 +144,13 @@ impl Kuizer {
     }
 
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
+        if self.overlays.menu.take().is_some() {
             cx.notify();
         }
     }
 
     pub(super) fn menu_key(&mut self, event: &KeyDownEvent, repeat: bool, cx: &mut Context<Self>) {
-        let Some(menu) = &self.menu else {
+        let Some(menu) = &self.overlays.menu else {
             return;
         };
         let items = self.menu_items(&menu.target);
@@ -198,14 +198,14 @@ impl Kuizer {
                 return;
             }
         };
-        if let Some(menu) = &mut self.menu {
+        if let Some(menu) = &mut self.overlays.menu {
             menu.active = next;
         }
         self.redraw_chrome(cx);
     }
 
     pub(super) fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(menu) = self.menu.take() else {
+        let Some(menu) = self.overlays.menu.take() else {
             return;
         };
         let choice = self
@@ -214,7 +214,7 @@ impl Kuizer {
             .filter(|item| item.enabled)
             .map(|item| item.choice);
         let Some(choice) = choice else {
-            self.menu = Some(menu);
+            self.overlays.menu = Some(menu);
             return;
         };
         cx.notify();
@@ -305,12 +305,12 @@ impl Kuizer {
             );
             return;
         }
-        if self.excluding.contains(&path) {
+        if self.session.excluding.contains(&path) {
             return;
         }
         let pattern = kuizer::config::exclude_pattern(&path);
-        self.menu = None;
-        self.dialog = Some(Dialog::Exclude {
+        self.overlays.menu = None;
+        self.overlays.dialog = Some(Dialog::Exclude {
             path,
             pattern,
             cancel: true,
@@ -320,7 +320,7 @@ impl Kuizer {
 
     /// Closes the exclude confirmation without changing the config file.
     pub(super) fn close_exclude(&mut self, cx: &mut Context<Self>) {
-        if let Some(Dialog::Exclude { path, pattern, .. }) = self.dialog.take() {
+        if let Some(Dialog::Exclude { path, pattern, .. }) = self.overlays.dialog.take() {
             self.leave_exclude(path, pattern, cx);
         }
         cx.notify();
@@ -331,16 +331,17 @@ impl Kuizer {
             return;
         }
         let at = Instant::now();
-        self.exclude_leaving = Some(Leaving { path, pattern, at });
+        self.session.exclude_leaving = Some(Leaving { path, pattern, at });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(motion::STEP).await;
             let _ = this.update(cx, |app, cx| {
                 if app
+                    .session
                     .exclude_leaving
                     .as_ref()
                     .is_some_and(|leaving| leaving.at == at)
                 {
-                    app.exclude_leaving = None;
+                    app.session.exclude_leaving = None;
                     cx.notify();
                 }
             });
@@ -349,7 +350,7 @@ impl Kuizer {
     }
 
     pub(super) fn accept_exclude(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Exclude { path, pattern, .. }) = self.dialog.take() else {
+        let Some(Dialog::Exclude { path, pattern, .. }) = self.overlays.dialog.take() else {
             return;
         };
         self.leave_exclude(path.clone(), pattern, cx);
@@ -359,7 +360,7 @@ impl Kuizer {
     /// The inline confirmation before adding a path to `scan.exclude`, floating over the
     /// bottom of the list like the selection summary.
     pub(super) fn render_exclude_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (path, pattern, focus) = match (&self.dialog, &self.exclude_leaving) {
+        let (path, pattern, focus) = match (&self.overlays.dialog, &self.session.exclude_leaving) {
             (
                 Some(Dialog::Exclude {
                     path,
@@ -484,7 +485,7 @@ impl Kuizer {
             );
             return;
         };
-        if !self.excluding.insert(path.clone()) {
+        if !self.session.excluding.insert(path.clone()) {
             return;
         }
         let written = cx.background_spawn({
@@ -515,7 +516,7 @@ impl Kuizer {
         written: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
-        self.excluding.remove(&path);
+        self.session.excluding.remove(&path);
         if let Err(error) = written {
             self.tell(
                 Notice::Failed(format!("Could not exclude {shown}: {error}")),
@@ -526,7 +527,7 @@ impl Kuizer {
         if !self.config.scan.exclude.contains(&pattern) {
             self.config.scan.exclude.push(pattern);
         }
-        self.excluded.push(path);
+        self.session.excluded.push(path);
         self.prune(cx);
         self.tell(
             Notice::Info(format!("{shown} is excluded from every scan")),
@@ -538,19 +539,20 @@ impl Kuizer {
     /// Removes excluded paths from the report on screen and forgets selections of items that
     /// are gone.
     fn prune(&mut self, cx: &Context<Self>) {
-        if let Phase::Ready(report) = &mut self.phase {
-            report.drop_paths(&self.excluded);
-            report.remove(&self.gone);
+        if let Phase::Ready(report) = &mut self.session.phase {
+            report.drop_paths(&self.session.excluded);
+            report.remove(&self.session.gone);
         }
         self.refresh_stats();
         self.refresh_rows();
         self.refresh_map(cx);
         if self
+            .overlays
             .menu
             .as_ref()
             .is_some_and(|menu| !self.known(&menu.target))
         {
-            self.menu = None;
+            self.overlays.menu = None;
         }
     }
 
@@ -569,14 +571,18 @@ impl Kuizer {
         cursor: Option<&Target>,
         cx: &mut Context<Self>,
     ) -> E {
-        let open = self.menu.as_ref().is_some_and(|menu| menu.target == target);
+        let open = self
+            .overlays
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.target == target);
         let look = match &target {
             Target::Item(source, id, path) => Some(self.look(*source, *id, path)),
             _ => None,
         };
         let tab = target.tab();
         let marked = cursor == Some(&target);
-        let bounds = marked.then(|| Rc::clone(&self.cursor_bounds));
+        let bounds = marked.then(|| Rc::clone(&self.list.cursor_bounds));
         let clicked = target.clone();
         row.when_some(bounds, |this, bounds| {
             this.child(
@@ -596,9 +602,9 @@ impl Kuizer {
                 if event.modifiers.shift && !app.busy() {
                     app.select_to(&clicked);
                 }
-                app.cursors.insert(tab, clicked.clone());
-                app.range = None;
-                app.filtering = false;
+                app.list.cursors.insert(tab, clicked.clone());
+                app.list.range = None;
+                app.list.filtering = false;
                 cx.notify();
             }),
         )
@@ -612,7 +618,7 @@ impl Kuizer {
     }
 
     pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.menu.as_ref()?;
+        let menu = self.overlays.menu.as_ref()?;
         let items = self.menu_items(&menu.target);
         let active = menu.active;
         let panel = div()
@@ -627,7 +633,7 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong())
             .text_size(unit(font::BODY))
-            .font_family(self.font.clone())
+            .font_family(self.chrome.font.clone())
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -663,7 +669,7 @@ impl Kuizer {
                     .child(div().flex_1().child(label))
                     .child(ui::kbd(self.key_hint(Scope::Menu, item.choice.binding())))
                     .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
-                        if let Some(menu) = &mut app.menu
+                        if let Some(menu) = &mut app.overlays.menu
                             && enabled
                             && menu.active != Some(index)
                         {

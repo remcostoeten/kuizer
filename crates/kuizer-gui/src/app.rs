@@ -76,7 +76,7 @@ mod tests;
 use keys::{found, found_path, keep_visible, shows_run};
 use lists::{Line, Lists};
 use map::SpaceMap;
-use pane::{Chrome, Pane};
+use pane::{Chrome as ChromeView, Pane};
 use repos::{GitJob, GitScope};
 use ring::{Region, Stops};
 use session::spawn_worker;
@@ -300,21 +300,24 @@ type Reveal = fn(&Path) -> Result<(), String>;
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
-pub struct Kuizer {
-    config: Config,
-    keymap: Keymap,
-    roots: Vec<PathBuf>,
-    options: ScanOptions,
+/// State for the start screen folder input, validation, and recent list.
+struct StartForm {
     folder: String,
     picked_folder: Option<(String, PathBuf)>,
     whole_home: bool,
-    collapsed: bool,
     folder_error: Option<String>,
     folder_check: Option<Task<()>>,
     recent: Recent,
+    scroll: ScrollHandle,
+}
+
+/// Active scan, loaded report, background jobs, and cleanup / git tasks.
+struct ScanSession {
+    roots: Vec<PathBuf>,
+    options: ScanOptions,
     snapshots: Snapshots,
     forgotten: Forgotten,
-    setting_writes: settings::SettingWrites,
+    phase: Phase,
     stale: Option<SystemTime>,
     pending: HashSet<Part>,
     early: Vec<Loaded>,
@@ -323,13 +326,29 @@ pub struct Kuizer {
     progress: Activity,
     search: Option<Search>,
     search_error: Option<String>,
-    wheel: Pixels,
-    moving: bool,
     cancel: Option<Cancel>,
     started: Instant,
-    font: SharedString,
-    focus: FocusHandle,
-    phase: Phase,
+    index: Index,
+    report_stats: ReportStats,
+    report_generation: u64,
+    reclaimable: Cell<Option<(u64, Reclaimable)>>,
+    cleaning: Option<Cleaning>,
+    flow: flow::Flow,
+    gone: HashMap<Source, HashSet<PathBuf>>,
+    history_fresh: bool,
+    task: Option<Task<()>>,
+    restore_task: Option<Task<()>>,
+    excluded: Vec<PathBuf>,
+    cached_excluded: usize,
+    excluding: HashSet<PathBuf>,
+    git: GitJob,
+    git_task: Option<Task<()>>,
+    branch_leaving: Option<repos::Leaving>,
+    exclude_leaving: Option<menu::Leaving>,
+}
+
+/// Active tab, filters, cached row indices, cursors, selection, scroll handles, and space map.
+struct ListView {
     tab: Tab,
     safety: Option<Safety>,
     hidden: HashSet<Category>,
@@ -342,29 +361,11 @@ pub struct Kuizer {
     all_checked: Cell<Option<(u64, u64, bool)>>,
     row_hints: [Cell<usize>; Tab::ALL.len()],
     selection: Selection,
-    index: Index,
-    report_stats: ReportStats,
-    report_generation: u64,
-    reclaimable: Cell<Option<(u64, Reclaimable)>>,
     range: Option<Span>,
     visual: bool,
     count: String,
     asked: Option<keys::Asked>,
-    dialog: Option<Dialog>,
     held: keys::Held,
-    cleaning: Option<Cleaning>,
-    flow: flow::Flow,
-    gone: HashMap<Source, HashSet<PathBuf>>,
-    history_fresh: bool,
-    task: Option<Task<()>>,
-    toast: Option<Toast>,
-    toast_task: Option<Task<()>>,
-    restore_task: Option<Task<()>>,
-    menu: Option<Menu>,
-    palette: Option<Palette>,
-    palette_cache: RefCell<Option<(keys::PaletteKey, Rc<[keys::Entry]>)>>,
-    shortcuts: bool,
-    settings: Option<settings::Settings>,
     filtering: bool,
     filters: HashMap<Tab, String>,
     cursors: HashMap<Tab, Target>,
@@ -372,26 +373,50 @@ pub struct Kuizer {
     artifact_scroll: UniformListScrollHandle,
     list_scrolls: HashMap<Tab, UniformListScrollHandle>,
     lists: Lists,
+    map: SpaceMap,
+}
+
+/// Modal dialogs, toasts, context menu, command palette, shortcuts sheet, and settings popover.
+struct Overlays {
+    dialog: Option<Dialog>,
+    toast: Option<Toast>,
+    toast_task: Option<Task<()>>,
+    menu: Option<Menu>,
+    palette: Option<Palette>,
+    palette_cache: RefCell<Option<(keys::PaletteKey, Rc<[keys::Entry]>)>>,
+    shortcuts: bool,
+    shortcuts_scroll: ScrollHandle,
+    settings: Option<settings::Settings>,
+    setting_writes: settings::SettingWrites,
+}
+
+/// Window-level chrome: sidebar state, focus, zoom wheel, keyboard ring, and cached views.
+struct Chrome {
+    collapsed: bool,
+    wheel: Pixels,
+    moving: bool,
+    font: SharedString,
+    focus: FocusHandle,
     stops: RefCell<Stops>,
     ring: Option<ElementId>,
     reveal_ring: Rc<Cell<bool>>,
-    start_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
-    shortcuts_scroll: ScrollHandle,
-    config_path: Option<PathBuf>,
-    excluded: Vec<PathBuf>,
-    cached_excluded: usize,
-    excluding: HashSet<PathBuf>,
-    reveal: Reveal,
-    map: SpaceMap,
-    git: GitJob,
-    git_task: Option<Task<()>>,
-    branch_leaving: Option<repos::Leaving>,
-    exclude_leaving: Option<menu::Leaving>,
     content: Option<Entity<Pane>>,
-    chrome: Option<Entity<Chrome>>,
+    view: Option<Entity<ChromeView>>,
     cache_content: bool,
     loader: Option<Entity<chart::Loader>>,
+}
+
+pub struct Kuizer {
+    config: Config,
+    config_path: Option<PathBuf>,
+    keymap: Keymap,
+    reveal: Reveal,
+    start: StartForm,
+    session: ScanSession,
+    list: ListView,
+    overlays: Overlays,
+    chrome: Chrome,
 }
 
 impl Kuizer {
@@ -417,113 +442,125 @@ impl Kuizer {
         theme::configure(config.appearance.theme, config.appearance.accent);
         theme::set_density(config.appearance.density);
         let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
+        let options = ScanOptions::from_config(&config);
+        let keymap = Keymap::resolve(&config.keys).0;
         let mut app = Self {
-            options: ScanOptions::from_config(&config),
-            keymap: Keymap::resolve(&config.keys).0,
             config,
-            roots,
-            folder,
-            picked_folder: None,
-            whole_home: false,
-            collapsed,
-            folder_error: None,
-            folder_check: None,
-            recent,
-            snapshots,
-            forgotten: Forgotten::default(),
-            setting_writes: Default::default(),
-            stale: None,
-            pending: HashSet::new(),
-            early: Vec::new(),
-            streamed: false,
-            refreshed: Vec::new(),
-            progress: Activity::default(),
-            search: None,
-            search_error: None,
-            wheel: px(0.),
-            moving: false,
-            cancel: None,
-            started: Instant::now(),
-            font,
-            focus,
-            phase: Phase::Start,
-            tab: Tab::Overview,
-            safety: None,
-            hidden: HashSet::new(),
-            rows: Vec::new(),
-            rows_bytes: 0,
-            rows_max: 0,
-            path_room: Rc::new(Cell::new(0.)),
-            rows_filter: None,
-            rows_generation: 0,
-            all_checked: Cell::new(None),
-            row_hints: Default::default(),
-            selection: Selection::default(),
-            index: Index::default(),
-            report_stats: ReportStats::default(),
-            report_generation: 0,
-            reclaimable: Cell::new(None),
-            range: None,
-            visual: false,
-            count: String::new(),
-            asked: None,
-            dialog: None,
-            held: keys::Held::default(),
-            cleaning: None,
-            flow: flow::Flow::default(),
-            gone: HashMap::new(),
-            history_fresh: false,
-            task: None,
-            toast: None,
-            toast_task: None,
-            restore_task: None,
-            menu: None,
-            palette: None,
-            palette_cache: RefCell::default(),
-            shortcuts: false,
-            settings: None,
-            filtering: false,
-            filters: HashMap::new(),
-            cursors: HashMap::new(),
-            cursor_bounds: Rc::new(Cell::new(None)),
-            artifact_scroll: UniformListScrollHandle::new(),
-            list_scrolls: [
-                Tab::Caches,
-                Tab::Toolchains,
-                Tab::Docker,
-                Tab::Repos,
-                Tab::Duplicates,
-                Tab::History,
-                Tab::Issues,
-            ]
-            .into_iter()
-            .map(|tab| (tab, UniformListScrollHandle::new()))
-            .collect(),
-            lists: Lists::default(),
-            stops: RefCell::default(),
-            ring: None,
-            reveal_ring: Rc::new(Cell::new(false)),
-            start_scroll: ScrollHandle::new(),
-            sidebar_scroll: ScrollHandle::new(),
-            shortcuts_scroll: ScrollHandle::new(),
             config_path: kuizer::config::default_path(),
-            excluded: Vec::new(),
-            cached_excluded: 0,
-            excluding: HashSet::new(),
+            keymap,
             reveal: reveal::reveal,
-            map: SpaceMap::default(),
-            git: GitJob::default(),
-            git_task: None,
-            branch_leaving: None,
-            exclude_leaving: None,
-            content: None,
-            chrome: None,
-            cache_content: cfg!(not(test)),
-            loader: None,
+            start: StartForm {
+                folder,
+                picked_folder: None,
+                whole_home: false,
+                folder_error: None,
+                folder_check: None,
+                recent,
+                scroll: ScrollHandle::new(),
+            },
+            session: ScanSession {
+                roots,
+                options,
+                snapshots,
+                forgotten: Forgotten::default(),
+                phase: Phase::Start,
+                stale: None,
+                pending: HashSet::new(),
+                early: Vec::new(),
+                streamed: false,
+                refreshed: Vec::new(),
+                progress: Activity::default(),
+                search: None,
+                search_error: None,
+                cancel: None,
+                started: Instant::now(),
+                index: Index::default(),
+                report_stats: ReportStats::default(),
+                report_generation: 0,
+                reclaimable: Cell::new(None),
+                cleaning: None,
+                flow: flow::Flow::default(),
+                gone: HashMap::new(),
+                history_fresh: false,
+                task: None,
+                restore_task: None,
+                excluded: Vec::new(),
+                cached_excluded: 0,
+                excluding: HashSet::new(),
+                git: GitJob::default(),
+                git_task: None,
+                branch_leaving: None,
+                exclude_leaving: None,
+            },
+            list: ListView {
+                tab: Tab::Overview,
+                safety: None,
+                hidden: HashSet::new(),
+                rows: Vec::new(),
+                rows_bytes: 0,
+                rows_max: 0,
+                path_room: Rc::new(Cell::new(0.)),
+                rows_filter: None,
+                rows_generation: 0,
+                all_checked: Cell::new(None),
+                row_hints: Default::default(),
+                selection: Selection::default(),
+                range: None,
+                visual: false,
+                count: String::new(),
+                asked: None,
+                held: keys::Held::default(),
+                filtering: false,
+                filters: HashMap::new(),
+                cursors: HashMap::new(),
+                cursor_bounds: Rc::new(Cell::new(None)),
+                artifact_scroll: UniformListScrollHandle::new(),
+                list_scrolls: [
+                    Tab::Caches,
+                    Tab::Toolchains,
+                    Tab::Docker,
+                    Tab::Repos,
+                    Tab::Duplicates,
+                    Tab::History,
+                    Tab::Issues,
+                ]
+                .into_iter()
+                .map(|tab| (tab, UniformListScrollHandle::new()))
+                .collect(),
+                lists: Lists::default(),
+                map: SpaceMap::default(),
+            },
+            overlays: Overlays {
+                dialog: None,
+                toast: None,
+                toast_task: None,
+                menu: None,
+                palette: None,
+                palette_cache: RefCell::default(),
+                shortcuts: false,
+                shortcuts_scroll: ScrollHandle::new(),
+                settings: None,
+                setting_writes: Default::default(),
+            },
+            chrome: Chrome {
+                collapsed,
+                wheel: px(0.),
+                moving: false,
+                font,
+                focus,
+                stops: RefCell::default(),
+                ring: None,
+                reveal_ring: Rc::new(Cell::new(false)),
+                sidebar_scroll: ScrollHandle::new(),
+                content: None,
+                view: None,
+                cache_content: cfg!(not(test)),
+                loader: None,
+            },
         };
-        if !app.roots.is_empty() {
-            app.recent.remember(&app.roots);
-            app.phase = Phase::Loading(Box::default());
+        if !app.session.roots.is_empty() {
+            app.start.recent.remember(&app.session.roots);
+            app.session.phase = Phase::Loading(Box::default());
             let view = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 view.update(cx, |app, cx| app.rescan(cx)).ok();
@@ -544,39 +581,46 @@ impl Kuizer {
 
     fn mark_recent_gone(&mut self, gone: Vec<PathBuf>, cx: &mut Context<Self>) {
         let unchanged = self
+            .start
             .recent
             .paths
             .iter()
-            .all(|path| self.recent.is_gone(path) == gone.contains(path));
+            .all(|path| self.start.recent.is_gone(path) == gone.contains(path));
         if unchanged {
             return;
         }
-        let before = self.recent.default_folder(&self.config, &self.roots);
-        self.recent.mark_gone(gone);
-        if self.folder == before {
-            self.folder = self.recent.default_folder(&self.config, &self.roots);
+        let before = self
+            .start
+            .recent
+            .default_folder(&self.config, &self.session.roots);
+        self.start.recent.mark_gone(gone);
+        if self.start.folder == before {
+            self.start.folder = self
+                .start
+                .recent
+                .default_folder(&self.config, &self.session.roots);
         }
         cx.notify();
     }
 
     fn report(&self) -> Option<&Report> {
-        match &self.phase {
+        match &self.session.phase {
             Phase::Ready(report) => Some(report),
             _ => None,
         }
     }
 
     fn busy(&self) -> bool {
-        matches!(self.phase, Phase::Loading(_)) || self.restoring()
+        matches!(self.session.phase, Phase::Loading(_)) || self.restoring()
     }
 
     fn working(&self) -> bool {
-        self.busy() || self.refreshing() || self.cleaning.is_some()
+        self.busy() || self.refreshing() || self.session.cleaning.is_some()
     }
 
     fn restoring(&self) -> bool {
         matches!(
-            self.toast,
+            self.overlays.toast,
             Some(Toast {
                 notice: Notice::Restoring { .. },
                 ..
@@ -585,21 +629,21 @@ impl Kuizer {
     }
 
     fn can_restore(&self) -> bool {
-        self.report().is_some() && !self.working() && self.dialog.is_none()
+        self.report().is_some() && !self.working() && self.overlays.dialog.is_none()
     }
 
     fn show_toast(&mut self, notice: Notice, cx: &mut Context<Self>) {
-        self.toast = Some(Toast {
+        self.overlays.toast = Some(Toast {
             notice,
             shown: Duration::ZERO,
         });
-        self.toast_task = Some(cx.spawn(async move |this, cx| {
+        self.overlays.toast_task = Some(cx.spawn(async move |this, cx| {
             let mut wait = TOAST_TIME;
             loop {
                 cx.background_executor().timer(wait).await;
                 let next = this.update(cx, |app, cx| {
-                    let paused = app.dialog.is_some();
-                    let toast = app.toast.as_mut()?;
+                    let paused = app.overlays.dialog.is_some();
+                    let toast = app.overlays.toast.as_mut()?;
                     if !toast.notice.lingers() {
                         return None;
                     }
@@ -610,7 +654,7 @@ impl Kuizer {
                     if toast.shown < TOAST_TIME {
                         return Some(TOAST_TIME - toast.shown);
                     }
-                    app.toast = None;
+                    app.overlays.toast = None;
                     app.redraw_chrome(cx);
                     None
                 });
@@ -625,14 +669,14 @@ impl Kuizer {
 
     fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
         let pinned = matches!(
-            self.toast,
+            self.overlays.toast,
             Some(Toast {
                 notice: Notice::Deleting(_) | Notice::Restoring { .. },
                 ..
             })
         );
-        if self.toast.is_some() && !pinned {
-            self.toast = None;
+        if self.overlays.toast.is_some() && !pinned {
+            self.overlays.toast = None;
             cx.notify();
         }
     }
@@ -647,14 +691,15 @@ impl Kuizer {
 
     /// Whether a scan is still filling or replacing the results on screen.
     fn refreshing(&self) -> bool {
-        self.stale.is_some() || (self.cancel.is_some() && matches!(self.phase, Phase::Ready(_)))
+        self.session.stale.is_some()
+            || (self.session.cancel.is_some() && matches!(self.session.phase, Phase::Ready(_)))
     }
 
     /// Whether a list still shows rows of an earlier scan. Those may not be removed until the
     /// running scan replaces them; rows the running scan found itself may.
     fn outdated(&self, source: Source) -> bool {
-        if self.cancel.is_none() {
-            return self.stale.is_some();
+        if self.session.cancel.is_none() {
+            return self.session.stale.is_some();
         }
         let part = match source {
             Source::Artifact => Part::Artifacts,
@@ -662,14 +707,15 @@ impl Kuizer {
             Source::Toolchain => Part::Toolchains,
             Source::Docker => Part::Docker,
         };
-        self.pending.contains(&part) && !(source == Source::Artifact && self.streamed)
+        self.session.pending.contains(&part)
+            && !(source == Source::Artifact && self.session.streamed)
     }
 
     /// Why items of these lists cannot be removed right now, if anything stands in the way.
     fn locked(&self, mut sources: impl Iterator<Item = Source>) -> Option<&'static str> {
         if self.restoring() {
             Some(WAIT_FOR_RESTORE)
-        } else if self.cleaning.is_some() {
+        } else if self.session.cleaning.is_some() {
             Some(keys::WAIT_FOR_CLEANUP)
         } else if sources.any(|source| self.outdated(source)) {
             Some(
@@ -681,20 +727,20 @@ impl Kuizer {
     }
 
     fn refresh_rows(&mut self) {
-        self.asked = None;
-        self.rows_generation += 1;
-        let Phase::Ready(report) = &self.phase else {
-            self.rows.clear();
-            self.rows_bytes = 0;
-            self.rows_max = 0;
-            self.rows_filter = None;
+        self.list.asked = None;
+        self.list.rows_generation += 1;
+        let Phase::Ready(report) = &self.session.phase else {
+            self.list.rows.clear();
+            self.list.rows_bytes = 0;
+            self.list.rows_max = 0;
+            self.list.rows_filter = None;
             return;
         };
         let filter = RowsFilter {
-            report: self.report_generation,
+            report: self.session.report_generation,
             needle: self.needle(Tab::Artifacts),
-            safety: self.safety,
-            hidden: self.hidden.clone(),
+            safety: self.list.safety,
+            hidden: self.list.hidden.clone(),
         };
         let shows = |candidate: &Candidate| {
             filter
@@ -711,7 +757,7 @@ impl Kuizer {
                         ],
                     ))
         };
-        let narrows = self.rows_filter.as_ref().is_some_and(|last| {
+        let narrows = self.list.rows_filter.as_ref().is_some_and(|last| {
             last.report == filter.report
                 && last.safety == filter.safety
                 && last.hidden == filter.hidden
@@ -722,9 +768,11 @@ impl Kuizer {
                 }
         });
         if narrows {
-            self.rows.retain(|&index| shows(&report.candidates[index]));
+            self.list
+                .rows
+                .retain(|&index| shows(&report.candidates[index]));
         } else {
-            self.rows = report
+            self.list.rows = report
                 .candidates
                 .iter()
                 .enumerate()
@@ -732,17 +780,18 @@ impl Kuizer {
                 .map(|(index, _)| index)
                 .collect();
         }
-        (self.rows_bytes, self.rows_max) = self.rows.iter().fold((0, 0), |(sum, max), &index| {
-            let bytes = report.candidates[index].usage.allocated;
-            (sum + bytes, max.max(bytes))
-        });
-        self.rows_filter = Some(filter);
+        (self.list.rows_bytes, self.list.rows_max) =
+            self.list.rows.iter().fold((0, 0), |(sum, max), &index| {
+                let bytes = report.candidates[index].usage.allocated;
+                (sum + bytes, max.max(bytes))
+            });
+        self.list.rows_filter = Some(filter);
     }
 
     fn grow_stats(&mut self) {
-        self.report_generation += 1;
-        self.index = Index::default();
-        self.report_stats = match &self.phase {
+        self.session.report_generation += 1;
+        self.session.index = Index::default();
+        self.session.report_stats = match &self.session.phase {
             Phase::Ready(report) => ReportStats::new(report),
             _ => ReportStats::default(),
         };
@@ -751,17 +800,17 @@ impl Kuizer {
     /// Recomputes what the views add up from the report and weighs the selection again. Runs
     /// whenever the report changes.
     fn refresh_stats(&mut self) {
-        self.report_generation += 1;
-        let Phase::Ready(report) = &self.phase else {
-            self.index = Index::default();
-            self.report_stats = ReportStats::default();
+        self.session.report_generation += 1;
+        let Phase::Ready(report) = &self.session.phase else {
+            self.session.index = Index::default();
+            self.session.report_stats = ReportStats::default();
             return;
         };
-        self.index = Index::default();
-        self.report_stats = ReportStats::new(report);
-        if !self.selection.is_empty() {
-            let index = &self.index;
-            self.selection.reweigh(|key| index.find(report, key));
+        self.session.index = Index::default();
+        self.session.report_stats = ReportStats::new(report);
+        if !self.list.selection.is_empty() {
+            let index = &self.session.index;
+            self.list.selection.reweigh(|key| index.find(report, key));
         }
     }
 
@@ -771,10 +820,11 @@ impl Kuizer {
             return Vec::new();
         };
         let mut items: Vec<(Source, usize, &Candidate)> = self
+            .list
             .selection
             .keys()
             .filter_map(|&key| {
-                let (position, candidate) = self.index.locate(report, key)?;
+                let (position, candidate) = self.session.index.locate(report, key)?;
                 Some((key.0, position, candidate))
             })
             .collect();
@@ -787,47 +837,57 @@ impl Kuizer {
 
     /// Selects an item of the report, and says whether it was not selected before.
     fn select(&mut self, key: (Source, u64)) -> bool {
-        let Phase::Ready(report) = &self.phase else {
+        let Phase::Ready(report) = &self.session.phase else {
             return false;
         };
-        self.index
+        self.session
+            .index
             .find(report, key)
-            .is_some_and(|candidate| self.selection.insert(key, candidate))
+            .is_some_and(|candidate| self.list.selection.insert(key, candidate))
     }
 
     /// Whether every artifact row on screen is selected, cached until the rows or the selection
     /// change.
     fn all_rows_checked(&self) -> bool {
-        let generation = (self.rows_generation, self.selection.generation());
-        if let Some((rows, selection, checked)) = self.all_checked.get()
+        let generation = (self.list.rows_generation, self.list.selection.generation());
+        if let Some((rows, selection, checked)) = self.list.all_checked.get()
             && (rows, selection) == generation
         {
             return checked;
         }
         let checked = self.report().is_some_and(|report| {
-            !self.rows.is_empty()
-                && self.selection.stats().source(Source::Artifact).all.count >= self.rows.len()
-                && self.rows.iter().all(|&index| {
-                    self.selection
+            !self.list.rows.is_empty()
+                && self
+                    .list
+                    .selection
+                    .stats()
+                    .source(Source::Artifact)
+                    .all
+                    .count
+                    >= self.list.rows.len()
+                && self.list.rows.iter().all(|&index| {
+                    self.list
+                        .selection
                         .contains(&(Source::Artifact, report.candidates[index].id))
                 })
         });
-        self.all_checked
+        self.list
+            .all_checked
             .set(Some((generation.0, generation.1, checked)));
         checked
     }
 
     fn toggle(&mut self, source: Source, id: u64, cx: &mut Context<Self>) {
-        self.range = None;
-        if !self.selection.remove(&(source, id)) {
+        self.list.range = None;
+        if !self.list.selection.remove(&(source, id)) {
             self.select((source, id));
         }
-        self.flow.mark((source, id));
+        self.session.flow.mark((source, id));
         cx.notify();
     }
 
     fn select_safe(&mut self, cx: &mut Context<Self>) {
-        self.asked = None;
+        self.list.asked = None;
         for (key, safety) in self.list_items() {
             if safety == Safety::Safe {
                 self.select(key);
@@ -838,7 +898,7 @@ impl Kuizer {
 
     fn item(&self, key: (Source, u64)) -> Option<(Source, &Candidate)> {
         let report = self.report()?;
-        Some((key.0, self.index.find(report, key)?))
+        Some((key.0, self.session.index.find(report, key)?))
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
@@ -866,16 +926,16 @@ impl Kuizer {
     }
 
     fn wheel_zoom(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        self.wheel += event.delta.pixel_delta(WHEEL_NOTCH).y;
-        if self.wheel.abs() < WHEEL_NOTCH {
+        self.chrome.wheel += event.delta.pixel_delta(WHEEL_NOTCH).y;
+        if self.chrome.wheel.abs() < WHEEL_NOTCH {
             return;
         }
-        let percent = if self.wheel > px(0.) {
+        let percent = if self.chrome.wheel > px(0.) {
             zoom::zoomed_in(self.config.appearance.zoom)
         } else {
             zoom::zoomed_out(self.config.appearance.zoom)
         };
-        self.wheel = px(0.);
+        self.chrome.wheel = px(0.);
         self.set_zoom(percent, cx);
     }
 
@@ -888,7 +948,7 @@ impl Kuizer {
 
     /// Why the selection, or the cursor row when nothing is selected, cannot be removed now.
     fn trash_lock(&self) -> Option<&'static str> {
-        let stats = self.selection.stats();
+        let stats = self.list.selection.stats();
         if stats.total().all.count > 0 {
             let selected = Source::ALL
                 .into_iter()
@@ -902,17 +962,21 @@ impl Kuizer {
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        match &self.phase {
+        match &self.session.phase {
             Phase::Start => self.render_start(cx),
             Phase::Loading(activity) => self.render_loading(activity),
             Phase::Failed(error) => self.render_failed(error, cx),
             Phase::Ready(_) => {
                 let pending = self
+                    .list
                     .tab
                     .part()
-                    .filter(|part| self.pending.contains(part))
+                    .filter(|part| self.session.pending.contains(part))
                     .map(|_| {
-                        let status = self.tab.status(&self.progress, &self.options);
+                        let status = self
+                            .list
+                            .tab
+                            .status(&self.session.progress, &self.session.options);
                         div()
                             .debug_selector(|| "section-pending".to_owned())
                             .flex()
@@ -929,7 +993,7 @@ impl Kuizer {
                             ))
                             .child(status)
                     });
-                let list = match self.tab {
+                let list = match self.list.tab {
                     Tab::Overview => self.render_overview(cx),
                     Tab::Artifacts => self.render_artifacts(cx),
                     Tab::Caches => self.render_caches(cx),
@@ -944,7 +1008,7 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .child(page_header(self.tab, self.tab_bytes(self.tab)))
+                    .child(page_header(self.list.tab, self.tab_bytes(self.list.tab)))
                     .children(pending)
                     .child(div().flex().flex_col().flex_1().min_h_0().child(list))
                     .into_any_element()
@@ -1047,11 +1111,12 @@ impl Kuizer {
     /// hides or shows it in the list.
     fn render_categories(&self, cx: &mut Context<Self>) -> Div {
         let categories: Vec<(usize, Category, u64)> = self
+            .session
             .report_stats
             .categories
             .iter()
             .enumerate()
-            .filter(|(_, (category, bytes))| *bytes > 0 || self.hidden.contains(category))
+            .filter(|(_, (category, bytes))| *bytes > 0 || self.list.hidden.contains(category))
             .map(|(rank, (category, bytes))| (rank, *category, *bytes))
             .collect();
         let whole = categories.iter().map(|(_, _, bytes)| bytes).sum::<u64>();
@@ -1077,11 +1142,11 @@ impl Kuizer {
                         .w(relative(theme::share(bytes, whole)))
                         .min_w(unit(size::MARKER))
                         .rounded(theme::radius_bar())
-                        .bg(tone(rank, !self.hidden.contains(&category)))
+                        .bg(tone(rank, !self.list.hidden.contains(&category)))
                 },
             ));
         let chips = categories.iter().map(|&(rank, category, bytes)| {
-            let shown = !self.hidden.contains(&category);
+            let shown = !self.list.hidden.contains(&category);
             let chip = div()
                 .id(category.as_str())
                 .flex()
@@ -1117,8 +1182,8 @@ impl Kuizer {
                         .child(theme::bytes(bytes)),
                 );
             self.control(chip, cx, move |app, _, cx| {
-                if !app.hidden.remove(&category) {
-                    app.hidden.insert(category);
+                if !app.list.hidden.remove(&category) {
+                    app.list.hidden.insert(category);
                 }
                 app.refresh_rows();
                 cx.notify();
@@ -1146,7 +1211,7 @@ impl Kuizer {
         if self.report().is_none() {
             return div().into_any_element();
         }
-        let shown_bytes = self.rows_bytes;
+        let shown_bytes = self.list.rows_bytes;
         let all_checked = self.all_rows_checked();
         let toolbar = self
             .list_toolbar(cx)
@@ -1182,7 +1247,7 @@ impl Kuizer {
             .child(head(col::L, "Rule", Term::Rule))
             .child(head(col::XS, "Changed", Term::Changed).text_right())
             .child(div().relative().flex_1().child("PATH").child({
-                let room = Rc::clone(&self.path_room);
+                let room = Rc::clone(&self.list.path_room);
                 canvas(
                     move |area, window, _| {
                         let width = f32::from(area.size.width);
@@ -1198,19 +1263,19 @@ impl Kuizer {
             }));
         let list = uniform_list(
             "artifacts",
-            self.rows.len(),
+            self.list.rows.len(),
             cx.processor(|app, range: Range<usize>, window, cx| {
                 let Some(report) = app.report() else {
                     return Vec::new();
                 };
                 let cursor = app.cursor_target();
-                let largest = app.rows_max.max(1);
+                let largest = app.list.rows_max.max(1);
                 range
                     .filter_map(|row| {
-                        let candidate = &report.candidates[*app.rows.get(row)?];
+                        let candidate = &report.candidates[*app.list.rows.get(row)?];
                         let id = candidate.id;
                         let key = (Source::Artifact, id);
-                        let checked = app.selection.contains(&key);
+                        let checked = app.list.selection.contains(&key);
                         let review = candidate.rule.safety == Safety::Review;
                         let target = Target::Item(Source::Artifact, id, candidate.path.clone());
                         let look = app.look(Source::Artifact, id, &candidate.path);
@@ -1237,7 +1302,8 @@ impl Kuizer {
                             "0",
                             zoom::rem_size(app.config.appearance.zoom),
                         ));
-                        let (folder, leaf) = fit_path(folder, leaf, app.path_room.get(), advance);
+                        let (folder, leaf) =
+                            fit_path(folder, leaf, app.list.path_room.get(), advance);
                         let row = table_row(("artifact", id), checked)
                             .debug_selector(move || format!("artifact-row-{row}"));
                         Some(
@@ -1381,7 +1447,7 @@ impl Kuizer {
                     .collect()
             }),
         )
-        .track_scroll(self.artifact_scroll.clone())
+        .track_scroll(self.list.artifact_scroll.clone())
         .debug_selector(|| "artifact-list".to_owned())
         .flex_1()
         .w_full();
@@ -1393,7 +1459,7 @@ impl Kuizer {
             .child(toolbar)
             .child(table(
                 header,
-                if self.rows.is_empty() {
+                if self.list.rows.is_empty() {
                     empty_list(
                         Tab::Artifacts,
                         self.report().map_or(0, |report| report.candidates.len()),
@@ -1515,7 +1581,7 @@ impl Render for Kuizer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(zoom::rem_size(self.config.appearance.zoom));
         self.animate_rows(window);
-        tooltip::focus(self.ring.clone().filter(|_| !self.typing()), cx);
+        tooltip::focus(self.chrome.ring.clone().filter(|_| !self.typing()), cx);
         let view = cx.entity().downgrade();
         let wheel = canvas(
             |_, _, _| {},
@@ -1540,7 +1606,7 @@ impl Render for Kuizer {
         let palette = self.render_palette(cx);
         let shortcuts = self.render_shortcuts(cx);
         let settings = self.render_settings(cx);
-        let start = matches!(self.phase, Phase::Start);
+        let start = matches!(self.session.phase, Phase::Start);
         self.region(Region::Titlebar);
         let titlebar = self.render_titlebar(window, cx);
         self.region(Region::Sidebar);
@@ -1584,13 +1650,13 @@ impl Render for Kuizer {
             .size_full()
             .bg(theme::background())
             .text_color(theme::text())
-            .font_family(self.font.clone())
+            .font_family(self.chrome.font.clone())
             .text_size(unit(font::BODY))
-            .track_focus(&self.focus)
+            .track_focus(&self.chrome.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_key_up(cx.listener(Self::on_key_up))
             .capture_any_mouse_down(cx.listener(|app, _: &MouseDownEvent, _, cx| {
-                if app.ring.take().is_some() {
+                if app.chrome.ring.take().is_some() {
                     cx.notify();
                 }
             }))
@@ -1633,7 +1699,8 @@ impl Render for Kuizer {
                                     .when(self.working(), |this| {
                                         this.child(
                                             div().absolute().top_0().left_0().right_0().child(
-                                                self.loader
+                                                self.chrome
+                                                    .loader
                                                     .get_or_insert_with(|| {
                                                         cx.new(|_| chart::Loader)
                                                     })

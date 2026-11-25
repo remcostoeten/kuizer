@@ -42,7 +42,7 @@ pub(super) enum GitScope {
 
 impl Kuizer {
     pub(super) fn git_running(&self) -> bool {
-        !self.git.roots.is_empty()
+        !self.session.git.roots.is_empty()
     }
 
     fn repository(&self, root: &Path) -> Option<&Repository> {
@@ -97,7 +97,7 @@ impl Kuizer {
     /// The repository under the keyboard cursor of the Git repositories section.
     pub(super) fn cursor_repo(&self) -> Option<PathBuf> {
         match self.cursor_target() {
-            Some(Target::Repo(root)) if self.tab == Tab::Repos => Some(root),
+            Some(Target::Repo(root)) if self.list.tab == Tab::Repos => Some(root),
             _ => None,
         }
     }
@@ -201,8 +201,8 @@ impl Kuizer {
         if self.branches_blocked(Some(&scope)).is_some() {
             return;
         }
-        self.menu = None;
-        self.dialog = Some(Dialog::Branches {
+        self.overlays.menu = None;
+        self.overlays.dialog = Some(Dialog::Branches {
             scope,
             cancel: true,
         });
@@ -211,7 +211,7 @@ impl Kuizer {
 
     /// Closes the branch confirmation and keeps every branch.
     pub(super) fn close_branches(&mut self, cx: &mut Context<Self>) {
-        if let Some(Dialog::Branches { scope, .. }) = self.dialog.take() {
+        if let Some(Dialog::Branches { scope, .. }) = self.overlays.dialog.take() {
             self.leave_branches(scope, cx);
         }
         cx.notify();
@@ -222,16 +222,17 @@ impl Kuizer {
             return;
         }
         let at = Instant::now();
-        self.branch_leaving = Some(Leaving { scope, at });
+        self.session.branch_leaving = Some(Leaving { scope, at });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(motion::STEP).await;
             let _ = this.update(cx, |app, cx| {
                 if app
+                    .session
                     .branch_leaving
                     .as_ref()
                     .is_some_and(|leaving| leaving.at == at)
                 {
-                    app.branch_leaving = None;
+                    app.session.branch_leaving = None;
                     cx.notify();
                 }
             });
@@ -240,7 +241,7 @@ impl Kuizer {
     }
 
     pub(super) fn accept_branches(&mut self, cx: &mut Context<Self>) {
-        let Some(Dialog::Branches { scope, .. }) = self.dialog.take() else {
+        let Some(Dialog::Branches { scope, .. }) = self.overlays.dialog.take() else {
             return;
         };
         self.leave_branches(scope.clone(), cx);
@@ -281,17 +282,17 @@ impl Kuizer {
                 return;
             }
         };
-        self.git.roots = roots;
+        self.session.git.roots = roots;
         cx.notify();
-        self.git_task = Some(cx.spawn(async move |this, cx| {
+        self.session.git_task = Some(cx.spawn(async move |this, cx| {
             let done = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.git_done(done, cx));
         }));
     }
 
     fn git_done(&mut self, done: Option<Vec<Done>>, cx: &mut Context<Self>) {
-        self.git = GitJob::default();
-        self.git_task = None;
+        self.session.git = GitJob::default();
+        self.session.git_task = None;
         let Some(done) = done else {
             self.tell(
                 Notice::Failed("The git command stopped unexpectedly".to_owned()),
@@ -301,8 +302,8 @@ impl Kuizer {
             return;
         };
         let min_gain = self.min_gain();
-        self.report_generation += 1;
-        if let Phase::Ready(report) = &mut self.phase {
+        self.session.report_generation += 1;
+        if let Phase::Ready(report) = &mut self.session.phase {
             for result in &done {
                 let index = report
                     .repos
@@ -453,7 +454,7 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let root = repository.root.clone();
-        let running = self.git.roots.contains(&root);
+        let running = self.session.git.roots.contains(&root);
         let gc_lock = self.gc_lock(repository);
         let branch_lock = self.branches_lock(repository);
         let id = index as u64;
@@ -591,7 +592,7 @@ impl Kuizer {
     /// The confirmation before merged branches go, floating over the bottom of the list like
     /// the selection summary: it rises in when asked and sinks away once answered.
     pub(super) fn render_branch_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (scope, focus) = match (&self.dialog, &self.branch_leaving) {
+        let (scope, focus) = match (&self.overlays.dialog, &self.session.branch_leaving) {
             (Some(Dialog::Branches { scope, cancel }), _) => (scope, Some(*cancel)),
             (_, Some(leaving)) => (&leaving.scope, None),
             _ => return None,
@@ -924,7 +925,7 @@ mod tests {
 
     fn toast(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |app, _| {
-            match app.toast.as_ref().map(|toast| &toast.notice) {
+            match app.overlays.toast.as_ref().map(|toast| &toast.notice) {
                 Some(Notice::Info(text) | Notice::Failed(text)) => text.clone(),
                 _ => String::new(),
             }
@@ -960,7 +961,7 @@ mod tests {
             .expect("the gc button is painted");
         cx.simulate_click(button.center(), Modifiers::default());
         cx.run_until_parked();
-        assert!(view.read_with(cx, |app, _| app.dialog.is_none()));
+        assert!(view.read_with(cx, |app, _| app.overlays.dialog.is_none()));
         wait_for_git(&view, cx);
         assert!(
             toast(&view, cx).starts_with("Freed"),
@@ -987,11 +988,11 @@ mod tests {
         };
         cx.simulate_keystrokes("b");
         assert!(view.read_with(cx, |app, _| matches!(
-            &app.dialog,
+            &app.overlays.dialog,
             Some(Dialog::Branches { scope: GitScope::One(shown), .. }) if *shown == root
         )));
         cx.simulate_keystrokes("escape");
-        assert!(view.read_with(cx, |app, _| app.dialog.is_none()));
+        assert!(view.read_with(cx, |app, _| app.overlays.dialog.is_none()));
         assert!(git(
             &root,
             &["show-ref", "--verify", "--quiet", "refs/heads/done"]
@@ -1014,7 +1015,8 @@ mod tests {
             let repos = &app.report().unwrap().repos;
             assert!(repos.iter().all(|repository| repository.merged.is_empty()));
             assert!(
-                app.toast
+                app.overlays
+                    .toast
                     .as_ref()
                     .is_some_and(|toast| toast.notice.lingers())
             );
@@ -1031,13 +1033,13 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("branch-confirm").is_some());
         assert!(view.read_with(cx, |app, _| matches!(
-            app.dialog,
+            app.overlays.dialog,
             Some(Dialog::Branches { cancel: true, .. })
         )));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         view.read_with(cx, |app, _| {
-            assert!(app.dialog.is_none(), "Enter on Cancel closes");
+            assert!(app.overlays.dialog.is_none(), "Enter on Cancel closes");
             assert!(!app.git_running());
         });
         assert!(git(
@@ -1054,7 +1056,7 @@ mod tests {
         };
         std::fs::create_dir(root.join(".git/rebase-merge")).unwrap();
         view.update(cx, |app, _| {
-            if let Phase::Ready(report) = &mut app.phase {
+            if let Phase::Ready(report) = &mut app.session.phase {
                 report.repos[0].busy = repos::busy(&root.join(".git"));
             }
         });
@@ -1062,7 +1064,7 @@ mod tests {
         cx.simulate_keystrokes("b");
         view.read_with(cx, |app, _| {
             assert!(!app.git_running());
-            assert!(app.dialog.is_none());
+            assert!(app.overlays.dialog.is_none());
             let reason = app.gc_blocked(Some(&GitScope::One(root.clone())));
             assert_eq!(reason, Some("A rebase is in progress in this repository"));
         });

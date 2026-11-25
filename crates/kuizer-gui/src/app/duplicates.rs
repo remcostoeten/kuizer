@@ -9,20 +9,20 @@ impl Kuizer {
     /// @example
     /// app.find_duplicates(cx);
     pub(super) fn find_duplicates(&mut self, cx: &mut Context<Self>) {
-        if self.search.is_some() {
+        if self.session.search.is_some() {
             self.stop_duplicates(cx);
             return;
         }
         if self.report().is_none() {
             return;
         }
-        self.search_error = None;
+        self.session.search_error = None;
         let (sender, mut receiver) = mpsc::unbounded();
         let config = self.config.clone();
-        let roots = self.roots.clone();
-        let options = self.options.clone();
-        let snapshots = self.snapshots.clone();
-        let excluded = self.excluded.clone();
+        let roots = self.session.roots.clone();
+        let options = self.session.options.clone();
+        let snapshots = self.session.snapshots.clone();
+        let excluded = self.session.excluded.clone();
         let cancel = Cancel::new();
         let worker_cancel = cancel.clone();
         let spawned = spawn_worker("kuizer-gui-duplicates", move || {
@@ -51,9 +51,9 @@ impl Kuizer {
                 staged.save();
             }
         });
-        let excluded_count = self.excluded.len();
+        let excluded_count = self.session.excluded.len();
         if let Err(error) = spawned {
-            self.search_error = Some(error);
+            self.session.search_error = Some(error);
             cx.notify();
             return;
         }
@@ -76,8 +76,8 @@ impl Kuizer {
                 );
             });
         });
-        self.search = Some(Search {
-            roots: self.roots.clone(),
+        self.session.search = Some(Search {
+            roots: self.session.roots.clone(),
             excluded: excluded_count,
             stage: None,
             cancel,
@@ -93,13 +93,13 @@ impl Kuizer {
     /// @example
     /// app.stop_duplicates(cx);
     pub(super) fn stop_duplicates(&mut self, cx: &mut Context<Self>) {
-        if self.search.take().is_some() {
+        if self.session.search.take().is_some() {
             cx.notify();
         }
     }
 
     pub(super) fn searched(&mut self, searched: Searched, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else {
+        let Some(search) = &mut self.session.search else {
             return;
         };
         match searched {
@@ -107,10 +107,10 @@ impl Kuizer {
             Searched::Done(found) => {
                 let roots = std::mem::take(&mut search.roots);
                 let excluded = search.excluded;
-                self.search = None;
+                self.session.search = None;
                 match found {
                     Ok(found) => self.show_duplicates(&roots, found, excluded, cx),
-                    Err(error) => self.search_error = Some(error),
+                    Err(error) => self.session.search_error = Some(error),
                 }
             }
         }
@@ -127,14 +127,17 @@ impl Kuizer {
         excluded: usize,
         cx: &mut Context<Self>,
     ) {
-        if let Phase::Ready(report) = &mut self.phase
+        if let Phase::Ready(report) = &mut self.session.phase
             && report.roots == roots
         {
-            model::drop_duplicate_paths(&mut found, self.excluded.get(excluded..).unwrap_or(&[]));
+            model::drop_duplicate_paths(
+                &mut found,
+                self.session.excluded.get(excluded..).unwrap_or(&[]),
+            );
             if let Some(old) = report.duplicates.replace(found) {
                 cx.background_spawn(async move { drop(old) }).detach();
             }
-            self.report_generation += 1;
+            self.session.report_generation += 1;
         }
     }
 
@@ -144,13 +147,13 @@ impl Kuizer {
         let Some(report) = self.report() else {
             return;
         };
-        if report.duplicates.is_some() || self.search.is_some() {
+        if report.duplicates.is_some() || self.session.search.is_some() {
             return;
         }
         let roots = report.roots.clone();
-        let snapshots = self.snapshots.clone();
-        let options = dupes::Options::from_config(&self.options.apply(&self.config));
-        let excluded = self.excluded.clone();
+        let snapshots = self.session.snapshots.clone();
+        let options = dupes::Options::from_config(&self.session.options.apply(&self.config));
+        let excluded = self.session.excluded.clone();
         let excluded_count = excluded.len();
         let spawned = spawn_worker("kuizer-gui-saved-duplicates", move || {
             let mut found = snapshots.load_duplicates(&roots, options);
@@ -169,11 +172,11 @@ impl Kuizer {
                 return;
             }
         };
-        let roots = self.roots.clone();
+        let roots = self.session.roots.clone();
         cx.spawn(async move |this, cx| {
             if let Ok(Some(found)) = receiver.await {
                 let _ = this.update(cx, |app, cx| {
-                    if app.search.is_none()
+                    if app.session.search.is_none()
                         && app
                             .report()
                             .is_some_and(|report| report.duplicates.is_none())
@@ -188,7 +191,7 @@ impl Kuizer {
     }
 
     pub(super) fn render_duplicate_search(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (text, label) = match (&self.search, &self.search_error) {
+        let (text, label) = match (&self.session.search, &self.session.search_error) {
             (Some(search), _) => (
                 match search.stage {
                     None => "Starting the duplicate search".to_owned(),
@@ -218,7 +221,7 @@ impl Kuizer {
                 "Find duplicates",
             ),
         };
-        let tip = if self.search.is_some() {
+        let tip = if self.session.search.is_some() {
             Tooltip::new("Stop the search. Nothing it found so far is kept")
                 .keys(&[&self.hint(&Command::StopDuplicates)])
                 .build()

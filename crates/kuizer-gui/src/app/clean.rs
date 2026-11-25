@@ -25,7 +25,7 @@ impl Kuizer {
             }
         };
         self.show_toast(Notice::Restoring { session }, cx);
-        self.restore_task = Some(cx.spawn(async move |this, cx| {
+        self.session.restore_task = Some(cx.spawn(async move |this, cx| {
             let message = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.restored(message, cx));
         }));
@@ -43,7 +43,7 @@ impl Kuizer {
             );
             return;
         };
-        if let Phase::Ready(report) = &mut self.phase
+        if let Phase::Ready(report) = &mut self.session.phase
             && let Some(history) = history
         {
             report.history = Ok(history);
@@ -51,7 +51,7 @@ impl Kuizer {
         self.refresh_stats();
         let notice = match restored {
             Ok(restored) => {
-                if restored.items > 0 && matches!(self.phase, Phase::Ready(_)) {
+                if restored.items > 0 && matches!(self.session.phase, Phase::Ready(_)) {
                     self.rescan(cx);
                 }
                 Notice::Restored(restored)
@@ -62,7 +62,7 @@ impl Kuizer {
     }
 
     pub(super) fn trash(&mut self, cx: &mut Context<Self>) {
-        if !self.selection.is_empty() {
+        if !self.list.selection.is_empty() {
             self.delete(None, cx);
         }
     }
@@ -145,7 +145,7 @@ impl Kuizer {
         let receiver = match spawned {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.dialog = Some(Dialog::Finished(Finished {
+                self.overlays.dialog = Some(Dialog::Finished(Finished {
                     removed: 0,
                     removed_bytes: 0,
                     trashed: 0,
@@ -161,7 +161,7 @@ impl Kuizer {
             let message = receiver.await.ok();
             let _ = this.update(cx, |app, cx| app.finish(message, cx));
         });
-        self.cleaning = Some(Cleaning {
+        self.session.cleaning = Some(Cleaning {
             paths,
             started: Instant::now(),
             _task: task,
@@ -176,10 +176,10 @@ impl Kuizer {
         if paths.is_empty() {
             return;
         }
-        if self.cancel.is_some() {
-            self.forgotten.add(paths.iter().cloned());
+        if self.session.cancel.is_some() {
+            self.session.forgotten.add(paths.iter().cloned());
         }
-        let (snapshots, roots) = (self.snapshots.clone(), self.roots.clone());
+        let (snapshots, roots) = (self.session.snapshots.clone(), self.session.roots.clone());
         let spawned = std::thread::Builder::new()
             .name("kuizer-gui-forget".to_owned())
             .spawn(move || snapshots.forget(&roots, &paths));
@@ -193,19 +193,19 @@ impl Kuizer {
         message: Option<(Outcome, Result<HistoryView, String>)>,
         cx: &mut Context<Self>,
     ) {
-        let cleaning = self.cleaning.take();
+        let cleaning = self.session.cleaning.take();
         if matches!(
-            self.toast,
+            self.overlays.toast,
             Some(Toast {
                 notice: Notice::Deleting(_),
                 ..
             })
         ) {
-            self.toast = None;
+            self.overlays.toast = None;
         }
         let Some((outcome, history)) = message else {
             self.settle(cleaning, HashMap::new(), cx);
-            self.dialog = Some(Dialog::Finished(Finished {
+            self.overlays.dialog = Some(Dialog::Finished(Finished {
                 removed: 0,
                 removed_bytes: 0,
                 trashed: 0,
@@ -260,27 +260,27 @@ impl Kuizer {
             .map(|(source, candidate)| (source, candidate.id))
             .collect();
         for key in &deselected {
-            self.selection.remove(key);
-            self.flow.mark(*key);
+            self.list.selection.remove(key);
+            self.session.flow.mark(*key);
         }
-        if let Phase::Ready(report) = &mut self.phase {
+        if let Phase::Ready(report) = &mut self.session.phase {
             report.history = history;
         }
         self.forget_in_snapshot(&removed);
-        if self.cancel.is_some() {
-            self.history_fresh = true;
+        if self.session.cancel.is_some() {
+            self.session.history_fresh = true;
         }
         self.settle(cleaning, removed, cx);
         let clean = finished.failures.is_empty() && finished.history_error.is_none();
         if clean && finished.removed > 0 {
             self.show_toast(Notice::Info(finished.summary()), cx);
         }
-        self.dialog = (!clean).then_some(Dialog::Finished(finished));
+        self.overlays.dialog = (!clean).then_some(Dialog::Finished(finished));
         cx.notify();
     }
 
     pub(super) fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let toast = self.toast.as_ref()?;
+        let toast = self.overlays.toast.as_ref()?;
         let dismiss = || {
             self.button(
                 "dismiss-toast",
@@ -409,7 +409,7 @@ impl Kuizer {
     }
 
     pub(super) fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let dialog = self.dialog.as_ref()?;
+        let dialog = self.overlays.dialog.as_ref()?;
         let panel = div()
             .flex()
             .flex_col()
@@ -476,7 +476,7 @@ impl Kuizer {
                                     .build(),
                             )
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                app.dialog = None;
+                                app.overlays.dialog = None;
                                 cx.notify();
                             })),
                     ),
@@ -499,7 +499,7 @@ impl Kuizer {
 
     /// The floating bar that sums up the selection and deletes it, over the bottom of the list.
     pub(super) fn render_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (stats, shown) = self.flow.bar()?;
+        let (stats, shown) = self.session.flow.bar()?;
         let total = stats.total();
         let count = total.all.count;
         let review = total.review.count;
@@ -595,7 +595,7 @@ impl Kuizer {
                     cx,
                     |app, _, cx| {
                         if !app.busy() {
-                            app.selection.clear();
+                            app.list.selection.clear();
                             cx.notify();
                         }
                     },

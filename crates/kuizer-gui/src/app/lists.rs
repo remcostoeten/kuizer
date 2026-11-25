@@ -9,6 +9,16 @@ use super::*;
 
 pub(super) type Slot = (usize, usize);
 
+struct SectionPage {
+    tab: Tab,
+    id: &'static str,
+    selector: &'static str,
+    total: usize,
+    banner: Option<String>,
+    empty: SharedString,
+    filtered: &'static str,
+}
+
 /// One drawn line of the duplicate list: a group's heading, or the member at this row of
 /// `Listed::targets`.
 #[derive(Clone, Copy)]
@@ -212,10 +222,10 @@ impl Kuizer {
         let Some(report) = self.report() else {
             return Listed::default();
         };
-        let text = self.filters.get(&tab).map_or("", |text| text.trim());
-        let safety = self.safety.filter(|_| tab.grades());
-        let (generation, len) = (self.report_generation, list_len(report, tab));
-        if let Some((key, listed)) = self.lists.0.borrow().get(&tab)
+        let text = self.list.filters.get(&tab).map_or("", |text| text.trim());
+        let safety = self.list.safety.filter(|_| tab.grades());
+        let (generation, len) = (self.session.report_generation, list_len(report, tab));
+        if let Some((key, listed)) = self.list.lists.0.borrow().get(&tab)
             && key.generation == generation
             && key.len == len
             && key.text == text
@@ -231,7 +241,11 @@ impl Kuizer {
             text: text.to_owned(),
             safety,
         };
-        self.lists.0.borrow_mut().insert(tab, (key, listed.clone()));
+        self.list
+            .lists
+            .0
+            .borrow_mut()
+            .insert(tab, (key, listed.clone()));
         listed
     }
 
@@ -243,7 +257,8 @@ impl Kuizer {
         if tab != Tab::Artifacts {
             return self.listed(tab).targets;
         }
-        self.rows
+        self.list
+            .rows
             .iter()
             .map(|&index| {
                 let candidate = &report.candidates[index];
@@ -254,8 +269,8 @@ impl Kuizer {
 
     pub(super) fn list_scroll(&self, tab: Tab) -> Option<&UniformListScrollHandle> {
         match tab {
-            Tab::Artifacts => Some(&self.artifact_scroll),
-            _ => self.list_scrolls.get(&tab),
+            Tab::Artifacts => Some(&self.list.artifact_scroll),
+            _ => self.list.list_scrolls.get(&tab),
         }
     }
 
@@ -275,9 +290,51 @@ impl Kuizer {
         .track_scroll(self.list_scroll(tab).cloned().unwrap_or_default())
         .flex_1()
         .w_full()
-        .when(!self.selection.is_empty(), |this| {
+        .when(!self.list.selection.is_empty(), |this| {
             this.pb(unit(size::SUMMARY_HEIGHT + space::L))
         })
+    }
+
+    fn section_page(
+        &self,
+        page: SectionPage,
+        header: Div,
+        rows: impl Fn(&mut Self, Range<usize>, &mut Context<Self>) -> Vec<Stateful<Div>> + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let listed = self.listed(page.tab);
+        let count = listed.slots.len();
+        let selector = page.selector;
+        let list = self
+            .table_list(page.id, page.tab, count, rows, cx)
+            .debug_selector(move || selector.to_owned());
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(
+                self.list_toolbar(cx)
+                    .child(div().flex_1())
+                    .child(self.tally(page.tab, Some(listed.bytes))),
+            )
+            .when_some(page.banner, |this, text| {
+                this.child(
+                    div()
+                        .px(unit(space::GUTTER))
+                        .py(unit(space::S))
+                        .text_color(theme::faint())
+                        .child(text),
+                )
+            })
+            .child(table(
+                header,
+                if count == 0 {
+                    empty_list(page.tab, page.total, page.empty, page.filtered)
+                } else {
+                    list.into_any_element()
+                },
+            ))
+            .into_any_element()
     }
 
     pub(super) fn render_caches(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -292,44 +349,25 @@ impl Kuizer {
             .child(column(col::XXL).child("CACHE"))
             .child(head(col::XS, "Changed", Term::Changed).text_right())
             .child(div().flex_1().child("PATH"));
-        let listed = self.listed(Tab::Caches);
-        let count = listed.slots.len();
-        let list = self
-            .table_list(
-                "caches",
-                Tab::Caches,
-                count,
-                |app, range, cx| app.cache_rows(range, cx),
-                cx,
-            )
-            .debug_selector(|| "cache-list".to_owned());
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(
-                self.list_toolbar(cx)
-                    .child(div().flex_1())
-                    .child(self.tally(Tab::Caches, Some(listed.bytes))),
-            )
-            .child(table(
-                header,
-                if count == 0 {
-                    empty_list(
-                        Tab::Caches,
-                        report.caches.len(),
-                        if report.options.caches {
-                            "No global caches found"
-                        } else {
-                            "Global caches were skipped for this scan"
-                        },
-                        "No caches match these filters",
-                    )
-                } else {
-                    list.into_any_element()
-                },
-            ))
-            .into_any_element()
+        let empty = if report.options.caches {
+            "No global caches found"
+        } else {
+            "Global caches were skipped for this scan"
+        };
+        self.section_page(
+            SectionPage {
+                tab: Tab::Caches,
+                id: "caches",
+                selector: "cache-list",
+                total: report.caches.len(),
+                banner: None,
+                empty: empty.into(),
+                filtered: "No caches match these filters",
+            },
+            header,
+            |app, range, cx| app.cache_rows(range, cx),
+            cx,
+        )
     }
 
     fn cache_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
@@ -355,7 +393,7 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = candidate.id;
-        let checked = self.selection.contains(&(Source::Cache, id));
+        let checked = self.list.selection.contains(&(Source::Cache, id));
         let review = candidate.rule.safety == Safety::Review;
         let row =
             table_row(("cache", id), checked).debug_selector(move || format!("cache-row-{index}"));
@@ -426,44 +464,25 @@ impl Kuizer {
             .child(head(col::S, "Tool", Term::Tool))
             .child(column(col::WIDE).child("VERSION"))
             .child(div().flex_1().child("PATH"));
-        let listed = self.listed(Tab::Toolchains);
-        let count = listed.slots.len();
-        let list = self
-            .table_list(
-                "toolchains",
-                Tab::Toolchains,
-                count,
-                |app, range, cx| app.toolchain_rows(range, cx),
-                cx,
-            )
-            .debug_selector(|| "toolchain-list".to_owned());
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(
-                self.list_toolbar(cx)
-                    .child(div().flex_1())
-                    .child(self.tally(Tab::Toolchains, Some(listed.bytes))),
-            )
-            .child(table(
-                header,
-                if count == 0 {
-                    empty_list(
-                        Tab::Toolchains,
-                        report.toolchains.len(),
-                        if report.options.toolchains {
-                            "No installed toolchain versions found"
-                        } else {
-                            "Toolchains were skipped for this scan"
-                        },
-                        "No toolchain versions match these filters",
-                    )
-                } else {
-                    list.into_any_element()
-                },
-            ))
-            .into_any_element()
+        let empty = if report.options.toolchains {
+            "No installed toolchain versions found"
+        } else {
+            "Toolchains were skipped for this scan"
+        };
+        self.section_page(
+            SectionPage {
+                tab: Tab::Toolchains,
+                id: "toolchains",
+                selector: "toolchain-list",
+                total: report.toolchains.len(),
+                banner: None,
+                empty: empty.into(),
+                filtered: "No toolchain versions match these filters",
+            },
+            header,
+            |app, range, cx| app.toolchain_rows(range, cx),
+            cx,
+        )
     }
 
     fn toolchain_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
@@ -489,7 +508,7 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = candidate.id;
-        let checked = self.selection.contains(&(Source::Toolchain, id));
+        let checked = self.list.selection.contains(&(Source::Toolchain, id));
         let review = candidate.rule.safety == Safety::Review;
         let note = toolchain.note();
         let row = table_row(("toolchain", id), checked)
@@ -565,17 +584,6 @@ impl Kuizer {
             .child(head(col::S, "Engine", Term::Engine))
             .child(column(col::L).child("OBJECT"))
             .child(div().flex_1().child("NAME"));
-        let listed = self.listed(Tab::Docker);
-        let count = listed.slots.len();
-        let list = self
-            .table_list(
-                "docker",
-                Tab::Docker,
-                count,
-                |app, range, cx| app.docker_rows(range, cx),
-                cx,
-            )
-            .debug_selector(|| "docker-list".to_owned());
         let empty = if !report.options.docker {
             "Docker and Podman were skipped for this scan".to_owned()
         } else if report.docker_issues.is_empty() {
@@ -583,41 +591,22 @@ impl Kuizer {
         } else {
             report.docker_issues.join(". ")
         };
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(
-                self.list_toolbar(cx)
-                    .child(div().flex_1())
-                    .child(self.tally(Tab::Docker, Some(listed.bytes))),
-            )
-            .when(
-                !report.docker.is_empty() && !report.docker_issues.is_empty(),
-                |this| {
-                    this.child(
-                        div()
-                            .px(unit(space::GUTTER))
-                            .py(unit(space::S))
-                            .text_color(theme::faint())
-                            .child(report.docker_issues.join(". ")),
-                    )
-                },
-            )
-            .child(table(
-                header,
-                if count == 0 {
-                    empty_list(
-                        Tab::Docker,
-                        report.docker.len(),
-                        empty,
-                        "No Docker or Podman objects match these filters",
-                    )
-                } else {
-                    list.into_any_element()
-                },
-            ))
-            .into_any_element()
+        let banner = (!report.docker.is_empty() && !report.docker_issues.is_empty())
+            .then(|| report.docker_issues.join(". "));
+        self.section_page(
+            SectionPage {
+                tab: Tab::Docker,
+                id: "docker",
+                selector: "docker-list",
+                total: report.docker.len(),
+                banner,
+                empty: empty.into(),
+                filtered: "No Docker or Podman objects match these filters",
+            },
+            header,
+            |app, range, cx| app.docker_rows(range, cx),
+            cx,
+        )
     }
 
     fn docker_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
@@ -643,7 +632,7 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = candidate.id;
-        let checked = self.selection.contains(&(Source::Docker, id));
+        let checked = self.list.selection.contains(&(Source::Docker, id));
         let review = candidate.rule.safety == Safety::Review;
         let row = table_row(("docker", id), checked)
             .debug_selector(move || format!("docker-row-{index}"));
@@ -719,8 +708,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open(cx, dir.path().join("recent"));
         view.update(cx, |app, cx| {
-            app.roots = vec![PathBuf::from("/p")];
-            let mut report = Report::empty(&app.roots, &app.options);
+            app.session.roots = vec![PathBuf::from("/p")];
+            let mut report = Report::empty(&app.session.roots, &app.session.options);
             let cache = KnownCache {
                 name: "npm",
                 tool: "npm",
@@ -729,16 +718,17 @@ mod tests {
                 note: "",
             };
             report.caches = vec![(cache, artifact(1, Path::new("/c/npm")))];
-            app.phase = Phase::Ready(Box::new(report));
+            app.session.phase = Phase::Ready(Box::new(report));
             app.refresh_stats();
-            app.tab = Tab::Caches;
+            app.list.tab = Tab::Caches;
             cx.notify();
         });
         draw(cx);
         assert!(cx.debug_bounds("cache-row-0").is_some());
 
         view.update(cx, |app, cx| {
-            app.filters
+            app.list
+                .filters
                 .insert(Tab::Caches, "nothing-like-this".to_owned());
             cx.notify();
         });
@@ -749,7 +739,7 @@ mod tests {
         );
 
         view.update(cx, |app, cx| {
-            app.tab = Tab::Toolchains;
+            app.list.tab = Tab::Toolchains;
             cx.notify();
         });
         draw(cx);
@@ -767,7 +757,7 @@ mod tests {
         let (view, cx) = open(cx, dir.path().join("recent"));
         let fail = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
             view.update(cx, |app, cx| {
-                app.roots = vec![root.clone()];
+                app.session.roots = vec![root.clone()];
                 app.set_phase(Phase::Failed("Permission denied".to_owned()), cx);
                 cx.notify();
             });
@@ -780,25 +770,29 @@ mod tests {
         cx.simulate_keystrokes("ctrl-r");
         view.read_with(cx, |app, _| {
             assert!(
-                !matches!(app.phase, Phase::Failed(_)),
+                !matches!(app.session.phase, Phase::Failed(_)),
                 "the Rescan key scans again"
             );
         });
         wait_for_refresh(&view, cx);
-        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Ready(_))));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.session.phase, Phase::Ready(_)))
+        });
 
         fail(&view, cx);
         let new_scan = cx
             .debug_bounds("failed-new-scan")
             .expect("a New scan button");
         cx.simulate_click(new_scan.center(), Modifiers::default());
-        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Start)));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.session.phase, Phase::Start))
+        });
 
         fail(&view, cx);
         cx.simulate_keystrokes("escape");
         view.read_with(cx, |app, _| {
             assert!(
-                matches!(app.phase, Phase::Start),
+                matches!(app.session.phase, Phase::Start),
                 "Esc backs out of a failed scan to the start screen"
             );
         });

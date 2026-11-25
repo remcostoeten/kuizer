@@ -5,7 +5,7 @@ use crate::commands::{CONTROLS, Group, HINTS};
 
 impl Kuizer {
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let palette = self.palette.as_ref()?;
+        let palette = self.overlays.palette.as_ref()?;
         let entries = self.palette_entries();
         let active = palette.active.min(entries.len().saturating_sub(1));
         let rows =
@@ -48,7 +48,7 @@ impl Kuizer {
                         },
                     ))
                     .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
-                        if let Some(palette) = &mut app.palette
+                        if let Some(palette) = &mut app.overlays.palette
                             && palette.active != index
                         {
                             palette.active = index;
@@ -87,7 +87,7 @@ impl Kuizer {
             .bg(theme::elevated())
             .border_1()
             .border_color(theme::border_strong())
-            .font_family(self.font.clone())
+            .font_family(self.chrome.font.clone())
             .text_size(unit(font::BODY))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -133,7 +133,7 @@ impl Kuizer {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|app, _: &MouseDownEvent, _, cx| {
-                        app.palette = None;
+                        app.overlays.palette = None;
                         cx.notify();
                     }),
                 )
@@ -143,7 +143,7 @@ impl Kuizer {
     }
 
     pub(super) fn render_shortcuts(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.shortcuts {
+        if !self.overlays.shortcuts {
             return None;
         }
         let row = |label: SharedString, keys: Vec<&str>| {
@@ -213,7 +213,7 @@ impl Kuizer {
             .max_w(gpui::relative(0.92))
             .max_h(gpui::relative(0.9))
             .overflow_y_scroll()
-            .track_scroll(&self.shortcuts_scroll)
+            .track_scroll(&self.overlays.shortcuts_scroll)
             .p(unit(space::XL))
             .rounded(theme::radius_dialog())
             .bg(theme::elevated())
@@ -261,7 +261,7 @@ impl Kuizer {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|app, _: &MouseDownEvent, _, cx| {
-                        app.shortcuts = false;
+                        app.overlays.shortcuts = false;
                         cx.notify();
                     }),
                 )
@@ -272,8 +272,12 @@ impl Kuizer {
 
     /// The filter field of a list, with the key that focuses it while it is empty.
     pub(super) fn render_filter(&self, cx: &mut Context<Self>) -> Div {
-        let text = self.filters.get(&self.tab).map_or("", String::as_str);
-        let active = self.filtering;
+        let text = self
+            .list
+            .filters
+            .get(&self.list.tab)
+            .map_or("", String::as_str);
+        let active = self.list.filtering;
         let key = self.hint(&Command::FocusFilter);
         div()
             .flex()
@@ -302,13 +306,13 @@ impl Kuizer {
     /// The start of every list toolbar: the filter, and the safety segments on sections whose
     /// rows are graded. Sections add their own controls, a spacer and `tally` after it.
     pub(super) fn list_toolbar(&self, cx: &mut Context<Self>) -> Div {
-        let can_select = self.report().is_some() && !self.busy() && self.tab.selects();
+        let can_select = self.report().is_some() && !self.busy() && self.list.tab.selects();
         ui::toolbar()
             .child(self.render_filter(cx))
-            .when(self.tab.grades(), |this| {
+            .when(self.list.tab.grades(), |this| {
                 this.child(self.safety_segments(cx))
             })
-            .when(self.tab.selects(), |this| {
+            .when(self.list.tab.selects(), |this| {
                 this.child(
                     self.button(
                         "select-safe",
@@ -317,7 +321,7 @@ impl Kuizer {
                         can_select,
                         cx,
                         |app, _, cx| {
-                            if app.tab.selects() && !app.busy() {
+                            if app.list.tab.selects() && !app.busy() {
                                 app.select_safe(cx);
                             }
                         },
@@ -328,16 +332,17 @@ impl Kuizer {
     }
 
     fn safety_segments(&self, cx: &mut Context<Self>) -> Div {
-        let totals = match self.tab {
-            Tab::Artifacts => Some(&self.report_stats.artifacts),
-            Tab::Caches => Some(&self.report_stats.caches),
-            Tab::Toolchains => Some(&self.report_stats.toolchains),
-            Tab::Docker => Some(&self.report_stats.docker),
+        let totals = match self.list.tab {
+            Tab::Artifacts => Some(&self.session.report_stats.artifacts),
+            Tab::Caches => Some(&self.session.report_stats.caches),
+            Tab::Toolchains => Some(&self.session.report_stats.toolchains),
+            Tab::Docker => Some(&self.session.report_stats.docker),
             _ => None,
         };
         let segment = |id: &'static str, label: &'static str, value: Option<Safety>| {
-            let choice =
-                ui::segment(id, label, self.safety == value).when_some(value, |this, safety| {
+            let choice = ui::segment(id, label, self.list.safety == value).when_some(
+                value,
+                |this, safety| {
                     let term = Term::safety(safety);
                     let tip = Tooltip::new(term.text()).title(term.title());
                     let tip = match totals {
@@ -352,9 +357,10 @@ impl Kuizer {
                         None => tip,
                     };
                     this.tip(tip.build())
-                });
+                },
+            );
             self.control(choice, cx, move |app, _, cx| {
-                app.safety = value;
+                app.list.safety = value;
                 app.filtered();
                 cx.notify();
             })

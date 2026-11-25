@@ -3,15 +3,16 @@ use super::*;
 impl Kuizer {
     pub(super) fn render_start(&self, cx: &mut Context<Self>) -> AnyElement {
         let home = platform::home_dir();
-        let field_text = if self.whole_home {
+        let field_text = if self.start.whole_home {
             home.as_deref().map(display_path).unwrap_or_default()
         } else {
-            self.folder.clone()
+            self.start.folder.clone()
         };
-        let typing = !self.whole_home && self.ring.is_none();
-        self.stops
+        let typing = !self.start.whole_home && self.chrome.ring.is_none();
+        self.chrome
+            .stops
             .borrow_mut()
-            .within(Some(self.start_scroll.clone()));
+            .within(Some(self.start.scroll.clone()));
         let field = div()
             .id("folder-field")
             .flex()
@@ -24,7 +25,7 @@ impl Kuizer {
             .rounded(theme::radius_control())
             .bg(theme::background())
             .border_1()
-            .border_color(if self.folder_error.is_some() {
+            .border_color(if self.start.folder_error.is_some() {
                 theme::danger()
             } else if typing {
                 theme::focus()
@@ -60,7 +61,7 @@ impl Kuizer {
                 this.child(
                     div()
                         .flex_none()
-                        .text_color(if self.whole_home {
+                        .text_color(if self.start.whole_home {
                             theme::muted()
                         } else {
                             theme::text()
@@ -78,30 +79,30 @@ impl Kuizer {
                 })
             })
             .on_click(cx.listener(|app, _: &ClickEvent, window, cx| {
-                window.focus(&app.focus);
-                app.whole_home = false;
+                window.focus(&app.chrome.focus);
+                app.start.whole_home = false;
                 cx.notify();
             }));
         let scope = ui::segments()
             .child(self.control(
-                ui::segment("scope-folder", "One folder", !self.whole_home)
+                ui::segment("scope-folder", "One folder", !self.start.whole_home)
                     .tip(tooltip::plain("Scan one folder and everything below it")),
                 cx,
                 |app, _, cx| {
-                    app.whole_home = false;
+                    app.start.whole_home = false;
                     cx.notify();
                 },
             ))
             .child(self.control(
-                ui::segment("scope-home", "Whole home folder", self.whole_home).tip(
+                ui::segment("scope-home", "Whole home folder", self.start.whole_home).tip(
                     tooltip::plain(
                         "Scan everything under your home folder. This takes longer than one project folder",
                     ),
                 ),
                 cx,
                 |app, _, cx| {
-                    app.whole_home = true;
-                    app.folder_error = None;
+                    app.start.whole_home = true;
+                    app.start.folder_error = None;
                     cx.notify();
                 },
             ));
@@ -127,7 +128,7 @@ impl Kuizer {
                     ),
             )
             .children(
-                self.folder_error
+                self.start.folder_error
                     .clone()
                     .map(|error| div().text_color(theme::danger()).child(error)),
             )
@@ -135,70 +136,80 @@ impl Kuizer {
                 div()
                     .text_size(unit(font::SMALL))
                     .text_color(theme::faint())
-                    .child(if self.whole_home {
+                    .child(if self.start.whole_home {
                         "Walks everything under your home folder. Expect this to take a while."
                     } else {
                         "Enter starts the scan. Ctrl+V pastes a path, Ctrl+Backspace removes the last folder."
                     }),
             );
 
-        let recent_card = (!self.recent.paths.is_empty()).then(|| {
-            ui::card("Recent folders").child(div().flex().flex_col().children(
-                self.recent.paths.iter().enumerate().map(|(index, path)| {
-                    let path = path.clone();
-                    let label = display_path(&path);
-                    let missing = self.recent.is_gone(&path);
-                    let full = tooltip::path(&path);
-                    let pressed = path.clone();
-                    let row = div()
-                        .id(("recent", index))
-                        .flex()
-                        .items_center()
-                        .gap(unit(space::M))
-                        .h(unit(size::CONTROL))
-                        .px(unit(space::M))
-                        .rounded(theme::radius_control())
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme::hover()))
-                        .child(
-                            div()
-                                .id(("recent-path", index))
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .tip(full)
-                                .text_color(if missing {
-                                    theme::faint()
-                                } else {
-                                    theme::text()
+        let recent_card =
+            (!self.start.recent.paths.is_empty()).then(|| {
+                ui::card("Recent folders").child(
+                    div().flex().flex_col().children(
+                        self.start
+                            .recent
+                            .paths
+                            .iter()
+                            .enumerate()
+                            .map(|(index, path)| {
+                                let path = path.clone();
+                                let label = display_path(&path);
+                                let missing = self.start.recent.is_gone(&path);
+                                let full = tooltip::path(&path);
+                                let pressed = path.clone();
+                                let row = div()
+                                    .id(("recent", index))
+                                    .flex()
+                                    .items_center()
+                                    .gap(unit(space::M))
+                                    .h(unit(size::CONTROL))
+                                    .px(unit(space::M))
+                                    .rounded(theme::radius_control())
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme::hover()))
+                                    .child(
+                                        div()
+                                            .id(("recent-path", index))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .tip(full)
+                                            .text_color(if missing {
+                                                theme::faint()
+                                            } else {
+                                                theme::text()
+                                            })
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(unit(font::SMALL))
+                                            .text_color(theme::faint())
+                                            .child(if missing {
+                                                "missing"
+                                            } else {
+                                                "double-click to scan"
+                                            }),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |app, event: &ClickEvent, _, cx| {
+                                            app.pick_recent(&path, cx);
+                                            if event.click_count() >= 2 {
+                                                app.start_scan(cx);
+                                            }
+                                        },
+                                    ));
+                                self.reachable(row, move |app, _, cx| {
+                                    app.pick_recent(&pressed, cx);
+                                    app.start_scan(cx);
                                 })
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .text_size(unit(font::SMALL))
-                                .text_color(theme::faint())
-                                .child(if missing {
-                                    "missing"
-                                } else {
-                                    "double-click to scan"
-                                }),
-                        )
-                        .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
-                            app.pick_recent(&path, cx);
-                            if event.click_count() >= 2 {
-                                app.start_scan(cx);
-                            }
-                        }));
-                    self.reachable(row, move |app, _, cx| {
-                        app.pick_recent(&pressed, cx);
-                        app.start_scan(cx);
-                    })
-                }),
-            ))
-        });
+                            }),
+                    ),
+                )
+            });
 
-        let options = &self.options;
+        let options = &self.session.options;
         let categories =
             Category::ALL
                 .into_iter()
@@ -222,7 +233,7 @@ impl Kuizer {
                                 .child(category.as_str()),
                             cx,
                             move |app, _, cx| {
-                                app.options.toggle_category(category);
+                                app.session.options.toggle_category(category);
                                 cx.notify();
                             },
                         ),
@@ -239,7 +250,7 @@ impl Kuizer {
                     ),
                     cx,
                     move |app, _, cx| {
-                        app.options.min_size = bytes;
+                        app.session.options.min_size = bytes;
                         cx.notify();
                     },
                 ))
@@ -256,7 +267,7 @@ impl Kuizer {
                     ),
                     cx,
                     move |app, _, cx| {
-                        app.options.max_depth = depth;
+                        app.session.options.max_depth = depth;
                         cx.notify();
                     },
                 ))
@@ -280,7 +291,7 @@ impl Kuizer {
                     ),
                 cx,
                 move |app, _, cx| {
-                    flip(&mut app.options);
+                    flip(&mut app.session.options);
                     cx.notify();
                 },
             )
@@ -355,7 +366,7 @@ impl Kuizer {
 
         div()
             .id("start")
-            .track_scroll(&self.start_scroll)
+            .track_scroll(&self.start.scroll)
             .flex()
             .flex_col()
             .items_center()
@@ -395,30 +406,31 @@ impl Kuizer {
         if self.busy() {
             return;
         }
-        let path = if self.whole_home {
+        let path = if self.start.whole_home {
             platform::home_dir()
         } else {
-            self.picked_path().or_else(|| start::expand(&self.folder))
+            self.picked_path()
+                .or_else(|| start::expand(&self.start.folder))
         };
         let Some(path) = path else {
-            self.folder_error = Some("Type a folder or choose one".to_owned());
+            self.start.folder_error = Some("Type a folder or choose one".to_owned());
             cx.notify();
             return;
         };
         let checked = cx.background_spawn(async move {
             start::check_folder(&path).map(|root| scan::normalize_roots(&[root]))
         });
-        self.folder_check = Some(cx.spawn(async move |this, cx| {
+        self.start.folder_check = Some(cx.spawn(async move |this, cx| {
             let result = checked.await;
             this.update(cx, |app, cx| match result {
                 Ok(roots) => {
-                    app.folder_error = None;
-                    app.roots = roots;
-                    app.recent.remember(&app.roots);
+                    app.start.folder_error = None;
+                    app.session.roots = roots;
+                    app.start.recent.remember(&app.session.roots);
                     app.rescan(cx);
                 }
                 Err(error) => {
-                    app.folder_error = Some(error);
+                    app.start.folder_error = Some(error);
                     cx.notify();
                 }
             })
@@ -427,11 +439,11 @@ impl Kuizer {
     }
 
     pub(super) fn cancel_scan(&mut self, cx: &mut Context<Self>) {
-        if let Some(cancel) = self.cancel.take() {
+        if let Some(cancel) = self.session.cancel.take() {
             cancel.cancel();
         }
-        self.task = None;
-        let refreshed = std::mem::take(&mut self.refreshed);
+        self.session.task = None;
+        let refreshed = std::mem::take(&mut self.session.refreshed);
         cx.background_spawn(async move { drop(refreshed) }).detach();
         self.scan_over();
         self.set_phase(Phase::Start, cx);
@@ -446,19 +458,19 @@ impl Kuizer {
     /// few parts that arrived before any artifact. What the stop throws away is dropped off the
     /// UI thread.
     pub(super) fn stop_scan(&mut self, cx: &mut Context<Self>) {
-        if let Some(cancel) = self.cancel.take() {
+        if let Some(cancel) = self.session.cancel.take() {
             cancel.cancel();
         }
-        self.task = None;
-        let mut dropped = vec![Loaded::Found(std::mem::take(&mut self.refreshed))];
-        let shown = matches!(self.phase, Phase::Loading(_));
+        self.session.task = None;
+        let mut dropped = vec![Loaded::Found(std::mem::take(&mut self.session.refreshed))];
+        let shown = matches!(self.session.phase, Phase::Loading(_));
         if shown {
             self.show_parts(&mut dropped);
         }
-        if let Phase::Ready(report) = &mut self.phase {
+        if let Phase::Ready(report) = &mut self.session.phase {
             report.summary.cancelled = true;
             if shown {
-                report.drop_paths(&self.excluded);
+                report.drop_paths(&self.session.excluded);
             }
         }
         self.scan_over();
@@ -475,9 +487,9 @@ impl Kuizer {
         if self.busy() || self.refreshing() {
             return;
         }
-        self.selection.clear();
-        self.rows.clear();
-        self.toast = None;
+        self.list.selection.clear();
+        self.list.rows.clear();
+        self.overlays.toast = None;
         self.set_phase(Phase::Start, cx);
         cx.notify();
     }
@@ -495,13 +507,13 @@ impl Kuizer {
                 match picked {
                     Ok(Ok(Some(paths))) => {
                         if let Some(path) = paths.first() {
-                            app.folder = display_path(path);
-                            app.whole_home = false;
-                            app.folder_error = None;
+                            app.start.folder = display_path(path);
+                            app.start.whole_home = false;
+                            app.start.folder_error = None;
                         }
                     }
                     Ok(Err(error)) => {
-                        app.folder_error =
+                        app.start.folder_error =
                             Some(format!("The folder picker is not available: {error}"));
                     }
                     Ok(Ok(None)) | Err(_) => {}
@@ -514,21 +526,22 @@ impl Kuizer {
 
     pub(super) fn show_folder(&mut self, path: &Path) {
         let shown = display_path(path);
-        self.picked_folder = Some((shown.clone(), path.to_path_buf()));
-        self.folder = shown;
+        self.start.picked_folder = Some((shown.clone(), path.to_path_buf()));
+        self.start.folder = shown;
     }
 
     fn picked_path(&self) -> Option<PathBuf> {
-        self.picked_folder
+        self.start
+            .picked_folder
             .as_ref()
-            .filter(|(shown, _)| *shown == self.folder)
+            .filter(|(shown, _)| *shown == self.start.folder)
             .map(|(_, path)| path.clone())
     }
 
     pub(super) fn pick_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.show_folder(path);
-        self.whole_home = false;
-        self.folder_error = None;
+        self.start.whole_home = false;
+        self.start.folder_error = None;
         cx.notify();
     }
 
@@ -546,21 +559,21 @@ impl Kuizer {
         let paste = || cx.read_from_clipboard().and_then(|item| item.text());
         if !field::edit(
             &self.keymap,
-            &mut self.folder,
+            &mut self.start.folder,
             keystroke,
             field::PATH,
             paste,
         ) {
             return false;
         }
-        self.whole_home = false;
-        self.folder_error = None;
+        self.start.whole_home = false;
+        self.start.folder_error = None;
         cx.notify();
         true
     }
 
     pub(super) fn render_loading(&self, activity: &Activity) -> AnyElement {
-        let status = self.tab.status(activity, &self.options);
+        let status = self.list.tab.status(activity, &self.session.options);
         let header = div()
             .flex()
             .items_end()
@@ -575,7 +588,7 @@ impl Kuizer {
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(self.tab.label()),
+                            .child(self.list.tab.label()),
                     )
                     .child(
                         div()
@@ -594,20 +607,19 @@ impl Kuizer {
                     .text_color(theme::faint())
                     .child(
                         ui::tabular(div().text_color(theme::muted()))
-                            .child(activity::took(self.started.elapsed())),
+                            .child(activity::took(self.session.started.elapsed())),
                     )
                     .child(ui::kbd(self.hint(&Command::StopScan)))
                     .child("keeps what it found")
                     .child(ui::kbd(self.key_hint(Scope::GuiBack, Key::Back)))
                     .child("cancels"),
             );
-        let steps = ui::card("Progress").child(
-            div().flex().flex_col().children(
-                Step::ALL
-                    .into_iter()
-                    .map(|step| step_row(step, activity, &self.options, &self.roots)),
-            ),
-        );
+        let steps =
+            ui::card("Progress").child(div().flex().flex_col().children(
+                Step::ALL.into_iter().map(|step| {
+                    step_row(step, activity, &self.session.options, &self.session.roots)
+                }),
+            ));
         scroll("loading")
             .debug_selector(|| "activity".to_owned())
             .child(header)
@@ -619,7 +631,7 @@ impl Kuizer {
                     .gap(unit(space::L))
                     .child(steps.flex_1().min_w(unit(size::LIST)))
                     .child(
-                        found_card(activity, &self.roots)
+                        found_card(activity, &self.session.roots)
                             .flex_1()
                             .min_w(unit(size::LIST)),
                     ),

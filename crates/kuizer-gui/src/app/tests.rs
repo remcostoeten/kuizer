@@ -18,9 +18,9 @@ pub(super) fn open(
             window,
             cx,
         );
-        app.options.caches = false;
-        app.options.toolchains = false;
-        app.options.docker = false;
+        app.session.options.caches = false;
+        app.session.options.toolchains = false;
+        app.session.options.docker = false;
         app.config_path = recent.parent().map(|dir| dir.join("config.toml"));
         app.reveal = |_| Err("no file manager in tests".to_owned());
         app
@@ -46,7 +46,7 @@ fn wait_for_scan(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
         cx.executor().advance_clock(POLL);
         cx.run_until_parked();
         if view.read_with(cx, |app, _| {
-            !matches!(app.phase, Phase::Loading(_)) && app.cancel.is_none()
+            !matches!(app.session.phase, Phase::Loading(_)) && app.session.cancel.is_none()
         }) {
             return;
         }
@@ -60,7 +60,7 @@ fn wait_until_shown(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> bool {
         cx.executor().advance_clock(POLL);
         cx.run_until_parked();
         if let Some(refreshing) = view.read_with(cx, |app, _| {
-            (!matches!(app.phase, Phase::Loading(_))).then(|| app.stale.is_some())
+            (!matches!(app.session.phase, Phase::Loading(_))).then(|| app.session.stale.is_some())
         }) {
             return refreshing;
         }
@@ -74,7 +74,7 @@ pub(super) fn wait_for_refresh(view: &Entity<Kuizer>, cx: &mut VisualTestContext
         cx.executor().advance_clock(POLL);
         cx.run_until_parked();
         if view.read_with(cx, |app, _| {
-            !matches!(app.phase, Phase::Loading(_)) && !app.refreshing()
+            !matches!(app.session.phase, Phase::Loading(_)) && !app.refreshing()
         }) {
             return;
         }
@@ -86,7 +86,7 @@ pub(super) fn wait_for_refresh(view: &Entity<Kuizer>, cx: &mut VisualTestContext
 pub(super) fn wait_for_duplicates(view: &Entity<Kuizer>, cx: &mut VisualTestContext) {
     for _ in 0..1000 {
         cx.run_until_parked();
-        if view.read_with(cx, |app, _| app.search.is_none()) {
+        if view.read_with(cx, |app, _| app.session.search.is_none()) {
             return;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -129,8 +129,8 @@ fn opens_on_the_start_screen_without_a_path(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.phase, Phase::Start));
-        assert!(app.folder.is_empty());
+        assert!(matches!(app.session.phase, Phase::Start));
+        assert!(app.start.folder.is_empty());
     });
 }
 
@@ -141,9 +141,9 @@ fn a_missing_folder_stays_on_the_start_screen(cx: &mut TestAppContext) {
     type_text(cx, &dir.path().join("missing").display().to_string());
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.phase, Phase::Start));
+        assert!(matches!(app.session.phase, Phase::Start));
         assert_eq!(
-            app.folder_error.as_deref(),
+            app.start.folder_error.as_deref(),
             Some("This folder does not exist")
         );
     });
@@ -155,9 +155,9 @@ fn ctrl_backspace_removes_the_last_folder(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, dir.path().join("recent"));
     type_text(cx, "/home/me/apps");
     cx.simulate_keystrokes("ctrl-backspace");
-    view.read_with(cx, |app, _| assert_eq!(app.folder, "/home/me/"));
+    view.read_with(cx, |app, _| assert_eq!(app.start.folder, "/home/me/"));
     cx.simulate_keystrokes("backspace");
-    view.read_with(cx, |app, _| assert_eq!(app.folder, "/home/me"));
+    view.read_with(cx, |app, _| assert_eq!(app.start.folder, "/home/me"));
 }
 
 #[gpui::test]
@@ -168,11 +168,13 @@ fn enter_scans_the_typed_folder_and_remembers_it(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, recent.clone());
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
-    view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Loading(_))));
+    view.read_with(cx, |app, _| {
+        assert!(matches!(app.session.phase, Phase::Loading(_)))
+    });
     wait_for_scan(&view, cx);
     let canonical = std::fs::canonicalize(&root).unwrap();
     view.read_with(cx, |app, _| {
-        let Phase::Ready(report) = &app.phase else {
+        let Phase::Ready(report) = &app.session.phase else {
             panic!("expected a report");
         };
         assert_eq!(report.roots, vec![canonical.clone()]);
@@ -185,8 +187,8 @@ fn enter_scans_the_typed_folder_and_remembers_it(cx: &mut TestAppContext) {
 
     view.update(cx, |app, cx| app.new_scan(cx));
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.phase, Phase::Start));
-        assert_eq!(app.recent.paths, vec![canonical.clone()]);
+        assert!(matches!(app.session.phase, Phase::Start));
+        assert_eq!(app.start.recent.paths, vec![canonical.clone()]);
     });
 }
 
@@ -198,10 +200,10 @@ fn escape_cancels_a_running_scan(cx: &mut TestAppContext) {
     let escape = Keystroke::parse("escape").unwrap();
     let cancel = cx.update(|window, cx| {
         let cancel = view.update(cx, |app, cx| {
-            app.roots = vec![root];
+            app.session.roots = vec![root];
             app.rescan(cx);
-            assert!(matches!(app.phase, Phase::Loading(_)));
-            app.cancel.clone()
+            assert!(matches!(app.session.phase, Phase::Loading(_)));
+            app.session.cancel.clone()
         });
         window.dispatch_keystroke(escape, cx);
         cancel
@@ -209,9 +211,9 @@ fn escape_cancels_a_running_scan(cx: &mut TestAppContext) {
     assert!(cancel.expect("the scan started").is_cancelled());
     cx.run_until_parked();
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.phase, Phase::Start));
-        assert!(app.cancel.is_none());
-        assert!(app.task.is_none());
+        assert!(matches!(app.session.phase, Phase::Start));
+        assert!(app.session.cancel.is_none());
+        assert!(app.session.task.is_none());
     });
 }
 
@@ -221,15 +223,15 @@ fn the_whole_home_option_ignores_the_typed_folder(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, dir.path().join("recent"));
     type_text(cx, "/does/not/matter");
     view.update(cx, |app, cx| {
-        app.whole_home = true;
-        app.options.duplicates = false;
+        app.start.whole_home = true;
+        app.session.options.duplicates = false;
         app.start_scan(cx);
     });
     cx.run_until_parked();
     view.update(cx, |app, cx| {
-        assert!(matches!(app.phase, Phase::Loading(_)));
+        assert!(matches!(app.session.phase, Phase::Loading(_)));
         assert_eq!(
-            app.roots,
+            app.session.roots,
             scan::normalize_roots(&[platform::home_dir().unwrap()])
         );
         app.cancel_scan(cx);
@@ -241,7 +243,7 @@ fn the_scan_view_shows_each_step_and_what_it_touches(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));
     view.update(cx, |app, cx| {
-        app.options.caches = true;
+        app.session.options.caches = true;
         let mut activity = Activity::default();
         activity.record(Path::new("/p/site/node_modules"), "node_modules", 3 << 30);
         activity.finish(
@@ -251,7 +253,7 @@ fn the_scan_view_shows_each_step_and_what_it_touches(cx: &mut TestAppContext) {
         );
         activity.begin(Step::Caches, Some(4));
         activity.advance(Step::Caches, Path::new("/home/me/.cargo/registry"));
-        app.phase = Phase::Loading(Box::new(activity));
+        app.session.phase = Phase::Loading(Box::new(activity));
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
@@ -291,7 +293,7 @@ fn the_folder_field_skips_recent_folders_that_are_gone(cx: &mut TestAppContext) 
     let (view, cx) = open(cx, recent);
     cx.run_until_parked();
     view.read_with(cx, |app, _| {
-        assert_eq!(app.folder, display_path(&kept));
+        assert_eq!(app.start.folder, display_path(&kept));
     });
 }
 
@@ -304,7 +306,7 @@ fn a_scan_shows_its_progress_then_charts_with_tooltips(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("enter");
     cx.update(|window, cx| window.draw(cx).clear());
     // A fast runner can stream the first artifacts in before this frame, which leaves the loader.
-    if view.read_with(cx, |app, _| matches!(app.phase, Phase::Loading(_))) {
+    if view.read_with(cx, |app, _| matches!(app.session.phase, Phase::Loading(_))) {
         assert!(cx.debug_bounds("activity").is_some());
         assert!(cx.debug_bounds("loader").is_some());
     }
@@ -344,7 +346,7 @@ fn the_titlebar_search_opens_the_palette(cx: &mut TestAppContext) {
         .debug_bounds("search")
         .expect("the titlebar search field");
     cx.simulate_click(search.center(), Modifiers::default());
-    view.read_with(cx, |app, _| assert!(app.palette.is_some()));
+    view.read_with(cx, |app, _| assert!(app.overlays.palette.is_some()));
 }
 
 #[gpui::test]
@@ -352,11 +354,11 @@ fn the_sidebar_switches_sections_during_a_scan(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));
     view.update(cx, |app, cx| {
-        app.roots = vec![dir.path().to_path_buf()];
+        app.session.roots = vec![dir.path().to_path_buf()];
         let mut activity = Activity::default();
         activity.begin(Step::Folders, None);
         activity.begin(Step::History, None);
-        app.phase = Phase::Loading(Box::new(activity));
+        app.session.phase = Phase::Loading(Box::new(activity));
         cx.notify();
     });
     for (label, shown) in [
@@ -368,8 +370,8 @@ fn the_sidebar_switches_sections_during_a_scan(cx: &mut TestAppContext) {
         let bounds = cx.debug_bounds(label).expect("a sidebar item");
         cx.simulate_click(bounds.center(), Modifiers::default());
         view.read_with(cx, |app, _| {
-            assert!(matches!(app.phase, Phase::Loading(_)));
-            assert_eq!(app.tab.label(), label);
+            assert!(matches!(app.session.phase, Phase::Loading(_)));
+            assert_eq!(app.list.tab.label(), label);
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds(shown).is_some(), "{shown} is not shown");
@@ -406,10 +408,10 @@ fn stopping_a_scan_keeps_what_it_found(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, dir.path().join("recent"));
     let cancel = Cancel::new();
     view.update(cx, |app, cx| {
-        app.roots = vec![PathBuf::from("/p")];
-        app.cancel = Some(cancel.clone());
-        app.pending = Part::expected(&app.options);
-        app.phase = Phase::Loading(Box::default());
+        app.session.roots = vec![PathBuf::from("/p")];
+        app.session.cancel = Some(cancel.clone());
+        app.session.pending = Part::expected(&app.session.options);
+        app.session.phase = Phase::Loading(Box::default());
         app.take(
             vec![Update::Loaded(Loaded::History(
                 Err("unreadable".to_owned()),
@@ -424,9 +426,9 @@ fn stopping_a_scan_keeps_what_it_found(cx: &mut TestAppContext) {
         assert!(report.history.is_err(), "a finished part is kept");
         let scanned = report.scanned;
 
-        app.cancel = Some(cancel.clone());
-        app.stale = Some(scanned);
-        app.streamed = true;
+        app.session.cancel = Some(cancel.clone());
+        app.session.stale = Some(scanned);
+        app.session.streamed = true;
         app.take(
             vec![Update::Loaded(Loaded::Found(vec![artifact(
                 2,
@@ -452,10 +454,10 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
         Path::new("/p/b/node_modules"),
     );
     view.update(cx, |app, cx| {
-        app.roots = vec![PathBuf::from("/p")];
-        app.cancel = Some(Cancel::new());
-        app.pending = Part::expected(&app.options);
-        app.phase = Phase::Loading(Box::default());
+        app.session.roots = vec![PathBuf::from("/p")];
+        app.session.cancel = Some(Cancel::new());
+        app.session.pending = Part::expected(&app.session.options);
+        app.session.phase = Phase::Loading(Box::default());
         let history = Loaded::History(Err("unreadable".to_owned()));
         app.take(
             vec![
@@ -468,7 +470,7 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
         assert_eq!(report.candidates.len(), 1);
         assert!(report.history.is_err(), "an earlier part is kept");
         assert!(app.refreshing());
-        assert!(!app.pending.contains(&Part::History));
+        assert!(!app.session.pending.contains(&Part::History));
 
         app.select((Source::Artifact, 2));
         app.take(
@@ -491,7 +493,7 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
             .collect();
         assert_eq!(paths, [a, b], "largest first");
 
-        let mut saved = Report::empty(&app.roots, &app.options);
+        let mut saved = Report::empty(&app.session.roots, &app.session.options);
         saved.candidates = vec![artifact(9, Path::new("/p/old/node_modules"))];
         saved.history = Ok(HistoryView::new(
             kuizer::history::History::default(),
@@ -530,7 +532,7 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
             cx,
         );
         assert!(!app.refreshing());
-        assert_eq!(app.selection, HashSet::from([(Source::Artifact, 2)]));
+        assert_eq!(app.list.selection, HashSet::from([(Source::Artifact, 2)]));
         assert_eq!(app.report().unwrap().scanned, SystemTime::UNIX_EPOCH);
         assert_eq!(app.trash_lock(), None);
     });
@@ -545,10 +547,10 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
         Path::new("/p/b/node_modules"),
     );
     view.update(cx, |app, cx| {
-        app.roots = vec![PathBuf::from("/p")];
-        app.cancel = Some(Cancel::new());
-        app.pending = Part::expected(&app.options);
-        app.phase = Phase::Loading(Box::default());
+        app.session.roots = vec![PathBuf::from("/p")];
+        app.session.cancel = Some(Cancel::new());
+        app.session.pending = Part::expected(&app.session.options);
+        app.session.phase = Phase::Loading(Box::default());
         let found = Loaded::Found(vec![artifact(1, a), artifact(2, b)]);
         app.take(vec![Update::Loaded(found)], cx);
         app.select((Source::Artifact, 1));
@@ -577,7 +579,7 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
             history_error: None,
         };
         app.finish(Some((outcome, history())), cx);
-        assert_eq!(app.selection, HashSet::from([(Source::Artifact, 1)]));
+        assert_eq!(app.list.selection, HashSet::from([(Source::Artifact, 1)]));
         assert_eq!(
             app.report().unwrap().candidates.len(),
             2,
@@ -626,33 +628,33 @@ fn a_batch_a_refresh_throws_away_changes_nothing_on_screen(cx: &mut TestAppConte
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));
     view.update(cx, |app, cx| {
-        app.roots = vec![PathBuf::from("/p")];
-        let mut report = Report::empty(&app.roots, &app.options);
+        app.session.roots = vec![PathBuf::from("/p")];
+        let mut report = Report::empty(&app.session.roots, &app.session.options);
         report.candidates = vec![artifact(2, Path::new("/p/a/node_modules"))];
-        app.phase = Phase::Ready(Box::new(report));
-        app.cancel = Some(Cancel::new());
+        app.session.phase = Phase::Ready(Box::new(report));
+        app.session.cancel = Some(Cancel::new());
         app.refresh_stats();
         app.refresh_rows();
         app.select((Source::Artifact, 2));
-        let (stats, rows) = (app.report_generation, app.rows_generation);
+        let (stats, rows) = (app.session.report_generation, app.list.rows_generation);
 
         let batch = vec![artifact(5, Path::new("/p/b/node_modules"))];
         app.take(vec![Update::Loaded(Loaded::Found(batch))], cx);
         assert_eq!(app.report().unwrap().candidates.len(), 1, "it is dropped");
         assert_eq!(
-            (app.report_generation, app.rows_generation),
+            (app.session.report_generation, app.list.rows_generation),
             (stats, rows),
             "and nothing is counted or listed again"
         );
 
-        app.streamed = true;
+        app.session.streamed = true;
         let batch = vec![artifact(5, Path::new("/p/b/node_modules"))];
         app.take(vec![Update::Loaded(Loaded::Found(batch))], cx);
         assert_eq!(app.report().unwrap().candidates.len(), 2);
-        assert_eq!(app.rows.len(), 2);
-        assert_eq!(app.report_stats.artifacts.all.count, 2);
-        assert_eq!(app.selection, HashSet::from([(Source::Artifact, 2)]));
-        assert_eq!(app.selection.stats().total().all.bytes, 2 * 4096);
+        assert_eq!(app.list.rows.len(), 2);
+        assert_eq!(app.session.report_stats.artifacts.all.count, 2);
+        assert_eq!(app.list.selection, HashSet::from([(Source::Artifact, 2)]));
+        assert_eq!(app.list.selection.stats().total().all.bytes, 2 * 4096);
     });
 }
 
@@ -670,8 +672,8 @@ fn a_failed_exclude_keeps_the_item_and_says_why(cx: &mut TestAppContext) {
     click_item(cx, "confirm-exclude");
     view.read_with(cx, |app, _| {
         assert_eq!(app.report().unwrap().candidates.len(), 1);
-        assert!(app.excluded.is_empty());
-        assert!(app.excluding.is_empty(), "the write is over");
+        assert!(app.session.excluded.is_empty());
+        assert!(app.session.excluding.is_empty(), "the write is over");
     });
     toast_is(&view, cx, |notice| matches!(notice, Notice::Failed(_)));
 }
@@ -687,18 +689,18 @@ fn the_sidebar_collapses_to_icons_and_back(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear());
     let wide = cx.debug_bounds("sidebar").expect("the sidebar").size.width;
     cx.simulate_keystrokes("ctrl-b");
-    view.read_with(cx, |app, _| assert!(app.collapsed));
+    view.read_with(cx, |app, _| assert!(app.chrome.collapsed));
     cx.update(|window, cx| window.draw(cx).clear());
     let narrow = cx.debug_bounds("sidebar").expect("the sidebar").size.width;
     assert!(narrow < wide / 2.);
     let history = cx.debug_bounds("History").expect("a sidebar icon");
     cx.simulate_click(history.center(), Modifiers::default());
-    view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::History));
+    view.read_with(cx, |app, _| assert_eq!(app.list.tab, Tab::History));
     let toggle = cx
         .debug_bounds("sidebar-toggle")
         .expect("the collapse button");
     cx.simulate_click(toggle.center(), Modifiers::default());
-    view.read_with(cx, |app, _| assert!(!app.collapsed));
+    view.read_with(cx, |app, _| assert!(!app.chrome.collapsed));
 }
 
 #[gpui::test]
@@ -714,7 +716,7 @@ fn the_sidebar_settings_item_opens_the_settings(cx: &mut TestAppContext) {
         .debug_bounds("sidebar-settings")
         .expect("the settings item");
     cx.simulate_click(settings.center(), Modifiers::default());
-    view.read_with(cx, |app, _| assert!(app.settings.is_some()));
+    view.read_with(cx, |app, _| assert!(app.overlays.settings.is_some()));
 }
 
 #[gpui::test]
@@ -732,7 +734,7 @@ fn the_sidebar_opens_collapsed_when_configured(cx: &mut TestAppContext) {
             cx,
         )
     });
-    view.read_with(cx, |app, _| assert!(app.collapsed));
+    view.read_with(cx, |app, _| assert!(app.chrome.collapsed));
 }
 
 #[gpui::test]
@@ -799,7 +801,7 @@ fn ctrl_plus_minus_and_zero_change_the_zoom(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-- ctrl-- ctrl-- ctrl--");
     view.read_with(cx, |app, _| {
         assert_eq!(app.config.appearance.zoom, 80);
-        assert!(app.folder.is_empty());
+        assert!(app.start.folder.is_empty());
     });
     cx.run_until_parked();
     let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
@@ -834,11 +836,11 @@ fn a_known_folder_opens_with_the_last_scan_while_it_refreshes(cx: &mut TestAppCo
 
     let id = view.update(cx, |app, cx| {
         let report = app.report().unwrap();
-        let saved = crate::snapshot::load(&app.snapshots, &report.roots, &report.options)
+        let saved = crate::snapshot::load(&app.session.snapshots, &report.roots, &report.options)
             .expect("the saved scan");
         app.set_phase(Phase::Loading(Box::default()), cx);
-        app.cancel = Some(Cancel::new());
-        app.pending = Part::expected(&app.options);
+        app.session.cancel = Some(Cancel::new());
+        app.session.pending = Part::expected(&app.session.options);
         app.take(vec![Update::Cached(Box::new(saved))], cx);
         let report = app.report().expect("the saved scan comes first");
         assert_eq!(report.candidates.len(), 1);
@@ -851,16 +853,19 @@ fn a_known_folder_opens_with_the_last_scan_while_it_refreshes(cx: &mut TestAppCo
     view.update(cx, |app, cx| {
         app.toggle(Source::Artifact, id, cx);
         app.delete(None, cx);
-        assert!(app.cleaning.is_none(), "stale items cannot be deleted");
+        assert!(
+            app.session.cleaning.is_none(),
+            "stale items cannot be deleted"
+        );
         assert_eq!(app.selected().len(), 1);
     });
 
     view.update(cx, |app, cx| app.rescan(cx));
     wait_for_refresh(&view, cx);
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.phase, Phase::Ready(_)));
+        assert!(matches!(app.session.phase, Phase::Ready(_)));
         assert_eq!(app.selected().len(), 1);
-        assert!(app.stale.is_none());
+        assert!(app.session.stale.is_none());
         assert_eq!(app.trash_lock(), None);
     });
 }
@@ -874,7 +879,7 @@ fn a_narrow_titlebar_never_overlaps_while_refreshing(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
     view.update(cx, |app, cx| {
-        app.stale = Some(SystemTime::now());
+        app.session.stale = Some(SystemTime::now());
         cx.notify();
     });
 
@@ -907,7 +912,7 @@ fn the_fresh_scan_keeps_the_selection_by_path(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
     view.update(cx, |app, cx| {
-        let Phase::Ready(report) = &mut app.phase else {
+        let Phase::Ready(report) = &mut app.session.phase else {
             panic!("expected a report");
         };
         assert_eq!(report.candidates.len(), 2);
@@ -931,8 +936,8 @@ fn the_fresh_scan_keeps_the_selection_by_path(cx: &mut TestAppContext) {
     view.update(cx, |app, cx| app.rescan(cx));
     view.read_with(cx, |app, _| {
         assert!(app.refreshing());
-        assert!(matches!(app.phase, Phase::Ready(_)));
-        assert_eq!(app.selection.len(), 2);
+        assert!(matches!(app.session.phase, Phase::Ready(_)));
+        assert_eq!(app.list.selection.len(), 2);
     });
     wait_for_refresh(&view, cx);
     view.read_with(cx, |app, _| {
@@ -941,7 +946,10 @@ fn the_fresh_scan_keeps_the_selection_by_path(cx: &mut TestAppContext) {
         let kept = &report.candidates[0];
         assert!(kept.id < 100);
         assert!(kept.path.ends_with("site/node_modules"));
-        assert_eq!(app.selection, HashSet::from([(Source::Artifact, kept.id)]));
+        assert_eq!(
+            app.list.selection,
+            HashSet::from([(Source::Artifact, kept.id)])
+        );
     });
 }
 
@@ -1008,7 +1016,10 @@ fn wait_until(
 
 fn toast_is(view: &Entity<Kuizer>, cx: &mut VisualTestContext, check: fn(&Notice) -> bool) {
     let shown = view.read_with(cx, |app, _| {
-        app.toast.as_ref().is_some_and(|toast| check(&toast.notice))
+        app.overlays
+            .toast
+            .as_ref()
+            .is_some_and(|toast| check(&toast.notice))
     });
     assert!(shown, "unexpected toast");
 }
@@ -1038,7 +1049,7 @@ fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| {
         matches!(
-            &app.toast,
+            &app.overlays.toast,
             Some(Toast {
                 notice: Notice::Info(_),
                 ..
@@ -1053,7 +1064,10 @@ fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
         "nothing goes to the trash"
     );
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
+        assert!(
+            app.overlays.dialog.is_none(),
+            "a clean run needs no summary dialog"
+        );
         assert!(app.report().unwrap().candidates.is_empty());
     });
     let path = kuizer::history::default_path().unwrap();
@@ -1088,7 +1102,7 @@ fn trash_mode_moves_the_selection_to_the_trash_inside(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| {
         matches!(
-            &app.toast,
+            &app.overlays.toast,
             Some(Toast {
                 notice: Notice::Info(text),
                 ..
@@ -1148,7 +1162,7 @@ fn a_clean_adds_its_run_to_the_history_on_screen_inside(cx: &mut TestAppContext)
             ..Default::default()
         };
         let trash = kuizer::history::TrashSnapshot::read(&history);
-        if let Phase::Ready(report) = &mut app.phase {
+        if let Phase::Ready(report) = &mut app.session.phase {
             report.history = Ok(HistoryView::new(history, trash));
         }
         let id = app.report().unwrap().candidates[0].id;
@@ -1156,7 +1170,9 @@ fn a_clean_adds_its_run_to_the_history_on_screen_inside(cx: &mut TestAppContext)
     });
     cx.update(|window, cx| window.draw(cx).clear());
     cx.simulate_keystrokes("enter");
-    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    wait_until(&view, cx, "the removal", |app| {
+        app.session.cleaning.is_none()
+    });
 
     let on_disk = kuizer::history::load(&kuizer::history::default_path().unwrap())
         .unwrap()
@@ -1242,7 +1258,7 @@ esac
     let root = project(&base.join("work"));
     let (view, cx) = open(cx, base.join("recent"));
     view.update(cx, |app, _| {
-        app.options.docker = true;
+        app.session.options.docker = true;
         app.config.docker.engines = vec![engine.display().to_string()];
     });
     type_text(cx, &root.display().to_string());
@@ -1258,7 +1274,7 @@ esac
     });
 
     cx.simulate_keystrokes("shift-5");
-    view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Docker));
+    view.read_with(cx, |app, _| assert_eq!(app.list.tab, Tab::Docker));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("docker-row-1").is_some());
     let target = view.read_with(cx, |app, _| app.targets(Tab::Docker)[0].clone());
@@ -1272,13 +1288,18 @@ esac
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
-    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    wait_until(&view, cx, "the removal", |app| {
+        app.session.cleaning.is_none()
+    });
     cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
     assert_eq!(calls.lines().last(), Some("image rm aaaaaaaaaaaaaaaa"));
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
+        assert!(
+            app.overlays.dialog.is_none(),
+            "a clean run needs no summary dialog"
+        );
         assert_eq!(app.report().unwrap().docker.len(), 1);
     });
 }
@@ -1303,7 +1324,7 @@ fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     let root = project(&base.join("work"));
     std::fs::write(root.join("site/.nvmrc"), "20\n").unwrap();
     let (view, cx) = open(cx, base.join("recent"));
-    view.update(cx, |app, _| app.options.toolchains = true);
+    view.update(cx, |app, _| app.session.options.toolchains = true);
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
@@ -1323,20 +1344,25 @@ fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     assert!(pinned.note().contains(".nvmrc"), "{}", pinned.note());
 
     cx.simulate_keystrokes("shift-4");
-    view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::Toolchains));
+    view.read_with(cx, |app, _| assert_eq!(app.list.tab, Tab::Toolchains));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("toolchain-row-1").is_some());
     view.update(cx, |app, cx| app.toggle(Source::Toolchain, id, cx));
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
-    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    wait_until(&view, cx, "the removal", |app| {
+        app.session.cleaning.is_none()
+    });
     cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     assert!(!old.exists());
     assert!(versions.join("v20.11.0").exists());
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "a clean run needs no summary dialog");
+        assert!(
+            app.overlays.dialog.is_none(),
+            "a clean run needs no summary dialog"
+        );
         assert_eq!(app.report().unwrap().toolchains.len(), 1);
     });
     let path = kuizer::history::default_path().unwrap();
@@ -1356,10 +1382,10 @@ fn a_toast_hides_itself(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("toast").is_some());
     cx.executor().advance_clock(TOAST_TIME - POLL * 2);
     cx.run_until_parked();
-    view.read_with(cx, |app, _| assert!(app.toast.is_some()));
+    view.read_with(cx, |app, _| assert!(app.overlays.toast.is_some()));
     cx.executor().advance_clock(POLL * 3);
     cx.run_until_parked();
-    view.read_with(cx, |app, _| assert!(app.toast.is_none()));
+    view.read_with(cx, |app, _| assert!(app.overlays.toast.is_none()));
 }
 
 pub(super) fn scanned<'a>(
@@ -1373,7 +1399,7 @@ pub(super) fn scanned<'a>(
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
     view.update(cx, |app, cx| {
-        app.tab = tab;
+        app.list.tab = tab;
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
@@ -1396,7 +1422,7 @@ fn click_item(cx: &mut VisualTestContext, selector: &'static str) {
 
 pub(super) fn menu_target(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Option<Target> {
     view.read_with(cx, |app, _| {
-        app.menu.as_ref().map(|menu| menu.target.clone())
+        app.overlays.menu.as_ref().map(|menu| menu.target.clone())
     })
 }
 
@@ -1422,9 +1448,12 @@ fn right_clicking_a_row_opens_its_menu_there(cx: &mut TestAppContext) {
     assert!(menu.top() >= row.top() && menu.top() <= row.bottom());
     assert!((menu.left() - row.center().x).abs() < px(1.));
     view.read_with(cx, |app, _| {
-        assert!(app.selection.is_empty(), "a right click does not select");
+        assert!(
+            app.list.selection.is_empty(),
+            "a right click does not select"
+        );
         let labels: Vec<&str> = app
-            .menu_items(&app.menu.as_ref().unwrap().target)
+            .menu_items(&app.overlays.menu.as_ref().unwrap().target)
             .iter()
             .map(|item| item.label)
             .collect();
@@ -1466,14 +1495,14 @@ fn always_exclude_writes_the_config_and_hides_the_item(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("x");
     view.read_with(cx, |app, _| {
         assert!(matches!(
-            &app.dialog,
+            &app.overlays.dialog,
             Some(Dialog::Exclude { path: shown, cancel: true, .. }) if shown == &path
         ));
     });
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none());
-        assert_eq!(app.rows.len(), 1);
+        assert!(app.overlays.dialog.is_none());
+        assert_eq!(app.list.rows.len(), 1);
     });
     assert!(!file.exists(), "cancelling must not write the config");
 
@@ -1481,9 +1510,9 @@ fn always_exclude_writes_the_config_and_hides_the_item(cx: &mut TestAppContext) 
     right_click(cx, "artifact-row-0");
     click_item(cx, "menu-Always exclude");
     view.read_with(cx, |app, _| {
-        assert!(app.menu.is_none());
+        assert!(app.overlays.menu.is_none());
         assert!(matches!(
-            app.dialog,
+            app.overlays.dialog,
             Some(Dialog::Exclude { cancel: true, .. })
         ));
     });
@@ -1493,11 +1522,14 @@ fn always_exclude_writes_the_config_and_hides_the_item(cx: &mut TestAppContext) 
     let pattern = kuizer::config::exclude_pattern(&path);
     assert_eq!(config.scan.exclude, std::slice::from_ref(&pattern));
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none());
-        assert!(app.menu.is_none());
+        assert!(app.overlays.dialog.is_none());
+        assert!(app.overlays.menu.is_none());
         assert!(app.report().unwrap().candidates.is_empty());
-        assert!(app.rows.is_empty());
-        assert!(app.selection.is_empty(), "the selection forgets it too");
+        assert!(app.list.rows.is_empty());
+        assert!(
+            app.list.selection.is_empty(),
+            "the selection forgets it too"
+        );
         assert_eq!(app.config.scan.exclude, std::slice::from_ref(&pattern));
     });
     toast_is(&view, cx, |notice| matches!(notice, Notice::Info(_)));
@@ -1528,8 +1560,11 @@ fn escape_or_a_click_outside_closes_the_menu(cx: &mut TestAppContext) {
         Modifiers::default(),
     );
     view.read_with(cx, |app, _| {
-        assert!(app.menu.is_none());
-        assert!(app.selection.is_empty(), "the click only closed the menu");
+        assert!(app.overlays.menu.is_none());
+        assert!(
+            app.list.selection.is_empty(),
+            "the click only closed the menu"
+        );
     });
 }
 
@@ -1540,7 +1575,11 @@ fn the_keyboard_opens_the_menu_and_chooses_an_item(cx: &mut TestAppContext) {
     let (id, path) = only_artifact(&view, cx);
     cx.simulate_keystrokes("shift-f10");
     view.read_with(cx, |app, _| {
-        let menu = app.menu.as_ref().expect("Shift+F10 opens the menu");
+        let menu = app
+            .overlays
+            .menu
+            .as_ref()
+            .expect("Shift+F10 opens the menu");
         assert_eq!(
             menu.target,
             Target::Item(Source::Artifact, id, path.clone())
@@ -1556,7 +1595,9 @@ fn the_keyboard_opens_the_menu_and_chooses_an_item(cx: &mut TestAppContext) {
     );
 
     let active = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |app, _| app.menu.as_ref().and_then(|menu| menu.active))
+        view.read_with(cx, |app, _| {
+            app.overlays.menu.as_ref().and_then(|menu| menu.active)
+        })
     };
     cx.simulate_keystrokes("down");
     assert_eq!(active(cx), Some(1));
@@ -1568,8 +1609,8 @@ fn the_keyboard_opens_the_menu_and_chooses_an_item(cx: &mut TestAppContext) {
     assert_eq!(active(cx), Some(4), "it wraps around");
     cx.simulate_keystrokes("down down down enter");
     view.read_with(cx, |app, _| {
-        assert!(app.menu.is_none());
-        assert!(app.selection.contains(&(Source::Artifact, id)));
+        assert!(app.overlays.menu.is_none());
+        assert!(app.list.selection.contains(&(Source::Artifact, id)));
     });
 
     cx.simulate_keystrokes("menu");
@@ -1579,8 +1620,8 @@ fn the_keyboard_opens_the_menu_and_chooses_an_item(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("s");
     view.read_with(cx, |app, _| {
-        assert!(app.menu.is_none());
-        assert!(app.selection.is_empty(), "S deselects");
+        assert!(app.overlays.menu.is_none());
+        assert!(app.list.selection.is_empty(), "S deselects");
     });
 }
 
@@ -1613,7 +1654,7 @@ fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
     let selected = view.update(cx, |app, cx| {
-        app.tab = Tab::Artifacts;
+        app.list.tab = Tab::Artifacts;
         let first = &app.report().unwrap().candidates[0];
         let (id, path) = (first.id, first.path.clone());
         app.toggle(Source::Artifact, id, cx);
@@ -1621,10 +1662,10 @@ fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
     });
     cx.update(|window, cx| window.draw(cx).clear());
 
-    view.update(cx, |app, _| app.stale = Some(SystemTime::now()));
+    view.update(cx, |app, _| app.session.stale = Some(SystemTime::now()));
     right_click(cx, "artifact-row-1");
     view.read_with(cx, |app, _| {
-        let items = app.menu_items(&app.menu.as_ref().unwrap().target);
+        let items = app.menu_items(&app.overlays.menu.as_ref().unwrap().target);
         let trash = items
             .iter()
             .find(|item| item.choice == Choice::Trash)
@@ -1633,9 +1674,9 @@ fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
         assert_eq!(trash.tip, app.trash_lock());
     });
     cx.simulate_keystrokes("delete");
-    view.read_with(cx, |app, _| assert!(app.cleaning.is_none()));
+    view.read_with(cx, |app, _| assert!(app.session.cleaning.is_none()));
     cx.simulate_keystrokes("escape");
-    view.update(cx, |app, _| app.stale = None);
+    view.update(cx, |app, _| app.session.stale = None);
 
     let second = right_click(cx, "artifact-row-1");
     let Some(Target::Item(_, _, path)) = menu_target(&view, cx) else {
@@ -1644,9 +1685,11 @@ fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
     assert!(second.size.height > px(0.));
     cx.simulate_keystrokes("delete");
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "the menu never asks")
+        assert!(app.overlays.dialog.is_none(), "the menu never asks")
     });
-    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    wait_until(&view, cx, "the removal", |app| {
+        app.session.cleaning.is_none()
+    });
     assert!(!path.exists());
     assert!(selected.exists(), "the selection is untouched");
     view.read_with(cx, |app, _| assert_eq!(app.selected().len(), 1));
@@ -1687,9 +1730,11 @@ fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside(cx: &m
     assert!(cx.debug_bounds("summary-bar").is_some());
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |app, _| {
-        assert!(app.dialog.is_none(), "Enter never asks")
+        assert!(app.overlays.dialog.is_none(), "Enter never asks")
     });
-    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+    wait_until(&view, cx, "the removal", |app| {
+        app.session.cleaning.is_none()
+    });
     cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     assert!(!first.exists());
@@ -1700,7 +1745,10 @@ fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside(cx: &m
         is_held: true,
     });
     view.read_with(cx, |app, _| {
-        assert!(app.cleaning.is_none(), "a held Enter deletes nothing");
+        assert!(
+            app.session.cleaning.is_none(),
+            "a held Enter deletes nothing"
+        );
         assert_eq!(app.selected().len(), 1);
     });
     assert!(second.exists());
@@ -1728,13 +1776,13 @@ fn duplicates_can_be_excluded_from_their_menu(cx: &mut TestAppContext) {
         std::fs::write(folder.join("same.bin"), vec![b'z'; 16 * 1024]).unwrap();
     }
     let (view, cx) = open(cx, dir.path().join("recent"));
-    view.update(cx, |app, _| app.options.duplicates = true);
+    view.update(cx, |app, _| app.session.options.duplicates = true);
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
     wait_for_duplicates(&view, cx);
     view.update(cx, |app, cx| {
-        app.tab = Tab::Duplicates;
+        app.list.tab = Tab::Duplicates;
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
@@ -1755,7 +1803,7 @@ fn duplicates_can_be_excluded_from_their_menu(cx: &mut TestAppContext) {
         panic!("a duplicate menu");
     };
     view.read_with(cx, |app, _| {
-        let items = app.menu_items(&app.menu.as_ref().unwrap().target);
+        let items = app.menu_items(&app.overlays.menu.as_ref().unwrap().target);
         let choices: Vec<Choice> = items.iter().map(|item| item.choice).collect();
         assert_eq!(choices, [Choice::Reveal, Choice::CopyPath, Choice::Exclude]);
     });
@@ -1776,7 +1824,7 @@ fn escape_cancels_a_duplicate_search_and_a_new_one_can_start(cx: &mut TestAppCon
         std::fs::write(folder.join("same.bin"), vec![b'z'; 16 * 1024]).unwrap();
     }
     let (view, cx) = open(cx, dir.path().join("recent"));
-    view.update(cx, |app, _| app.options.duplicates = false);
+    view.update(cx, |app, _| app.session.options.duplicates = false);
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
     wait_for_refresh(&view, cx);
@@ -1784,7 +1832,10 @@ fn escape_cancels_a_duplicate_search_and_a_new_one_can_start(cx: &mut TestAppCon
     let cancel = cx.update(|window, cx| {
         let cancel = view.update(cx, |app, cx| {
             app.run(Command::FindDuplicates, window, cx);
-            app.search.as_ref().map(|search| search.cancel.clone())
+            app.session
+                .search
+                .as_ref()
+                .map(|search| search.cancel.clone())
         });
         window.dispatch_keystroke(escape, cx);
         cancel
@@ -1802,8 +1853,8 @@ fn escape_cancels_a_duplicate_search_and_a_new_one_can_start(cx: &mut TestAppCon
     };
     cx.run_until_parked();
     view.read_with(cx, |app, _| {
-        assert!(app.search.is_none());
-        assert!(app.search_error.is_none());
+        assert!(app.session.search.is_none());
+        assert!(app.session.search_error.is_none());
     });
     assert_eq!(duplicates(cx), None, "a cancelled search shows nothing");
 
@@ -1830,7 +1881,9 @@ fn a_broken_saved_scan_falls_back_to_a_normal_scan(cx: &mut TestAppContext) {
     std::fs::write(&files[0], b"\0garbage").unwrap();
 
     scan_again_from_the_start(&view, cx);
-    view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Loading(_))));
+    view.read_with(cx, |app, _| {
+        assert!(matches!(app.session.phase, Phase::Loading(_)))
+    });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("activity").is_some());
     assert!(!wait_until_shown(&view, cx), "no saved scan is shown");
@@ -1856,19 +1909,19 @@ fn the_mode_follows_whatever_takes_the_next_key(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, dir.path().join("recent"));
     view.update(cx, |app, _| {
         assert_eq!(app.mode(), keys::Mode::Normal);
-        app.visual = true;
-        app.filtering = true;
+        app.list.visual = true;
+        app.list.filtering = true;
         assert_eq!(app.mode(), keys::Mode::Filter);
-        app.palette = Some(Palette::default());
+        app.overlays.palette = Some(Palette::default());
         assert_eq!(app.mode(), keys::Mode::Palette);
-        app.dialog = Some(Dialog::Branches {
+        app.overlays.dialog = Some(Dialog::Branches {
             scope: GitScope::All,
             cancel: false,
         });
         assert_eq!(app.mode(), keys::Mode::Confirm);
-        app.dialog = None;
-        app.palette = None;
-        app.filtering = false;
+        app.overlays.dialog = None;
+        app.overlays.palette = None;
+        app.list.filtering = false;
         assert_eq!(app.mode(), keys::Mode::Visual);
     });
 }
@@ -1897,7 +1950,7 @@ fn delete_keys_without_a_selection_remove_nothing(cx: &mut TestAppContext) {
     wait_for_refresh(&view, cx);
     for tab in [Tab::Artifacts, Tab::Caches, Tab::Toolchains, Tab::Docker] {
         view.update(cx, |app, cx| {
-            app.tab = tab;
+            app.list.tab = tab;
             cx.notify();
         });
         for key in ["enter", "delete", "d"] {
@@ -1922,15 +1975,15 @@ fn paths_excluded_while_saved_results_load_stay_out(cx: &mut TestAppContext) {
         modified: None,
     };
     view.update(cx, |app, cx| {
-        app.roots = vec![PathBuf::from("/p")];
-        app.cancel = Some(Cancel::new());
-        app.pending = Part::expected(&app.options);
-        app.phase = Phase::Loading(Box::default());
-        app.excluded = vec![PathBuf::from("/p/old")];
-        app.cached_excluded = app.excluded.len();
-        app.excluded.push(late.to_path_buf());
+        app.session.roots = vec![PathBuf::from("/p")];
+        app.session.cancel = Some(Cancel::new());
+        app.session.pending = Part::expected(&app.session.options);
+        app.session.phase = Phase::Loading(Box::default());
+        app.session.excluded = vec![PathBuf::from("/p/old")];
+        app.session.cached_excluded = app.session.excluded.len();
+        app.session.excluded.push(late.to_path_buf());
 
-        let mut saved = Report::empty(&app.roots, &app.options);
+        let mut saved = Report::empty(&app.session.roots, &app.session.options);
         saved.candidates = vec![artifact(1, kept), artifact(2, late)];
         app.take(vec![Update::Cached(Box::new(saved))], cx);
         let ids: Vec<u64> = app
@@ -1958,7 +2011,7 @@ fn paths_excluded_while_saved_results_load_stay_out(cx: &mut TestAppContext) {
             files: 3,
             duration: Duration::ZERO,
         };
-        let roots = app.roots.clone();
+        let roots = app.session.roots.clone();
         app.show_duplicates(&roots, found, 1, cx);
         let groups = &app.report().unwrap().duplicates.as_ref().unwrap().groups;
         assert_eq!(groups[0].members.len(), 2);

@@ -5,10 +5,10 @@ impl Kuizer {
         let Some(report) = self.report() else {
             return div().into_any_element();
         };
-        if self.map.shown {
+        if self.list.map.shown {
             return self.render_map(cx);
         }
-        let figures = &self.report_stats;
+        let figures = &self.session.report_stats;
         let caches = figures.caches.all.bytes;
         let toolchains = figures.toolchains.all.bytes;
         let containers = figures.docker.all.bytes;
@@ -144,7 +144,8 @@ impl Kuizer {
     /// Why the biggest safe artifacts cannot be selected, or `None` when there are some.
     pub(super) fn wins_blocked(&self) -> Option<&'static str> {
         let report = self.report()?;
-        self.report_stats
+        self.session
+            .report_stats
             .charts(report)
             .wins
             .0
@@ -157,20 +158,20 @@ impl Kuizer {
         let Some(report) = self.report() else {
             return;
         };
-        let ids = self.report_stats.charts(report).wins.0.clone();
+        let ids = self.session.report_stats.charts(report).wins.0.clone();
         for id in ids {
             self.select((Source::Artifact, id));
         }
         self.go_to(Tab::Artifacts, cx);
-        if self.safety == Some(Safety::Review) {
-            self.safety = None;
+        if self.list.safety == Some(Safety::Review) {
+            self.list.safety = None;
             self.filtered();
         }
     }
 
     /// The first step to take: the largest safe artifacts, one key away from being selected.
     fn overview_wins(&self, report: &Report, cx: &mut Context<Self>) -> Div {
-        let (ids, bytes) = &self.report_stats.charts(report).wins;
+        let (ids, bytes) = &self.session.report_stats.charts(report).wins;
         let card = ui::card("Biggest safe wins").debug_selector(|| "overview-wins".to_owned());
         if ids.is_empty() {
             return card.child(ui::empty(if self.refreshing() {
@@ -181,7 +182,7 @@ impl Kuizer {
         }
         let picks: Vec<&Candidate> = ids
             .iter()
-            .filter_map(|&id| self.index.find(report, (Source::Artifact, id)))
+            .filter_map(|&id| self.session.index.find(report, (Source::Artifact, id)))
             .collect();
         let largest = picks
             .first()

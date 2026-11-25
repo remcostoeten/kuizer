@@ -173,6 +173,22 @@ pub enum DeleteMode {
     Trash,
 }
 
+impl DeleteMode {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Permanent => "permanent",
+            Self::Trash => "trash",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Permanent => "Permanent",
+            Self::Trash => "Trash",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeleteConfig {
@@ -283,6 +299,24 @@ pub enum Theme {
     Light,
 }
 
+impl Theme {
+    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+}
+
 /// The color the GUI marks the selection, the focus and its bars with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -302,12 +336,22 @@ impl Accent {
     ///
     /// @example
     /// assert_eq!(Accent::Teal.key(), "teal");
-    pub fn key(self) -> &'static str {
+    pub const fn key(self) -> &'static str {
         match self {
             Self::Purple => "purple",
             Self::Blue => "blue",
             Self::Teal => "teal",
             Self::Pink => "pink",
+        }
+    }
+
+    /// Human-readable label shown in the settings UI.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Purple => "Purple",
+            Self::Blue => "Blue",
+            Self::Teal => "Teal",
+            Self::Pink => "Pink",
         }
     }
 }
@@ -321,6 +365,24 @@ pub enum Density {
     Compact,
 }
 
+impl Density {
+    pub const ALL: [Self; 2] = [Self::Comfortable, Self::Compact];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Comfortable => "Comfortable",
+            Self::Compact => "Compact",
+        }
+    }
+}
+
 /// How wide the GUI sidebar opens: with labels, or as a narrow strip of icons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -328,6 +390,22 @@ pub enum Sidebar {
     #[default]
     Expanded,
     Collapsed,
+}
+
+impl Sidebar {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Expanded => "expanded",
+            Self::Collapsed => "collapsed",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Expanded => "Expanded",
+            Self::Collapsed => "Collapsed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

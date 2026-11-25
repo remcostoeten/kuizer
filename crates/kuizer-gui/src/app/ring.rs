@@ -109,7 +109,7 @@ impl Kuizer {
 
     /// Starts drawing a region of the window, see `Stops::enter`.
     pub(super) fn region(&self, region: Region) {
-        self.stops.borrow_mut().enter(region);
+        self.chrome.stops.borrow_mut().enter(region);
     }
 
     /// Makes `control` a Tab stop that runs `press` when it is clicked, or when it has the ring
@@ -170,18 +170,19 @@ impl Kuizer {
         else {
             return control;
         };
-        let ringed = self.ring.as_ref() == Some(&id) && !self.typing();
-        let scroll = self.stops.borrow_mut().push(id, press);
+        let ringed = self.chrome.ring.as_ref() == Some(&id) && !self.typing();
+        let scroll = self.chrome.stops.borrow_mut().push(id, press);
         control.when(ringed, |this| {
-            this.child(outline(scroll, Rc::clone(&self.reveal_ring)))
+            this.child(outline(scroll, Rc::clone(&self.chrome.reveal_ring)))
         })
     }
 
     /// Whether the ring is on a control of the frame on screen.
     pub(super) fn ringed(&self) -> bool {
-        self.ring
+        self.chrome
+            .ring
             .as_ref()
-            .is_some_and(|ring| self.stops.borrow().ids().any(|id| id == ring))
+            .is_some_and(|ring| self.chrome.stops.borrow().ids().any(|id| id == ring))
     }
 
     /// Handles a key for the ring: Tab from anywhere, and while a control has the ring, Enter,
@@ -197,7 +198,7 @@ impl Kuizer {
         let stroke = commands::stroke(keystroke);
         let action = self.keymap.lookup(Scope::Control, stroke);
         if !self.ringed() {
-            self.ring = None;
+            self.chrome.ring = None;
         }
         if matches!(action, Some(Key::ControlNext | Key::ControlPrevious)) {
             self.move_ring(Move::Cycle {
@@ -206,12 +207,12 @@ impl Kuizer {
             cx.notify();
             return true;
         }
-        let Some(ring) = self.ring.clone() else {
+        let Some(ring) = self.chrome.ring.clone() else {
             return false;
         };
         let back = match action {
             Some(key @ (Key::ControlBack | Key::ControlForward))
-                if !matches!(self.phase, Phase::Start)
+                if !matches!(self.session.phase, Phase::Start)
                     || self.keymap.matches(Scope::StartControl, key, stroke) =>
             {
                 Some(key == Key::ControlBack)
@@ -221,14 +222,14 @@ impl Kuizer {
         if let Some(back) = back {
             self.move_ring(Move::Step { back });
         } else if action == Some(Key::ControlPress) {
-            let press = self.stops.borrow().press(&ring).filter(|_| !repeat);
+            let press = self.chrome.stops.borrow().press(&ring).filter(|_| !repeat);
             if let Some(press) = press {
                 press(self, window, cx);
             }
         } else if action == Some(Key::Back) {
-            self.ring = None;
+            self.chrome.ring = None;
         } else {
-            self.ring = None;
+            self.chrome.ring = None;
             cx.notify();
             return false;
         }
@@ -237,8 +238,12 @@ impl Kuizer {
     }
 
     fn move_ring(&mut self, motion: Move) {
-        self.ring = self.stops.borrow().moved(self.ring.as_ref(), motion);
-        self.reveal_ring.set(self.ring.is_some());
+        self.chrome.ring = self
+            .chrome
+            .stops
+            .borrow()
+            .moved(self.chrome.ring.as_ref(), motion);
+        self.chrome.reveal_ring.set(self.chrome.ring.is_some());
     }
 }
 
@@ -313,7 +318,7 @@ mod tests {
     }
 
     fn ring(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Option<ElementId> {
-        view.read_with(cx, |app, _| app.ring.clone())
+        view.read_with(cx, |app, _| app.chrome.ring.clone())
     }
 
     fn tab_to(view: &Entity<Kuizer>, cx: &mut VisualTestContext, id: &'static str) {
@@ -347,13 +352,16 @@ mod tests {
         let tipped = cx.update(|_, cx| tooltip::layer(cx).read(cx).showing());
         assert!(tipped, "the control with the ring shows its tooltip");
         cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| assert!(app.whole_home));
+        view.read_with(cx, |app, _| assert!(app.start.whole_home));
 
         type_text(cx, "~");
         view.read_with(cx, |app, _| {
-            assert_eq!(app.ring, None, "typing goes back to the folder field");
-            assert_eq!(app.folder, "~");
-            assert!(!app.whole_home);
+            assert_eq!(
+                app.chrome.ring, None,
+                "typing goes back to the folder field"
+            );
+            assert_eq!(app.start.folder, "~");
+            assert!(!app.start.whole_home);
         });
 
         cx.simulate_keystrokes("shift-tab");
@@ -362,23 +370,28 @@ mod tests {
             Some("opt-one-fs".into()),
             "Shift+Tab wraps"
         );
-        let before = view.read_with(cx, |app, _| app.options.one_file_system);
+        let before = view.read_with(cx, |app, _| app.session.options.one_file_system);
         cx.simulate_keystrokes("space");
-        view.read_with(cx, |app, _| assert_ne!(app.options.one_file_system, before));
+        view.read_with(cx, |app, _| {
+            assert_ne!(app.session.options.one_file_system, before)
+        });
         cx.simulate_keystrokes("escape");
         assert_eq!(ring(&view, cx), None);
 
         cx.simulate_keystrokes("shift-tab");
         type_text(cx, "h");
         view.read_with(cx, |app, _| {
-            assert_eq!(app.ring, None, "a motion letter types on the start screen");
-            assert_eq!(app.folder, "~h");
+            assert_eq!(
+                app.chrome.ring, None,
+                "a motion letter types on the start screen"
+            );
+            assert_eq!(app.start.folder, "~h");
         });
 
         cx.simulate_keystrokes("ctrl-,");
         view.read_with(cx, |app, _| {
             assert!(
-                app.settings.is_some(),
+                app.overlays.settings.is_some(),
                 "commands the field leaves alone still run"
             )
         });
@@ -393,11 +406,15 @@ mod tests {
 
         tab_to(&view, cx, Tab::History.label());
         cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| assert_eq!(app.tab, Tab::History));
+        view.read_with(cx, |app, _| assert_eq!(app.list.tab, Tab::History));
         cx.simulate_keystrokes("j");
         assert_ne!(ring(&view, cx), Some(Tab::History.label().into()));
         view.read_with(cx, |app, _| {
-            assert_eq!(app.tab, Tab::History, "a motion moves without pressing");
+            assert_eq!(
+                app.list.tab,
+                Tab::History,
+                "a motion moves without pressing"
+            );
         });
         cx.simulate_keystrokes("k");
         assert_eq!(ring(&view, cx), Some(Tab::History.label().into()));
@@ -406,7 +423,9 @@ mod tests {
 
         tab_to(&view, cx, "new-scan");
         cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Start)));
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.session.phase, Phase::Start))
+        });
         cx.simulate_keystrokes("tab");
         assert_eq!(
             ring(&view, cx),

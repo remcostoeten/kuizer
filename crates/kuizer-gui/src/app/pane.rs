@@ -37,7 +37,7 @@ impl Render for Pane {
             return div().into_any_element();
         };
         app.update(cx, |app, cx| {
-            app.cursor_bounds.set(None);
+            app.list.cursor_bounds.set(None);
             app.region(Region::Content);
             app.render_content(cx)
         })
@@ -54,7 +54,7 @@ impl Render for Chrome {
 
 impl Kuizer {
     pub(super) fn redraw_chrome(&self, cx: &mut Context<Self>) {
-        match &self.chrome {
+        match &self.chrome.view {
             Some(chrome) => {
                 let id = chrome.entity_id();
                 let app: &mut App = cx;
@@ -66,6 +66,7 @@ impl Kuizer {
 
     pub(super) fn chrome_view(&mut self, cx: &mut Context<Self>) -> Entity<Chrome> {
         self.chrome
+            .view
             .get_or_insert_with(|| cx.new(|_| Chrome))
             .clone()
     }
@@ -74,11 +75,12 @@ impl Kuizer {
     pub(super) fn content_pane(&mut self, cx: &mut Context<Self>) -> AnyView {
         let app = cx.entity();
         let pane = self
+            .chrome
             .content
             .get_or_insert_with(|| cx.new(|cx| Pane::new(&app, cx)))
             .clone();
         let view = AnyView::from(pane);
-        if self.cache_content {
+        if self.chrome.cache_content {
             view.cached(StyleRefinement::default().size_full())
         } else {
             view
@@ -94,7 +96,9 @@ mod tests {
     use crate::app::tests::scanned;
 
     fn renders(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> usize {
-        let pane = view.read_with(cx, |app, _| app.content.clone().expect("the content pane"));
+        let pane = view.read_with(cx, |app, _| {
+            app.chrome.content.clone().expect("the content pane")
+        });
         pane.read_with(cx, |pane, _| pane.renders)
     }
 
@@ -108,13 +112,13 @@ mod tests {
         cx.update(bind_keys);
         let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
         view.update(cx, |app, cx| {
-            app.cache_content = true;
-            app.stale = Some(SystemTime::now());
+            app.chrome.cache_content = true;
+            app.session.stale = Some(SystemTime::now());
             cx.notify();
         });
         draw(cx);
         let before = renders(&view, cx);
-        let loader = view.read_with(cx, |app, _| app.loader.clone().expect("the loader"));
+        let loader = view.read_with(cx, |app, _| app.chrome.loader.clone().expect("the loader"));
         cx.update(|_, cx| cx.notify(loader.entity_id()));
         draw(cx);
         assert_eq!(
@@ -137,7 +141,7 @@ mod tests {
         cx.update(bind_keys);
         let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
         view.update(cx, |app, cx| {
-            app.cache_content = true;
+            app.chrome.cache_content = true;
             cx.notify();
         });
         draw(cx);
@@ -148,8 +152,8 @@ mod tests {
         assert_eq!(renders(&view, cx), before, "a hover mark is chrome only");
 
         view.update(cx, |app, cx| {
-            app.cancel = Some(Cancel::new());
-            app.pending = HashSet::from([Part::Docker]);
+            app.session.cancel = Some(Cancel::new());
+            app.session.pending = HashSet::from([Part::Docker]);
             app.take(vec![Update::Activity(Box::default())], cx);
         });
         draw(cx);
@@ -160,7 +164,7 @@ mod tests {
         );
 
         view.update(cx, |app, cx| {
-            app.tab = Tab::Docker;
+            app.list.tab = Tab::Docker;
             app.take(vec![Update::Activity(Box::default())], cx);
         });
         draw(cx);

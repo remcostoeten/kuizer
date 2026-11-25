@@ -36,16 +36,16 @@ pub(super) struct SpaceMap {
 impl Kuizer {
     /// Whether the space map is on screen and has the keyboard.
     pub(super) fn map_active(&self) -> bool {
-        self.tab == Tab::Overview && self.map.shown && self.report().is_some()
+        self.list.tab == Tab::Overview && self.list.map.shown && self.report().is_some()
     }
 
     pub(super) fn refresh_map(&mut self, cx: &Context<Self>) {
-        self.map.dirty = true;
+        self.list.map.dirty = true;
         self.ensure_map(cx);
     }
 
     pub(super) fn ensure_map(&mut self, cx: &Context<Self>) {
-        if self.map.dirty && self.map_active() {
+        if self.list.map.dirty && self.map_active() {
             self.rebuild_map(cx);
         }
     }
@@ -77,37 +77,38 @@ impl Kuizer {
             .map(|(_, candidate)| leaf(Source::Cache, candidate))
             .collect();
         let tree = treemap::build(&report.roots, artifacts, caches);
-        let depth = tree.trail(&self.map.path).len() - 1;
-        self.map.path.truncate(depth);
+        let depth = tree.trail(&self.list.map.path).len() - 1;
+        self.list.map.path.truncate(depth);
         self.replace_map_tree(Some(tree), cx);
-        self.map.dirty = false;
-        self.map.built += 1;
-        let kept = self.map.focus.as_deref().is_some_and(|focus| {
+        self.list.map.dirty = false;
+        self.list.map.built += 1;
+        let kept = self.list.map.focus.as_deref().is_some_and(|focus| {
             self.map_level()
                 .is_some_and(|level| level.child(focus).is_some())
         });
         if !kept {
-            self.map.focus = None;
+            self.list.map.focus = None;
         }
     }
 
     pub(super) fn clear_map_tree(&mut self, cx: &Context<Self>) {
         self.replace_map_tree(None, cx);
-        self.map.dirty = true;
+        self.list.map.dirty = true;
     }
 
     fn replace_map_tree(&mut self, tree: Option<Node>, cx: &Context<Self>) {
-        if let Some(old) = std::mem::replace(&mut self.map.tree, tree) {
+        if let Some(old) = std::mem::replace(&mut self.list.map.tree, tree) {
             cx.background_spawn(async move { drop(old) }).detach();
         }
     }
 
     /// The top of the map and every level opened from it.
     pub(super) fn map_trail(&self) -> Vec<&Node> {
-        self.map
+        self.list
+            .map
             .tree
             .as_ref()
-            .map(|tree| tree.trail(&self.map.path))
+            .map(|tree| tree.trail(&self.list.map.path))
             .unwrap_or_default()
     }
 
@@ -121,6 +122,7 @@ impl Kuizer {
             return None;
         }
         let at = self
+            .list
             .map
             .focus
             .as_deref()
@@ -140,20 +142,24 @@ impl Kuizer {
     }
 
     fn map_selected(&self, level: &Node) -> u64 {
-        let key = (self.selection.generation(), self.map.built, self.map.epoch);
-        if let Some((counted, bytes)) = self.map.selected.get()
+        let key = (
+            self.list.selection.generation(),
+            self.list.map.built,
+            self.list.map.epoch,
+        );
+        if let Some((counted, bytes)) = self.list.map.selected.get()
             && counted == key
         {
             return bytes;
         }
         let bytes = level.fold_leaves(0, &|total, item, bytes| {
-            if self.selection.contains(&(item.source, item.id)) {
+            if self.list.selection.contains(&(item.source, item.id)) {
                 total + bytes
             } else {
                 total
             }
         });
-        self.map.selected.set(Some((key, bytes)));
+        self.list.map.selected.set(Some((key, bytes)));
         bytes
     }
 
@@ -164,21 +170,21 @@ impl Kuizer {
             .and_then(|level| level.child(key))
             .is_some_and(Node::opens)
         {
-            self.map.path.push(key.to_owned());
-            self.map.focus = None;
-            self.map.epoch += 1;
+            self.list.map.path.push(key.to_owned());
+            self.list.map.focus = None;
+            self.list.map.epoch += 1;
         }
     }
 
     /// Zooms out to the level at `depth`, zero being the top, with the focus on the folder the
     /// map came out of.
     pub(super) fn map_back(&mut self, depth: usize) {
-        if depth >= self.map.path.len() {
+        if depth >= self.list.map.path.len() {
             return;
         }
-        self.map.focus = self.map.path.get(depth).cloned();
-        self.map.path.truncate(depth);
-        self.map.epoch += 1;
+        self.list.map.focus = self.list.map.path.get(depth).cloned();
+        self.list.map.path.truncate(depth);
+        self.list.map.epoch += 1;
     }
 
     pub(super) fn map_move(&mut self, direction: Direction) {
@@ -187,7 +193,7 @@ impl Kuizer {
         };
         let rects = self.map_rects(level);
         if let Some(next) = squarify::neighbor(&rects, from, direction) {
-            self.map.focus = Some(level.children[next].key.clone());
+            self.list.map.focus = Some(level.children[next].key.clone());
         }
     }
 
@@ -198,7 +204,8 @@ impl Kuizer {
     }
 
     fn map_size(&self) -> (f32, f32) {
-        self.map
+        self.list
+            .map
             .bounds
             .get()
             .map(|bounds| (f32::from(bounds.size.width), f32::from(bounds.size.height)))
@@ -217,18 +224,18 @@ impl Kuizer {
             return;
         };
         let (opens, item) = (node.opens(), node.item());
-        self.filtering = false;
+        self.list.filtering = false;
         if modifiers.secondary() || modifiers.shift {
             if let Some(item) = item
                 && !self.busy()
             {
                 self.toggle(item.source, item.id, cx);
             }
-            self.map.focus = Some(key.to_owned());
+            self.list.map.focus = Some(key.to_owned());
         } else if opens {
             self.map_open(key);
         } else {
-            self.map.focus = Some(key.to_owned());
+            self.list.map.focus = Some(key.to_owned());
         }
         cx.notify();
     }
@@ -240,7 +247,7 @@ impl Kuizer {
         let (Some(item), Some(path)) = (node.item(), node.path.clone()) else {
             return;
         };
-        self.map.focus = Some(key.to_owned());
+        self.list.map.focus = Some(key.to_owned());
         self.open_menu(
             Target::Item(item.source, item.id, path),
             position,
@@ -254,17 +261,17 @@ impl Kuizer {
         let key = self.hint(&Command::SpaceMap);
         ui::segments()
             .child(self.control(
-                ui::segment("view-summary", "Summary", !self.map.shown)
+                ui::segment("view-summary", "Summary", !self.list.map.shown)
                     .debug_selector(|| "view-summary".to_owned())
                     .tip(tooltip::plain("Totals and charts of the scan")),
                 cx,
                 |app, _, cx| {
-                    app.map.shown = false;
+                    app.list.map.shown = false;
                     cx.notify();
                 },
             ))
             .child(self.control(
-                ui::segment("view-map", "Space map", self.map.shown)
+                ui::segment("view-map", "Space map", self.list.map.shown)
                     .debug_selector(|| "view-map".to_owned())
                     .tip(
                         Tooltip::details("Space map")
@@ -274,7 +281,7 @@ impl Kuizer {
                     ),
                 cx,
                 |app, _, cx| {
-                    app.map.shown = true;
+                    app.list.map.shown = true;
                     app.ensure_map(cx);
                     cx.notify();
                 },
@@ -440,7 +447,7 @@ impl Kuizer {
                 self.render_tile(index, node, rect, (width, height), focus == Some(index), cx)
             })
             .collect();
-        let bounds = Rc::clone(&self.map.bounds);
+        let bounds = Rc::clone(&self.list.map.bounds);
         let probe = canvas(
             move |area, window, _| {
                 if bounds.get().map(|known| known.size) != Some(area.size) {
@@ -460,7 +467,7 @@ impl Kuizer {
         } else {
             layer
                 .with_animation(
-                    ("map-zoom", self.map.epoch),
+                    ("map-zoom", self.list.map.epoch),
                     Animation::new(motion::STEP).with_easing(motion::ease_out),
                     |layer, progress| layer.opacity(motion::fade_from(motion::ZOOM_FROM, progress)),
                 )
@@ -490,7 +497,8 @@ impl Kuizer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let item = node.item();
-        let selected = item.is_some_and(|item| self.selection.contains(&(item.source, item.id)));
+        let selected =
+            item.is_some_and(|item| self.list.selection.contains(&(item.source, item.id)));
         let (fill, edge) = match node.kind {
             Kind::Item(item) if selected => (
                 theme::tile_selected(),
@@ -534,7 +542,7 @@ impl Kuizer {
                 theme::focus()
             }
         });
-        let marker = focused.then(|| Rc::clone(&self.cursor_bounds));
+        let marker = focused.then(|| Rc::clone(&self.list.cursor_bounds));
         let inner = div()
             .relative()
             .size_full()
@@ -687,7 +695,7 @@ mod tests {
         cx.simulate_keystrokes("m");
         view.read_with(cx, |app, _| {
             assert!(app.map_active(), "M opens the space map");
-            assert_eq!(app.tab, Tab::Overview);
+            assert_eq!(app.list.tab, Tab::Overview);
         });
         draw(cx);
         (view, cx)
@@ -704,32 +712,32 @@ mod tests {
         wait_for_refresh(&view, cx);
         view.read_with(cx, |app, _| {
             assert!(
-                app.map.tree.is_none(),
+                app.list.map.tree.is_none(),
                 "nothing is built for a map nobody opened"
             );
-            assert!(app.map.dirty);
+            assert!(app.list.map.dirty);
         });
         cx.simulate_keystrokes("m");
         let built = view.read_with(cx, |app, _| {
-            assert!(!app.map.dirty);
+            assert!(!app.list.map.dirty);
             assert!(app.map_level().is_some_and(|level| level.items > 0));
-            app.map.built
+            app.list.map.built
         });
 
         cx.simulate_keystrokes("shift-2");
         view.update(cx, |app, cx| app.rescan(cx));
         wait_for_refresh(&view, cx);
         view.read_with(cx, |app, _| {
-            assert!(app.map.shown);
-            assert_eq!(app.tab, Tab::Artifacts);
-            assert!(app.map.dirty);
-            assert_eq!(app.map.built, built);
+            assert!(app.list.map.shown);
+            assert_eq!(app.list.tab, Tab::Artifacts);
+            assert!(app.list.map.dirty);
+            assert_eq!(app.list.map.built, built);
         });
         cx.simulate_keystrokes("shift-1");
         view.read_with(cx, |app, _| {
             assert!(app.map_active());
-            assert!(!app.map.dirty);
-            assert_eq!(app.map.built, built + 1);
+            assert!(!app.list.map.dirty);
+            assert_eq!(app.list.map.built, built + 1);
         });
     }
 
@@ -745,7 +753,7 @@ mod tests {
     }
 
     fn path(view: &Entity<Kuizer>, cx: &mut VisualTestContext) -> Vec<String> {
-        view.read_with(cx, |app, _| app.map.path.clone())
+        view.read_with(cx, |app, _| app.list.map.path.clone())
     }
 
     fn click(cx: &mut VisualTestContext, selector: &'static str, modifiers: Modifiers) {
@@ -793,12 +801,16 @@ mod tests {
 
         cx.simulate_keystrokes("m");
         view.read_with(cx, |app, _| {
-            assert!(!app.map.shown, "M goes back to the summary")
+            assert!(!app.list.map.shown, "M goes back to the summary")
         });
         cx.simulate_keystrokes("2 m");
         view.read_with(cx, |app, _| {
-            assert_eq!(app.tab, Tab::Overview, "M opens the map from any section");
-            assert!(app.map.shown);
+            assert_eq!(
+                app.list.tab,
+                Tab::Overview,
+                "M opens the map from any section"
+            );
+            assert!(app.list.map.shown);
         });
     }
 
@@ -843,7 +855,10 @@ mod tests {
         cx.simulate_keystrokes("right enter");
         assert!(path(&view, cx).is_empty(), "an item tile does not open");
         view.read_with(cx, |app, _| {
-            assert!(app.dialog.is_none(), "Enter in the map never trashes");
+            assert!(
+                app.overlays.dialog.is_none(),
+                "Enter in the map never trashes"
+            );
         });
     }
 
@@ -856,7 +871,7 @@ mod tests {
         let first = focused_item(&view, cx);
         cx.simulate_keystrokes("space");
         view.read_with(cx, |app, _| {
-            assert_eq!(app.selection, HashSet::from([first]));
+            assert_eq!(app.list.selection, HashSet::from([first]));
         });
         draw(cx);
         assert!(
@@ -869,15 +884,15 @@ mod tests {
 
         click(cx, "map-tile-1", Modifiers::secondary_key());
         view.read_with(cx, |app, _| {
-            assert_eq!(app.selection, HashSet::from([first, second]));
+            assert_eq!(app.list.selection, HashSet::from([first, second]));
             assert!(
-                app.map.path.len() == 1,
+                app.list.map.path.len() == 1,
                 "a modified click selects instead of opening"
             );
         });
         cx.simulate_keystrokes("shift-2");
         view.read_with(cx, |app, _| {
-            assert_eq!(app.tab, Tab::Artifacts);
+            assert_eq!(app.list.tab, Tab::Artifacts);
             let listed: HashSet<(Source, u64)> = app
                 .selected()
                 .iter()
@@ -887,7 +902,7 @@ mod tests {
         });
         cx.simulate_keystrokes("ctrl-shift-a 1");
         view.read_with(cx, |app, _| {
-            assert!(app.selection.is_empty(), "the list cleared it");
+            assert!(app.list.selection.is_empty(), "the list cleared it");
             let level = app.map_level().unwrap();
             assert_eq!(level.items, 2);
         });
@@ -920,9 +935,9 @@ mod tests {
         assert!(cx.debug_bounds("menu").is_some(), "the menu is painted");
         cx.simulate_keystrokes("s");
         view.read_with(cx, |app, _| {
-            assert!(app.menu.is_none());
+            assert!(app.overlays.menu.is_none());
             assert!(
-                app.selection.contains(&(source, id)),
+                app.list.selection.contains(&(source, id)),
                 "Select in the menu selects it"
             );
         });
@@ -955,7 +970,7 @@ mod tests {
         cx.simulate_keystrokes("tab enter");
         view.read_with(cx, |app, _| {
             assert!(
-                app.map.path.is_empty(),
+                app.list.map.path.is_empty(),
                 "the folder is gone, so the map goes up"
             );
             let names: Vec<&str> = app

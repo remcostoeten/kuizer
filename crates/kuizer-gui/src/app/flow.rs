@@ -125,17 +125,18 @@ impl Kuizer {
     pub(super) fn look(&self, source: Source, id: u64, path: &Path) -> Look {
         let now = Instant::now();
         let key = (source, id);
-        let checked = self.selection.contains(&key);
+        let checked = self.list.selection.contains(&key);
         let within = |paths: &Paths| paths.get(&source).is_some_and(|set| set.contains(path));
         let removing = self
+            .session
             .cleaning
             .as_ref()
             .is_some_and(|cleaning| within(&cleaning.paths));
-        let (opacity, slide) = if let Some(cleaning) = &self.cleaning
+        let (opacity, slide) = if let Some(cleaning) = &self.session.cleaning
             && removing
         {
             (deleting(cleaning.started, now), 0.0)
-        } else if let Some(settling) = &self.flow.settling
+        } else if let Some(settling) = &self.session.flow.settling
             && within(&settling.paths)
         {
             let blend = progress(settling.at, now);
@@ -148,7 +149,7 @@ impl Kuizer {
             (1.0, 0.0)
         };
         Look {
-            checked: self.flow.check(key, checked, now),
+            checked: self.session.flow.check(key, checked, now),
             opacity,
             slide,
             deleting: removing,
@@ -167,7 +168,7 @@ impl Kuizer {
         let (from, paths) = cleaning.map_or((theme::DISABLED, Paths::new()), |cleaning| {
             (deleting(cleaning.started, now), cleaning.paths)
         });
-        if let Some(previous) = self.flow.settling.take() {
+        if let Some(previous) = self.session.flow.settling.take() {
             self.depart(previous.removed, cx);
         }
         if motion::reduced() {
@@ -177,13 +178,13 @@ impl Kuizer {
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(motion::STEP).await;
             let _ = this.update(cx, |app, cx| {
-                if let Some(settling) = app.flow.settling.take() {
+                if let Some(settling) = app.session.flow.settling.take() {
                     app.depart(settling.removed, cx);
                     cx.notify();
                 }
             });
         });
-        self.flow.settling = Some(Settling {
+        self.session.flow.settling = Some(Settling {
             at: now,
             from,
             paths,
@@ -195,12 +196,12 @@ impl Kuizer {
     /// Takes removed items out of the report, and keeps them out of what a running scan still
     /// delivers.
     fn depart(&mut self, removed: Paths, cx: &Context<Self>) {
-        if let Phase::Ready(report) = &mut self.phase {
+        if let Phase::Ready(report) = &mut self.session.phase {
             report.remove(&removed);
         }
-        if self.cancel.is_some() {
+        if self.session.cancel.is_some() {
             for (source, paths) in removed {
-                self.gone.entry(source).or_default().extend(paths);
+                self.session.gone.entry(source).or_default().extend(paths);
             }
         }
         self.refresh_stats();
@@ -211,11 +212,13 @@ impl Kuizer {
     /// Follows the selection for the summary bar and asks for the next frame while any row or
     /// the bar is still blending.
     pub(super) fn animate_rows(&mut self, window: &mut Window) {
-        self.flow.observe(self.selection.stats());
-        if self
-            .flow
-            .moving(self.cleaning.as_ref().map(|cleaning| cleaning.started))
-        {
+        self.session.flow.observe(self.list.selection.stats());
+        if self.session.flow.moving(
+            self.session
+                .cleaning
+                .as_ref()
+                .map(|cleaning| cleaning.started),
+        ) {
             window.request_animation_frame();
         }
     }

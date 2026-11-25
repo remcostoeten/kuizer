@@ -2,38 +2,38 @@ use super::*;
 
 impl Kuizer {
     pub(super) fn rescan(&mut self, cx: &mut Context<Self>) {
-        let shown = if let Phase::Ready(report) = &self.phase {
-            self.stale = Some(report.scanned);
+        let shown = if let Phase::Ready(report) = &self.session.phase {
+            self.session.stale = Some(report.scanned);
             true
         } else {
             self.set_phase(Phase::Loading(Box::default()), cx);
-            self.stale = None;
-            self.selection.clear();
-            self.rows.clear();
+            self.session.stale = None;
+            self.list.selection.clear();
+            self.list.rows.clear();
             false
         };
-        if let Some(cancel) = self.cancel.take() {
+        if let Some(cancel) = self.session.cancel.take() {
             cancel.cancel();
         }
-        self.pending = Part::expected(&self.options);
-        self.early.clear();
-        self.streamed = false;
-        self.refreshed.clear();
-        self.gone.clear();
-        self.history_fresh = false;
-        self.progress = Activity::default();
-        self.started = Instant::now();
+        self.session.pending = Part::expected(&self.session.options);
+        self.session.early.clear();
+        self.session.streamed = false;
+        self.session.refreshed.clear();
+        self.session.gone.clear();
+        self.session.history_fresh = false;
+        self.session.progress = Activity::default();
+        self.session.started = Instant::now();
         let cancel = Cancel::new();
-        self.cancel = Some(cancel.clone());
+        self.session.cancel = Some(cancel.clone());
         let (sender, mut receiver) = mpsc::unbounded();
         let config = self.config.clone();
-        let roots = self.roots.clone();
-        let options = self.options.clone();
-        let snapshots = self.snapshots.clone();
-        self.forgotten = Forgotten::default();
-        let forgotten = self.forgotten.clone();
-        let excluded = self.excluded.clone();
-        self.cached_excluded = excluded.len();
+        let roots = self.session.roots.clone();
+        let options = self.session.options.clone();
+        let snapshots = self.session.snapshots.clone();
+        self.session.forgotten = Forgotten::default();
+        let forgotten = self.session.forgotten.clone();
+        let excluded = self.session.excluded.clone();
+        self.session.cached_excluded = excluded.len();
         let spawned = spawn_worker("kuizer-gui-scan", move || {
             scan_parts(
                 &config, &roots, &options, &cancel, &snapshots, forgotten, &sender, shown, excluded,
@@ -49,7 +49,7 @@ impl Kuizer {
             }
             return;
         }
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.session.task = Some(cx.spawn(async move |this, cx| {
             while let Some(first) = receiver.next().await {
                 let mut updates = vec![first];
                 while let Ok(update) = receiver.try_recv() {
@@ -84,22 +84,27 @@ impl Kuizer {
         let (mut rows, mut map, mut sections, mut grown) = (false, false, false, false);
         for update in updates {
             match update {
-                Update::Activity(activity) => match &mut self.phase {
+                Update::Activity(activity) => match &mut self.session.phase {
                     Phase::Loading(shown) => *shown = activity,
-                    _ => self.progress = *activity,
+                    _ => self.session.progress = *activity,
                 },
                 Update::Cached(mut report) => {
-                    report.drop_paths(self.excluded.get(self.cached_excluded..).unwrap_or(&[]));
-                    if !self.gone.is_empty() {
-                        report.remove(&self.gone);
+                    report.drop_paths(
+                        self.session
+                            .excluded
+                            .get(self.session.cached_excluded..)
+                            .unwrap_or(&[]),
+                    );
+                    if !self.session.gone.is_empty() {
+                        report.remove(&self.session.gone);
                     }
-                    if self.cancel.is_some() && self.cached(*report, &mut dropped) {
+                    if self.session.cancel.is_some() && self.cached(*report, &mut dropped) {
                         rows = true;
                         map = true;
                     }
                 }
                 Update::Loaded(mut loaded) => {
-                    loaded.without(&self.excluded, &self.gone);
+                    loaded.without(&self.session.excluded, &self.session.gone);
                     let found = matches!(loaded, Loaded::Found(_));
                     let listed = matches!(
                         loaded,
@@ -117,18 +122,18 @@ impl Kuizer {
                     }
                 }
                 Update::Done(Ok(scanned)) => {
-                    if matches!(self.phase, Phase::Loading(_)) {
+                    if matches!(self.session.phase, Phase::Loading(_)) {
                         self.show_parts(&mut dropped);
                     }
-                    if let Phase::Ready(report) = &mut self.phase {
+                    if let Phase::Ready(report) = &mut self.session.phase {
                         report.scanned = scanned;
                     }
                     self.scan_over();
                     rows = true;
                     map = true;
-                    if self.options.duplicates && self.search.is_none() {
+                    if self.session.options.duplicates && self.session.search.is_none() {
                         self.find_duplicates(cx);
-                    } else if self.tab == Tab::Duplicates {
+                    } else if self.list.tab == Tab::Duplicates {
                         self.load_duplicates(cx);
                     }
                 }
@@ -157,17 +162,18 @@ impl Kuizer {
                 self.refresh_map(cx);
             }
             if self
+                .overlays
                 .menu
                 .as_ref()
                 .is_some_and(|menu| !self.known(&menu.target))
             {
-                self.menu = None;
+                self.overlays.menu = None;
             }
         }
         if !dropped.is_empty() {
             cx.background_spawn(async move { drop(dropped) }).detach();
         }
-        if activity_only && !changed && matches!(self.phase, Phase::Ready(_)) {
+        if activity_only && !changed && matches!(self.session.phase, Phase::Ready(_)) {
             if self.content_reads_progress() {
                 cx.notify();
             }
@@ -177,30 +183,31 @@ impl Kuizer {
     }
 
     pub(super) fn content_reads_progress(&self) -> bool {
-        self.tab != Tab::Overview
+        self.list.tab != Tab::Overview
             && self
+                .list
                 .tab
                 .part()
-                .is_some_and(|part| self.pending.contains(&part))
+                .is_some_and(|part| self.session.pending.contains(&part))
     }
 
     pub(super) fn scan_over(&mut self) {
-        self.cancel = None;
-        self.stale = None;
-        self.pending.clear();
-        self.early.clear();
-        self.streamed = false;
-        self.refreshed.clear();
+        self.session.cancel = None;
+        self.session.stale = None;
+        self.session.pending.clear();
+        self.session.early.clear();
+        self.session.streamed = false;
+        self.session.refreshed.clear();
     }
 
     /// Shows the saved scan of these folders while the fresh one runs. Before anything fresh
     /// is in, it is the whole report; after that it only fills the sections still pending.
     pub(super) fn cached(&mut self, report: Report, dropped: &mut Vec<Loaded>) -> bool {
-        if matches!(self.phase, Phase::Loading(_)) {
-            if let Phase::Loading(activity) = &mut self.phase {
-                self.progress = std::mem::take(&mut **activity);
+        if matches!(self.session.phase, Phase::Loading(_)) {
+            if let Phase::Loading(activity) = &mut self.session.phase {
+                self.session.progress = std::mem::take(&mut **activity);
             }
-            self.stale = Some(report.scanned);
+            self.session.stale = Some(report.scanned);
             self.adopt(report);
             self.apply_early(dropped);
             return true;
@@ -211,16 +218,16 @@ impl Kuizer {
             let Some(kind) = part.part() else {
                 continue;
             };
-            let streaming = kind == Part::Artifacts && self.streamed;
-            let kept = kind == Part::History && self.history_fresh;
-            if !self.pending.contains(&kind) || streaming || kept {
+            let streaming = kind == Part::Artifacts && self.session.streamed;
+            let kept = kind == Part::History && self.session.history_fresh;
+            if !self.session.pending.contains(&kind) || streaming || kept {
                 dropped.push(part);
                 continue;
             }
             if kind == Part::Artifacts {
-                self.streamed = false;
+                self.session.streamed = false;
             }
-            self.stale = Some(scanned);
+            self.session.stale = Some(scanned);
             self.replace(part, dropped);
             changed = true;
         }
@@ -228,24 +235,24 @@ impl Kuizer {
     }
 
     pub(super) fn loaded(&mut self, mut loaded: Loaded, dropped: &mut Vec<Loaded>) -> bool {
-        if matches!(self.phase, Phase::Loading(_)) {
+        if matches!(self.session.phase, Phase::Loading(_)) {
             if !matches!(
                 loaded,
                 Loaded::Found(_) | Loaded::Artifacts { .. } | Loaded::ArtifactsDone { .. }
             ) {
-                self.early.push(loaded);
+                self.session.early.push(loaded);
                 return false;
             }
             self.show_parts(dropped);
         }
         if let Loaded::Found(batch) = loaded {
-            return match (self.streamed, &mut self.phase) {
+            return match (self.session.streamed, &mut self.session.phase) {
                 (true, Phase::Ready(report)) => {
                     dropped.push(report.apply(Loaded::Found(batch)));
                     true
                 }
                 (false, Phase::Ready(_)) => {
-                    self.refreshed.extend(batch);
+                    self.session.refreshed.extend(batch);
                     false
                 }
                 _ => {
@@ -255,16 +262,16 @@ impl Kuizer {
             };
         }
         if let Some(part) = loaded.part() {
-            self.pending.remove(&part);
+            self.session.pending.remove(&part);
             if part == Part::Artifacts {
-                if !self.streamed
+                if !self.session.streamed
                     && let Loaded::ArtifactsDone {
                         issues,
                         summary,
                         disks,
                     } = loaded
                 {
-                    let mut candidates = std::mem::take(&mut self.refreshed);
+                    let mut candidates = std::mem::take(&mut self.session.refreshed);
                     kuizer::scan::sort_candidates(&mut candidates, kuizer::scan::SortKey::Size);
                     loaded = Loaded::Artifacts {
                         candidates,
@@ -273,9 +280,9 @@ impl Kuizer {
                         disks,
                     };
                 }
-                self.streamed = false;
+                self.session.streamed = false;
             }
-            if part == Part::History && self.history_fresh {
+            if part == Part::History && self.session.history_fresh {
                 dropped.push(loaded);
                 return false;
             }
@@ -287,18 +294,21 @@ impl Kuizer {
     /// Leaves the activity view for the results once the first artifacts are in, with every
     /// part that arrived before them.
     pub(super) fn show_parts(&mut self, dropped: &mut Vec<Loaded>) {
-        if let Phase::Loading(activity) = &mut self.phase {
-            self.progress = std::mem::take(&mut **activity);
+        if let Phase::Loading(activity) = &mut self.session.phase {
+            self.session.progress = std::mem::take(&mut **activity);
         }
-        self.phase = Phase::Ready(Box::new(Report::empty(&self.roots, &self.options)));
-        self.streamed = true;
+        self.session.phase = Phase::Ready(Box::new(Report::empty(
+            &self.session.roots,
+            &self.session.options,
+        )));
+        self.session.streamed = true;
         self.apply_early(dropped);
     }
 
     pub(super) fn apply_early(&mut self, dropped: &mut Vec<Loaded>) {
-        for part in std::mem::take(&mut self.early) {
+        for part in std::mem::take(&mut self.session.early) {
             if let Some(kind) = part.part() {
-                self.pending.remove(&kind);
+                self.session.pending.remove(&kind);
             }
             self.replace(part, dropped);
         }
@@ -307,7 +317,7 @@ impl Kuizer {
     /// Puts a part into its section of the report on screen and keeps the selection of that
     /// section on the same paths.
     pub(super) fn replace(&mut self, loaded: Loaded, dropped: &mut Vec<Loaded>) {
-        let Phase::Ready(report) = &mut self.phase else {
+        let Phase::Ready(report) = &mut self.session.phase else {
             dropped.push(loaded);
             return;
         };
@@ -315,37 +325,40 @@ impl Kuizer {
         let kept: HashSet<PathBuf> = source.map_or_else(HashSet::new, |source| {
             report
                 .section(source)
-                .filter(|candidate| self.selection.contains(&(source, candidate.id)))
+                .filter(|candidate| self.list.selection.contains(&(source, candidate.id)))
                 .map(|candidate| candidate.path.clone())
                 .collect()
         });
         dropped.push(report.apply(loaded));
         if let Some(source) = source {
             let stale: Vec<(Source, u64)> = self
+                .list
                 .selection
                 .keys()
                 .filter(|(selected, _)| *selected == source)
                 .copied()
                 .collect();
             for key in &stale {
-                self.selection.remove(key);
+                self.list.selection.remove(key);
             }
             for candidate in report
                 .section(source)
                 .filter(|candidate| kept.contains(&candidate.path))
             {
-                self.selection.insert((source, candidate.id), candidate);
+                self.list
+                    .selection
+                    .insert((source, candidate.id), candidate);
             }
         }
     }
 
     /// Changes the phase and drops the report it replaces off the UI thread.
     pub(super) fn set_phase(&mut self, phase: Phase, cx: &mut Context<Self>) {
-        if let Phase::Ready(report) = std::mem::replace(&mut self.phase, phase) {
+        if let Phase::Ready(report) = std::mem::replace(&mut self.session.phase, phase) {
             cx.background_spawn(async move { drop(report) }).detach();
         }
-        if !matches!(self.phase, Phase::Ready(_)) {
-            self.search = None;
+        if !matches!(self.session.phase, Phase::Ready(_)) {
+            self.session.search = None;
             self.clear_map_tree(cx);
         }
     }
@@ -374,9 +387,9 @@ impl Kuizer {
                     .collect()
             }
         };
-        self.selection = Selection::pending(selection);
-        self.phase = Phase::Ready(Box::new(report));
-        self.menu = None;
+        self.list.selection = Selection::pending(selection);
+        self.session.phase = Phase::Ready(Box::new(report));
+        self.overlays.menu = None;
     }
 }
 

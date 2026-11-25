@@ -6,8 +6,9 @@ impl Kuizer {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let start = matches!(self.phase, Phase::Start);
+        let start = matches!(self.session.phase, Phase::Start);
         let roots = self
+            .session
             .roots
             .iter()
             .map(|root| display_path(root))
@@ -15,9 +16,10 @@ impl Kuizer {
             .join(", ");
         let busy = self.working();
         let refreshing = self.refreshing();
-        let scanning = matches!(self.phase, Phase::Loading(_)) || refreshing;
-        let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_)) && !refreshing;
-        let stale = self.stale.map(|saved| {
+        let scanning = matches!(self.session.phase, Phase::Loading(_)) || refreshing;
+        let finished =
+            matches!(self.session.phase, Phase::Ready(_) | Phase::Failed(_)) && !refreshing;
+        let stale = self.session.stale.map(|saved| {
             div()
                 .flex()
                 .flex_none()
@@ -224,7 +226,7 @@ impl Kuizer {
     }
 
     fn render_sidebar_head(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
-        let collapsed = self.collapsed;
+        let collapsed = self.chrome.collapsed;
         let toggle_here = frame::inset(window).is_none();
         div()
             .id("sidebar-head")
@@ -247,7 +249,7 @@ impl Kuizer {
 
     /// Where the scan stands, as a dot and a few words after the root path in the titlebar.
     fn scan_state(&self) -> Option<Stateful<Div>> {
-        let (dot, text, tip) = match &self.phase {
+        let (dot, text, tip) = match &self.session.phase {
             Phase::Start => return None,
             Phase::Loading(_) => (theme::bar(), "Scanning".to_owned(), None),
             Phase::Failed(_) => (theme::danger(), "Scan failed".to_owned(), None),
@@ -294,11 +296,11 @@ impl Kuizer {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
-        self.moving = frame::titlebar_down(event.click_count, window);
+        self.chrome.moving = frame::titlebar_down(event.click_count, window);
     }
 
     pub(super) fn titlebar_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.moving = false;
+        self.chrome.moving = false;
     }
 
     pub(super) fn titlebar_move(
@@ -307,8 +309,8 @@ impl Kuizer {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
-        if self.moving {
-            self.moving = false;
+        if self.chrome.moving {
+            self.chrome.moving = false;
             window.start_window_move();
         }
     }
@@ -337,10 +339,10 @@ impl Kuizer {
         let report = self.report()?;
         let bytes = match tab {
             Tab::Overview | Tab::History | Tab::Issues => return None,
-            Tab::Artifacts => self.report_stats.artifacts.all.bytes,
-            Tab::Caches => self.report_stats.caches.all.bytes,
-            Tab::Toolchains => self.report_stats.toolchains.all.bytes,
-            Tab::Docker => self.report_stats.docker.all.bytes,
+            Tab::Artifacts => self.session.report_stats.artifacts.all.bytes,
+            Tab::Caches => self.session.report_stats.caches.all.bytes,
+            Tab::Toolchains => self.session.report_stats.toolchains.all.bytes,
+            Tab::Docker => self.session.report_stats.docker.all.bytes,
             Tab::Repos => self.reclaimable(report).repos,
             Tab::Duplicates => self.reclaimable(report).duplicates,
         };
@@ -348,8 +350,8 @@ impl Kuizer {
     }
 
     pub(super) fn reclaimable(&self, report: &Report) -> Reclaimable {
-        if let Some((generation, figures)) = self.reclaimable.get()
-            && generation == self.report_generation
+        if let Some((generation, figures)) = self.session.reclaimable.get()
+            && generation == self.session.report_generation
         {
             return figures;
         }
@@ -365,8 +367,9 @@ impl Kuizer {
                 .as_ref()
                 .map_or(0, kuizer::dupes::Duplicates::reclaimable),
         };
-        self.reclaimable
-            .set(Some((self.report_generation, figures)));
+        self.session
+            .reclaimable
+            .set(Some((self.session.report_generation, figures)));
         figures
     }
 
@@ -384,7 +387,7 @@ impl Kuizer {
 
     /// The button at the start of the titlebar that collapses the sidebar to icons and back.
     pub(super) fn sidebar_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let collapsed = self.collapsed;
+        let collapsed = self.chrome.collapsed;
         let toggle = div()
             .id("sidebar-toggle")
             .debug_selector(|| "sidebar-toggle".to_owned())
@@ -408,7 +411,7 @@ impl Kuizer {
             )
             .child(icon::view(Icon::Sidebar, theme::muted()));
         self.control(toggle, cx, |app, _, cx| {
-            app.collapsed = !app.collapsed;
+            app.chrome.collapsed = !app.chrome.collapsed;
             cx.notify();
         })
     }
@@ -417,7 +420,7 @@ impl Kuizer {
     /// section and marks the open one.
     fn render_reclaim(&self) -> Option<Div> {
         let report = self.report()?;
-        let stats = &self.report_stats;
+        let stats = &self.session.report_stats;
         let total = stats.space();
         let parts = [
             (Tab::Artifacts, stats.artifacts.all.bytes),
@@ -439,7 +442,7 @@ impl Kuizer {
                             .w(relative(theme::share(bytes, total)))
                             .min_w(unit(size::MARKER))
                             .rounded(theme::radius_bar())
-                            .bg(if tab == self.tab {
+                            .bg(if tab == self.list.tab {
                                 theme::bar()
                             } else {
                                 theme::bar_rest()
@@ -480,11 +483,12 @@ impl Kuizer {
     }
 
     pub(super) fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
-        let collapsed = self.collapsed;
+        let collapsed = self.chrome.collapsed;
         let head = self.render_sidebar_head(window, cx);
-        self.stops
+        self.chrome
+            .stops
             .borrow_mut()
-            .within(Some(self.sidebar_scroll.clone()));
+            .within(Some(self.chrome.sidebar_scroll.clone()));
         let mut items: Vec<AnyElement> = Vec::new();
         if !collapsed {
             items.extend(self.render_reclaim().map(IntoElement::into_any_element));
@@ -505,7 +509,7 @@ impl Kuizer {
             items.extend(heading);
             items.push(self.render_tab(tab, cx).into_any_element());
         }
-        self.stops.borrow_mut().within(None);
+        self.chrome.stops.borrow_mut().within(None);
         let settings = ui::nav_item("sidebar-settings", false)
             .debug_selector(|| "sidebar-settings".to_owned())
             .when(collapsed, |this| this.justify_center().px_0())
@@ -540,7 +544,7 @@ impl Kuizer {
             .child(
                 div()
                     .id("sidebar-items")
-                    .track_scroll(&self.sidebar_scroll)
+                    .track_scroll(&self.chrome.sidebar_scroll)
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -561,8 +565,8 @@ impl Kuizer {
     }
 
     pub(super) fn render_tab(&self, tab: Tab, cx: &mut Context<Self>) -> Stateful<Div> {
-        let active = self.tab == tab;
-        let collapsed = self.collapsed;
+        let active = self.list.tab == tab;
+        let collapsed = self.chrome.collapsed;
         let figure = self.tab_figure(tab);
         let warn = tab == Tab::Issues && figure.is_some();
         let shortcuts = &self.config.route_shortcuts;
@@ -629,7 +633,7 @@ impl Kuizer {
 
     pub(super) fn render_mode(&self) -> Div {
         let mode = self.mode();
-        let review = self.selection.stats().total().review.count;
+        let review = self.list.selection.stats().total().review.count;
         let (fill, color) = match mode {
             keys::Mode::Normal => (theme::hover(), theme::muted()),
             keys::Mode::Visual | keys::Mode::Record => (theme::bar(), theme::on_accent()),
@@ -672,7 +676,7 @@ impl Kuizer {
                         )
                     }),
             )
-            .when(!self.count.is_empty(), |this| {
+            .when(!self.list.count.is_empty(), |this| {
                 this.child(
                     theme::label(div())
                         .flex()
@@ -685,7 +689,7 @@ impl Kuizer {
                         .bg(theme::tile_selected())
                         .text_color(theme::text())
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.count.clone())
+                        .child(self.list.count.clone())
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
@@ -722,7 +726,7 @@ impl Kuizer {
 
     /// The keys that do the most in the current mode, read from the keymap so a rebind shows.
     fn render_hints(&self) -> Div {
-        let list = self.report().is_some() && self.tab != Tab::Overview;
+        let list = self.report().is_some() && self.list.tab != Tab::Overview;
         let hints: Vec<(String, &'static str)> = match self.mode() {
             keys::Mode::Normal if list => {
                 let mut hints = vec![
@@ -731,7 +735,7 @@ impl Kuizer {
                     (self.hint(&Command::Visual), "visual"),
                     (self.hint(&Command::FocusFilter), "filter"),
                 ];
-                if self.tab.selects() {
+                if self.list.tab.selects() {
                     hints.push((self.hint(&Command::Trash), "delete"));
                 }
                 hints.push((self.hint(&Command::Palette), "commands"));
@@ -791,7 +795,7 @@ impl Kuizer {
 
     /// Where the cursor is in the artifact list, as row out of rows.
     fn render_position(&self) -> Option<Div> {
-        if self.tab != Tab::Artifacts || self.rows.is_empty() {
+        if self.list.tab != Tab::Artifacts || self.list.rows.is_empty() {
             return None;
         }
         let cursor = self.cursor_target()?;
@@ -800,7 +804,7 @@ impl Kuizer {
             ui::tabular(theme::mono(div()))
                 .flex_none()
                 .text_color(theme::muted())
-                .child(format!("{}/{}", row + 1, self.rows.len())),
+                .child(format!("{}/{}", row + 1, self.list.rows.len())),
         )
     }
 }
