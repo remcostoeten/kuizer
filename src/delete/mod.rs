@@ -268,27 +268,51 @@ fn owner(uid: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
 
     #[test]
     fn nested_paths_wait_for_each_other_but_siblings_do_not() {
         let lanes = Lanes::default();
-        let parent = lanes.claim(Path::new("/p/app"));
-        let sibling = lanes.claim(Path::new("/p/other"));
-        let (sender, receiver) = mpsc::channel();
+        let sibling_entered = Barrier::new(2);
+        let nested_ready = Barrier::new(2);
+        let parent_released = AtomicBool::new(false);
+
+        // Two siblings must be able to hold lanes concurrently (would deadlock if serialized).
         thread::scope(|scope| {
-            scope.spawn(|| {
-                let _inner = lanes.claim(Path::new("/p/app/node_modules"));
-                sender.send(()).unwrap();
+            let parent = lanes.claim(Path::new("/p/app"));
+            let sibling_thread = scope.spawn(|| {
+                let _sibling = lanes.claim(Path::new("/p/other"));
+                sibling_entered.wait();
             });
-            assert!(receiver.recv_timeout(Duration::from_millis(150)).is_err());
-            drop(sibling);
-            assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+            sibling_entered.wait();
+            sibling_thread.join().unwrap();
+
+            // A nested path must wait until its parent lane is dropped.
+            let nested_thread = scope.spawn(|| {
+                nested_ready.wait();
+                let _inner = lanes.claim(Path::new("/p/app/node_modules"));
+                assert!(
+                    parent_released.load(Ordering::Acquire),
+                    "nested lane claimed before parent lane was dropped"
+                );
+            });
+            nested_ready.wait();
+            {
+                let active = lanes.active.lock().unwrap_or_else(PoisonError::into_inner);
+                assert!(
+                    active
+                        .iter()
+                        .any(|other| other.starts_with("/p/app/node_modules")
+                            || Path::new("/p/app/node_modules").starts_with(other)),
+                    "parent lane must remain active until dropped"
+                );
+            }
+            parent_released.store(true, Ordering::Release);
             drop(parent);
-            assert!(receiver.recv_timeout(Duration::from_secs(10)).is_ok());
+            nested_thread.join().unwrap();
         });
     }
 

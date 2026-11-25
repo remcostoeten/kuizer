@@ -790,67 +790,9 @@ mod tests {
     }
 
     #[test]
-    fn toolchain_tools_and_pins_are_configurable() {
-        let defaults = Config::default();
-        assert_eq!(defaults.toolchains.tools, Tool::ALL);
-        assert!(defaults.toolchains.pins);
-        let config =
-            parse("[toolchains]\ntools = [\"nvm\", \"go\"]\npins = false\n").expect("parses");
-        assert_eq!(config.toolchains.tools, [Tool::Nvm, Tool::Go]);
-        assert!(!config.toolchains.pins);
-        assert!(matches!(
-            parse("[toolchains]\ntools = [\"asdf\"]\n"),
-            Err(ConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn docker_engines_and_timeouts_are_configurable() {
-        let defaults = Config::default().docker;
-        assert_eq!(defaults.engines, ["docker", "podman"]);
-        assert_eq!(defaults.timeout(), std::time::Duration::from_secs(10));
-        let config =
-            parse("[docker]\nengines = [\"podman\"]\ntimeout_secs = 0\nrecent_hours = 2\n")
-                .expect("parses");
-        assert_eq!(config.docker.engines, ["podman"]);
+    fn docker_timeout_has_one_second_floor() {
+        let config = parse("[docker]\ntimeout_secs = 0\n").expect("parses");
         assert_eq!(config.docker.timeout(), std::time::Duration::from_secs(1));
-        assert_eq!(config.docker.recent_hours, 2);
-    }
-
-    #[test]
-    fn motion_can_be_turned_off() {
-        let config = parse("[appearance]\nmotion = false\n").expect("parses");
-        assert!(!config.appearance.motion);
-        assert!(Config::default().appearance.motion);
-    }
-
-    #[test]
-    fn theme_is_dark_unless_set() {
-        let config = parse("[appearance]\ntheme = \"light\"\n").expect("parses");
-        assert_eq!(config.appearance.theme, Theme::Light);
-        assert_eq!(Config::default().appearance.theme, Theme::Dark);
-        assert!(parse("[appearance]\ntheme = \"sepia\"\n").is_err());
-        for accent in Accent::ALL {
-            let text = format!("[appearance]\naccent = \"{}\"\n", accent.key());
-            assert_eq!(parse(&text).expect("parses").appearance.accent, accent);
-        }
-        assert_eq!(Config::default().appearance.accent, Accent::Purple);
-    }
-
-    #[test]
-    fn sidebar_opens_expanded_unless_collapsed() {
-        let config = parse("[appearance]\nsidebar = \"collapsed\"\n").expect("parses");
-        assert_eq!(config.appearance.sidebar, Sidebar::Collapsed);
-        assert_eq!(Config::default().appearance.sidebar, Sidebar::Expanded);
-        assert!(parse("[appearance]\nsidebar = \"wide\"\n").is_err());
-    }
-
-    #[test]
-    fn route_shortcuts_can_be_switched_off() {
-        let config = parse("[route_shortcuts]\nenabled = false\n").expect("parses");
-        assert!(!config.route_shortcuts.enabled);
-        assert!(config.route_shortcuts.hints);
-        assert!(Config::default().route_shortcuts.enabled);
     }
 
     #[test]

@@ -955,21 +955,16 @@ fn the_fresh_scan_keeps_the_selection_by_path(cx: &mut TestAppContext) {
 
 const ISOLATED: &str = "KUIZER_GUI_TEST_BASE";
 
-/// Runs one ignored test in a child process whose HOME and XDG folders point into a temporary
-/// folder, like the CLI tests in tests/restore.rs, so the trash and the history it touches
-/// belong to that test alone.
-fn isolated(name: &str) {
+/// Runs every ignored `*_inside` deletion test sequentially in one child process whose HOME and
+/// XDG folders point into a temporary directory, avoiding spawning a fresh test binary per case.
+#[test]
+fn isolated_deletion_cases() {
     let dir = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(dir.path()).unwrap();
     let home = base.join("home");
     std::fs::create_dir_all(home.join(".local/share")).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("app::tests::{name}"),
-            "--ignored",
-            "--test-threads=1",
-        ])
+        .args(["_inside", "--ignored", "--test-threads=1"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
@@ -986,15 +981,26 @@ fn isolated(name: &str) {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = if cfg!(unix) { 7 } else { 6 };
     assert!(
-        output.status.success() && stdout.contains("1 passed"),
+        output.status.success() && stdout.contains(&format!("{expected} passed")),
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 fn isolated_base() -> Option<PathBuf> {
-    std::env::var_os(ISOLATED).map(PathBuf::from)
+    let base = std::env::var_os(ISOLATED).map(PathBuf::from)?;
+    for name in ["work", "recent", "bin", "home"] {
+        let path = base.join(name);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    std::fs::create_dir_all(base.join("home/.local/share")).unwrap();
+    Some(base)
 }
 
 fn wait_until(
@@ -1024,13 +1030,8 @@ fn toast_is(view: &Entity<Kuizer>, cx: &mut VisualTestContext, check: fn(&Notice
     assert!(shown, "unexpected toast");
 }
 
-#[test]
-fn deleting_the_selection_removes_it_for_good() {
-    isolated("deleting_the_selection_removes_it_for_good_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through deleting_the_selection_removes_it_for_good"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
@@ -1075,13 +1076,8 @@ fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
     assert_eq!(runs[0].deleted[0].mode, kuizer::delete::Mode::Permanent);
 }
 
-#[test]
-fn trash_mode_moves_the_selection_to_the_trash() {
-    isolated("trash_mode_moves_the_selection_to_the_trash_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through trash_mode_moves_the_selection_to_the_trash"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn trash_mode_moves_the_selection_to_the_trash_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
@@ -1119,13 +1115,8 @@ fn trash_mode_moves_the_selection_to_the_trash_inside(cx: &mut TestAppContext) {
     assert_eq!(runs[0].deleted[0].mode, kuizer::delete::Mode::Trash);
 }
 
-#[test]
-fn a_clean_adds_its_run_to_the_history_on_screen() {
-    isolated("a_clean_adds_its_run_to_the_history_on_screen_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through a_clean_adds_its_run_to_the_history_on_screen"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn a_clean_adds_its_run_to_the_history_on_screen_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
@@ -1223,14 +1214,9 @@ fn trash_mode_still_says_delete_for_what_cannot_be_trashed(cx: &mut TestAppConte
     });
 }
 
-#[test]
-fn docker_objects_are_removed_through_the_engine() {
-    isolated("docker_objects_are_removed_through_the_engine_inside");
-}
-
 #[cfg(unix)]
 #[gpui::test]
-#[ignore = "runs in its own process through docker_objects_are_removed_through_the_engine"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn docker_objects_are_removed_through_the_engine_inside(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1304,13 +1290,8 @@ esac
     });
 }
 
-#[test]
-fn toolchains_are_deleted_for_good() {
-    isolated("toolchains_are_deleted_for_good_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through toolchains_are_deleted_for_good"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
@@ -1633,13 +1614,8 @@ fn a_right_click_on_the_titlebar_opens_no_item_menu(cx: &mut TestAppContext) {
     assert!(menu_target(&view, cx).is_none());
 }
 
-#[test]
-fn delete_from_the_menu_removes_that_item_only() {
-    isolated("delete_from_the_menu_removes_that_item_only_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through delete_from_the_menu_removes_that_item_only"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;
@@ -1695,13 +1671,8 @@ fn delete_from_the_menu_removes_that_item_only_inside(cx: &mut TestAppContext) {
     view.read_with(cx, |app, _| assert_eq!(app.selected().len(), 1));
 }
 
-#[test]
-fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does() {
-    isolated("enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside");
-}
-
 #[gpui::test]
-#[ignore = "runs in its own process through enter_deletes_the_selection_at_once_but_a_held_enter_never_does"]
+#[ignore = "runs inside isolated_deletion_cases"]
 fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside(cx: &mut TestAppContext) {
     let Some(base) = isolated_base() else {
         return;

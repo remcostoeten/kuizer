@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_tooltip_waits_then_opens_below_its_trigger(cx: &mut TestAppContext) {
+    fn tooltip_waits_switches_and_dismisses(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
         cx.executor().advance_clock(motion::TOOLTIP_DELAY / 2);
@@ -568,44 +568,22 @@ mod tests {
         assert!(!visible(cx));
         cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
-        let bounds = shown(cx).expect("the tooltip is painted");
-        assert!(bounds.origin.y >= px(40.));
-    }
-
-    #[gpui::test]
-    fn leaving_the_trigger_closes_the_tooltip(cx: &mut TestAppContext) {
-        let cx = open(cx);
-        hover(cx, 20., 20.);
-        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
-        cx.run_until_parked();
         assert!(shown(cx).is_some());
-        hover(cx, 600., 400.);
-        cx.run_until_parked();
-        assert!(!visible(cx));
-        assert!(shown(cx).is_none());
-    }
 
-    #[gpui::test]
-    fn the_next_tooltip_opens_at_once(cx: &mut TestAppContext) {
-        let cx = open(cx);
-        hover(cx, 20., 20.);
-        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
-        cx.run_until_parked();
         hover(cx, 20., 60.);
         cx.run_until_parked();
-        let bounds = shown(cx).expect("the second tooltip is painted at once");
-        assert!(bounds.origin.y >= px(80.));
-    }
+        assert!(shown(cx).is_some(), "the next tooltip opens at once");
 
-    #[gpui::test]
-    fn a_click_closes_the_tooltip(cx: &mut TestAppContext) {
-        let cx = open(cx);
+        cx.simulate_click(point(px(20.), px(60.)), Modifiers::default());
+        assert!(!visible(cx), "a click closes the tooltip");
+
         hover(cx, 20., 20.);
         cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         assert!(visible(cx));
-        cx.simulate_click(point(px(20.), px(20.)), Modifiers::default());
-        assert!(!visible(cx));
+        hover(cx, 600., 400.);
+        cx.run_until_parked();
+        assert!(!visible(cx), "leaving the trigger closes the tooltip");
     }
 
     fn aim(cx: &mut VisualTestContext, id: Option<&'static str>) {

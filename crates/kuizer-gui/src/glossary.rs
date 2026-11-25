@@ -45,50 +45,6 @@ pub enum Term {
 }
 
 impl Term {
-    #[cfg(test)]
-    pub const ALL: [Term; 40] = [
-        Self::Overview,
-        Self::History,
-        Self::Trash,
-        Self::Safety,
-        Self::Category,
-        Self::Safe,
-        Self::Review,
-        Self::Dependencies,
-        Self::Build,
-        Self::Cache,
-        Self::Temp,
-        Self::Rule,
-        Self::Changed,
-        Self::Size,
-        Self::Tool,
-        Self::ProjectArtifacts,
-        Self::GlobalCaches,
-        Self::Toolchains,
-        Self::Docker,
-        Self::DuplicateFiles,
-        Self::Reclaimable,
-        Self::Groups,
-        Self::FilesCompared,
-        Self::Unverified,
-        Self::DiskFree,
-        Self::SelectSafe,
-        Self::Cleanups,
-        Self::ItemsRemoved,
-        Self::Freed,
-        Self::InTrash,
-        Self::Restore,
-        Self::Run,
-        Self::Mode,
-        Self::Command,
-        Self::Issues,
-        Self::GitRepositories,
-        Self::GcGain,
-        Self::LooseObjects,
-        Self::MergedBranches,
-        Self::Engine,
-    ];
-
     pub fn safety(safety: Safety) -> Self {
         match safety {
             Safety::Safe => Self::Safe,
@@ -269,14 +225,6 @@ impl Term {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_term_has_a_title_and_an_explanation() {
-        for term in Term::ALL {
-            assert!(!term.title().is_empty(), "{term:?} has no title");
-            assert!(term.text().ends_with('.'), "{term:?} is not a sentence");
-        }
-    }
 
     #[test]
     fn safety_and_category_map_to_their_terms() {

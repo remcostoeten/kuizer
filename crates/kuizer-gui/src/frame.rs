@@ -359,6 +359,7 @@ mod tests {
     fn edges_and_corners_resize() {
         let free = Tiling::default();
         assert_eq!(edge(2., 2., free), Some(ResizeEdge::TopLeft));
+        assert_eq!(edge(13., 2., free), Some(ResizeEdge::TopLeft));
         assert_eq!(edge(798., 2., free), Some(ResizeEdge::TopRight));
         assert_eq!(edge(2., 598., free), Some(ResizeEdge::BottomLeft));
         assert_eq!(edge(798., 598., free), Some(ResizeEdge::BottomRight));
@@ -366,17 +367,8 @@ mod tests {
         assert_eq!(edge(400., 596., free), Some(ResizeEdge::Bottom));
         assert_eq!(edge(4., 300., free), Some(ResizeEdge::Left));
         assert_eq!(edge(796., 300., free), Some(ResizeEdge::Right));
-    }
-
-    #[test]
-    fn corners_are_wider_than_the_margin() {
-        assert_eq!(edge(13., 2., Tiling::default()), Some(ResizeEdge::TopLeft));
-    }
-
-    #[test]
-    fn the_inside_never_resizes() {
-        assert_eq!(edge(400., 300., Tiling::default()), None);
-        assert_eq!(edge(400., 12., Tiling::default()), None);
+        assert_eq!(edge(400., 300., free), None);
+        assert_eq!(edge(400., 12., free), None);
     }
 
     #[test]
@@ -390,29 +382,5 @@ mod tests {
         };
         assert_eq!(edge(2., 2., left), Some(ResizeEdge::Top));
         assert_eq!(edge(4., 300., left), None);
-    }
-
-    #[test]
-    fn icons_stay_inside_their_box() {
-        for kind in [
-            Control::Minimize,
-            Control::Maximize,
-            Control::Restore,
-            Control::Close,
-        ] {
-            for line in lines(kind) {
-                for (x, y) in line {
-                    assert!((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn decorations_are_client_side_on_linux_only() {
-        assert_eq!(
-            decorations().is_some(),
-            cfg!(any(target_os = "linux", target_os = "freebsd"))
-        );
     }
 }

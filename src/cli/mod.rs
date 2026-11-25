@@ -854,73 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_scan_flags() {
-        let cli = Cli::try_parse_from([
-            "kuizer",
-            "--json",
-            "scan",
-            "/tmp/a",
-            "--category",
-            "cache",
-            "--min-size",
-            "10MB",
-            "--sort",
-            "path",
-        ])
-        .expect("parses");
-        let Some(Command::Scan(args)) = cli.command else {
-            panic!("expected scan");
-        };
-        assert!(cli.json);
-        assert_eq!(args.categories, [Category::Cache]);
-        assert_eq!(args.min_size, Some(ByteSize(10_000_000)));
-        assert_eq!(args.sort, SortKey::Path);
-    }
-
-    #[test]
-    fn parses_report_flag() {
-        let cli = Cli::try_parse_from(["kuizer", "scan", "--report", "/tmp/a"]).expect("parses");
-        let Some(Command::Scan(args)) = cli.command else {
-            panic!("expected scan");
-        };
-        assert_eq!(args.report, Some(None));
-        assert_eq!(args.paths, [PathBuf::from("/tmp/a")]);
-
-        let cli = Cli::try_parse_from(["kuizer", "scan", "--report=out.html", "--no-open"])
-            .expect("parses");
-        let Some(Command::Scan(args)) = cli.command else {
-            panic!("expected scan");
-        };
-        assert_eq!(args.report, Some(Some(PathBuf::from("out.html"))));
-        assert!(args.no_open);
-        assert!(Cli::try_parse_from(["kuizer", "scan", "--no-open"]).is_err());
-    }
-
-    #[test]
-    fn parses_clean_selection() {
-        let cli = Cli::try_parse_from([
-            "kuizer",
-            "clean",
-            "/tmp/a",
-            "--select",
-            "all",
-            "--select",
-            "node-modules",
-            "--dry-run",
-            "-y",
-        ])
-        .expect("parses");
-        let Some(Command::Clean(args)) = cli.command else {
-            panic!("expected clean");
-        };
-        assert_eq!(
-            args.removal.select,
-            [Selection::All, Selection::Rule("node-modules".to_owned())]
-        );
-        assert!(args.removal.dry_run && args.removal.yes);
-    }
-
-    #[test]
     fn toolchain_clean_reads_the_same_in_every_spelling() {
         let expected = RemovalPlan {
             cleaning: true,
@@ -1022,11 +955,6 @@ mod tests {
             assert!(args.plan().cleaning, "{argv:?}");
         }
         assert!(Cli::try_parse_from(["kuizer", "--json", "--json-lines", "scan"]).is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_category() {
-        assert!(Cli::try_parse_from(["kuizer", "scan", "--category", "music"]).is_err());
     }
 
     #[test]

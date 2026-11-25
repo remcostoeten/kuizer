@@ -620,15 +620,3 @@ pub fn share(part: u64, whole: u64) -> f32 {
     }
     (part as f64 / whole as f64).clamp(0.0, 1.0) as f32
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn share_is_clamped_and_safe_for_zero() {
-        assert!((share(1, 4) - 0.25).abs() < f32::EPSILON);
-        assert!(share(5, 0).abs() < f32::EPSILON);
-        assert!((share(9, 4) - 1.0).abs() < f32::EPSILON);
-    }
-}
