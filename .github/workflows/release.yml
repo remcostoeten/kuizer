@@ -247,6 +247,60 @@ jobs:
             target/linux-packages/PKGBUILD
           if-no-files-found: error
 
+  macos-packages:
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Import Apple Developer signing certificate (optional)
+        if: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD || 'kuizer-ci-keychain' }}
+        run: |
+          cert="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$cert"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import "$cert" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f "$cert"
+      - run: cargo build --locked --release -p kuizer-gui --target ${{ matrix.target }}
+      - name: Build Kuizer.app bundle and DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash packaging/macos/build-bundle.sh \
+            "target/${{ matrix.target }}/release/kuizer-gui" \
+            "$version" \
+            "${{ matrix.target }}" \
+            target/macos-packages
+      - uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-macos-packages-${{ matrix.target }}
+          path: |
+            target/macos-packages/*.dmg
+            target/macos-packages/*.dmg.sha256
+          if-no-files-found: error
+
   # Determines if we should publish/announce
   host:
     needs:
@@ -254,8 +308,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - linux-packages
+      - macos-packages
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.linux-packages.result == 'skipped' || needs.linux-packages.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.linux-packages.result == 'skipped' || needs.linux-packages.result == 'success') && (needs.macos-packages.result == 'skipped' || needs.macos-packages.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

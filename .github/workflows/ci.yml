@@ -99,6 +99,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p kuizer
       - run: cargo build --release -p kuizer-gui
+      - name: Smoke-test macOS .app bundle and DMG
+        run: |
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          bash packaging/macos/build-bundle.sh target/release/kuizer-gui "$version" aarch64-apple-darwin target/macos-packages
+          test -s target/macos-packages/kuizer-gui-aarch64-apple-darwin.dmg
+          test -s target/macos-packages/kuizer-gui-aarch64-apple-darwin.dmg.sha256
 
   msrv:
     runs-on: ubuntu-latest
