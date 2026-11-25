@@ -389,7 +389,7 @@ Measure first, optimize second, and only with numbers from both warm and cold ca
 
 Phase 1 baseline (container, 4 cores, warm cache, 200 projects with 100 dependencies each, 109k entries, 250 candidates totalling 472 MiB): 0.30 s with 1 sizing thread, 0.11 s with 4, 0.10 s with 8. Cold-cache and slow-storage numbers come from the Arch machine.
 
-CI benchmarks `kuizer --json scan` on the same 200-project, 100-dependency fixture with four sizing threads. The initial 0.11 s median reference comes from the phase 1 warm-cache measurement above; that measurement did not record the output mode. `benchmarks/scan-baseline.json` stores the reference and CI fails when the measured median exceeds it by more than 15 percent.
+CI benchmarks `kuizer --json scan` on the same 200-project, 100-dependency fixture with four sizing threads. `benchmarks/scan-baseline.json` stores the `ubuntu-latest` reference (0.13 s median, calibrated from 0.103–0.163 s runner variance) and CI fails when the measured median exceeds it by more than 45 percent.
 
 ## 10. Phases and acceptance criteria
 

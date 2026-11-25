@@ -222,7 +222,7 @@ Claim a speedup only with a measurement (`cargo run --release --example synth`).
 
 ### 6.3 Benchmarks in CI (P2, M)
 
-CI now benchmarks `kuizer --json scan` with `hyperfine` on a fixed 200-project, 100-dependency synthetic tree. It compares the median against `benchmarks/scan-baseline.json` and fails above a 15% regression. Add time to first candidate and peak RSS after this wall-time measurement is stable.
+CI now benchmarks `kuizer --json scan` with `hyperfine` on a fixed 200-project, 100-dependency synthetic tree. It compares the median against `benchmarks/scan-baseline.json` and fails above the configured regression limit (currently 45% over the 0.13 s `ubuntu-latest` baseline to absorb shared-runner jitter). Add time to first candidate and peak RSS after this wall-time measurement is stable.
 
 ## 7. GUI
 
