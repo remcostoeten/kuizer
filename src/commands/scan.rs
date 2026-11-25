@@ -30,17 +30,29 @@ pub fn keep_idle(
     if idle.is_none() && !annotate {
         return Ok(());
     }
-    let cutoff = idle.and_then(|Idle(age)| SystemTime::now().checked_sub(age));
+    let now = SystemTime::now();
+    let cutoff = idle.and_then(|Idle(age)| now.checked_sub(age));
     if idle.is_some() && cutoff.is_none() {
         candidates.clear();
         return Ok(());
     }
     scan::annotate(candidates, config, cutoff)?;
-    if let Some(cutoff) = cutoff {
+    if let Some(global_idle) = idle {
+        let mut overrides: std::collections::HashMap<PathBuf, Option<Idle>> =
+            std::collections::HashMap::new();
         candidates.retain(|candidate| {
+            let project_idle = candidate.project.as_ref().and_then(|project| {
+                *overrides
+                    .entry(project.clone())
+                    .or_insert_with(|| crate::config::project_idle_override(project))
+            });
+            let effective = crate::config::effective_idle(global_idle, project_idle);
+            let Some(effective_cutoff) = now.checked_sub(effective.0) else {
+                return false;
+            };
             candidate
                 .project_last_active
-                .is_some_and(|active| active <= cutoff)
+                .is_some_and(|active| active <= effective_cutoff)
         });
     }
     Ok(())

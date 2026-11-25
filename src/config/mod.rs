@@ -3,6 +3,7 @@ mod exclude;
 mod fix;
 mod lenient;
 mod policy;
+mod project;
 mod rules_d;
 
 use std::collections::BTreeMap;
@@ -25,6 +26,9 @@ pub use exclude::{ExcludeError, Excludes};
 pub use fix::{ConfigChange, FixReport, fix_file, fix_text};
 pub use lenient::{ConfigWarning, rejected_scope};
 pub use policy::{EXAMPLE_POLICY, Policy, PolicySelect, SourceKind, known_rules};
+pub use project::{
+    PROJECT_CONFIG_FILE, ProjectConfig, ProjectScope, effective_idle, project_idle_override,
+};
 pub use rules_d::default_rules_dir;
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
@@ -642,7 +646,11 @@ impl Config {
 
     pub fn detector(&self) -> Result<Detector, ConfigError> {
         Ok(Detector::new(&self.enabled_rules()?)?
-            .watching([self.scan.ignore_file.as_str(), LEGACY_IGNORE_FILE])
+            .watching([
+                self.scan.ignore_file.as_str(),
+                LEGACY_IGNORE_FILE,
+                PROJECT_CONFIG_FILE,
+            ])
             .reporting(self.detect.categories.clone()))
     }
 

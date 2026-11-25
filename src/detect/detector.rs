@@ -455,6 +455,10 @@ impl Detector {
         self.reported.contains(&rule.category)
     }
 
+    pub fn reported_categories(&self) -> &[Category] {
+        &self.reported
+    }
+
     /// @name watches
     /// @description Returns whether listings record an entry called `name`, so
     /// [`Detector::lists`] may be asked about it.

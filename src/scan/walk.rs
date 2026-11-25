@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::types::{Issue, IssueKind};
-use crate::config::{Excludes, ScanConfig};
+use crate::config::{Excludes, PROJECT_CONFIG_FILE, ProjectScope, ScanConfig};
 use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
 use crate::platform::dir::{Buffer, Dir, EntryKind, Stat};
 use crate::platform::{self, MountTable};
@@ -276,6 +276,8 @@ pub(crate) struct Child {
 pub(crate) struct Pending {
     pub path: PathBuf,
     parent: Arc<Listing>,
+    parent_names: Option<Arc<[Box<OsStr>]>>,
+    project: Option<Arc<ProjectScope>>,
     depth: usize,
     device: u64,
     probe: bool,
@@ -465,6 +467,8 @@ impl<'a> Context<'a> {
         Some(Pending {
             path: root.to_path_buf(),
             parent: Arc::new(Listing::default()),
+            parent_names: None,
+            project: None,
             depth: 0,
             device: platform::device(&metadata),
             probe: false,
@@ -555,26 +559,95 @@ impl<'a> Context<'a> {
         if self.prunes(&own) {
             return Flow::Continue;
         }
-        if pending.depth > 0
-            && let Some(rule) = self
-                .detector
-                .classify_dir(&pending.path, &pending.parent, &own)
+        if pending
+            .project
+            .as_ref()
+            .is_some_and(|scope| scope.keeps(&pending.path))
         {
-            if !self.detector.reports(&rule) {
-                return Flow::Continue;
+            return Flow::Continue;
+        }
+        if pending.depth > 0 {
+            let protects_child = pending
+                .project
+                .as_ref()
+                .is_some_and(|scope| scope.protects_descendant(&pending.path));
+            if !protects_child {
+                let global = self
+                    .detector
+                    .classify_dir(&pending.path, &pending.parent, &own);
+                let local = pending.project.as_ref().and_then(|scope| {
+                    let parent_names: Vec<&OsStr> = pending
+                        .parent_names
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(Box::as_ref)
+                        .collect();
+                    let own_names: Vec<&OsStr> =
+                        entries.iter().map(|entry| name_of(names, entry)).collect();
+                    scope.classify_dir(&pending.path, &parent_names, &own_names)
+                });
+                let matched = match global {
+                    Some(rule) => {
+                        if !self.detector.reports(&rule) {
+                            return Flow::Continue;
+                        }
+                        Some(ProjectScope::narrow_safety(rule, local))
+                    }
+                    None => local,
+                };
+                if let Some(rule) = matched {
+                    return self.emit(
+                        visitor,
+                        Found {
+                            path: pending.path,
+                            kind: Kind::Dir,
+                            rule,
+                        },
+                    );
+                }
             }
-            return self.emit(
-                visitor,
-                Found {
-                    path: pending.path,
-                    kind: Kind::Dir,
-                    rule,
-                },
-            );
         }
         if self.scan.max_depth.is_some_and(|max| pending.depth >= max) {
             return Flow::Continue;
         }
+
+        let mut project = pending.project;
+        if self.detector.watches(PROJECT_CONFIG_FILE)
+            && self.detector.lists(&own, PROJECT_CONFIG_FILE)
+        {
+            match ProjectScope::load(
+                pending.path.clone(),
+                self.detector.reported_categories(),
+                project.clone(),
+            ) {
+                Ok(Some(loaded)) => project = Some(loaded),
+                Ok(None) => {}
+                Err(message) => {
+                    if let Flow::Stop = visitor.issue(Issue {
+                        path: pending.path.join(PROJECT_CONFIG_FILE),
+                        kind: IssueKind::Io,
+                        message,
+                    }) {
+                        return Flow::Stop;
+                    }
+                }
+            }
+        }
+
+        let own_names_arc: Option<Arc<[Box<OsStr>]>> = project.as_ref().map(|_| {
+            entries
+                .iter()
+                .map(|entry| Box::<OsStr>::from(name_of(names, entry)))
+                .collect::<Vec<_>>()
+                .into()
+        });
+        let own_name_refs: Vec<&OsStr> = own_names_arc
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(Box::as_ref)
+            .collect();
 
         let own = Arc::new(own);
         let wants_files = visitor.wants_files();
@@ -588,11 +661,23 @@ impl<'a> Context<'a> {
                         continue;
                     }
                     let path = pending.path.join(name);
-                    if self.excludes.full_path(&path) {
+                    if self.excludes.full_path(&path)
+                        || project.as_ref().is_some_and(|scope| scope.keeps(&path))
+                    {
                         continue;
                     }
-                    if let Some(rule) = self.detector.classify_symlink(&path, &own)
-                        && self.detector.reports(&rule)
+                    let global = self.detector.classify_symlink(&path, &own);
+                    let local = project
+                        .as_ref()
+                        .and_then(|scope| scope.classify_symlink(&path, &own_name_refs));
+                    let matched = match global {
+                        Some(rule) if self.detector.reports(&rule) => {
+                            Some(ProjectScope::narrow_safety(rule, local))
+                        }
+                        Some(_) => None,
+                        None => local,
+                    };
+                    if let Some(rule) = matched
                         && let Flow::Stop = self.emit(
                             visitor,
                             Found {
@@ -612,9 +697,17 @@ impl<'a> Context<'a> {
                     let Some(child) = self.child(&pending.path, name, pending.splits) else {
                         continue;
                     };
+                    if project
+                        .as_ref()
+                        .is_some_and(|scope| scope.keeps(&child.path))
+                    {
+                        continue;
+                    }
                     out.push(Pending {
                         path: child.path,
                         parent: Arc::clone(&own),
+                        parent_names: own_names_arc.clone(),
+                        project: project.clone(),
                         depth: pending.depth + 1,
                         device,
                         probe: child.probe,
@@ -627,12 +720,11 @@ impl<'a> Context<'a> {
                     if self.excludes.extension(name) || self.excludes.name(name) {
                         continue;
                     }
-                    let path = self
-                        .excludes
-                        .matches_paths()
+                    let path = (self.excludes.matches_paths() || project.is_some())
                         .then(|| pending.path.join(name));
                     if let Some(path) = &path
-                        && self.excludes.full_path(path)
+                        && (self.excludes.full_path(path)
+                            || project.as_ref().is_some_and(|scope| scope.keeps(path)))
                     {
                         continue;
                     }
@@ -647,8 +739,18 @@ impl<'a> Context<'a> {
                     {
                         return Flow::Stop;
                     }
-                    if let Some(rule) = self.detector.classify_file(name, &own)
-                        && self.detector.reports(&rule)
+                    let global = self.detector.classify_file(name, &own);
+                    let local = project
+                        .as_ref()
+                        .and_then(|scope| scope.classify_file(name, &own_name_refs));
+                    let matched = match global {
+                        Some(rule) if self.detector.reports(&rule) => {
+                            Some(ProjectScope::narrow_safety(rule, local))
+                        }
+                        Some(_) => None,
+                        None => local,
+                    };
+                    if let Some(rule) = matched
                         && let Flow::Stop = self.emit(
                             visitor,
                             Found {
