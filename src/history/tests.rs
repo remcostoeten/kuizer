@@ -440,9 +440,14 @@ fn matches_by_wall_clock_time_after_a_time_zone_change() {
 
 #[test]
 fn trash_record_keeps_the_wall_clock_time() {
-    let zone = jiff::tz::TimeZone::system();
-    let wall: jiff::civil::DateTime = "2026-10-15T12:00:00".parse().unwrap();
-    let unix = wall.to_zoned(zone).unwrap().timestamp().as_second();
+    use chrono::TimeZone;
+
+    let wall: chrono::NaiveDateTime = "2026-10-15T12:00:00".parse().unwrap();
+    let unix = chrono::Local
+        .from_local_datetime(&wall)
+        .earliest()
+        .unwrap()
+        .timestamp();
 
     let record = TrashRecord::new(PathBuf::from("/w/a"), unix);
 

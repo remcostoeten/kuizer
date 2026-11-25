@@ -82,7 +82,7 @@ fn clean_all(home: &Path, root: &Path) {
             format!(
                 "[Trash Info]\nPath={}\nDeletionDate={}\n",
                 path.display(),
-                jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S")
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
             ),
         )
         .unwrap();

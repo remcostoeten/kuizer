@@ -199,12 +199,12 @@ pub(super) fn announce_report(path: Option<&Path>, open: bool) {
 
 fn default_page_path(prefix: &str) -> Result<PathBuf, AppError> {
     let dir = dirs::cache_dir().ok_or(AppError::NoHome)?.join("kuizer");
-    let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S");
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     Ok(dir.join(format!("{prefix}-{stamp}.html")))
 }
 
 pub(super) fn generated_at() -> String {
-    jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string()
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
 pub(super) fn refuse_overwrite(target: &Path, force: bool) -> Result<(), AppError> {

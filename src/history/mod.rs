@@ -120,8 +120,8 @@ pub enum HistoryError {
 /// @example
 /// let started_at = history::now();
 pub fn now() -> String {
-    jiff::Zoned::now()
-        .strftime("%Y-%m-%dT%H:%M:%S%:z")
+    chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%:z")
         .to_string()
 }
 

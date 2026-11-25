@@ -70,7 +70,7 @@ const RESTORE_WINDOW_SECONDS: i64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrashRecord {
     pub path: PathBuf,
-    pub deleted_at: Option<jiff::civil::DateTime>,
+    pub deleted_at: Option<chrono::NaiveDateTime>,
 }
 
 impl TrashRecord {
@@ -84,11 +84,18 @@ impl TrashRecord {
     /// let record = TrashRecord::new(item.original_path(), item.time_deleted);
     pub fn new(path: PathBuf, time_deleted: i64) -> Self {
         let deleted_at = (time_deleted >= 0)
-            .then(|| jiff::Timestamp::from_second(time_deleted).ok())
+            .then(|| chrono::DateTime::from_timestamp(time_deleted, 0))
             .flatten()
-            .map(|time| time.to_zoned(jiff::tz::TimeZone::system()).datetime());
+            .map(|time| time.with_timezone(&chrono::Local).naive_local());
         Self { path, deleted_at }
     }
+}
+
+fn parse_wall_clock(text: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.naive_local())
+        .or_else(|| text.parse::<chrono::NaiveDateTime>().ok())
 }
 
 /// @name match_trash
@@ -120,7 +127,7 @@ pub fn match_trash(
             if entry.mode != Mode::Trash {
                 return None;
             }
-            let deleted = entry.deleted_at.parse::<jiff::civil::DateTime>().ok();
+            let deleted = parse_wall_clock(&entry.deleted_at);
             let same_path = by_path.get(entry.path.as_path())?;
             let timed = same_path
                 .iter()
@@ -129,8 +136,8 @@ pub fn match_trash(
                 .filter_map(|index| {
                     let gap = trash[index]
                         .deleted_at?
-                        .duration_since(deleted?)
-                        .as_secs()
+                        .signed_duration_since(deleted?)
+                        .num_seconds()
                         .abs();
                     (gap <= RESTORE_WINDOW_SECONDS).then_some((gap, index))
                 })

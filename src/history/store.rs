@@ -523,11 +523,11 @@ impl Store {
     }
 }
 
-fn run_timestamp(run: &Run) -> Option<jiff::Timestamp> {
-    run.finished_at
-        .parse::<jiff::Timestamp>()
+fn run_timestamp(run: &Run) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&run.finished_at)
         .ok()
-        .or_else(|| run.started_at.parse::<jiff::Timestamp>().ok())
+        .or_else(|| chrono::DateTime::parse_from_rfc3339(&run.started_at).ok())
+        .map(|time| time.to_utc())
 }
 
 pub fn prune(
@@ -566,8 +566,8 @@ fn prune_inner(
     let before_runs = history.runs.len();
 
     if let Some(age) = options.older_than {
-        let age = jiff::SignedDuration::try_from(age).unwrap_or(jiff::SignedDuration::MAX);
-        if let Ok(cutoff) = jiff::Timestamp::now().checked_sub(age) {
+        let age = chrono::TimeDelta::from_std(age).unwrap_or(chrono::TimeDelta::MAX);
+        if let Some(cutoff) = chrono::Utc::now().checked_sub_signed(age) {
             history
                 .runs
                 .retain(|run| run_timestamp(run).is_none_or(|ts| ts >= cutoff));

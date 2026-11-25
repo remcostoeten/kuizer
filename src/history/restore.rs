@@ -328,7 +328,7 @@ mod tests {
     }
 
     fn in_trash(paths: &[&Path]) -> Vec<TrashRecord> {
-        let now = jiff::Zoned::now().datetime();
+        let now = chrono::Local::now().naive_local();
         paths
             .iter()
             .map(|path| TrashRecord {
