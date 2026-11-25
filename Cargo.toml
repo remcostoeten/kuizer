@@ -15,6 +15,7 @@ include = ["/src/**", "/tests/**", "/examples/synth.rs", "/docs/config.example.t
 
 [workspace]
 members = [".", "crates/kuizer-gui"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.3"

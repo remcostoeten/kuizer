@@ -1,0 +1,29 @@
+[package]
+name = "kuizer-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kuizer = { path = "..", default-features = false }
+
+[[bin]]
+name = "config_lenient"
+path = "fuzz_targets/config_lenient.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hostile_names"
+path = "fuzz_targets/hostile_names.rs"
+test = false
+doc = false
+bench = false
