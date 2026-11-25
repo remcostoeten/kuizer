@@ -33,7 +33,7 @@ impl ConfigWarning {
         }
     }
 
-    fn note(key: &str, message: String) -> Self {
+    pub(crate) fn note(key: &str, message: String) -> Self {
         Self {
             key: key.to_owned(),
             message,
@@ -206,7 +206,11 @@ fn from_absorbed(root: Table, warnings: &mut Vec<ConfigWarning>) -> Config {
     })
 }
 
-fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
+fn settle(
+    config: &mut Config,
+    rules_dir: Option<&std::path::Path>,
+    warnings: &mut Vec<ConfigWarning>,
+) {
     for problem in Keymap::resolve(&config.keys).1 {
         config.keys.remove(&problem.name);
         warnings.push(ConfigWarning::new(
@@ -238,6 +242,10 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
             }
         }
     });
+    if let Some(dir) = rules_dir {
+        let pack_rules = super::rules_d::load_rules_dir(dir, &mut known, warnings);
+        config.rules.extend(pack_rules);
+    }
     config.detect.disabled_rules.retain(|name| {
         let keep = known.contains(name);
         if !keep {
@@ -346,6 +354,13 @@ impl Config {
     /// assert_eq!(config.scan.min_size, Config::default().scan.min_size);
     /// assert_eq!(warnings.len(), 1);
     pub fn parse_lenient(text: &str) -> (Self, Vec<ConfigWarning>) {
+        Self::parse_lenient_with_rules_dir(text, None)
+    }
+
+    pub(crate) fn parse_lenient_with_rules_dir(
+        text: &str,
+        rules_dir: Option<&std::path::Path>,
+    ) -> (Self, Vec<ConfigWarning>) {
         let user = match text.parse::<Table>() {
             Ok(user) => user,
             Err(error) => {
@@ -361,7 +376,7 @@ impl Config {
         absorb(&mut root, &mut Vec::new(), user, &mut warnings);
         let mut config = from_absorbed(root, &mut warnings);
         config.normalize();
-        settle(&mut config, &mut warnings);
+        settle(&mut config, rules_dir, &mut warnings);
         if warnings.iter().any(|warning| warning.key == "delete.mode") {
             config.delete.mode = DeleteMode::Trash;
         }

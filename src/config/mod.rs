@@ -3,6 +3,7 @@ mod exclude;
 mod fix;
 mod lenient;
 mod policy;
+mod rules_d;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,6 +25,7 @@ pub use exclude::{ExcludeError, Excludes};
 pub use fix::{ConfigChange, FixReport, fix_file, fix_text};
 pub use lenient::{ConfigWarning, rejected_scope};
 pub use policy::{EXAMPLE_POLICY, Policy, PolicySelect, SourceKind, known_rules};
+pub use rules_d::default_rules_dir;
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
 pub const MAX_SIZE_THREADS: usize = 64;
@@ -523,8 +525,27 @@ impl Config {
             Some(path) => Some(expand_home(path)),
             None => default_path().filter(|path| path.is_file()),
         };
+        let rules_dir = match explicit {
+            Some(_) => path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(|dir| dir.join("rules.d")),
+            None => default_rules_dir(),
+        };
         let Some(path) = path else {
-            return Ok(Loaded::default());
+            let mut config = Self::default();
+            let mut warnings = Vec::new();
+            if let Some(dir) = rules_dir.as_deref() {
+                let mut known: std::collections::HashSet<String> =
+                    builtin_rules().into_iter().map(|rule| rule.name).collect();
+                let packs = rules_d::load_rules_dir(dir, &mut known, &mut warnings);
+                config.rules.extend(packs);
+            }
+            return Ok(Loaded {
+                config,
+                source: None,
+                warnings,
+            });
         };
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -546,7 +567,7 @@ impl Config {
                 });
             }
         };
-        let (config, warnings) = Self::parse_lenient(&text);
+        let (config, warnings) = Self::parse_lenient_with_rules_dir(&text, rules_dir.as_deref());
         Ok(Loaded {
             config,
             source: Some(path),
