@@ -66,7 +66,7 @@ pub fn run(
         mode: Source::Toolchain.mode(removal::mode(&plan.removal, config)),
         yes: plan.removal.yes,
         confirm: config.delete.confirm || clean_may_mean_a_folder(&args),
-        json,
+        format,
         source: Source::Toolchain,
         engines: &config.docker.engines,
         delete: &config.delete,

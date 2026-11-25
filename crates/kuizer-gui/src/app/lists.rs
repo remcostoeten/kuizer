@@ -289,9 +289,9 @@ impl Kuizer {
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::S, "Safety", Term::Safety))
             .child(head(col::M, "Tool", Term::Tool))
-            .child(column(col::XXL).child("Cache"))
+            .child(column(col::XXL).child("CACHE"))
             .child(head(col::XS, "Changed", Term::Changed).text_right())
-            .child(div().flex_1().child("Path"));
+            .child(div().flex_1().child("PATH"));
         let listed = self.listed(Tab::Caches);
         let count = listed.slots.len();
         let list = self
@@ -424,8 +424,8 @@ impl Kuizer {
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::S, "Safety", Term::Safety))
             .child(head(col::S, "Tool", Term::Tool))
-            .child(column(col::WIDE).child("Version"))
-            .child(div().flex_1().child("Path"));
+            .child(column(col::WIDE).child("VERSION"))
+            .child(div().flex_1().child("PATH"));
         let listed = self.listed(Tab::Toolchains);
         let count = listed.slots.len();
         let list = self
@@ -563,8 +563,8 @@ impl Kuizer {
             .child(head(col::M, "Size", Term::Size).text_right())
             .child(head(col::S, "Safety", Term::Safety))
             .child(head(col::S, "Engine", Term::Engine))
-            .child(column(col::L).child("Object"))
-            .child(div().flex_1().child("Name"));
+            .child(column(col::L).child("OBJECT"))
+            .child(div().flex_1().child("NAME"));
         let listed = self.listed(Tab::Docker);
         let count = listed.slots.len();
         let list = self

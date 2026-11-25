@@ -4,19 +4,21 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::caches;
+use super::jobs::GitState;
 use crate::cli::SortKey;
 use crate::delete::{Confirmation, Mode, Risk};
 use crate::detect::{Category, Safety};
 use crate::dupes::{Duplicates, Stage};
 use crate::keymap::{Action as Key, Keymap, Scope};
+use crate::repos::{Collected, Inspected, Pruned, RepoError, Repository};
 use crate::scan::{Candidate, Issue, Progress, Summary};
 use crate::source::Source;
+use crate::units::ByteSize;
 use ratatui::crossterm::event::KeyEvent;
 
 const SHOWN: usize = 8;
-const KEY_HOLD: Duration = Duration::from_millis(600);
-const CACHE_IDS: u64 = 1 << 62;
+const KEY_HOLD: Duration = Duration::from_millis(1200);
+const TYPED_DIGITS: usize = 9;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Tab {
@@ -25,21 +27,29 @@ pub enum Tab {
     Caches,
     Duplicates,
     Issues,
+    Toolchains,
+    Docker,
+    Repos,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [
+    pub const ALL: [Tab; 7] = [
         Self::Artifacts,
         Self::Caches,
         Self::Duplicates,
         Self::Issues,
+        Self::Toolchains,
+        Self::Docker,
+        Self::Repos,
     ];
 
     pub fn source(self) -> Option<Source> {
         match self {
             Self::Artifacts => Some(Source::Artifact),
             Self::Caches => Some(Source::Cache),
-            Self::Duplicates | Self::Issues => None,
+            Self::Toolchains => Some(Source::Toolchain),
+            Self::Docker => Some(Source::Docker),
+            Self::Duplicates | Self::Issues | Self::Repos => None,
         }
     }
 
@@ -49,6 +59,9 @@ impl Tab {
             Self::Caches => Key::Caches,
             Self::Duplicates => Key::Duplicates,
             Self::Issues => Key::Issues,
+            Self::Toolchains => Key::Toolchains,
+            Self::Docker => Key::Docker,
+            Self::Repos => Key::Repos,
         }
     }
 
@@ -58,7 +71,19 @@ impl Tab {
             Self::Caches => "caches",
             Self::Duplicates => "duplicates",
             Self::Issues => "issues",
+            Self::Toolchains => "toolchains",
+            Self::Docker => "docker",
+            Self::Repos => "git",
         }
+    }
+}
+
+fn tagged(source: Source, id: u64) -> u64 {
+    id | match source {
+        Source::Artifact => 0,
+        Source::Cache => 1 << 62,
+        Source::Toolchain => 1 << 61,
+        Source::Docker => 1 << 60,
     }
 }
 
@@ -68,6 +93,61 @@ pub enum Load {
     Idle,
     Loading,
     Done,
+}
+
+#[derive(Debug, Default)]
+pub struct Feed {
+    pub load: Load,
+    pub problem: Option<String>,
+}
+
+static IDLE: Feed = Feed {
+    load: Load::Idle,
+    problem: None,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitScope {
+    One(PathBuf),
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitTask {
+    Gc,
+    Branches,
+}
+
+pub type GitWork = (GitTask, Vec<Repository>);
+
+#[derive(Debug)]
+pub struct GitDone {
+    pub root: PathBuf,
+    pub collected: Option<Result<Collected, RepoError>>,
+    pub pruned: Vec<Pruned>,
+    pub after: Option<Repository>,
+}
+
+#[derive(Debug, Default)]
+struct GitTally {
+    packed: usize,
+    freed: u64,
+    removed: usize,
+    failed: usize,
+    problem: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct RepoList {
+    pub load: Load,
+    pub checking: usize,
+    pub found: Vec<Repository>,
+    pub unreadable: usize,
+    pub problem: Option<String>,
+    pub rows: Vec<usize>,
+    pub cursor: usize,
+    pub running: HashSet<PathBuf>,
+    tally: GitTally,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +209,8 @@ pub fn project_of(candidate: &Candidate) -> &Path {
 pub struct Item {
     pub candidate: Candidate,
     pub source: Source,
-    pub note: &'static str,
+    pub note: String,
+    pub label: String,
     pub selected: bool,
     pub status: Status,
     lower_path: String,
@@ -148,6 +229,7 @@ struct Span {
 pub enum Overlay {
     None,
     Confirm { ids: Vec<u64>, mode: Mode },
+    Branches { scope: GitScope, delete: bool },
     Quit,
     Help,
 }
@@ -190,6 +272,14 @@ fn review_items(count: usize) -> String {
     format!("{count} review item{}", if count == 1 { "" } else { "s" })
 }
 
+pub fn counted(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
+}
+
 pub struct App {
     last_enter: Option<Instant>,
     last_action_key: Option<(KeyEvent, Instant)>,
@@ -214,12 +304,14 @@ pub struct App {
     pub current: Option<PathBuf>,
     pub finished: Option<Summary>,
     pub tab: Tab,
-    pub caches: Load,
-    pub cache_problem: Option<String>,
     pub duplicates: DuplicateList,
     pub issues: IssueList,
+    pub repos: RepoList,
+    pub min_gain: u64,
     pub overlay: Overlay,
     pub confirm_stats: Option<ConfirmStats>,
+    pub typed: String,
+    pub typed_wrong: bool,
     pub mode: Mode,
     pub confirm_before_delete: bool,
     pub freed: u64,
@@ -238,10 +330,12 @@ pub struct App {
     project_ids: HashMap<PathBuf, u32>,
     project_groups: Vec<PathBuf>,
     unchecked: HashSet<PathBuf>,
+    unknown_projects: HashSet<PathBuf>,
     listed: Source,
     remembered: HashMap<Source, u64>,
     keep: Option<u64>,
     tallies: HashMap<Source, Tally>,
+    feeds: HashMap<Source, Feed>,
     changes_unknown: bool,
     dirty: bool,
     grown: bool,
@@ -273,12 +367,14 @@ impl App {
             current: None,
             finished: None,
             tab: Tab::Artifacts,
-            caches: Load::Idle,
-            cache_problem: None,
             duplicates: DuplicateList::default(),
             issues: IssueList::default(),
+            repos: RepoList::default(),
+            min_gain: 0,
             overlay: Overlay::None,
             confirm_stats: None,
+            typed: String::new(),
+            typed_wrong: false,
             mode,
             confirm_before_delete,
             freed: 0,
@@ -297,10 +393,12 @@ impl App {
             project_ids: HashMap::new(),
             project_groups: Vec::new(),
             unchecked: HashSet::new(),
+            unknown_projects: HashSet::new(),
             listed: Source::Artifact,
             remembered: HashMap::new(),
             keep: None,
             tallies: HashMap::new(),
+            feeds: HashMap::new(),
             changes_unknown: false,
             dirty: false,
             grown: false,
@@ -308,28 +406,37 @@ impl App {
     }
 
     pub fn push(&mut self, candidate: Candidate) {
-        self.add(Source::Artifact, "", candidate);
+        self.add(Source::Artifact, String::new(), String::new(), candidate);
     }
 
-    pub fn push_cache(&mut self, mut candidate: Candidate) {
-        candidate.id |= CACHE_IDS;
-        let note = caches::known(&candidate.rule.name, candidate.path.clone())
-            .map_or("", |cache| cache.note);
-        self.add(Source::Cache, note, candidate);
+    pub fn push_listed(
+        &mut self,
+        source: Source,
+        mut candidate: Candidate,
+        note: String,
+        label: String,
+    ) {
+        candidate.id = tagged(source, candidate.id);
+        self.add(source, note, label, candidate);
     }
 
-    fn add(&mut self, source: Source, note: &'static str, candidate: Candidate) {
+    fn add(&mut self, source: Source, note: String, label: String, candidate: Candidate) {
         self.index.insert(candidate.id, self.items.len());
         let tally = self.tallies.entry(source).or_default();
         tally.items += 1;
         tally.bytes += candidate.usage.allocated;
-        let lower_path = candidate.path.to_string_lossy().to_lowercase();
+        let lower_path = if label.is_empty() {
+            candidate.path.to_string_lossy().to_lowercase()
+        } else {
+            format!("{label} {}", candidate.path.to_string_lossy()).to_lowercase()
+        };
         let rule_group = self.rule_group_of(&candidate);
         let project_group = self.project_group_of(&candidate);
         self.items.push(Item {
             candidate,
             source,
             note,
+            label,
             selected: false,
             status: Status::Ready,
             lower_path,
@@ -451,6 +558,7 @@ impl App {
         if self.dirty {
             self.rebuild_duplicates();
             self.rebuild_issues();
+            self.rebuild_repos();
         }
         let keep = self.keep.take().or_else(|| self.current_id());
         self.order_items();
@@ -578,6 +686,15 @@ impl App {
         list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
     }
 
+    fn rebuild_repos(&mut self) {
+        let needle = self.filter.to_lowercase();
+        let list = &mut self.repos;
+        list.rows = (0..list.found.len())
+            .filter(|&index| repo_matches(&list.found[index], &needle))
+            .collect();
+        list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
+    }
+
     pub fn push_issue(&mut self, issue: Issue) {
         let needle = self.filter.to_lowercase();
         if issue_matches(&issue, &needle) {
@@ -600,7 +717,241 @@ impl App {
     }
 
     pub fn loading(&self) -> bool {
-        self.caches == Load::Loading || self.duplicates.load == Load::Loading
+        self.feeds.values().any(|feed| feed.load == Load::Loading)
+            || self.duplicates.load == Load::Loading
+            || self.repos.load == Load::Loading
+            || !self.repos.running.is_empty()
+    }
+
+    pub fn feed(&self, source: Source) -> &Feed {
+        self.feeds.get(&source).unwrap_or(&IDLE)
+    }
+
+    pub fn feed_mut(&mut self, source: Source) -> &mut Feed {
+        self.feeds.entry(source).or_default()
+    }
+
+    pub fn set_repos(&mut self, inspected: Inspected) {
+        let list = &mut self.repos;
+        list.found = inspected.repositories;
+        list.unreadable = inspected.issues.len();
+        list.load = Load::Done;
+        self.rebuild_repos();
+    }
+
+    pub fn current_repo(&self) -> Option<&Repository> {
+        let list = &self.repos;
+        list.rows.get(list.cursor).map(|&index| &list.found[index])
+    }
+
+    fn git_scope(&mut self, all: bool) -> Option<GitScope> {
+        if all {
+            return Some(GitScope::All);
+        }
+        let scope = self
+            .current_repo()
+            .map(|repository| GitScope::One(repository.root.clone()));
+        if scope.is_none() {
+            self.message = Some("no repository here".to_owned());
+        }
+        scope
+    }
+
+    fn git_ready(&self, task: GitTask, repository: &Repository) -> bool {
+        repository.busy.is_none()
+            && !self.repos.running.contains(&repository.root)
+            && match task {
+                GitTask::Gc => repository.collectable(self.min_gain),
+                GitTask::Branches => !repository.merged.is_empty(),
+            }
+    }
+
+    pub fn git_targets(&self, task: GitTask, scope: &GitScope) -> Vec<&Repository> {
+        let list = &self.repos;
+        let shown = list.rows.iter().map(|&index| &list.found[index]);
+        shown
+            .filter(|repository| match scope {
+                GitScope::One(root) => &repository.root == root,
+                GitScope::All => true,
+            })
+            .filter(|repository| self.git_ready(task, repository))
+            .collect()
+    }
+
+    fn git_blocked(&self, task: GitTask, scope: &GitScope) -> String {
+        let one = match scope {
+            GitScope::One(root) => self.repos.found.iter().find(|found| &found.root == root),
+            GitScope::All => None,
+        };
+        match (one, task) {
+            (Some(repository), _) if self.repos.running.contains(&repository.root) => {
+                "git is still running in this repository".to_owned()
+            }
+            (Some(repository), _) if repository.busy.is_some() => format!(
+                "skipped because {}",
+                repository.busy.map_or("", |busy| busy.describe())
+            ),
+            (Some(_), GitTask::Gc) => "git gc would free less than git.min_gain here".to_owned(),
+            (Some(_), GitTask::Branches) => "no merged branches here".to_owned(),
+            (None, GitTask::Gc) => "nothing to pack in the repositories shown".to_owned(),
+            (None, GitTask::Branches) => "no merged branches in the repositories shown".to_owned(),
+        }
+    }
+
+    fn start_git(&mut self, task: GitTask, targets: Vec<Repository>) -> GitWork {
+        let list = &mut self.repos;
+        if list.running.is_empty() {
+            list.tally = GitTally::default();
+        }
+        list.running
+            .extend(targets.iter().map(|repository| repository.root.clone()));
+        let what = match task {
+            GitTask::Gc => "packing",
+            GitTask::Branches => "removing merged branches in",
+        };
+        self.message = Some(format!(
+            "{what} {}",
+            counted(targets.len(), "repository", "repositories")
+        ));
+        (task, targets)
+    }
+
+    pub fn collect_garbage(&mut self, all: bool) -> Option<GitWork> {
+        let scope = self.git_scope(all)?;
+        let targets: Vec<Repository> = self
+            .git_targets(GitTask::Gc, &scope)
+            .into_iter()
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            self.message = Some(self.git_blocked(GitTask::Gc, &scope));
+            return None;
+        }
+        Some(self.start_git(GitTask::Gc, targets))
+    }
+
+    pub fn ask_branches(&mut self, all: bool) {
+        let Some(scope) = self.git_scope(all) else {
+            return;
+        };
+        if self.git_targets(GitTask::Branches, &scope).is_empty() {
+            self.message = Some(self.git_blocked(GitTask::Branches, &scope));
+            return;
+        }
+        self.overlay = Overlay::Branches {
+            scope,
+            delete: false,
+        };
+    }
+
+    pub fn toggle_branch_focus(&mut self) {
+        if let Overlay::Branches { delete, .. } = &mut self.overlay {
+            *delete = !*delete;
+        }
+    }
+
+    pub fn answer_branches(&mut self) -> Option<GitWork> {
+        let Overlay::Branches { scope, delete } =
+            std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return None;
+        };
+        if !delete {
+            return None;
+        }
+        let targets: Vec<Repository> = self
+            .git_targets(GitTask::Branches, &scope)
+            .into_iter()
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            self.message = Some(self.git_blocked(GitTask::Branches, &scope));
+            return None;
+        }
+        Some(self.start_git(GitTask::Branches, targets))
+    }
+
+    pub fn git_unavailable(&mut self, roots: &[PathBuf]) {
+        for root in roots {
+            self.repos.running.remove(root);
+        }
+        self.message = Some("could not run git, nothing was changed".to_owned());
+    }
+
+    pub fn git_done(&mut self, done: GitDone) {
+        let list = &mut self.repos;
+        list.running.remove(&done.root);
+        let tally = &mut list.tally;
+        match &done.collected {
+            Some(Ok(collected)) => {
+                tally.packed += 1;
+                tally.freed += collected.freed();
+            }
+            Some(Err(error)) => {
+                tally.failed += 1;
+                tally.problem = Some(error.to_string());
+            }
+            None => {}
+        }
+        for pruned in &done.pruned {
+            match &pruned.result {
+                Ok(()) => tally.removed += 1,
+                Err(error) => {
+                    tally.failed += 1;
+                    tally.problem = Some(error.to_string());
+                }
+            }
+        }
+        let position = list
+            .found
+            .iter()
+            .position(|repository| repository.root == done.root);
+        match (position, done.after) {
+            (Some(index), Some(after)) if after.worth(self.min_gain) => list.found[index] = after,
+            (Some(index), Some(_)) => {
+                list.found.remove(index);
+            }
+            _ => {}
+        }
+        self.message = Some(self.git_summary());
+        self.dirty = true;
+        if self.overlay == Overlay::Quit && self.unfinished() == 0 {
+            self.overlay = Overlay::None;
+            self.message = Some(format!("git finished, {} quits", self.quit_key()));
+        }
+    }
+
+    fn git_summary(&self) -> String {
+        let list = &self.repos;
+        let tally = &list.tally;
+        let mut parts = Vec::new();
+        if tally.packed > 0 {
+            parts.push(format!(
+                "git gc freed {} in {}",
+                ByteSize(tally.freed),
+                counted(tally.packed, "repository", "repositories")
+            ));
+        }
+        if tally.removed > 0 {
+            parts.push(format!(
+                "removed {}",
+                counted(tally.removed, "merged branch", "merged branches")
+            ));
+        }
+        if tally.failed > 0 {
+            parts.push(format!(
+                "{} failed: {}",
+                tally.failed,
+                tally.problem.as_deref().unwrap_or("unknown error")
+            ));
+        }
+        if !list.running.is_empty() {
+            parts.push(format!(
+                "still running in {}",
+                counted(list.running.len(), "repository", "repositories")
+            ));
+        }
+        parts.join(", ")
     }
 
     pub fn switch(&mut self, tab: Tab) {
@@ -624,9 +975,12 @@ impl App {
 
     fn cursor_and_len(&mut self) -> (&mut usize, usize) {
         match self.tab {
-            Tab::Artifacts | Tab::Caches => (&mut self.cursor, self.view.len()),
+            Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {
+                (&mut self.cursor, self.view.len())
+            }
             Tab::Duplicates => (&mut self.duplicates.cursor, self.duplicates.rows.len()),
             Tab::Issues => (&mut self.issues.cursor, self.issues.rows.len()),
+            Tab::Repos => (&mut self.repos.cursor, self.repos.rows.len()),
         }
     }
 
@@ -837,7 +1191,7 @@ impl App {
     }
 
     pub fn request_quit(&mut self) {
-        if self.deleting() == 0 {
+        if self.unfinished() == 0 {
             self.quit = true;
         } else {
             self.overlay = Overlay::Quit;
@@ -861,7 +1215,10 @@ impl App {
     }
 
     pub fn expect_status(&mut self, project: PathBuf) {
-        if !self.changes_unknown && !self.changes.contains_key(&project) {
+        if !self.changes_unknown
+            && !self.changes.contains_key(&project)
+            && !self.unknown_projects.contains(&project)
+        {
             self.unchecked.insert(project);
         }
     }
@@ -871,11 +1228,22 @@ impl App {
         self.unchecked.clear();
     }
 
-    pub fn set_statuses(&mut self, updates: impl IntoIterator<Item = (PathBuf, Option<usize>)>) {
-        for (project, count) in updates {
+    pub fn set_statuses(&mut self, updates: impl IntoIterator<Item = (PathBuf, GitState)>) {
+        for (project, state) in updates {
             self.unchecked.remove(&project);
-            if let Some(count) = count {
-                self.changes.insert(project, count);
+            match state {
+                GitState::NotRepo => {
+                    self.changes.remove(&project);
+                    self.unknown_projects.remove(&project);
+                }
+                GitState::Changes(count) => {
+                    self.unknown_projects.remove(&project);
+                    self.changes.insert(project, count);
+                }
+                GitState::Unknown => {
+                    self.changes.remove(&project);
+                    self.unknown_projects.insert(project);
+                }
             }
         }
         if matches!(self.overlay, Overlay::Confirm { .. }) {
@@ -975,7 +1343,44 @@ impl App {
             ids,
             mode: self.listed.mode(self.mode),
         };
+        self.typed.clear();
+        self.typed_wrong = false;
         self.confirm_stats = self.compute_confirm_stats();
+    }
+
+    pub fn confirm_count(&self) -> usize {
+        match &self.overlay {
+            Overlay::Confirm { ids, .. } => ids.len(),
+            _ => 0,
+        }
+    }
+
+    pub fn type_digit(&mut self, digit: char) {
+        if digit.is_ascii_digit() && self.typed.len() < TYPED_DIGITS {
+            self.typed.push(digit);
+            self.typed_wrong = false;
+        }
+    }
+
+    pub fn erase_digit(&mut self) {
+        self.typed.pop();
+        self.typed_wrong = false;
+    }
+
+    pub fn submit_count(&mut self) -> Vec<Job> {
+        if self.typed.parse::<usize>().ok() == Some(self.confirm_count()) {
+            return self.confirm();
+        }
+        self.typed.clear();
+        self.typed_wrong = true;
+        Vec::new()
+    }
+
+    pub fn close_overlay(&mut self) {
+        self.overlay = Overlay::None;
+        self.confirm_stats = None;
+        self.typed.clear();
+        self.typed_wrong = false;
     }
 
     fn compute_confirm_stats(&self) -> Option<ConfirmStats> {
@@ -999,8 +1404,8 @@ impl App {
             if item.source != Source::Artifact {
                 continue;
             }
-            stats.unknown = self.changes_unknown;
             let project = project_of(candidate);
+            stats.unknown |= self.changes_unknown || self.unknown_projects.contains(project);
             if let Some(changes) = self.changes_in(candidate)
                 && dirty_seen.insert(project)
             {
@@ -1030,9 +1435,11 @@ impl App {
         for item in ids.iter().filter_map(|&id| self.item(id)) {
             risk.review += usize::from(item.candidate.rule.safety == Safety::Review);
             if item.source == Source::Artifact {
+                let project = project_of(&item.candidate);
                 risk.dirty += usize::from(self.changes_in(&item.candidate).is_some());
-                risk.unknown |=
-                    self.changes_unknown || self.unchecked.contains(project_of(&item.candidate));
+                risk.unknown |= self.changes_unknown
+                    || self.unchecked.contains(project)
+                    || self.unknown_projects.contains(project);
             }
         }
         risk.confirmation(self.confirm_before_delete)
@@ -1108,7 +1515,8 @@ impl App {
                 (true, false) => tally.bytes += bytes,
                 _ => {}
             }
-            if before == Status::Deleting && self.deleting() == 0 && self.overlay == Overlay::Quit {
+            if before == Status::Deleting && self.unfinished() == 0 && self.overlay == Overlay::Quit
+            {
                 self.overlay = Overlay::None;
                 self.message = Some(format!("deletions finished, {} quits", self.quit_key()));
             }
@@ -1134,7 +1542,7 @@ impl App {
             }
         }
         self.tallies.entry(source).or_default().deleting = 0;
-        if self.overlay == Overlay::Quit && self.deleting() == 0 {
+        if self.overlay == Overlay::Quit && self.unfinished() == 0 {
             self.overlay = Overlay::None;
         }
         if restored > 0 {
@@ -1157,6 +1565,10 @@ impl App {
         self.tallies.values().map(|tally| tally.deleting).sum()
     }
 
+    pub fn unfinished(&self) -> usize {
+        self.deleting() + self.repos.running.len()
+    }
+
     pub fn deleting_in(&self, source: Source) -> usize {
         self.tallies.get(&source).map_or(0, |tally| tally.deleting)
     }
@@ -1164,6 +1576,15 @@ impl App {
 
 fn contains(path: &Path, needle: &str) -> bool {
     path.to_string_lossy().to_lowercase().contains(needle)
+}
+
+fn repo_matches(repository: &Repository, needle: &str) -> bool {
+    needle.is_empty()
+        || contains(&repository.root, needle)
+        || repository
+            .merged
+            .iter()
+            .any(|branch| branch.name.to_lowercase().contains(needle))
 }
 
 fn issue_matches(issue: &Issue, needle: &str) -> bool {
@@ -1322,13 +1743,27 @@ mod tests {
             app.confirm_stats.as_ref().map(|stats| stats.checking),
             Some(1)
         );
-        app.set_statuses([(PathBuf::from("/p/b"), Some(0))]);
+        app.set_statuses([(PathBuf::from("/p/b"), GitState::Changes(0))]);
         assert_eq!(
             app.confirm_stats.as_ref().map(|stats| stats.checking),
             Some(0)
         );
         app.overlay = Overlay::None;
         assert_eq!(app.delete_selected().len(), 1);
+    }
+
+    #[test]
+    fn a_project_whose_git_check_failed_asks() {
+        let mut app = app_with(Mode::Permanent, false);
+        app.expect_status(PathBuf::from("/p/b"));
+        app.set_statuses([(PathBuf::from("/p/b"), GitState::Unknown)]);
+        app.toggle();
+        assert!(app.delete_selected().is_empty());
+        assert_eq!(app.pending_confirmation(), Confirmation::YesNo);
+        assert_eq!(
+            app.confirm_stats.as_ref().map(|stats| stats.unknown),
+            Some(true)
+        );
     }
 
     #[test]

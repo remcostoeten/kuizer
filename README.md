@@ -88,6 +88,27 @@ kuizer-gui ~/projects                              # skip the start screen and s
 
 Prebuilt binaries for Linux and macOS, on x86_64 and ARM, are attached to every [GitHub release](https://github.com/remcostoeten/kuizer/releases), as plain archives with a SHA-256 checksum next to the installers below. The `kuizer-gui` archive includes a `.desktop` entry and an icon for Linux menus.
 
+### Homebrew
+
+The kuizer repository is its own tap. The formula installs the CLI on macOS and Linux, the cask installs the desktop app on macOS.
+
+```bash
+brew tap remcostoeten/kuizer https://github.com/remcostoeten/kuizer
+brew install kuizer                                 # the CLI and terminal UI
+brew install --cask kuizer-gui                      # the desktop app, macOS only
+```
+
+From the release after 0.1.3 on, the formula also installs bash, zsh and fish completions and the man pages. The macOS desktop app is not signed or notarized yet, so Gatekeeper blocks its first start; allow it once under System Settings, Privacy & Security.
+
+### Arch Linux
+
+`packaging/aur` holds two PKGBUILDs: `kuizer` builds the CLI and the desktop app from source, `kuizer-bin` packages the release binaries. Both install the desktop entry, the icons and, from the release after 0.1.3 on, the shell completions and man pages.
+
+```bash
+git clone https://github.com/remcostoeten/kuizer
+cd kuizer/packaging/aur/kuizer-bin && makepkg -si
+```
+
 ### Installer script
 
 Downloads the right binary, checks it and puts it in `~/.cargo/bin`.

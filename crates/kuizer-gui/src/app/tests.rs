@@ -1103,6 +1103,83 @@ fn trash_mode_moves_the_selection_to_the_trash_inside(cx: &mut TestAppContext) {
     assert_eq!(runs[0].deleted[0].mode, kuizer::delete::Mode::Trash);
 }
 
+#[test]
+fn a_clean_adds_its_run_to_the_history_on_screen() {
+    isolated("a_clean_adds_its_run_to_the_history_on_screen_inside");
+}
+
+#[gpui::test]
+#[ignore = "runs in its own process through a_clean_adds_its_run_to_the_history_on_screen"]
+fn a_clean_adds_its_run_to_the_history_on_screen_inside(cx: &mut TestAppContext) {
+    let Some(base) = isolated_base() else {
+        return;
+    };
+    cx.update(bind_keys);
+    let root = project(&base.join("work"));
+    let modules = std::fs::canonicalize(root.join("site").join("node_modules")).unwrap();
+    let (view, cx) = open(cx, base.join("recent"));
+    view.update(cx, |app, _| app.config.delete.mode = DeleteMode::Trash);
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_refresh(&view, cx);
+    let shown_only = kuizer::history::Run {
+        id: 41,
+        ..kuizer::history::Run::new(
+            kuizer::history::now(),
+            &[],
+            vec![kuizer::history::Entry {
+                deleted_at: kuizer::history::now(),
+                path: PathBuf::from("/p/old/node_modules"),
+                rule: "node-modules".to_owned(),
+                category: "dependencies".to_owned(),
+                mode: kuizer::delete::Mode::Permanent,
+                bytes: 7,
+                size: "7 B".to_owned(),
+                restores: None,
+            }],
+        )
+    };
+    view.update(cx, |app, cx| {
+        let history = kuizer::history::History {
+            next_session: 42,
+            runs: vec![shown_only],
+            ..Default::default()
+        };
+        let trash = kuizer::history::TrashSnapshot::read(&history);
+        if let Phase::Ready(report) = &mut app.phase {
+            report.history = Ok(HistoryView::new(history, trash));
+        }
+        let id = app.report().unwrap().candidates[0].id;
+        app.toggle(Source::Artifact, id, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_keystrokes("enter");
+    wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
+
+    let on_disk = kuizer::history::load(&kuizer::history::default_path().unwrap())
+        .unwrap()
+        .runs;
+    assert_eq!(on_disk.len(), 1);
+    view.read_with(cx, |app, _| {
+        let view = app.report().unwrap().history.as_ref().unwrap();
+        let runs = &view.history.runs;
+        assert_eq!(runs.len(), 2, "the history was not read again");
+        assert_eq!(runs[0].id, 41);
+        assert_eq!(runs[1], on_disk[0]);
+        assert_eq!(runs[1].deleted[0].path, modules);
+        assert_eq!(view.history.cumulative.runs, 2);
+        let bytes = runs[1].total.bytes;
+        if view.trash.known {
+            assert_eq!(
+                view.trash_state(1),
+                TrashState::Restorable { items: 1, bytes }
+            );
+            assert_eq!(view.stats.in_trash, bytes);
+        }
+        assert_eq!(view.stats.freed, 7);
+    });
+}
+
 #[gpui::test]
 fn trash_mode_still_says_delete_for_what_cannot_be_trashed(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

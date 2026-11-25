@@ -47,9 +47,7 @@ pub enum AppError {
     UnknownRule { name: String, known: String },
     #[error(transparent)]
     Scope(#[from] ScopeError),
-    #[error(
-        "--json-lines works with scan and the cache, toolchain and docker listings; use --json"
-    )]
+    #[error("--json-lines works with scan, clean, cache, toolchain and docker; use --json")]
     JsonLinesUnsupported,
     #[error("refusing to remove without confirmation: no terminal to ask on, pass --yes")]
     NeedsConfirmation,
@@ -129,13 +127,16 @@ fn removes_unattended(command: Option<&Command>) -> bool {
 }
 
 fn streams_lines(command: Option<&Command>) -> bool {
-    match command {
-        None | Some(Command::Scan(_)) => true,
-        Some(Command::Cache(args)) => !args.plan().cleaning,
-        Some(Command::Toolchain(args)) => !args.plan().cleaning,
-        Some(Command::Docker(args)) => !args.plan().cleaning,
-        _ => false,
-    }
+    matches!(
+        command,
+        None | Some(
+            Command::Scan(_)
+                | Command::Clean(_)
+                | Command::Cache(_)
+                | Command::Toolchain(_)
+                | Command::Docker(_),
+        )
+    )
 }
 
 fn config_notice(loaded: &Loaded) -> Option<String> {
@@ -190,7 +191,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Some(Command::Duplicates(args)) => {
             duplicates::run(&loaded.config, args, cli.json, cli.quiet)
         }
-        Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Clean(args)) => clean::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Docker(args)) => docker::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, format, cli.quiet),

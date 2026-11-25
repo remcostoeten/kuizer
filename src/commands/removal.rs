@@ -1,10 +1,11 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use super::AppError;
 use super::interrupt::Interrupt;
 use super::sort_candidates;
-use crate::cli::{RemovalArgs, Selection, SortKey};
+use crate::cli::{Format, RemovalArgs, Selection, SortKey};
 use crate::config::{Config, DeleteConfig};
 use crate::delete::{self, Batch, Confirmation, Executor, Mode, Removal, Risk, Status, confirm};
 use crate::detect::Safety;
@@ -18,7 +19,7 @@ pub struct Request<'a> {
     pub mode: Mode,
     pub yes: bool,
     pub confirm: bool,
-    pub json: bool,
+    pub format: Format,
     pub source: Source,
     pub engines: &'a [String],
     pub delete: &'a DeleteConfig,
@@ -96,11 +97,60 @@ fn ask(
     })
 }
 
+fn write_line(line: &str) -> Result<(), AppError> {
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}")?;
+    Ok(())
+}
+
+fn print_report(
+    request: &Request,
+    mode: Mode,
+    removals: &[Removal],
+    issues: &[Issue],
+) -> Result<(), AppError> {
+    let (command, roots) = (request.command, request.roots);
+    match request.format {
+        Format::Text => {}
+        Format::Json => println!(
+            "{}",
+            output::removal_report(command, mode, roots, removals, issues)?
+        ),
+        Format::JsonLines => write_line(&output::removal_summary_line(
+            command, mode, roots, removals, issues,
+        )?)?,
+    }
+    Ok(())
+}
+
+fn print_untouched(
+    request: &Request,
+    mode: Mode,
+    candidates: Vec<Candidate>,
+    issues: &[Issue],
+) -> Result<(), AppError> {
+    let removals: Vec<Removal> = candidates
+        .into_iter()
+        .map(|candidate| Removal {
+            candidate,
+            status: Status::WouldRemove,
+            error: None,
+        })
+        .collect();
+    if request.format == Format::JsonLines {
+        for removal in &removals {
+            write_line(&output::removal_line(request.command, removal)?)?;
+        }
+    }
+    print_report(request, mode, &removals, issues)
+}
+
 /// @name run
 /// @description Previews the selected candidates and removes them through the shared executor,
 /// recording what was removed in the history file. Asks first unless `yes` is set. With `confirm`
 /// off it still asks for `review` items and for projects with uncommitted changes or whose state
-/// cannot be read. A dry run prints the preview and touches nothing.
+/// cannot be read. A dry run prints the preview and touches nothing. With `--json-lines` each
+/// item is printed as one line once it is done, followed by one summary line.
 ///
 /// @example
 /// removal::run(&request, removal::select(candidates, &args.select), &issues)?;
@@ -110,39 +160,19 @@ pub fn run(
     issues: &[Issue],
 ) -> Result<(), AppError> {
     let mode = request.mode;
-    if !request.json {
+    let text = request.format == Format::Text;
+    if text {
         if candidates.is_empty() {
             println!("Nothing to remove");
             return Ok(());
         }
         output::print_removal_plan(&candidates, mode);
     }
-    let pending = |candidates: Vec<Candidate>| -> Vec<Removal> {
-        candidates
-            .into_iter()
-            .map(|candidate| Removal {
-                candidate,
-                status: Status::WouldRemove,
-                error: None,
-            })
-            .collect()
-    };
     if mode == Mode::DryRun || candidates.is_empty() {
-        if request.json {
-            println!(
-                "{}",
-                output::removal_report(
-                    request.command,
-                    mode,
-                    request.roots,
-                    &pending(candidates),
-                    issues
-                )?
-            );
-        } else {
+        if text {
             println!("Dry run, nothing was removed");
         }
-        return Ok(());
+        return print_untouched(request, mode, candidates, issues);
     }
     let review = confirm::review_items(&candidates);
     let dirty = if request.yes || request.confirm || review > 0 {
@@ -161,21 +191,10 @@ pub fn run(
         .confirmation(request.confirm)
     };
     if confirmation != Confirmation::Skip && !ask(&candidates, confirmation, dirty)? {
-        if request.json {
-            println!(
-                "{}",
-                output::removal_report(
-                    request.command,
-                    mode,
-                    request.roots,
-                    &pending(candidates),
-                    issues
-                )?
-            );
-        } else {
+        if text {
             println!("Cancelled, nothing was removed");
         }
-        return Ok(());
+        return print_untouched(request, mode, candidates, issues);
     }
 
     let executor = Executor::new(request.roots, request.delete).with_engines(request.engines);
@@ -185,9 +204,22 @@ pub fn run(
         roots: request.roots.to_vec(),
         candidates,
     };
+    let unwritten: Mutex<Option<AppError>> = Mutex::new(None);
     let report = executor.run(vec![batch], mode, delete::workers(), |_, removal| {
-        if !request.json {
-            output::print_removal(removal);
+        match request.format {
+            Format::Text => output::print_removal(removal),
+            Format::Json => {}
+            Format::JsonLines => {
+                let written = output::removal_line(request.command, removal)
+                    .map_err(AppError::from)
+                    .and_then(|line| write_line(&line));
+                if let Err(error) = written {
+                    unwritten
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_or_insert(error);
+                }
+            }
         }
         if interrupt.requested() {
             executor.stop();
@@ -196,19 +228,22 @@ pub fn run(
     if let Err(error) = executor.finish() {
         eprintln!("kuizer: {error}");
     }
+    if let Some(error) = unwritten
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
+        return Err(error);
+    }
     let failed = report.failed();
     let removals: Vec<Removal> = report
         .removals
         .into_iter()
         .map(|(_, removal)| removal)
         .collect();
-    if request.json {
-        println!(
-            "{}",
-            output::removal_report(request.command, mode, request.roots, &removals, issues)?
-        );
-    } else {
+    if text {
         output::print_removal_summary(&removals, mode);
+    } else {
+        print_report(request, mode, &removals, issues)?;
     }
     if report.left > 0 {
         return Err(AppError::Interrupted(report.left));

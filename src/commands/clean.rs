@@ -4,13 +4,13 @@ use super::AppError;
 use super::filter::{self, Filters};
 use super::removal::{self, Request};
 use super::scan::{keep_idle, resolve_roots};
-use crate::cli::CleanArgs;
+use crate::cli::{CleanArgs, Format};
 use crate::config::Config;
 use crate::output;
 use crate::scan::{self, Cancel};
 use crate::source::Source;
 
-pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<(), AppError> {
+pub fn run(config: &Config, args: CleanArgs, format: Format, quiet: bool) -> Result<(), AppError> {
     let rules = filter::project_rules(config);
     let names: Vec<&str> = rules.iter().map(String::as_str).collect();
     let filters = Filters::new(config, &args.categories, args.min_size, &args.scope, &names)?;
@@ -20,7 +20,7 @@ pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<
     removal::check_selection(&args.removal.select, &names)?;
     let roots = scan::normalize_roots(&resolve_roots(config, args.paths)?);
     let handle = scan::start(config, &roots, Cancel::new())?;
-    let show_progress = !json && !quiet && std::io::stderr().is_terminal();
+    let show_progress = format == Format::Text && !quiet && std::io::stderr().is_terminal();
     let collected = scan::collect(&handle, |progress| {
         if show_progress {
             output::print_progress(progress);
@@ -35,7 +35,7 @@ pub fn run(config: &Config, args: CleanArgs, json: bool, quiet: bool) -> Result<
         mode: removal::mode(&args.removal, config),
         yes: args.removal.yes,
         confirm: config.delete.confirm,
-        json,
+        format,
         source: Source::Artifact,
         engines: &config.docker.engines,
         delete: &config.delete,

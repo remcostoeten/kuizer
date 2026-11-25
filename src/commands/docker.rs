@@ -62,7 +62,7 @@ pub fn run(config: &Config, args: DockerArgs, format: Format, quiet: bool) -> Re
         mode: Source::Docker.mode(removal::mode(&plan.removal, config)),
         yes: plan.removal.yes,
         confirm: config.delete.confirm,
-        json,
+        format,
         source: Source::Docker,
         engines: &config.docker.engines,
         delete: &config.delete,

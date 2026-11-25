@@ -229,6 +229,7 @@ pub(super) enum Mode {
     Menu,
     Shortcuts,
     Confirm,
+    Record,
 }
 
 impl Mode {
@@ -242,6 +243,7 @@ impl Mode {
             Mode::Menu => "Menu",
             Mode::Shortcuts => "Shortcuts",
             Mode::Confirm => "Confirm",
+            Mode::Record => "Record",
         }
     }
 }
@@ -253,7 +255,7 @@ impl Kuizer {
         } else if matches!(self.dialog, Some(Dialog::Branches { .. })) {
             Mode::Confirm
         } else if self.settings.is_some() {
-            Mode::Settings
+            self.settings_mode()
         } else if self.palette.is_some() {
             Mode::Palette
         } else if self.shortcuts {
@@ -511,6 +513,10 @@ impl Kuizer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.recording_keys() {
+            cx.propagate();
+            return;
+        }
         if self.palette.take().is_some() {
             cx.notify();
         } else {

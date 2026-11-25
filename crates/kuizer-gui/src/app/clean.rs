@@ -132,12 +132,15 @@ impl Kuizer {
                 candidates: docker,
             });
         }
+        let history = report
+            .history
+            .as_ref()
+            .ok()
+            .map(|view| (view.history.clone(), view.trash.clone()));
         let delete_config = self.config.delete.clone();
         let engines = self.config.docker.engines.clone();
         let spawned = spawn_worker("kuizer-gui-clean", move || {
-            let outcome = model::clean(batches, &delete_config, &engines);
-            let history = HistoryView::load();
-            (outcome, history)
+            model::clean(batches, &delete_config, &engines, history)
         });
         let receiver = match spawned {
             Ok(receiver) => receiver,

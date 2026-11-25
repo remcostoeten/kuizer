@@ -233,6 +233,13 @@ impl History {
         };
     }
 
+    fn push(&mut self, run: Run) -> usize {
+        self.next_session = self.next_session.max(run.id + 1);
+        self.runs.push(run);
+        self.recompute();
+        self.runs.len() - 1
+    }
+
     fn assign_ids(&mut self) {
         let mut next = self
             .runs
@@ -860,10 +867,34 @@ impl Recorder {
         self.shared.queue().session
     }
 
-    pub fn finish(self) -> Result<(), HistoryError> {
+    /// @name finish
+    /// @description Writes every queued entry and returns the run as it now stands in the history
+    /// file, or `None` when nothing was recorded, so a frontend can add it to a history it holds
+    /// without reading the file again. Returns the first write error instead when one is left.
+    ///
+    /// @example
+    /// let run = recorder.finish()?;
+    pub fn finish(self) -> Result<Option<Run>, HistoryError> {
         self.shared.flush();
-        let error = self.shared.queue().error.take();
-        error.map_or(Ok(()), Err)
+        if let Some(error) = self.shared.queue().error.take() {
+            return Err(error);
+        }
+        let Some(session) = self.shared.queue().session else {
+            return Ok(None);
+        };
+        let (written, target) = {
+            let mut store = self
+                .shared
+                .store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (store.written.take(), store.target.clone())
+        };
+        let history = match written {
+            Some((history, _)) => history,
+            None => load(&target)?,
+        };
+        Ok(history.runs.into_iter().rev().find(|run| run.id == session))
     }
 }
 

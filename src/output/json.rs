@@ -253,9 +253,45 @@ struct RemovalReport<'a> {
     mode: Mode,
     #[serde(serialize_with = "lossy_paths")]
     roots: &'a [PathBuf],
-    items: Vec<RemovalJson<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    items: Option<Vec<RemovalJson<'a>>>,
     issues: Vec<IssueJson<'a>>,
     summary: RemovalSummary,
+}
+
+impl<'a> RemovalJson<'a> {
+    fn new(command: &str, removal: &'a Removal) -> Self {
+        Self {
+            candidate: CandidateJson::new(Source::removal(command), &removal.candidate),
+            status: removal.status,
+            error: removal.error.as_deref(),
+        }
+    }
+}
+
+impl RemovalSummary {
+    fn new(removals: &[Removal]) -> Self {
+        let mut summary = Self {
+            selected: removals.len(),
+            selected_bytes: 0,
+            removed: 0,
+            removed_bytes: 0,
+            failed: 0,
+        };
+        for removal in removals {
+            let bytes = removal.candidate.usage.allocated;
+            summary.selected_bytes += bytes;
+            match removal.status {
+                Status::Removed => {
+                    summary.removed += 1;
+                    summary.removed_bytes += bytes;
+                }
+                Status::Failed => summary.failed += 1,
+                Status::WouldRemove => {}
+            }
+        }
+        summary
+    }
 }
 
 pub fn removal_report(
@@ -265,42 +301,58 @@ pub fn removal_report(
     removals: &[Removal],
     issues: &[Issue],
 ) -> Result<String, serde_json::Error> {
-    let removed: Vec<&Removal> = removals
-        .iter()
-        .filter(|removal| removal.status == Status::Removed)
-        .collect();
     let report = RemovalReport {
         schema_version: SCHEMA_VERSION,
         command,
         mode,
         roots,
-        items: removals
-            .iter()
-            .map(|removal| RemovalJson {
-                candidate: CandidateJson::new(Source::removal(command), &removal.candidate),
-                status: removal.status,
-                error: removal.error.as_deref(),
-            })
-            .collect(),
+        items: Some(
+            removals
+                .iter()
+                .map(|removal| RemovalJson::new(command, removal))
+                .collect(),
+        ),
         issues: issues_json(issues),
-        summary: RemovalSummary {
-            selected: removals.len(),
-            selected_bytes: removals
-                .iter()
-                .map(|removal| removal.candidate.usage.allocated)
-                .sum(),
-            removed: removed.len(),
-            removed_bytes: removed
-                .iter()
-                .map(|removal| removal.candidate.usage.allocated)
-                .sum(),
-            failed: removals
-                .iter()
-                .filter(|removal| removal.status == Status::Failed)
-                .count(),
-        },
+        summary: RemovalSummary::new(removals),
     };
     serde_json::to_string_pretty(&report)
+}
+
+/// @name removal_line
+/// @description Serializes one finished removal as a single `--json-lines` line with
+/// `"type": "removal"` and the fields of a removal report item, including its status.
+///
+/// @example
+/// println!("{}", output::removal_line("clean", &removal)?);
+pub fn removal_line(command: &str, removal: &Removal) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&Line {
+        kind: "removal",
+        row: RemovalJson::new(command, removal),
+    })
+}
+
+/// @name removal_summary_line
+/// @description Serializes the closing `--json-lines` line of a removal: `"type": "summary"`
+/// with every removal report field except `items`.
+///
+/// @example
+/// println!("{}", output::removal_summary_line("clean", mode, &roots, &removals, &issues)?);
+pub fn removal_summary_line(
+    command: &str,
+    mode: Mode,
+    roots: &[PathBuf],
+    removals: &[Removal],
+    issues: &[Issue],
+) -> Result<String, serde_json::Error> {
+    summary_line(RemovalReport {
+        schema_version: SCHEMA_VERSION,
+        command,
+        mode,
+        roots,
+        items: None,
+        issues: issues_json(issues),
+        summary: RemovalSummary::new(removals),
+    })
 }
 
 fn seconds(time: Option<SystemTime>) -> Option<u64> {

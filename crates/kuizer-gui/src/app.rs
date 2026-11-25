@@ -629,6 +629,10 @@ impl Kuizer {
     }
 
     fn quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_keys() {
+            cx.propagate();
+            return;
+        }
         cx.quit();
     }
 
@@ -829,14 +833,26 @@ impl Kuizer {
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_keys() {
+            cx.propagate();
+            return;
+        }
         self.set_zoom(zoom::zoomed_in(self.config.appearance.zoom), cx);
     }
 
     fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_keys() {
+            cx.propagate();
+            return;
+        }
         self.set_zoom(zoom::zoomed_out(self.config.appearance.zoom), cx);
     }
 
     fn reset_zoom(&mut self, _: &ResetZoom, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_keys() {
+            cx.propagate();
+            return;
+        }
         self.set_zoom(kuizer::config::DEFAULT_ZOOM, cx);
     }
 
@@ -1711,7 +1727,6 @@ fn page_header(tab: Tab, bytes: Option<u64>) -> Div {
                 )
                 .child(
                     div()
-                        .truncate()
                         .text_size(unit(font::SMALL))
                         .text_color(theme::faint())
                         .child(tab.term().text()),

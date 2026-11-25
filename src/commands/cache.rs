@@ -48,7 +48,7 @@ pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Res
         mode: removal::mode(&plan.removal, config),
         yes: plan.removal.yes,
         confirm: config.delete.confirm,
-        json,
+        format,
         source: Source::Cache,
         engines: &config.docker.engines,
         delete: &config.delete,

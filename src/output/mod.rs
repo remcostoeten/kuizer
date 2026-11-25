@@ -8,7 +8,8 @@ pub use git::{GitOutcome, git_report, print_git_outcome, print_repositories};
 pub use html::{Dashboard, dashboard_data, dashboard_html, scan_html};
 pub use json::{
     SCHEMA_VERSION, cache_lines, cache_report, docker_lines, docker_report, duplicates_report,
-    removal_report, scan_line, scan_report, scan_summary_line, toolchain_lines, toolchain_report,
+    removal_line, removal_report, removal_summary_line, scan_line, scan_report, scan_summary_line,
+    toolchain_lines, toolchain_report,
 };
 pub use text::{
     clear_progress, display_path, largest_count, print_caches, print_candidates, print_docker,

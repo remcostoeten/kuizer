@@ -589,15 +589,18 @@ pub fn load(
         });
 
         let collected = walk(&handle, tracker, emit);
-        let (pins, found_repos) = walked
-            .recv()
-            .map(|walked| (walked.pins, walked.repositories))
-            .unwrap_or_default();
+        let walked = walked.recv();
         if cancel.is_cancelled() {
             finished.store(true, Ordering::Relaxed);
             ticker.thread().unpark();
             return Err(CANCELLED.to_owned());
         }
+        let Ok(walked) = walked else {
+            finished.store(true, Ordering::Relaxed);
+            ticker.thread().unpark();
+            return Err("the scan stopped before finishing".to_owned());
+        };
+        let (pins, found_repos) = (walked.pins, walked.repositories);
         let (issues, summary, found, artifact_bytes) = collected;
         let dirs = summary.progress.dirs;
         emit(Loaded::ArtifactsDone {
@@ -887,9 +890,18 @@ impl Outcome {
 /// exactly like the CLI. Trashed items are recorded as their own run in the history file, so a
 /// restore of that run never lists items that cannot come back.
 ///
+/// The runs the clean recorded are added to `history`, the history and trash snapshot on screen,
+/// in memory, and the view it returns is built here, off the UI thread. Without a history on
+/// screen, or when the history file could not be written, the history is read again instead.
+///
 /// @example
-/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], &config.delete, &config.docker.engines);
-pub fn clean(batches: Vec<Batch>, delete: &DeleteConfig, engines: &[String]) -> Outcome {
+/// let (outcome, view) = clean(batches, &config.delete, &config.docker.engines, Some((history, trash)));
+pub fn clean(
+    batches: Vec<Batch>,
+    delete: &DeleteConfig,
+    engines: &[String],
+    history: Option<(std::sync::Arc<History>, TrashSnapshot)>,
+) -> (Outcome, Result<HistoryView, String>) {
     let mut roots: Vec<PathBuf> = batches
         .iter()
         .flat_map(|batch| batch.roots.iter().cloned())
@@ -898,11 +910,23 @@ pub fn clean(batches: Vec<Batch>, delete: &DeleteConfig, engines: &[String]) -> 
     roots.dedup();
     let executor = Executor::new(&roots, delete).with_engines(engines);
     let report = executor.run(batches, delete.mode.into(), delete::workers(), |_, _| {});
-    Outcome {
+    let (view, history_error) = match (executor.finish(), history) {
+        (Ok(runs), Some((history, mut trash))) => {
+            let mut history = std::sync::Arc::unwrap_or_clone(history);
+            for run in runs {
+                trash.record(&mut history, run);
+            }
+            (Ok(HistoryView::new(history, trash)), None)
+        }
+        (Ok(_), None) => (HistoryView::load(), None),
+        (Err(error), _) => (HistoryView::load(), Some(error.to_string())),
+    };
+    let outcome = Outcome {
         removals: report.removals,
         mode: delete.mode,
-        history_error: executor.finish().err().map(|error| error.to_string()),
-    }
+        history_error,
+    };
+    (outcome, view)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

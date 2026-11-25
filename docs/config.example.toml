@@ -103,7 +103,8 @@ recent_hours = 24
 # Use modifier prefixes such as ctrl-, alt-, shift-, and secondary- (Cmd in the macOS GUI,
 # Ctrl in the TUI and on Linux). Named keys include space, enter, escape, and pageup.
 # Invalid or conflicting overrides report a warning and keep that action's defaults.
-# See src/keymap.rs for the full action list and the contexts where each action works.
+# See src/keymap.rs for the full action list and the contexts where each action works. The
+# Keys page of the GUI settings lists every action too, and records and writes new keys here.
 [keys]
 # "nav.down" = ["n", "down"]
 # "nav.up" = ["shift-n", "up"]

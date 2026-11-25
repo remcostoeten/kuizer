@@ -1,13 +1,18 @@
 //! The settings popover: pages of switches that read and write the config file.
 
+use std::sync::LazyLock;
+
 use gpui::{Keystroke, canvas};
 use kuizer::config::{
-    self, Accent, Config, DEFAULT_ZOOM, DeleteMode, Density, MAX_ZOOM, MIN_ZOOM, SettingValue,
-    Sidebar, Theme,
+    self, Accent, Config, DEFAULT_ZOOM, DeleteMode, Density, EditError, MAX_ZOOM, MIN_ZOOM,
+    SettingValue, Sidebar, Theme,
 };
+use kuizer::keymap::{self, KeyError, Override, Overrides};
 
 use super::*;
 use crate::zoom;
+
+static DEFAULT_KEYS: LazyLock<Keymap> = LazyLock::new(Keymap::default);
 
 #[derive(Default)]
 pub(super) struct SettingWrites {
@@ -15,6 +20,7 @@ pub(super) struct SettingWrites {
     queued: Vec<(Setting, usize)>,
     writing: bool,
     field: Option<Field>,
+    keys: Option<Key>,
 }
 
 impl SettingWrites {
@@ -604,6 +610,7 @@ fn protected(config: &Config, entry: &str, remove: bool) -> Result<Write, String
 enum Row {
     Setting(Setting),
     Field(Field),
+    Key(Key),
 }
 
 struct Group {
@@ -618,7 +625,7 @@ struct Page {
     groups: &'static [Group],
 }
 
-const PAGES: [Page; 7] = [
+const PAGES: [Page; 8] = [
     Page {
         title: "General",
         detail: "Choose how kuizer looks and opens.",
@@ -736,14 +743,114 @@ const PAGES: [Page; 7] = [
             ],
         }],
     },
+    Page {
+        title: "Keys",
+        detail: "Every action with its keys. The window and the terminal UI read the same keys, so a change applies to both.",
+        groups: &[],
+    },
 ];
 
-fn rows(page: usize) -> Vec<Row> {
-    PAGES[page]
+const KEYS_PAGE: usize = PAGES.len() - 1;
+
+fn rows(state: &Settings, keys: &Keymap) -> Vec<Row> {
+    if state.page == KEYS_PAGE {
+        return key_actions(&state.keys.filter, keys)
+            .into_iter()
+            .map(Row::Key)
+            .collect();
+    }
+    PAGES[state.page]
         .groups
         .iter()
         .flat_map(|group| group.rows.iter().copied())
         .collect()
+}
+
+const AREAS: [&str; 12] = [
+    "Window",
+    "Space map",
+    "Controls",
+    "Start screen",
+    "Palette",
+    "Filter",
+    "Settings",
+    "Menu",
+    "Dialogs",
+    "Text fields",
+    "Shortcuts overlay",
+    "Terminal",
+];
+
+fn area(scope: Scope) -> &'static str {
+    if scope.terminal() {
+        return "Terminal";
+    }
+    match scope {
+        Scope::Map => "Space map",
+        Scope::Control => "Controls",
+        Scope::StartControl | Scope::Folder => "Start screen",
+        Scope::Palette => "Palette",
+        Scope::GuiFilter => "Filter",
+        Scope::Settings => "Settings",
+        Scope::Menu => "Menu",
+        Scope::Dialog => "Dialogs",
+        Scope::PathEditor | Scope::Field => "Text fields",
+        Scope::Shortcuts => "Shortcuts overlay",
+        _ => "Window",
+    }
+}
+
+fn home_scope(action: Key) -> Scope {
+    action.scopes().next().unwrap_or(Scope::Gui)
+}
+
+fn key_actions(filter: &str, keys: &Keymap) -> Vec<Key> {
+    let needle = filter.trim().to_lowercase();
+    let mut actions: Vec<Key> = Key::all()
+        .filter(|&action| {
+            needle.is_empty()
+                || action.name().contains(&needle)
+                || action.scopes().any(|scope| {
+                    keys.keys(scope, action).any(|key| {
+                        key.to_lowercase().contains(&needle)
+                            || commands::label(key).to_lowercase().contains(&needle)
+                    })
+                })
+        })
+        .collect();
+    actions.sort_by_key(|&action| {
+        let area = area(home_scope(action));
+        AREAS.iter().position(|known| *known == area)
+    });
+    actions
+}
+
+fn labels<'a>(keys: impl Iterator<Item = &'a str>) -> String {
+    keys.map(commands::label).collect::<Vec<_>>().join(", ")
+}
+
+fn problem_text(action: Key, problem: &KeyError) -> String {
+    if problem.name == action.name() {
+        format!("Not saved: {}", problem.message)
+    } else {
+        format!("Not saved: {problem}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    Replace,
+    Add,
+}
+
+/// The state of the Keys page: its filter, the action being recorded and the last refusal.
+#[derive(Debug, Default)]
+struct KeyEditor {
+    filter: String,
+    filtering: bool,
+    recording: Option<(Key, Record)>,
+    chip: usize,
+    error: Option<(Key, String)>,
 }
 
 #[derive(Debug)]
@@ -759,6 +866,7 @@ pub(super) struct Settings {
     page: usize,
     row: usize,
     editor: Option<Editor>,
+    keys: KeyEditor,
     scroll: ScrollHandle,
     reveal: Rc<Cell<bool>>,
 }
@@ -782,6 +890,18 @@ impl Kuizer {
             self.field_key(keystroke, cx);
             return;
         }
+        if self.recording_keys() {
+            self.record_key(keystroke, cx);
+            return;
+        }
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|state| state.keys.filtering)
+        {
+            self.key_filter_key(keystroke, cx);
+            return;
+        }
         if commands::lookup(&self.keymap, keystroke, false) == Some(Command::Settings) {
             self.settings = None;
             cx.notify();
@@ -793,15 +913,15 @@ impl Kuizer {
         let action = self
             .keymap
             .lookup(Scope::Settings, commands::stroke(keystroke));
-        let page = rows(state.page);
-        let count = page.len();
+        let page = rows(state, &self.keymap);
+        let last = page.len().saturating_sub(1);
         let row = page.get(state.row).copied();
         match action {
             Some(Key::Back) => self.settings = None,
-            Some(Key::SettingsNext) => move_to(state, (state.row + 1).min(count - 1)),
+            Some(Key::SettingsNext) => move_to(state, (state.row + 1).min(last)),
             Some(Key::SettingsPrevious) => move_to(state, state.row.saturating_sub(1)),
             Some(Key::SettingsFirst) => move_to(state, 0),
-            Some(Key::SettingsLast) => move_to(state, count - 1),
+            Some(Key::SettingsLast) => move_to(state, last),
             Some(Key::SettingsRight | Key::SettingsLeft) => {
                 let forward = action == Some(Key::SettingsRight);
                 if let Some(Row::Setting(setting)) = row
@@ -811,7 +931,17 @@ impl Kuizer {
                     self.change(setting, setting.step(&self.config, delta), cx);
                     return;
                 }
-                switch_page(state, if forward { 1 } else { PAGES.len() - 1 });
+                if let Some(Row::Key(key)) = row {
+                    let count = self.keymap.keys(home_scope(key), key).count();
+                    let chip = state.keys.chip.min(count.saturating_sub(1));
+                    state.keys.chip = if forward {
+                        (chip + 1).min(count.saturating_sub(1))
+                    } else {
+                        chip.saturating_sub(1)
+                    };
+                } else {
+                    switch_page(state, if forward { 1 } else { PAGES.len() - 1 });
+                }
             }
             Some(Key::SettingsPreviousTab) => switch_page(state, PAGES.len() - 1),
             Some(Key::SettingsNextTab) => switch_page(state, 1),
@@ -821,13 +951,246 @@ impl Kuizer {
                         self.change(setting, setting.next(&self.config), cx);
                     }
                     Some(Row::Field(field)) => self.edit_field(field, cx),
+                    Some(Row::Key(key)) => self.start_recording(key, Record::Replace, cx),
                     None => {}
+                }
+                return;
+            }
+            Some(Key::SettingsFilter) if state.page == KEYS_PAGE => {
+                state.keys.filtering = true;
+                state.keys.error = None;
+            }
+            Some(Key::SettingsAddKey) => {
+                if let Some(Row::Key(key)) = row {
+                    self.start_recording(key, Record::Add, cx);
+                }
+                return;
+            }
+            Some(Key::SettingsRemoveKey) => {
+                if let Some(Row::Key(key)) = row {
+                    self.remove_key(key, cx);
+                }
+                return;
+            }
+            Some(Key::SettingsResetKey) => {
+                if let Some(Row::Key(key)) = row {
+                    self.reset_key(key, cx);
                 }
                 return;
             }
             _ => return,
         }
         cx.notify();
+    }
+
+    /// Whether the Keys page waits for the key combination that becomes a binding.
+    pub(super) fn recording_keys(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|state| state.keys.recording.is_some())
+    }
+
+    pub(super) fn settings_mode(&self) -> keys::Mode {
+        match &self.settings {
+            Some(state) if state.keys.recording.is_some() => keys::Mode::Record,
+            Some(state) if state.keys.filtering => keys::Mode::Filter,
+            _ => keys::Mode::Settings,
+        }
+    }
+
+    fn key_filter_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        let last = rows(state, &self.keymap).len().saturating_sub(1);
+        match self
+            .keymap
+            .lookup(Scope::GuiFilter, commands::stroke(keystroke))
+        {
+            Some(Key::ApplyFilter) => state.keys.filtering = false,
+            Some(Key::Back) => {
+                state.keys.filtering = false;
+                state.keys.filter.clear();
+                move_to(state, 0);
+            }
+            Some(Key::FilterDown) => move_to(state, (state.row + 1).min(last)),
+            Some(Key::FilterUp) => move_to(state, state.row.saturating_sub(1)),
+            _ => {
+                let paste = || cx.read_from_clipboard().and_then(|item| item.text());
+                if !field::edit(
+                    &self.keymap,
+                    &mut state.keys.filter,
+                    keystroke,
+                    field::WORDS,
+                    paste,
+                ) {
+                    return;
+                }
+                move_to(state, 0);
+            }
+        }
+        cx.notify();
+    }
+
+    fn start_recording(&mut self, key: Key, record: Record, cx: &mut Context<Self>) {
+        if self.setting_writes.keys.is_some() {
+            return;
+        }
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        if self.config_path.is_none() {
+            state.keys.error = Some((key, "This system has no config folder".to_owned()));
+        } else {
+            state.keys.recording = Some((key, record));
+            state.keys.error = None;
+        }
+        cx.notify();
+    }
+
+    fn record_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some((key, record)) = self
+            .settings
+            .as_mut()
+            .and_then(|state| state.keys.recording.take())
+        else {
+            return;
+        };
+        let stroke = commands::stroke(keystroke);
+        if self.keymap.lookup(Scope::Settings, stroke) == Some(Key::Back) {
+            cx.notify();
+            return;
+        }
+        let Some(text) = keymap::binding_text(stroke) else {
+            let label = commands::label(&keystroke.unparse());
+            self.refuse_keys(key, format!("Not saved: {label} cannot be bound"), cx);
+            return;
+        };
+        let mut list: Vec<String> = match record {
+            Record::Replace => Vec::new(),
+            Record::Add => self
+                .keymap
+                .keys(home_scope(key), key)
+                .map(str::to_owned)
+                .collect(),
+        };
+        if list.contains(&text) {
+            let message = format!("{} is already one of its keys", commands::label(&text));
+            self.refuse_keys(key, message, cx);
+            return;
+        }
+        list.push(text);
+        if let Some(state) = &mut self.settings {
+            state.keys.chip = list.len() - 1;
+        }
+        self.write_keys(key, Some(list), cx);
+    }
+
+    fn remove_key(&mut self, key: Key, cx: &mut Context<Self>) {
+        let Some(state) = &self.settings else {
+            return;
+        };
+        let mut list: Vec<String> = self
+            .keymap
+            .keys(home_scope(key), key)
+            .map(str::to_owned)
+            .collect();
+        if list.is_empty() {
+            return;
+        }
+        let chip = state.keys.chip.min(list.len() - 1);
+        list.remove(chip);
+        if list.is_empty() {
+            let message = format!(
+                "Not saved: an action needs at least one key. {} resets it to the defaults.",
+                self.key_hint(Scope::Settings, Key::SettingsResetKey)
+            );
+            self.refuse_keys(key, message, cx);
+            return;
+        }
+        self.write_keys(key, Some(list), cx);
+    }
+
+    fn reset_key(&mut self, key: Key, cx: &mut Context<Self>) {
+        if self.config.keys.contains_key(key.name()) {
+            self.write_keys(key, None, cx);
+        }
+    }
+
+    fn refuse_keys(&mut self, key: Key, message: String, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.settings {
+            state.keys.error = Some((key, message));
+        }
+        cx.notify();
+    }
+
+    fn write_keys(&mut self, key: Key, list: Option<Vec<String>>, cx: &mut Context<Self>) {
+        if self.setting_writes.keys.is_some() {
+            return;
+        }
+        let Some(file) = self.config_path.clone() else {
+            self.refuse_keys(key, "This system has no config folder".to_owned(), cx);
+            return;
+        };
+        let entry = list.map(|mut list| {
+            if list.len() == 1 {
+                Override::One(list.remove(0))
+            } else {
+                Override::Many(list)
+            }
+        });
+        let next = match keymap::rebind(&self.config.keys, key.name(), entry.clone()) {
+            Ok(next) => next,
+            Err(problem) => {
+                self.refuse_keys(key, problem_text(key, &problem), cx);
+                return;
+            }
+        };
+        if let Some(state) = &mut self.settings {
+            state.keys.error = None;
+        }
+        self.setting_writes.keys = Some(key);
+        let written = cx.background_spawn(async move {
+            let _one_writer = CONFIG_WRITE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            config::set_keys(&file, key.name(), entry.as_ref())
+                .map(|()| next)
+                .map_err(|error| match error {
+                    EditError::Keys { source, .. } => problem_text(key, &source),
+                    other => format!("Not saved: {other}"),
+                })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = written.await;
+            let _ = this.update(cx, |app, cx| app.keys_written(key, result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn keys_written(
+        &mut self,
+        key: Key,
+        result: Result<Overrides, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.setting_writes.keys = None;
+        match result {
+            Ok(keys) => self.apply_keys(keys, cx),
+            Err(error) if self.settings.is_some() => self.refuse_keys(key, error, cx),
+            Err(error) => self.tell(Notice::Failed(error), cx),
+        }
+        cx.notify();
+    }
+
+    /// Makes a new set of `[keys]` overrides the live keymap, including the keys GPUI dispatches
+    /// itself, so a rebind works without a restart.
+    fn apply_keys(&mut self, keys: Overrides, cx: &mut Context<Self>) {
+        self.keymap = Keymap::resolve(&keys).0;
+        self.config.keys = keys;
+        cx.clear_key_bindings();
+        commands::bind_configured_keys(cx, &self.config.keys);
     }
 
     pub(super) fn set_zoom(&mut self, percent: u16, cx: &mut Context<Self>) {
@@ -851,7 +1214,7 @@ impl Kuizer {
         let Some(state) = &mut self.settings else {
             return;
         };
-        if let Some(at) = rows(state.page)
+        if let Some(at) = rows(state, &self.keymap)
             .iter()
             .position(|row| *row == Row::Field(field))
         {
@@ -995,6 +1358,11 @@ impl Kuizer {
         };
         let was = setting.value(&self.config);
         self.apply_setting(setting, value);
+        if setting == Setting::Zoom
+            && let Some(state) = &self.settings
+        {
+            state.reveal.set(true);
+        }
         self.setting_writes.queue(setting, was, value);
         self.write_next_setting(file, cx);
         cx.notify();
@@ -1082,6 +1450,9 @@ impl Kuizer {
                         state.page = index;
                         state.row = 0;
                         state.editor = None;
+                        state.keys.recording = None;
+                        state.keys.filtering = false;
+                        state.keys.error = None;
                         cx.notify();
                     }
                 }))
@@ -1089,50 +1460,55 @@ impl Kuizer {
         let nav: Vec<_> = nav.collect();
         let page = &PAGES[state.page];
         let mut position = 0;
-        let groups: Vec<_> = page
-            .groups
-            .iter()
-            .map(|group| {
-                let last_row = group.rows.len() - 1;
-                let rows: Vec<_> = group
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(at, &row)| {
-                        let index = position;
-                        position += 1;
-                        let rule = at < last_row;
-                        let line = match row {
-                            Row::Setting(setting) => {
-                                self.setting_row(setting, index, state.row, rule, cx)
-                            }
-                            Row::Field(field) => self.field_row(field, index, state, rule, cx),
-                        };
-                        line.relative().when(index == state.row, |line| {
-                            line.child(reveal(state.scroll.clone(), Rc::clone(&state.reveal)))
+        let groups: Vec<_> = if state.page == KEYS_PAGE {
+            self.key_groups(state, cx)
+        } else {
+            page.groups
+                .iter()
+                .map(|group| {
+                    let last_row = group.rows.len() - 1;
+                    let rows: Vec<_> = group
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &row)| {
+                            let index = position;
+                            position += 1;
+                            let rule = at < last_row;
+                            let line = match row {
+                                Row::Setting(setting) => {
+                                    self.setting_row(setting, index, state.row, rule, cx)
+                                }
+                                Row::Field(field) => self.field_row(field, index, state, rule, cx),
+                                Row::Key(key) => self.key_row(key, index, state, rule, cx),
+                            };
+                            line.relative().when(index == state.row, |line| {
+                                line.child(reveal(state.scroll.clone(), Rc::clone(&state.reveal)))
+                            })
                         })
-                    })
-                    .collect();
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(unit(space::XXS))
-                            .pb(unit(space::M))
-                            .child(ui::heading(group.title))
-                            .children(group.hint.map(|hint| {
-                                div()
-                                    .text_size(unit(font::SMALL))
-                                    .text_color(theme::faint())
-                                    .child(hint)
-                            })),
-                    )
-                    .children(rows)
-            })
-            .collect();
+                        .collect();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(unit(space::XXS))
+                                .pb(unit(space::M))
+                                .child(ui::heading(group.title))
+                                .children(group.hint.map(|hint| {
+                                    div()
+                                        .text_size(unit(font::SMALL))
+                                        .text_color(theme::faint())
+                                        .child(hint)
+                                })),
+                        )
+                        .children(rows)
+                        .into_any_element()
+                })
+                .collect()
+        };
         let hint = |keys: &[Key], what: &'static str| {
             div()
                 .flex()
@@ -1155,7 +1531,14 @@ impl Kuizer {
             .text_color(theme::faint())
             .child(hint(&[Key::SettingsPrevious, Key::SettingsNext], "move"))
             .child(hint(&[Key::SettingsNextTab], "section"))
-            .child(hint(&[Key::SettingsChange], "change"))
+            .child(hint(
+                &[Key::SettingsChange],
+                if state.page == KEYS_PAGE {
+                    "record"
+                } else {
+                    "change"
+                },
+            ))
             .child(hint(&[Key::Back], "close"));
         let panel = div()
             .id("settings")
@@ -1204,12 +1587,13 @@ impl Kuizer {
                     .overflow_y_scroll()
                     .track_scroll(&state.scroll)
                     .px(unit(space::XXL))
-                    .py(unit(space::XXL))
+                    .pt(unit(space::XXL))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(unit(space::XXL))
+                            .pb(unit(space::XXL))
                             .w_full()
                             .max_w(unit(size::SETTINGS_CONTENT))
                             .mx_auto()
@@ -1343,6 +1727,236 @@ impl Kuizer {
                         .map(|error| div().text_color(theme::review()).child(error)),
                 )
             })
+    }
+
+    fn key_groups(&self, state: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let actions = key_actions(&state.keys.filter, &self.keymap);
+        let hint = |key: Key, what: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(unit(space::XS))
+                .child(ui::kbd(self.key_hint(Scope::Settings, key)))
+                .child(what)
+        };
+        let placeholder = format!(
+            "{} filters by action or key",
+            self.key_hint(Scope::Settings, Key::SettingsFilter)
+        );
+        let tools = div()
+            .flex()
+            .flex_col()
+            .gap(unit(space::M))
+            .child(
+                field::view(
+                    "keys-filter",
+                    &state.keys.filter,
+                    placeholder,
+                    state.keys.filtering,
+                )
+                .debug_selector(|| "keys-filter".to_owned())
+                .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                    if let Some(state) = &mut app.settings {
+                        state.keys.filtering = true;
+                        cx.notify();
+                    }
+                })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(unit(space::L))
+                    .text_size(unit(font::CAPTION))
+                    .text_color(theme::faint())
+                    .child(hint(Key::SettingsChange, "record a new key"))
+                    .child(hint(Key::SettingsAddKey, "add one"))
+                    .child(hint(Key::SettingsRemoveKey, "remove the picked key"))
+                    .child(hint(Key::SettingsResetKey, "back to the default")),
+            );
+        let mut groups = vec![tools.into_any_element()];
+        if actions.is_empty() {
+            groups.push(ui::empty("No action or key matches the filter").into_any_element());
+            return groups;
+        }
+        let mut start = 0;
+        while start < actions.len() {
+            let title = area(home_scope(actions[start]));
+            let end = actions[start..]
+                .iter()
+                .position(|&action| area(home_scope(action)) != title)
+                .map_or(actions.len(), |length| start + length);
+            let rows: Vec<_> = (start..end)
+                .map(|index| {
+                    self.key_row(actions[index], index, state, index + 1 < end, cx)
+                        .relative()
+                        .when(index == state.row, |line| {
+                            line.child(reveal(state.scroll.clone(), Rc::clone(&state.reveal)))
+                        })
+                })
+                .collect();
+            groups.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().pb(unit(space::M)).child(ui::heading(title)))
+                    .children(rows)
+                    .into_any_element(),
+            );
+            start = end;
+        }
+        groups
+    }
+
+    fn key_row(
+        &self,
+        key: Key,
+        index: usize,
+        state: &Settings,
+        rule: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let focused = index == state.row;
+        let home = home_scope(key);
+        let current: Vec<&str> = self.keymap.keys(home, key).collect();
+        let recording = state
+            .keys
+            .recording
+            .filter(|(recorded, _)| *recorded == key)
+            .map(|(_, record)| record);
+        let picked = state.keys.chip.min(current.len().saturating_sub(1));
+        let mut chips: Vec<AnyElement> = Vec::new();
+        if recording != Some(Record::Replace) {
+            chips.extend(current.iter().enumerate().map(|(at, binding)| {
+                let label = commands::label(binding);
+                if focused && recording.is_none() && at == picked {
+                    ui::kbd_on(label, theme::bar(), theme::on_accent()).into_any_element()
+                } else {
+                    ui::kbd(label).into_any_element()
+                }
+            }));
+        }
+        if recording.is_some() {
+            chips.push(ui::appear(
+                ("key-recording", index),
+                ui::kbd_on("Press a key", theme::review_soft(), theme::review()),
+            ));
+        }
+        let mut places: Vec<&str> = Vec::new();
+        let mut elsewhere: Vec<String> = Vec::new();
+        for scope in key.scopes() {
+            let place = area(scope);
+            if !places.contains(&place) {
+                places.push(place);
+            }
+            let keys: Vec<&str> = self.keymap.keys(scope, key).collect();
+            let line = format!("{place}: {}", labels(keys.iter().copied()));
+            if keys != current && !elsewhere.contains(&line) {
+                elsewhere.push(line);
+            }
+        }
+        let changed = self.config.keys.contains_key(key.name());
+        let default = format!(
+            "{}Default: {}",
+            if changed { "Changed. " } else { "" },
+            labels(DEFAULT_KEYS.keys(home, key))
+        );
+        let status = if self.setting_writes.keys == Some(key) {
+            Some(("Saving".to_owned(), theme::muted()))
+        } else if recording.is_some() {
+            let cancel = self.key_hint(Scope::Settings, Key::Back);
+            Some((
+                format!("Press the key combination to use. {cancel} cancels."),
+                theme::text(),
+            ))
+        } else {
+            state
+                .keys
+                .error
+                .as_ref()
+                .filter(|(failed, _)| *failed == key)
+                .map(|(_, error)| (error.clone(), theme::review()))
+        };
+        let label = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap(unit(space::XXS))
+            .child(
+                theme::mono(div())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(key.name()),
+            )
+            .child(
+                div()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::muted())
+                    .child(places.join(", ")),
+            )
+            .child(
+                div()
+                    .text_size(unit(font::SMALL))
+                    .text_color(if changed {
+                        theme::muted()
+                    } else {
+                        theme::faint()
+                    })
+                    .child(default),
+            )
+            .children(elsewhere.into_iter().map(|line| {
+                div()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::faint())
+                    .child(line)
+            }));
+        div()
+            .id(("key", index))
+            .debug_selector(move || format!("key-{}", key.name()))
+            .flex()
+            .flex_col()
+            .gap(unit(space::XS))
+            .px(unit(space::M))
+            .py(unit(space::row_y()))
+            .rounded(theme::radius_control())
+            .when(rule, |this| this.border_b_1().border_color(theme::border()))
+            .when(focused, |this| this.bg(theme::selected()))
+            .when(!focused, |this| {
+                this.hover(|style| style.bg(theme::hover()))
+            })
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::L))
+                    .child(label)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .flex_wrap()
+                            .justify_end()
+                            .max_w(unit(size::LABEL))
+                            .gap(unit(space::XS))
+                            .children(chips),
+                    ),
+            )
+            .children(status.map(|(text, color)| {
+                ui::appear(
+                    ("key-status", index),
+                    div()
+                        .text_size(unit(font::SMALL))
+                        .text_color(color)
+                        .child(text),
+                )
+            }))
+            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                if let Some(state) = &mut app.settings {
+                    move_to(state, index);
+                }
+                app.start_recording(key, Record::Replace, cx);
+            }))
     }
 
     fn setting_row(
@@ -1587,6 +2201,10 @@ fn choice_chip(
 }
 
 fn move_to(state: &mut Settings, row: usize) {
+    if state.row != row {
+        state.keys.chip = 0;
+        state.keys.error = None;
+    }
     state.row = row;
     state.reveal.set(true);
 }
@@ -1594,6 +2212,8 @@ fn move_to(state: &mut Settings, row: usize) {
 fn switch_page(state: &mut Settings, step: usize) {
     state.page = (state.page + step) % PAGES.len();
     state.row = 0;
+    state.keys.chip = 0;
+    state.keys.error = None;
     state.scroll.set_offset(gpui::point(px(0.), px(0.)));
 }
 
@@ -1691,5 +2311,36 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         view.read_with(cx, |app, _| assert!(app.settings.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_recorded_key_is_written_and_works_at_once_while_escape_changes_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(bind_keys);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        cx.simulate_keystrokes("ctrl-, shift-tab /");
+        type_text(cx, "help.open");
+        cx.simulate_keystrokes("enter enter");
+        view.read_with(cx, |app, _| assert_eq!(app.mode(), keys::Mode::Record));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.mode(), keys::Mode::Settings);
+            assert!(app.config.keys.is_empty());
+        });
+        assert!(!file.exists());
+
+        cx.simulate_keystrokes("enter f1");
+        cx.run_until_parked();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("\"help.open\" = \"f1\""), "{written}");
+        cx.simulate_keystrokes("escape f1");
+        view.read_with(cx, |app, _| {
+            assert!(app.settings.is_none());
+            assert!(app.shortcuts, "the new key opens the shortcuts at once");
+        });
     }
 }

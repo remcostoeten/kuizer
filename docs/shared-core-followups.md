@@ -17,7 +17,7 @@ Build each in `src/` with tests, then switch all three frontends over.
 ### 1. Delete executor and confirmation policy (P2-05, P3-08, P3-09, P4-06, P5-03, P5-04)
 - One `delete::run` executor with lanes, worker count, the history `Recorder`, a stop flag and a per-item callback. Replaces `commands/removal.rs:180-207`, `tui/jobs.rs:29-74` and the GUI `run_batches` in `model.rs:930-979`, which deletes one item at a time.
 - One confirmation policy (`delete.confirm`, permanent mode, review items, uncommitted changes). The GUI confirm dialog never warns about uncommitted changes. Merge the CLI rule (`removal.rs:80-106`), the TUI rule (`tui/app.rs:597-603`) and `Confirmation::for_items` (`model.rs:847-879`).
-- GUI follow-ups once it exists: pass `config.delete.mode` through `model::clean` and `accept()`, send the outcome before `HistoryView::load()`, stream per-item results so rows animate out one by one.
+- GUI follow-ups once it exists: pass `config.delete.mode` through `model::clean` and `accept()`, stream per-item results so rows animate out one by one.
 - Batch trash moves: `trash::delete` re-reads `/proc/mounts` under a global lock on every call, which serializes parallel workers.
 - `git::StatusCache` with in-flight dedupe, used by the confirm policy.
 
@@ -46,7 +46,7 @@ Build each in `src/` with tests, then switch all three frontends over.
 
 ### 7. Trash and history types (P2-10, P2-12, P5-07)
 - Done: `Restored`, `TrashSnapshot`, `TrashState` and `TrashView` live in `src/history/state.rs`, `restore::restore_listed` restores from an existing listing, and the GUI computes `HistoryStats` in `HistoryView::new` on the history thread. A GUI restore lists the trash once and updates the history in memory.
-- Left: after a clean the GUI still calls `HistoryView::load()`. It can push the recorded run into the view once the delete executor hands back the run it recorded.
+- Done: `Executor::finish` returns the runs it recorded, as they stand in the history file. The GUI clean worker adds them to the history on screen with `TrashSnapshot::record`, which counts what the run trashed as still in the trash, and builds the new `HistoryView` with its stats on that worker. It reads the history file again only when the history could not be written or none was on screen. The rescan after a successful restore stays.
 
 ### 8. Build shape (P2-06)
 - Make `clap` and `ratatui` optional behind a default `cli` feature, mark the `kuizer` bin `required-features`, and set `default-features = false` in the GUI manifest. Needs `SortKey` and `sort_candidates` moved first (item 3).

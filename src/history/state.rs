@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::restore::{RestoreError, backend};
-use super::{Action, History, Total, TrashRecord, parse_id};
+use super::{Action, History, Run, Total, TrashRecord, parse_id};
 use crate::delete::Mode;
 
 /// @name Restored
@@ -123,6 +123,31 @@ impl TrashSnapshot {
 
     pub fn kept(&self) -> Option<&HashSet<(usize, usize)>> {
         self.known.then_some(&self.kept)
+    }
+
+    /// @name TrashSnapshot::record
+    /// @description Adds a run that was just written to the history file, such as one the delete
+    /// executor returns, to `history` and keeps the snapshot current without listing the trash
+    /// again: everything the run moved to the trash counts as still in it, and a restore run
+    /// marks what it put back.
+    ///
+    /// @example
+    /// for run in executor.finish()? { trash.record(&mut history, run); }
+    pub fn record(&mut self, history: &mut History, run: Run) {
+        let index = history.push(run);
+        let added = &history.runs[index];
+        match added.action {
+            Action::Restore => self.restored = Restored::of(history),
+            Action::Delete if self.known => self.kept.extend(
+                added
+                    .deleted
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.mode == Mode::Trash)
+                    .map(|(entry, _)| (index, entry)),
+            ),
+            Action::Delete => {}
+        }
     }
 
     /// @name TrashSnapshot::state

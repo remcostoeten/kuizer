@@ -32,13 +32,18 @@ pub enum Scope {
     TuiFilter,
     TuiConfirm,
     TuiQuit,
+    TuiRepos,
 }
 
 impl Scope {
-    fn terminal(self) -> bool {
+    /// @name Scope::terminal
+    /// @description Returns whether the scope belongs to the terminal UI rather than the GUI.
+    /// @example
+    /// assert!(kuizer::keymap::Scope::Tui.terminal());
+    pub fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Tui | Self::TuiFilter | Self::TuiConfirm | Self::TuiQuit
+            Self::Tui | Self::TuiFilter | Self::TuiConfirm | Self::TuiQuit | Self::TuiRepos
         )
     }
 
@@ -99,7 +104,11 @@ macro_rules! actions {
                 match self { $(Self::$action => $name),+ }
             }
 
-            fn named(name: &str) -> Option<Self> {
+            /// @name Action::named
+            /// @description Finds the action with this stable config name.
+            /// @example
+            /// assert_eq!(kuizer::keymap::Action::named("nav.down"), Some(kuizer::keymap::Action::Down));
+            pub fn named(name: &str) -> Option<Self> {
                 match name { $($name => Some(Self::$action)),+, _ => None }
             }
         }
@@ -122,9 +131,9 @@ actions! {
     Overview => "view.overview", Gui: ["shift-1"];
     Artifacts => "view.artifacts", Gui: ["shift-2"], Tui: ["1"];
     Caches => "view.caches", Gui: ["shift-3"], Tui: ["2"];
-    Toolchains => "view.toolchains", Gui: ["shift-4"];
-    Docker => "view.docker", Gui: ["shift-5"];
-    Repos => "view.repos", Gui: ["shift-6"];
+    Toolchains => "view.toolchains", Gui: ["shift-4"], Tui: ["5"];
+    Docker => "view.docker", Gui: ["shift-5"], Tui: ["6"];
+    Repos => "view.repos", Gui: ["shift-6"], Tui: ["7"];
     Duplicates => "view.duplicates", Gui: ["shift-7"], Tui: ["3"];
     History => "view.history", Gui: ["shift-8"];
     Issues => "view.issues", Gui: ["shift-9"], Tui: ["4"];
@@ -149,10 +158,10 @@ actions! {
     CopyPath => "file.copy_path", Gui: ["y"];
     OpenMenu => "menu.open", Gui: ["menu", "shift-f10"];
     FilterFocus => "filter.focus", Gui: ["/"], Tui: ["/"];
-    Gc => "git.gc", Gui: ["c"];
-    GcAll => "git.gc_all", Gui: ["C"];
-    Branches => "git.branches", Gui: ["b"];
-    BranchesAll => "git.branches_all", Gui: ["B"];
+    Gc => "git.gc", Gui: ["c"], TuiRepos: ["c"];
+    GcAll => "git.gc_all", Gui: ["C"], TuiRepos: ["C"];
+    Branches => "git.branches", Gui: ["b"], TuiRepos: ["b"];
+    BranchesAll => "git.branches_all", Gui: ["B"], TuiRepos: ["B"];
     ZoomIn => "zoom.in", Gui: ["secondary-=", "secondary-+", "secondary-shift-="];
     ZoomOut => "zoom.out", Gui: ["secondary--"];
     ResetZoom => "zoom.reset", Gui: ["secondary-0"];
@@ -190,6 +199,10 @@ actions! {
     SettingsNextTab => "settings.next_page", Settings: ["tab"];
     SettingsPreviousTab => "settings.previous_page", Settings: ["shift-tab"];
     SettingsChange => "settings.change", Settings: ["space", "enter"];
+    SettingsFilter => "settings.filter", Settings: ["/"];
+    SettingsAddKey => "settings.add_key", Settings: ["a"];
+    SettingsRemoveKey => "settings.remove_key", Settings: ["x", "delete"];
+    SettingsResetKey => "settings.reset_key", Settings: ["r"];
     MenuDown => "menu.next", Menu: ["down", "j", "tab"];
     MenuUp => "menu.previous", Menu: ["up", "k", "shift-tab"];
     MenuFirst => "menu.first", Menu: ["home"];
@@ -205,7 +218,7 @@ actions! {
     MenuCopyCommand => "menu.copy_command", Menu: ["c", "C"];
     MenuGc => "menu.git_gc", Menu: ["g", "G"];
     MenuBranches => "menu.git_branches", Menu: ["b", "B"];
-    DialogToggle => "confirm.focus_next", Dialog: ["tab", "shift-tab", "left", "right", "up", "down", "h", "j", "k", "l"];
+    DialogToggle => "confirm.focus_next", Dialog: ["tab", "shift-tab", "left", "right", "up", "down", "h", "j", "k", "l"], TuiConfirm: ["tab", "shift-tab", "left", "right", "h", "l"];
     Confirm => "confirm.accept", Dialog: ["enter"], TuiConfirm: ["y", "enter"];
     HalfPageDown => "nav.half_page_down", Tui: ["ctrl-d"];
     HalfPageUp => "nav.half_page_up", Tui: ["ctrl-u"];
@@ -219,7 +232,7 @@ actions! {
     Cancel => "confirm.cancel", TuiConfirm: ["n", "escape"];
     QuitAccept => "quit.accept", TuiQuit: ["y", "enter"];
     QuitCancel => "quit.cancel", TuiQuit: ["n", "escape"];
-    FieldBackspace => "field.backspace", Field: ["backspace"], TuiFilter: ["backspace"];
+    FieldBackspace => "field.backspace", Field: ["backspace"], TuiFilter: ["backspace"], TuiConfirm: ["backspace"];
     FieldDeleteWord => "field.delete_word", Field: ["ctrl-backspace", "cmd-backspace", "alt-backspace"];
     FieldClear => "field.clear", Field: ["ctrl-u", "cmd-u"];
     FieldPaste => "field.paste", Field: ["ctrl-v", "cmd-v"];
@@ -248,6 +261,115 @@ impl Action {
             self,
             Self::Quit | Self::Palette | Self::ZoomIn | Self::ZoomOut | Self::ResetZoom
         )
+    }
+
+    /// @name Action::all
+    /// @description Lists every action once, in the order the keymap declares them.
+    /// @example
+    /// assert_eq!(kuizer::keymap::Action::all().next(), Some(kuizer::keymap::Action::Palette));
+    pub fn all() -> impl Iterator<Item = Self> {
+        DEFAULTS
+            .iter()
+            .enumerate()
+            .filter(|&(at, entry)| at == 0 || DEFAULTS[at - 1].0 != entry.0)
+            .map(|(_, entry)| entry.0)
+    }
+
+    /// @name Action::scopes
+    /// @description Lists the scopes an action works in. The first one is where it is used most.
+    /// @example
+    /// use kuizer::keymap::{Action, Scope};
+    /// assert!(Action::Down.scopes().any(|scope| scope == Scope::Tui));
+    pub fn scopes(self) -> impl Iterator<Item = Scope> {
+        DEFAULTS
+            .iter()
+            .filter(move |entry| entry.0 == self)
+            .map(|entry| entry.1)
+    }
+}
+
+/// @name binding_text
+/// @description Writes a pressed key the way the `[keys]` table spells it, such as `ctrl-k`, `G`
+/// or `?`. Returns `None` for a key the keymap cannot bind.
+/// @example
+/// use kuizer::keymap::{Modifiers, Stroke, binding_text};
+/// let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
+/// assert_eq!(binding_text(Stroke { key: "k", typed: None, modifiers: ctrl }).as_deref(), Some("ctrl-k"));
+pub fn binding_text(stroke: Stroke<'_>) -> Option<String> {
+    let modifiers = stroke.modifiers;
+    let key = stroke.key.to_ascii_lowercase();
+    let symbol = stroke.typed.filter(|typed| {
+        typed.len() == 1
+            && typed.as_bytes()[0].is_ascii_graphic()
+            && !typed.as_bytes()[0].is_ascii_alphanumeric()
+    });
+    let text = match symbol {
+        Some(typed) if !modifiers.modified() => typed.to_owned(),
+        _ if !modifiers.modified()
+            && modifiers.shift
+            && key.len() == 1
+            && key.as_bytes()[0].is_ascii_lowercase() =>
+        {
+            key.to_ascii_uppercase()
+        }
+        _ => {
+            let mut text = String::new();
+            for (held, name) in [
+                (modifiers.ctrl, "ctrl-"),
+                (modifiers.alt, "alt-"),
+                (modifiers.shift, "shift-"),
+                (modifiers.cmd, "cmd-"),
+                (modifiers.function, "fn-"),
+            ] {
+                if held {
+                    text.push_str(name);
+                }
+            }
+            text.push_str(&key);
+            text
+        }
+    };
+    Binding::parse(&text, Scope::Gui).map(|_| text)
+}
+
+/// @name rebind
+/// @description Changes one action in a set of overrides, or drops its override with `None`, and
+/// checks the result with the same rules the keymap applies when it loads: an unknown action, a
+/// key it cannot bind or a key another action in the same scope already answers is refused. A
+/// problem that was already there before the change does not count against it.
+/// @example
+/// use kuizer::keymap::{Override, Overrides, rebind};
+/// let next = rebind(&Overrides::new(), "nav.down", Some(Override::One("n".into())))?;
+/// assert!(rebind(&next, "nav.up", Some(Override::One("n".into()))).is_err());
+pub fn rebind(
+    overrides: &Overrides,
+    name: &str,
+    keys: Option<Override>,
+) -> Result<Overrides, KeyError> {
+    if Action::named(name).is_none() {
+        return Err(KeyError {
+            name: name.to_owned(),
+            message: "unknown action".to_owned(),
+        });
+    }
+    let mut next = overrides.clone();
+    match keys {
+        Some(keys) => {
+            next.insert(name.to_owned(), keys);
+        }
+        None => {
+            next.remove(name);
+        }
+    }
+    let before = Keymap::resolve(overrides).1;
+    let problem = Keymap::resolve(&next).1.into_iter().find(|problem| {
+        !before
+            .iter()
+            .any(|known| known.name == problem.name && known.message == problem.message)
+    });
+    match problem {
+        Some(problem) => Err(problem),
+        None => Ok(next),
     }
 }
 

@@ -7,7 +7,7 @@ use crossbeam_channel::Receiver;
 
 use super::{DeleteError, Guard, Lanes, Mode, Removal, Status, Target};
 use crate::config::DeleteConfig;
-use crate::history::{self, Entry, HistoryError, Recorder};
+use crate::history::{self, Entry, HistoryError, Recorder, Run};
 use crate::scan::Candidate;
 use crate::source::Source;
 
@@ -380,22 +380,29 @@ impl Executor {
 
     /// @name Executor::finish
     /// @description Writes the history for every mode this executor removed in and returns the
-    /// first error writing it hit.
+    /// runs it recorded, oldest first and exactly as they stand in the history file, so a
+    /// frontend can add them to the history it holds. Returns the first error writing it hit
+    /// instead.
     ///
     /// @example
-    /// if let Err(error) = executor.finish() { eprintln!("kuizer: {error}"); }
-    pub fn finish(self) -> Result<(), HistoryError> {
+    /// let runs = executor.finish()?;
+    pub fn finish(self) -> Result<Vec<Run>, HistoryError> {
         let recorders = self
             .recorders
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut runs = Vec::new();
         let mut first = None;
         for (_, recorder) in recorders {
-            if let Err(error) = recorder.finish() {
-                first.get_or_insert(error);
+            match recorder.finish() {
+                Ok(run) => runs.extend(run),
+                Err(error) => {
+                    first.get_or_insert(error);
+                }
             }
         }
-        first.map_or(Ok(()), Err)
+        runs.sort_by_key(|run| run.id);
+        first.map_or(Ok(runs), Err)
     }
 }
 
@@ -465,6 +472,38 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].deleted.len(), 1);
         assert_eq!(runs[0].deleted[0].path, candidates[0].path);
+    }
+
+    #[test]
+    fn finish_returns_the_runs_exactly_as_the_history_file_holds_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap().join("work");
+        let history = tmp.path().join("history.json");
+        let clean = |candidates: Vec<Candidate>| {
+            let executor = Executor::new(std::slice::from_ref(&root), &DeleteConfig::default())
+                .recording_at(history.clone());
+            let batch = Batch {
+                source: Source::Artifact,
+                roots: vec![root.clone()],
+                candidates,
+            };
+            executor.run(vec![batch], Mode::Permanent, 1, |_, _| {});
+            executor.finish().unwrap()
+        };
+
+        let first = clean(vec![candidate(1, &root.join("a/node_modules"))]);
+        let second = clean(vec![
+            candidate(2, &root.join("b/node_modules")),
+            candidate(3, &root.join("c/node_modules")),
+        ]);
+        let nothing = clean(Vec::new());
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].deleted.len(), 2);
+        assert!(nothing.is_empty());
+        let on_disk = history::load(&history).unwrap().runs;
+        assert_eq!(on_disk, [first, second].concat());
     }
 
     #[test]

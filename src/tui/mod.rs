@@ -6,6 +6,7 @@ mod sources;
 mod view;
 mod watch;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,14 +17,15 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::config::Config;
-use crate::delete::Mode;
+use crate::delete::{Confirmation, Mode};
 use crate::history::HistoryError;
 use crate::keymap::{Action, Keymap, Scope};
-use crate::scan::{self, Cancel, Event};
+use crate::repos::{self, Walked};
+use crate::scan::{Cancel, Event};
 use crate::source::Source;
-use app::{App, Load, Overlay, Tab, project_of};
+use app::{App, GitWork, Load, Overlay, Tab, project_of};
 use jobs::{Changes, Job, Outcome};
-use sources::{CacheWork, Found};
+use sources::{Found, ListWork};
 pub use watch::watch;
 
 const FRAME: Duration = Duration::from_millis(50);
@@ -32,9 +34,11 @@ const REFRESH: Duration = Duration::from_millis(100);
 const EVENTS_PER_FRAME: usize = 5_000;
 const PAGE: isize = 20;
 
+const LISTED: [Source; 3] = [Source::Cache, Source::Toolchain, Source::Docker];
+
 struct Queues {
-    artifacts: Sender<Job>,
-    caches: Sender<Job>,
+    jobs: HashMap<Source, Sender<Job>>,
+    git: Sender<GitWork>,
 }
 
 fn dispatch(app: &mut App, queues: &Queues, batch: Vec<(u64, Mode)>) {
@@ -43,9 +47,9 @@ fn dispatch(app: &mut App, queues: &Queues, batch: Vec<(u64, Mode)>) {
             continue;
         };
         let source = item.source;
-        let queue = match source {
-            Source::Cache => &queues.caches,
-            _ => &queues.artifacts,
+        let Some(queue) = queues.jobs.get(&source) else {
+            app.restore_deleting(source);
+            return;
         };
         let job = Job {
             source,
@@ -56,6 +60,16 @@ fn dispatch(app: &mut App, queues: &Queues, batch: Vec<(u64, Mode)>) {
             app.restore_deleting(source);
             return;
         }
+    }
+}
+
+fn dispatch_git(app: &mut App, queues: &Queues, work: Option<GitWork>) {
+    let Some(work) = work else {
+        return;
+    };
+    let roots: Vec<PathBuf> = work.1.iter().map(|found| found.root.clone()).collect();
+    if queues.git.send(work).is_err() {
+        app.git_unavailable(&roots);
     }
 }
 
@@ -83,16 +97,32 @@ fn view_of(action: Action) -> Option<Tab> {
 
 fn receive(app: &mut App, found: Found) {
     match found {
-        Found::Cache(candidate) => app.push_cache(candidate),
-        Found::CachesDone => app.caches = Load::Done,
-        Found::CachesFailed(problem) => {
-            app.caches = Load::Done;
-            notify(app, problem.clone());
-            app.cache_problem = Some(problem);
+        Found::Item {
+            source,
+            candidate,
+            note,
+            label,
+        } => app.push_listed(source, candidate, note, label),
+        Found::Listed(source, issues) => {
+            let feed = app.feed_mut(source);
+            feed.load = Load::Done;
+            if !issues.is_empty() {
+                let problem = issues.join("; ");
+                feed.problem = Some(problem.clone());
+                notify(app, problem);
+            }
+        }
+        Found::ListFailed(source, problem) => {
+            let feed = app.feed_mut(source);
+            feed.load = Load::Done;
+            feed.problem = Some(problem.clone());
+            notify(app, problem);
         }
         Found::Stage(stage) => app.duplicates.stage = Some(stage),
         Found::Duplicates(found) => app.set_duplicates(found),
         Found::DuplicatesFailed(problem) => app.duplicates_failed(problem),
+        Found::Repos(inspected) => app.set_repos(inspected),
+        Found::Git(done) => app.git_done(done),
     }
 }
 
@@ -143,15 +173,73 @@ fn handle_filter(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_confirm(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) {
+    let typing = app.pending_confirmation() == Confirmation::TypeCount;
+    let modified = keys::modifiers(key).modified();
+    match keys::action(&app.keymap, Scope::TuiConfirm, key) {
+        Some(Action::Confirm) if !held => {
+            let batch = if typing {
+                app.submit_count()
+            } else {
+                app.confirm()
+            };
+            dispatch(app, queues, batch);
+        }
+        Some(Action::Confirm) => {}
+        Some(Action::Cancel) => app.close_overlay(),
+        Some(Action::FieldBackspace) if typing => app.erase_digit(),
+        _ if typing => {
+            if let KeyCode::Char(digit) = key.code
+                && !modified
+            {
+                app.type_digit(digit);
+            }
+        }
+        _ if !modified => app.close_overlay(),
+        _ => {}
+    }
+}
+
+fn handle_branches(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) {
+    match keys::action(&app.keymap, Scope::TuiConfirm, key) {
+        Some(Action::DialogToggle) => app.toggle_branch_focus(),
+        Some(Action::Confirm) if !held => {
+            let work = app.answer_branches();
+            dispatch_git(app, queues, work);
+        }
+        Some(Action::Cancel) => app.close_overlay(),
+        _ => {}
+    }
+}
+
+fn handle_repos(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) -> bool {
+    match keys::action(&app.keymap, Scope::TuiRepos, key) {
+        Some(Action::Gc | Action::GcAll | Action::Branches | Action::BranchesAll) if held => {}
+        Some(Action::Gc) => {
+            let work = app.collect_garbage(false);
+            dispatch_git(app, queues, work);
+        }
+        Some(Action::GcAll) => {
+            let work = app.collect_garbage(true);
+            dispatch_git(app, queues, work);
+        }
+        Some(Action::Branches) => app.ask_branches(false),
+        Some(Action::BranchesAll) => app.ask_branches(true),
+        _ => return false,
+    }
+    true
+}
+
 fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
     let now = Instant::now();
     let held_enter = key.code == KeyCode::Enter && app.enter_repeats(now);
     let held_key = app.action_key_repeats(key, now);
+    let held = held_enter || held_key;
     let action = keys::action(&app.keymap, Scope::Tui, key);
     let modified = keys::modifiers(key).modified();
     if app.overlay == Overlay::Quit {
         match keys::action(&app.keymap, Scope::TuiQuit, key) {
-            Some(Action::QuitAccept) if !(held_enter || held_key) => app.quit = true,
+            Some(Action::QuitAccept) if !held => app.quit = true,
             Some(Action::QuitAccept) => {}
             Some(Action::QuitCancel) => app.overlay = Overlay::None,
             _ if !modified && action != Some(Action::Quit) => app.overlay = Overlay::None,
@@ -181,24 +269,27 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
         app.switch(tab);
         return;
     }
+    if app.overlay == Overlay::None
+        && app.tab == Tab::Repos
+        && handle_repos(app, key, queues, held_key)
+    {
+        return;
+    }
     if app.overlay == Overlay::None && app.tab.source().is_none() && action.is_some_and(list_only) {
-        app.message = Some(format!(
-            "{} are a report, nothing here is selected or deleted",
-            app.tab.label()
-        ));
+        app.message = Some(match app.tab {
+            Tab::Repos => {
+                "git: pack with git gc or remove merged branches, see ? for keys".to_owned()
+            }
+            tab => format!(
+                "{} are a report, nothing here is selected or deleted",
+                tab.label()
+            ),
+        });
         return;
     }
     match app.overlay {
-        Overlay::Confirm { .. } => match keys::action(&app.keymap, Scope::TuiConfirm, key) {
-            Some(Action::Confirm) if !(held_enter || held_key) => {
-                let batch = app.confirm();
-                dispatch(app, queues, batch);
-            }
-            Some(Action::Confirm) => {}
-            Some(Action::Cancel) => app.overlay = Overlay::None,
-            _ if !modified => app.overlay = Overlay::None,
-            _ => {}
-        },
+        Overlay::Confirm { .. } => handle_confirm(app, key, queues, held),
+        Overlay::Branches { .. } => handle_branches(app, key, queues, held),
         Overlay::Help => {
             if !modified {
                 app.overlay = Overlay::None;
@@ -241,37 +332,44 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
     }
 }
 
+type Pending = (Receiver<Job>, Sender<Outcome>);
+
 struct Background {
     config: Config,
     roots: Vec<PathBuf>,
     cancel: Cancel,
     stop: Arc<AtomicBool>,
     found: Sender<Found>,
-    cache_queue: Option<(Receiver<Job>, Sender<Outcome>)>,
-    caches: Option<JoinHandle<Option<HistoryError>>>,
+    pending: HashMap<Source, Pending>,
+    lists: Vec<JoinHandle<Option<HistoryError>>>,
     duplicates: Option<JoinHandle<()>>,
+    repositories: Option<Vec<PathBuf>>,
+    repos: Option<JoinHandle<()>>,
 }
 
 impl Background {
     fn start(&mut self, app: &mut App) {
-        if app.tab == Tab::Caches
-            && app.caches == Load::Idle
-            && let Some((jobs, results)) = self.cache_queue.take()
+        if let Some(source) = app.tab.source()
+            && app.feed(source).load == Load::Idle
+            && let Some((jobs, results)) = self.pending.remove(&source)
         {
-            app.caches = Load::Loading;
-            let work = CacheWork {
+            app.feed_mut(source).load = Load::Loading;
+            let work = ListWork {
                 config: self.config.clone(),
+                roots: self.roots.clone(),
                 jobs,
                 results,
                 stop: Arc::clone(&self.stop),
                 cancel: self.cancel.clone(),
                 found: self.found.clone(),
             };
-            match sources::spawn_caches(work) {
-                Ok(handle) => self.caches = Some(handle),
+            match sources::spawn_list(source, work) {
+                Ok(handle) => self.lists.push(handle),
                 Err(error) => {
-                    app.caches = Load::Done;
-                    app.cache_problem = Some(format!("could not list caches: {error}"));
+                    let problem = format!("could not list {}: {error}", app.tab.label());
+                    let feed = app.feed_mut(source);
+                    feed.load = Load::Done;
+                    feed.problem = Some(problem);
                 }
             }
         }
@@ -289,6 +387,43 @@ impl Background {
                 }
             }
         }
+        if app.tab == Tab::Repos
+            && app.repos.load == Load::Idle
+            && let Some(roots) = self.repositories.take()
+        {
+            app.repos.load = Load::Loading;
+            app.repos.checking = roots.len();
+            match sources::spawn_repos(
+                roots,
+                self.config.git.clone(),
+                self.cancel.clone(),
+                self.found.clone(),
+            ) {
+                Ok(handle) => self.repos = Some(handle),
+                Err(error) => {
+                    app.repos.load = Load::Done;
+                    app.repos.problem = Some(format!("could not read repositories: {error}"));
+                }
+            }
+        }
+    }
+
+    fn walked(&mut self, app: &mut App, walked: Result<Walked, TryRecvError>) -> bool {
+        match walked {
+            Ok(walked) => {
+                self.repositories = Some(walked.repositories);
+                self.start(app);
+                true
+            }
+            Err(TryRecvError::Disconnected) => {
+                if app.repos.load == Load::Idle {
+                    app.repos.load = Load::Done;
+                    app.repos.problem = Some("the scan did not list repositories".to_owned());
+                }
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+        }
     }
 
     fn finish(self) {
@@ -296,10 +431,13 @@ impl Background {
         if let Some(handle) = self.duplicates {
             let _ = handle.join();
         }
-        if let Some(handle) = self.caches
-            && let Ok(Some(error)) = handle.join()
-        {
-            eprintln!("kuizer: {error}");
+        if let Some(handle) = self.repos {
+            let _ = handle.join();
+        }
+        for handle in self.lists {
+            if let Ok(Some(error)) = handle.join() {
+                eprintln!("kuizer: {error}");
+            }
         }
     }
 }
@@ -328,14 +466,18 @@ pub fn run_with_notice(
 ) -> std::io::Result<()> {
     let mut app = App::new(config.delete.mode.into(), confirm);
     app.keymap = Keymap::resolve(&config.keys).0;
+    app.min_gain = config.git.min_gain.0;
     app.message = notice;
     let mut terminal = ratatui::try_init()?;
     let started = terminal
         .draw(|frame| view::draw(frame, &app))
         .map(drop)
-        .and_then(|()| scan::start(config, roots, Cancel::new()).map_err(std::io::Error::other));
-    let handle = match started {
-        Ok(handle) => handle,
+        .and_then(|()| {
+            repos::start_scan(config, roots, Cancel::new(), None, false)
+                .map_err(std::io::Error::other)
+        });
+    let (handle, walked_rx) = match started {
+        Ok(started) => started,
         Err(error) => {
             ratatui::restore();
             return Err(error);
@@ -343,23 +485,46 @@ pub fn run_with_notice(
     };
     let (job_tx, job_rx) = unbounded::<Job>();
     let (result_tx, result_rx) = unbounded::<Outcome>();
-    let (cache_job_tx, cache_job_rx) = unbounded::<Job>();
-    let (cache_result_tx, cache_result_rx) = unbounded::<Outcome>();
+    let mut job_queues = HashMap::from([(Source::Artifact, job_tx)]);
+    let mut results = vec![(Source::Artifact, result_rx)];
+    let mut pending = HashMap::new();
+    for source in LISTED {
+        let (jobs_tx, jobs_rx) = unbounded::<Job>();
+        let (outcome_tx, outcome_rx) = unbounded::<Outcome>();
+        job_queues.insert(source, jobs_tx);
+        results.push((source, outcome_rx));
+        pending.insert(source, (jobs_rx, outcome_tx));
+    }
+    let (git_tx, git_rx) = unbounded::<GitWork>();
     let queues = Queues {
-        artifacts: job_tx,
-        caches: cache_job_tx,
+        jobs: job_queues,
+        git: git_tx,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let (found_tx, found_rx) = unbounded::<Found>();
+    let git = match sources::spawn_git(
+        config.git.clone(),
+        git_rx,
+        Arc::clone(&stop),
+        found_tx.clone(),
+    ) {
+        Ok(git) => Some(git),
+        Err(error) => {
+            notify(&mut app, format!("could not start git: {error}"));
+            None
+        }
+    };
     let mut background = Background {
         config: config.clone(),
         roots: roots.to_vec(),
         cancel: Cancel::new(),
         stop: Arc::clone(&stop),
         found: found_tx,
-        cache_queue: Some((cache_job_rx, cache_result_tx)),
-        caches: None,
+        pending,
+        lists: Vec::new(),
         duplicates: None,
+        repositories: None,
+        repos: None,
     };
     let deleter = match jobs::spawn_deleters(
         roots.to_vec(),
@@ -391,6 +556,7 @@ pub fn run_with_notice(
 
     let outcome = (|| -> std::io::Result<()> {
         let mut scanning = true;
+        let mut walking = true;
         let mut redraw = true;
         let mut refreshed: Option<Instant> = None;
         while !app.quit {
@@ -410,6 +576,7 @@ pub fn run_with_notice(
                     }
                     Ok(Event::Issue(issue)) => app.push_issue(issue),
                     Ok(Event::Finished(summary)) => {
+                        app.progress = summary.progress;
                         app.finished = Some(summary);
                         scanning = false;
                         redraw = true;
@@ -417,6 +584,10 @@ pub fn run_with_notice(
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => scanning = false,
                 }
+            }
+            if walking && background.walked(&mut app, walked_rx.try_recv()) {
+                walking = false;
+                redraw = true;
             }
             let updates: Vec<_> = changes_rx.try_iter().collect();
             if !updates.is_empty() {
@@ -427,8 +598,10 @@ pub fn run_with_notice(
                 receive(&mut app, found);
                 redraw = true;
             }
-            let removed = drain(&mut app, &result_rx, Source::Artifact)
-                | drain(&mut app, &cache_result_rx, Source::Cache);
+            let mut removed = false;
+            for (source, outcomes) in &results {
+                removed |= drain(&mut app, outcomes, *source);
+            }
             if removed {
                 let _ = nudge_tx.send(());
                 redraw = true;
@@ -467,7 +640,10 @@ pub fn run_with_notice(
                     background.start(&mut app);
                 }
                 redraw = true;
-                let confirming = matches!(app.overlay, Overlay::Confirm { .. } | Overlay::Quit);
+                let confirming = matches!(
+                    app.overlay,
+                    Overlay::Confirm { .. } | Overlay::Branches { .. } | Overlay::Quit
+                );
                 if app.quit || confirming || !event::poll(Duration::ZERO)? {
                     break;
                 }
@@ -488,6 +664,9 @@ pub fn run_with_notice(
         eprintln!("kuizer: {error}");
     }
     background.finish();
+    if let Some(git) = git {
+        let _ = git.join();
+    }
     outcome
 }
 
@@ -535,13 +714,29 @@ mod tests {
 
     fn queues() -> (Queues, Receiver<Job>) {
         let (jobs, queued) = unbounded::<Job>();
+        let (git, _) = unbounded::<GitWork>();
         (
             Queues {
-                artifacts: jobs.clone(),
-                caches: jobs,
+                jobs: Source::ALL
+                    .into_iter()
+                    .map(|source| (source, jobs.clone()))
+                    .collect(),
+                git,
             },
             queued,
         )
+    }
+
+    fn split_queues() -> (Queues, HashMap<Source, Receiver<Job>>, Receiver<GitWork>) {
+        let mut senders = HashMap::new();
+        let mut receivers = HashMap::new();
+        for source in Source::ALL {
+            let (jobs, queued) = unbounded::<Job>();
+            senders.insert(source, jobs);
+            receivers.insert(source, queued);
+        }
+        let (git, git_work) = unbounded::<GitWork>();
+        (Queues { jobs: senders, git }, receivers, git_work)
     }
 
     fn press(app: &mut App, jobs: &Queues, code: KeyCode, modifiers: KeyModifiers) {
@@ -681,26 +876,53 @@ mod tests {
 
     #[test]
     fn number_keys_switch_views_and_each_list_deletes_only_its_own_source() {
-        let (artifacts, artifact_jobs) = unbounded::<Job>();
-        let (caches, cache_jobs) = unbounded::<Job>();
-        let queues = Queues { artifacts, caches };
-        let mut app = app();
+        let (queues, queued, _) = split_queues();
+        let mut app = App::new(Mode::Trash, false);
+        for id in 1..=3 {
+            app.push(candidate(id, &format!("/p/{id}/node_modules")));
+        }
+        app.refresh();
         app.set_changes_unknown();
-        app.push_cache(candidate(1, "/home/me/.cache/pip"));
+        let listed = [
+            ('2', Tab::Caches, Source::Cache, "/home/me/.cache/pip"),
+            (
+                '5',
+                Tab::Toolchains,
+                Source::Toolchain,
+                "/home/me/.rustup/toolchains/1.80",
+            ),
+            ('6', Tab::Docker, Source::Docker, "docker:image/3f2a"),
+        ];
+        for (_, _, source, path) in listed {
+            app.push_listed(source, candidate(1, path), String::new(), String::new());
+        }
         press(&mut app, &queues, KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(app.selected_count(), 1);
 
-        press(&mut app, &queues, KeyCode::Char('2'), KeyModifiers::NONE);
-        app.refresh();
-        assert_eq!(app.tab, Tab::Caches);
-        assert_eq!(app.view.len(), 1);
-        assert_eq!(app.selected_count(), 0);
-        press(&mut app, &queues, KeyCode::Char('d'), KeyModifiers::NONE);
-        assert_eq!(app.overlay, Overlay::None);
-        assert!(artifact_jobs.is_empty());
-        let job = cache_jobs.try_recv().expect("cache job");
-        assert_eq!(job.source, Source::Cache);
-        assert_eq!(job.candidate.path, PathBuf::from("/home/me/.cache/pip"));
+        for (key, tab, source, path) in listed {
+            press(&mut app, &queues, KeyCode::Char(key), KeyModifiers::NONE);
+            app.refresh();
+            assert_eq!(app.tab, tab);
+            assert_eq!(app.view.len(), 1);
+            assert_eq!(app.selected_count(), 0);
+            press(&mut app, &queues, KeyCode::Char('d'), KeyModifiers::NONE);
+            assert_eq!(app.overlay, Overlay::None);
+            let job = queued[&source].try_recv().expect("job for the open view");
+            assert_eq!(job.source, source);
+            assert_eq!(job.candidate.path, PathBuf::from(path));
+            let mode = if source.permanent() {
+                Mode::Permanent
+            } else {
+                Mode::Trash
+            };
+            assert_eq!(job.mode, mode, "{source:?}");
+            assert!(
+                queued
+                    .iter()
+                    .all(|(other, jobs)| *other == source || jobs.is_empty()),
+                "{source:?} reached another queue"
+            );
+        }
 
         press(&mut app, &queues, KeyCode::Char('1'), KeyModifiers::NONE);
         app.refresh();
@@ -710,15 +932,132 @@ mod tests {
     }
 
     #[test]
+    fn review_items_need_the_exact_count_typed_and_esc_cancels() {
+        let (jobs, queued) = queues();
+        let mut app = App::new(Mode::Permanent, false);
+        for id in 1..=12 {
+            let mut review = candidate(id, &format!("/p/{id}/dist"));
+            review.rule = Arc::new(RuleInfo {
+                name: "dist".to_owned(),
+                category: Category::Build,
+                safety: Safety::Review,
+                ecosystem: "node".to_owned(),
+            });
+            app.push(review);
+        }
+        app.refresh();
+        let type_text = |app: &mut App, text: &str| {
+            for digit in text.chars() {
+                press(app, &jobs, KeyCode::Char(digit), KeyModifiers::NONE);
+            }
+        };
+        let confirm = |app: &mut App| {
+            press(app, &jobs, KeyCode::Char('y'), KeyModifiers::NONE);
+        };
+
+        for _ in 0..11 {
+            press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
+        }
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.pending_confirmation(), Confirmation::TypeCount);
+        confirm(&mut app);
+        type_text(&mut app, "12");
+        confirm(&mut app);
+        assert!(matches!(app.overlay, Overlay::Confirm { .. }));
+        assert!(app.typed_wrong);
+        assert!(queued.is_empty());
+
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(queued.is_empty());
+        assert_eq!(app.selected_count(), 11);
+
+        press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::NONE);
+        type_text(&mut app, "112");
+        press(&mut app, &jobs, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.typed, "11");
+        confirm(&mut app);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(queued.len(), 11);
+    }
+
+    fn repository(root: &str, merged: &[&str]) -> repos::Repository {
+        repos::Repository {
+            root: PathBuf::from(root),
+            git_dir: PathBuf::from(root).join(".git"),
+            objects: repos::Objects::default(),
+            default_branch: Some("main".to_owned()),
+            current_branch: Some("main".to_owned()),
+            merged: merged
+                .iter()
+                .map(|name| repos::Branch {
+                    name: (*name).to_owned(),
+                    commit: "0".repeat(40),
+                })
+                .collect(),
+            busy: None,
+        }
+    }
+
+    #[test]
+    fn the_branch_confirmation_starts_on_cancel_and_a_held_enter_never_deletes() {
+        let (queues, queued, git_work) = split_queues();
+        let mut app = app();
+        press(&mut app, &queues, KeyCode::Char('7'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Repos);
+        app.set_repos(repos::Inspected {
+            repositories: vec![
+                repository("/p/one", &["old-feature"]),
+                repository("/p/two", &["done", "merged"]),
+            ],
+            issues: Vec::new(),
+        });
+
+        press(&mut app, &queues, KeyCode::Char('b'), KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Branches { delete: false, .. }
+        ));
+        press(&mut app, &queues, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(git_work.is_empty());
+
+        press(&mut app, &queues, KeyCode::Char('B'), KeyModifiers::SHIFT);
+        press(&mut app, &queues, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Branches { delete: true, .. }
+        ));
+        press(&mut app, &queues, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            git_work.is_empty(),
+            "an Enter still held from before deletes nothing"
+        );
+        assert!(queued.values().all(Receiver::is_empty));
+        press(&mut app, &queues, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.quit);
+
+        press(&mut app, &queues, KeyCode::Char('B'), KeyModifiers::SHIFT);
+        press(&mut app, &queues, KeyCode::Tab, KeyModifiers::NONE);
+        press(&mut app, &queues, KeyCode::Char('y'), KeyModifiers::NONE);
+        let (task, targets) = git_work.try_recv().expect("branches handed to git");
+        assert_eq!(task, app::GitTask::Branches);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(app.repos.running.len(), 2);
+        assert!(queued.values().all(Receiver::is_empty));
+    }
+
+    #[test]
     fn report_views_never_select_or_delete_and_esc_only_clears_their_search() {
         let (jobs, queued) = queues();
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char('4'), KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Issues);
         for path in ["/p/locked", "/p/gone"] {
-            app.push_issue(scan::Issue {
+            app.push_issue(crate::scan::Issue {
                 path: PathBuf::from(path),
-                kind: scan::IssueKind::PermissionDenied,
+                kind: crate::scan::IssueKind::PermissionDenied,
                 message: "denied".to_owned(),
             });
         }

@@ -149,10 +149,99 @@ fn json_lines_print_each_candidate_then_one_summary() {
         }
     }
 
-    let refused = kuizer(&home, &["--json-lines", "clean", root_arg, "--dry-run"]);
+    let refused = kuizer(&home, &["--json-lines", "rules"]);
     assert_eq!(refused.status.code(), Some(1));
     let conflict = kuizer(&home, &["--json", "--json-lines", "scan", root_arg]);
     assert_eq!(conflict.status.code(), Some(2));
+}
+
+fn without(mut value: serde_json::Value, fields: &[&str]) -> serde_json::Value {
+    let object = value.as_object_mut().expect("object");
+    for field in fields {
+        object.remove(*field);
+    }
+    value
+}
+
+#[test]
+fn clean_dry_run_json_lines_match_the_json_report() {
+    let (_tmp, home, root) = setup();
+    let root_arg = root.to_str().unwrap();
+    let args = [root_arg, "--select", "all", "--dry-run"];
+
+    let report = json(&kuizer(
+        &home,
+        &[&["--json", "clean"][..], &args[..]].concat(),
+    ));
+    let mut rows = lines(&kuizer(
+        &home,
+        &[&["--json-lines", "clean"][..], &args[..]].concat(),
+    ));
+    let summary = rows.pop().expect("summary line");
+
+    assert_eq!(summary["type"], "summary");
+    assert_eq!(
+        without(summary, &["type"]),
+        without(report.clone(), &["items"])
+    );
+    let items = report["items"].as_array().expect("items");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), items.len());
+    for row in &rows {
+        assert_eq!(row["type"], "removal");
+        assert_eq!(row["status"], "would-remove");
+        let item = items
+            .iter()
+            .find(|item| item["path"] == row["path"])
+            .expect("the same item in the report");
+        assert_eq!(
+            without(row.clone(), &["type", "id"]),
+            without(item.clone(), &["id"])
+        );
+    }
+    assert!(root.join("web/node_modules/react/index.js").exists());
+}
+
+#[test]
+fn clean_json_lines_print_one_line_per_removed_item() {
+    let (_tmp, home, root) = setup();
+    let root_arg = root.to_str().unwrap();
+
+    for format in ["--json", "--json-lines"] {
+        let unconfirmed = kuizer(&home, &[format, "clean", root_arg, "--select", "all"]);
+        assert_eq!(unconfirmed.status.code(), Some(1), "{format}");
+        assert!(unconfirmed.stdout.is_empty(), "{format}");
+    }
+    assert!(root.join("web/node_modules").exists());
+
+    let mut rows = lines(&kuizer(
+        &home,
+        &[
+            "--json-lines",
+            "clean",
+            root_arg,
+            "--select",
+            "all",
+            "--yes",
+        ],
+    ));
+    let summary = rows.pop().expect("summary line");
+    assert_eq!(summary["type"], "summary");
+    assert_eq!(summary["command"], "clean");
+    assert_eq!(summary["summary"]["removed"], 3);
+    assert_eq!(summary["summary"]["failed"], 0);
+    assert!(summary.get("items").is_none());
+    let removed = paths(&serde_json::Value::Array(rows.clone()), &root);
+    assert_eq!(
+        removed,
+        ["api/node_modules", "web/dist", "web/node_modules"]
+    );
+    for row in &rows {
+        assert_eq!(row["type"], "removal");
+        assert_eq!(row["status"], "removed");
+        assert!(!Path::new(row["path"].as_str().unwrap()).exists());
+    }
+    assert!(root.join("web/package.json").exists());
 }
 
 #[test]

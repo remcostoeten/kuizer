@@ -84,9 +84,7 @@ impl Restore {
         }
         let mut run = Run::restore(super::now(), self.put_back.clone());
         run.id = super::record_session(run.clone())?;
-        history.next_session = history.next_session.max(run.id + 1);
-        history.runs.push(run);
-        history.recompute();
+        history.push(run);
         Ok(())
     }
 }

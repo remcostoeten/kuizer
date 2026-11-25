@@ -19,8 +19,15 @@ pub use crate::delete::Job;
 const STATUS_WORKERS: usize = 3;
 const DISK_REFRESH: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitState {
+    NotRepo,
+    Changes(usize),
+    Unknown,
+}
+
 pub type Outcome = (u64, Mode, Result<(), String>);
-pub type Changes = (PathBuf, Option<usize>);
+pub type Changes = (PathBuf, GitState);
 
 pub fn spawn_deleters(
     roots: Vec<PathBuf>,
@@ -33,16 +40,25 @@ pub fn spawn_deleters(
         .name("kuizer-delete".to_owned())
         .spawn(move || {
             let executor = Executor::new(&roots, &delete_config).with_stop(stop);
-            let guard = executor.guard(&roots);
-            executor.serve(&guard, &jobs, delete::workers(), |mode, removal| {
-                let result = match removal.status {
-                    Status::Failed => Err(removal.error.unwrap_or_default()),
-                    Status::Removed | Status::WouldRemove => Ok(()),
-                };
-                results.send((removal.candidate.id, mode, result)).is_ok()
-            });
-            executor.finish().err()
+            serve(executor, &roots, &jobs, &results)
         })
+}
+
+pub fn serve(
+    executor: Executor,
+    roots: &[PathBuf],
+    jobs: &Receiver<Job>,
+    results: &Sender<Outcome>,
+) -> Option<HistoryError> {
+    let guard = executor.guard(roots);
+    executor.serve(&guard, jobs, delete::workers(), |mode, removal| {
+        let result = match removal.status {
+            Status::Failed => Err(removal.error.unwrap_or_default()),
+            Status::Removed | Status::WouldRemove => Ok(()),
+        };
+        results.send((removal.candidate.id, mode, result)).is_ok()
+    });
+    executor.finish().err()
 }
 
 fn repository_dir(project: &Path) -> Option<&Path> {
@@ -51,21 +67,26 @@ fn repository_dir(project: &Path) -> Option<&Path> {
         .find(|dir| dir.join(".git").symlink_metadata().is_ok())
 }
 
-fn changes_in(project: &Path, known: &Mutex<HashMap<PathBuf, Option<usize>>>) -> Option<usize> {
-    let repository = repository_dir(project)?;
-    if let Some(count) = known
+fn changes_in(project: &Path, known: &Mutex<HashMap<PathBuf, GitState>>) -> GitState {
+    let Some(repository) = repository_dir(project) else {
+        return GitState::NotRepo;
+    };
+    if let Some(state) = known
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(repository)
     {
-        return *count;
+        return *state;
     }
-    let count = git::uncommitted_changes(repository);
+    let state = match git::uncommitted_changes(repository) {
+        Some(count) => GitState::Changes(count),
+        None => GitState::Unknown,
+    };
     known
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(repository.to_path_buf(), count);
-    count
+        .insert(repository.to_path_buf(), state);
+    state
 }
 
 pub fn spawn_status(projects: Receiver<PathBuf>, results: Sender<Changes>) -> io::Result<()> {

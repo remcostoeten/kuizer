@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,14 +9,15 @@ use ratatui::widgets::{
 };
 
 use super::app::{
-    App, ConfirmStats, Group, Grouping, Item, Load, Overlay, Row, Spot, Status, Tab, project_of,
+    App, ConfirmStats, GitScope, GitTask, Group, Grouping, Item, Load, Overlay, Row, Spot, Status,
+    Tab, counted, project_of,
 };
 use super::palette::{
-    self, ACCENT, CURSOR, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL, SELECTED,
-    WARNING,
+    self, ACCENT, CURSOR, DANGER, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL,
+    SELECTED, WARNING,
 };
 use crate::cli::SortKey;
-use crate::delete::Mode;
+use crate::delete::{Confirmation, Mode};
 use crate::detect::{Category, Safety};
 use crate::dupes::Stage;
 use crate::keymap::{Action, Scope};
@@ -24,9 +27,10 @@ use crate::source::Source;
 use crate::units::{ByteSize, age, since};
 
 const BAR: u16 = 8;
+const SHOWN_REPOS: usize = 5;
 pub(super) const CURRENT_WIDTH: usize = 48;
 type HelpRow = (&'static [Action], &'static str);
-type HelpSection = (&'static str, &'static [HelpRow]);
+type HelpSection = (&'static str, Scope, &'static [HelpRow]);
 
 const FIXED_COLUMNS: u16 = 3 + 10 + 9 + 8 + 12 + 20 + 6 + 8;
 
@@ -55,17 +59,30 @@ fn size_bar(bytes: u64, largest: u64) -> String {
     )
 }
 
-fn explain(candidate: &crate::scan::Candidate) -> &'static str {
-    match (candidate.rule.category, candidate.rule.safety) {
-        (Category::Dependencies, Safety::Safe) => {
+fn explain(item: &Item) -> &'static str {
+    let rule = &item.candidate.rule;
+    match (item.source, rule.category, rule.safety) {
+        (Source::Toolchain, _, Safety::Safe) => {
+            "A version nothing uses. Deleting is permanent, the tool installs it again on demand."
+        }
+        (Source::Toolchain, _, Safety::Review) => {
+            "Check first: this version is the default or a project pins it."
+        }
+        (Source::Docker, _, Safety::Safe) => {
+            "Removed through the engine for good. Pull or build it again when needed."
+        }
+        (Source::Docker, _, Safety::Review) => {
+            "Check first: this object is recent or may still be in use."
+        }
+        (_, Category::Dependencies, Safety::Safe) => {
             "Installed packages. Deleting is safe, reinstall with your package manager."
         }
-        (Category::Build, Safety::Safe) => {
+        (_, Category::Build, Safety::Safe) => {
             "Build output. Deleting is safe, the next build recreates it."
         }
-        (Category::Cache, Safety::Safe) => "Cache. Deleting is safe, it is rebuilt when needed.",
-        (Category::Temp, Safety::Safe) => "Temporary files. Deleting is safe.",
-        (_, Safety::Review) => {
+        (_, Category::Cache, Safety::Safe) => "Cache. Deleting is safe, it is rebuilt when needed.",
+        (_, Category::Temp, Safety::Safe) => "Temporary files. Deleting is safe.",
+        (_, _, Safety::Review) => {
             "Check first: this may hold data that cannot be regenerated. Look inside before deleting."
         }
     }
@@ -148,7 +165,7 @@ fn header(app: &App) -> Line<'static> {
 
 fn summary(app: &App) -> Vec<Span<'static>> {
     match app.tab {
-        Tab::Artifacts | Tab::Caches => {
+        Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {
             let mut spans = vec![
                 Span::raw(format!(
                     " {} found  {} ",
@@ -181,6 +198,24 @@ fn summary(app: &App) -> Vec<Span<'static>> {
             " {} unreadable or skipped ",
             app.issues.entries.len()
         ))],
+        Tab::Repos if app.repos.load == Load::Done => {
+            let found = &app.repos.found;
+            let gain: u64 = found
+                .iter()
+                .map(|repository| repository.objects.gain())
+                .sum();
+            let merged: usize = found.iter().map(|repository| repository.merged.len()).sum();
+            vec![Span::raw(format!(
+                " {}  {} to pack  {} ",
+                counted(found.len(), "repository", "repositories"),
+                ByteSize(gain),
+                counted(merged, "merged branch", "merged branches")
+            ))]
+        }
+        Tab::Repos => vec![Span::styled(
+            " reading repositories ",
+            Style::new().fg(MUTED),
+        )],
     }
 }
 
@@ -295,9 +330,17 @@ fn item_row(item: &Item, largest: u64, path_width: usize) -> TableRow<'static> {
             .style(Style::new().fg(dim_if(palette::category(candidate.rule.category)))),
         Cell::from(candidate.rule.name.clone()),
         Cell::from(age(candidate.newest)).style(Style::new().fg(MUTED)),
-        Cell::from(shorten(&display_path(&candidate.path), path_width)),
+        Cell::from(shorten(&shown_path(item), path_width)),
     ])
     .style(style)
+}
+
+fn shown_path(item: &Item) -> String {
+    if item.label.is_empty() {
+        display_path(&item.candidate.path)
+    } else {
+        item.label.clone()
+    }
 }
 
 fn window(cursor: usize, rows: usize, height: usize) -> (usize, usize) {
@@ -380,11 +423,43 @@ fn issues_table(frame: &mut Frame, app: &App, area: Rect) {
     report_table(frame, rows, list.cursor - start, area);
 }
 
+fn repos_table(frame: &mut Frame, app: &App, area: Rect) {
+    let list = &app.repos;
+    let height = usize::from(area.height);
+    let path_width = usize::from(area.width.saturating_sub(10 + 16 + 2));
+    let (start, stop) = window(list.cursor, list.rows.len(), height);
+    let rows = list.rows[start.min(stop)..stop]
+        .iter()
+        .map(|&index| {
+            let repository = &list.found[index];
+            let gain = repository.objects.gain();
+            let state = if list.running.contains(&repository.root) {
+                Cell::from("running git").style(Style::new().fg(MUTED))
+            } else if repository.busy.is_some() {
+                Cell::from("busy").style(Style::new().fg(WARNING))
+            } else if repository.merged.is_empty() {
+                Cell::from("")
+            } else {
+                Cell::from(format!("{} merged", repository.merged.len()))
+                    .style(Style::new().fg(ACCENT))
+            };
+            TableRow::new(vec![
+                Cell::from(format!("{:>10}", ByteSize(gain).to_string()))
+                    .style(Style::new().fg(palette::size(gain))),
+                state,
+                Cell::from(shorten(&display_path(&repository.root), path_width)),
+            ])
+        })
+        .collect();
+    report_table(frame, rows, list.cursor - start, area);
+}
+
 fn table(frame: &mut Frame, app: &App, area: Rect) {
     match app.tab {
         Tab::Duplicates => return duplicates_table(frame, app, area),
         Tab::Issues => return issues_table(frame, app, area),
-        Tab::Artifacts | Tab::Caches => {}
+        Tab::Repos => return repos_table(frame, app, area),
+        Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {}
     }
     let path_width = usize::from(area.width.saturating_sub(FIXED_COLUMNS + 8));
     let height = usize::from(area.height.saturating_sub(1));
@@ -438,10 +513,43 @@ fn empty_text(app: &App) -> String {
     match app.tab {
         Tab::Artifacts if app.finished.is_some() => "Nothing found.".to_owned(),
         Tab::Artifacts => "Scanning, results appear as they are found.".to_owned(),
-        Tab::Caches => match (&app.cache_problem, app.caches) {
+        Tab::Caches | Tab::Toolchains | Tab::Docker => {
+            let Some(source) = app.tab.source() else {
+                return String::new();
+            };
+            let feed = app.feed(source);
+            match (&feed.problem, feed.load, app.tab) {
+                (Some(problem), _, _) => problem.clone(),
+                (None, Load::Done, Tab::Caches) => "No global tool caches found.".to_owned(),
+                (None, Load::Done, Tab::Toolchains) => "No toolchain versions found.".to_owned(),
+                (None, Load::Done, _) => "No Docker or Podman objects found.".to_owned(),
+                (None, _, Tab::Caches) => {
+                    "Measuring global tool caches, they appear as they are sized.".to_owned()
+                }
+                (None, _, Tab::Toolchains) => {
+                    "Finding toolchain versions and the projects that pin them, they appear as they are sized."
+                        .to_owned()
+                }
+                (None, _, _) => {
+                    "Asking Docker and Podman for images, containers, volumes and build cache."
+                        .to_owned()
+                }
+            }
+        }
+        Tab::Repos => match (&app.repos.problem, app.repos.load) {
             (Some(problem), _) => problem.clone(),
-            (None, Load::Done) => "No global tool caches found.".to_owned(),
-            (None, _) => "Measuring global tool caches, they appear as they are sized.".to_owned(),
+            (None, Load::Done) if app.repos.found.is_empty() => {
+                "No repository has anything to pack or merged branches to remove.".to_owned()
+            }
+            (None, Load::Done) => "No repository matches the search.".to_owned(),
+            (None, Load::Loading) => format!(
+                "Reading {} for git gc gain and merged branches.",
+                counted(app.repos.checking, "repository", "repositories")
+            ),
+            (None, Load::Idle) if app.finished.is_none() => {
+                "Repositories are read once the scan finishes.".to_owned()
+            }
+            (None, Load::Idle) => "Reading repositories.".to_owned(),
         },
         Tab::Duplicates => match (&app.duplicates.problem, app.duplicates.load) {
             (Some(problem), _) => problem.clone(),
@@ -506,11 +614,57 @@ fn issue_detail(app: &App) -> Option<Vec<Line<'static>>> {
     ])
 }
 
+fn repo_detail(app: &App) -> Option<Vec<Line<'static>>> {
+    let repository = app.current_repo()?;
+    let objects = &repository.objects;
+    let branches = |name: &Option<String>| name.clone().unwrap_or_else(|| "-".to_owned());
+    let first = vec![
+        Span::raw(format!(" {}", display_path(&repository.root))),
+        Span::styled(
+            format!(
+                "  default {} · on {}",
+                branches(&repository.default_branch),
+                branches(&repository.current_branch)
+            ),
+            Style::new().fg(MUTED),
+        ),
+    ];
+    let second = match repository.busy {
+        Some(busy) => Line::styled(
+            format!(" Skipped while {}.", busy.describe()),
+            Style::new().fg(WARNING),
+        ),
+        None => muted(format!(
+            "git gc frees up to {} · {} · {}",
+            ByteSize(objects.gain()),
+            counted(objects.loose as usize, "loose object", "loose objects"),
+            counted(objects.packs as usize, "pack", "packs")
+        )),
+    };
+    let names: Vec<&str> = repository
+        .merged
+        .iter()
+        .map(|branch| branch.name.as_str())
+        .collect();
+    let third = if names.is_empty() {
+        muted("No merged branches.")
+    } else {
+        Line::styled(
+            format!(" merged into the default branch: {}", names.join(", ")),
+            Style::new().fg(ACCENT),
+        )
+    };
+    Some(vec![Line::from(first), second, third])
+}
+
 fn detail(app: &App) -> Vec<Line<'static>> {
     let shown = match app.tab {
         Tab::Duplicates => duplicate_detail(app),
         Tab::Issues => issue_detail(app),
-        Tab::Artifacts | Tab::Caches => app.current().map(|item| item_detail(app, item)),
+        Tab::Repos => repo_detail(app),
+        Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {
+            app.current().map(|item| item_detail(app, item))
+        }
     };
     shown.unwrap_or_else(|| vec![muted(empty_text(app))])
 }
@@ -518,16 +672,37 @@ fn detail(app: &App) -> Vec<Line<'static>> {
 fn item_detail(app: &App, item: &Item) -> Vec<Line<'static>> {
     let candidate = &item.candidate;
     let mut first = vec![Span::raw(format!(" {}", display_path(&candidate.path)))];
+    if !item.label.is_empty() {
+        first.push(Span::styled(
+            format!("  {}", item.label),
+            Style::new().fg(MUTED),
+        ));
+    }
     if candidate.usage.partial {
         first.push(Span::styled("  size is partial", Style::new().fg(MUTED)));
     }
+    let entries = counted(
+        usize::try_from(candidate.usage.entries).unwrap_or(usize::MAX),
+        "entry",
+        "entries",
+    );
     let second = match &item.status {
         Status::Failed(error) => format!(" failed: {error}"),
-        _ if item.source == Source::Cache => format!(
-            " {} · {} · {} entries{}",
+        _ if item.source == Source::Docker => format!(
+            " {} {}{}",
+            candidate.rule.ecosystem,
+            candidate.rule.name,
+            if item.note.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", item.note)
+            },
+        ),
+        _ if item.source != Source::Artifact => format!(
+            " {} · {} · {}{}",
             candidate.rule.name,
             candidate.rule.ecosystem,
-            candidate.usage.entries,
+            entries,
             if item.note.is_empty() {
                 String::new()
             } else {
@@ -535,10 +710,10 @@ fn item_detail(app: &App, item: &Item) -> Vec<Line<'static>> {
             },
         ),
         _ => format!(
-            " {} · {} · {} entries · project {}",
+            " {} · {} · {} · project {}",
             candidate.rule.name,
             candidate.rule.ecosystem,
-            candidate.usage.entries,
+            entries,
             candidate
                 .project
                 .as_deref()
@@ -559,7 +734,7 @@ fn item_detail(app: &App, item: &Item) -> Vec<Line<'static>> {
     };
     vec![
         Line::from(first),
-        Line::styled(format!(" {}", explain(candidate)), Style::new().fg(advice)),
+        Line::styled(format!(" {}", explain(item)), Style::new().fg(advice)),
         Line::from(second),
     ]
 }
@@ -571,9 +746,42 @@ fn uncommitted(changes: usize) -> String {
     )
 }
 
+fn format_key(key: &str) -> Cow<'_, str> {
+    match key {
+        "escape" => Cow::Borrowed("Esc"),
+        "enter" => Cow::Borrowed("Enter"),
+        "space" => Cow::Borrowed("Space"),
+        "tab" => Cow::Borrowed("Tab"),
+        "shift-tab" => Cow::Borrowed("S-Tab"),
+        "backspace" => Cow::Borrowed("Bksp"),
+        "delete" => Cow::Borrowed("Del"),
+        "home" => Cow::Borrowed("Home"),
+        "end" => Cow::Borrowed("End"),
+        "pageup" => Cow::Borrowed("PgUp"),
+        "pagedown" => Cow::Borrowed("PgDn"),
+        "up" => Cow::Borrowed("↑"),
+        "down" => Cow::Borrowed("↓"),
+        "left" => Cow::Borrowed("←"),
+        "right" => Cow::Borrowed("→"),
+        "shift-up" => Cow::Borrowed("S-↑"),
+        "shift-down" => Cow::Borrowed("S-↓"),
+        "shift-left" => Cow::Borrowed("S-←"),
+        "shift-right" => Cow::Borrowed("S-→"),
+        _ => {
+            if let Some(rest) = key.strip_prefix("ctrl-") {
+                Cow::Owned(format!("Ctrl+{}", rest.to_ascii_uppercase()))
+            } else if let Some(rest) = key.strip_prefix("shift-") {
+                Cow::Owned(format!("S-{}", rest.to_ascii_uppercase()))
+            } else {
+                Cow::Borrowed(key)
+            }
+        }
+    }
+}
+
 fn key_chip(key: &str) -> Span<'static> {
     Span::styled(
-        format!(" {key} "),
+        format!(" {} ", format_key(key)),
         Style::new()
             .fg(KEY_FG)
             .bg(KEY_BG)
@@ -594,7 +802,7 @@ fn key_hints(app: &App, scope: Scope, hints: &[(Action, &str)]) -> Vec<Span<'sta
 
 fn mode_chip(app: &App) -> Span<'static> {
     let (label, fill) = match app.overlay {
-        Overlay::Confirm { .. } | Overlay::Quit => ("Confirm", WARNING),
+        Overlay::Confirm { .. } | Overlay::Branches { .. } | Overlay::Quit => ("Confirm", WARNING),
         Overlay::Help => ("Help", MUTED),
         Overlay::None if app.filtering => ("Filter", MUTED),
         Overlay::None => ("Normal", MUTED),
@@ -610,13 +818,23 @@ fn mode_chip(app: &App) -> Span<'static> {
 
 fn quit_prompt(app: &App) -> Line<'static> {
     let deleting = app.deleting();
+    let running = app.repos.running.len();
+    let unfinished = match (deleting, running) {
+        (_, 0) => counted(deleting, "unfinished deletion", "unfinished deletions"),
+        (0, _) => format!(
+            "git running in {}",
+            counted(running, "repository", "repositories")
+        ),
+        _ => format!(
+            "{} and git running in {}",
+            counted(deleting, "unfinished deletion", "unfinished deletions"),
+            counted(running, "repository", "repositories")
+        ),
+    };
     let mut spans = vec![
         mode_chip(app),
         Span::styled(
-            format!(
-                " Quit with {deleting} unfinished deletion{}? Queued ones are cancelled.  ",
-                if deleting == 1 { "" } else { "s" }
-            ),
+            format!(" Quit with {unfinished}? Queued ones are cancelled.  "),
             Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
         ),
     ];
@@ -644,6 +862,9 @@ fn footer(app: &App) -> Line<'static> {
         ));
         return Line::from(spans);
     }
+    if app.tab == Tab::Repos {
+        return repos_footer(app);
+    }
     if app.tab.source().is_none() {
         return report_footer(app);
     }
@@ -659,25 +880,37 @@ fn footer(app: &App) -> Line<'static> {
     if let Some(message) = &app.message {
         spans.push(Span::raw(format!(" {message}  ")));
     }
-    let delete_hint = if selected > 0 {
-        (Action::Delete, "delete selected")
+    if app.rows.is_empty() {
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[
+                (Action::FilterFocus, "search"),
+                (Action::Help, "help"),
+                (Action::Quit, "quit"),
+            ],
+        ));
     } else {
-        (Action::DeleteCursor, "delete this")
-    };
-    spans.extend(key_hints(
-        app,
-        Scope::Tui,
-        &[
-            (Action::Toggle, "select"),
-            (Action::SelectAll, "select all safe"),
-            delete_hint,
-            (Action::SafeOnly, "safe only"),
-            (Action::Category, "category"),
-            (Action::FilterFocus, "search"),
-            (Action::Help, "help"),
-            (Action::Quit, "quit"),
-        ],
-    ));
+        let delete_hint = if selected > 0 {
+            (Action::Delete, "delete")
+        } else {
+            (Action::DeleteCursor, "delete")
+        };
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[
+                (Action::Toggle, "select"),
+                (Action::SelectAll, "all safe"),
+                delete_hint,
+                (Action::SafeOnly, "safe"),
+                (Action::Category, "category"),
+                (Action::FilterFocus, "search"),
+                (Action::Help, "help"),
+                (Action::Quit, "quit"),
+            ],
+        ));
+    }
     if app.filtered() || selected > 0 {
         spans.extend(key_hints(app, Scope::Tui, &[(Action::Back, "back")]));
     }
@@ -735,6 +968,50 @@ fn report_footer(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+fn repos_footer(app: &App) -> Line<'static> {
+    let mut spans = vec![mode_chip(app), Span::raw(" ")];
+    if let Some(message) = &app.message {
+        spans.push(Span::raw(format!(" {message}  ")));
+    }
+    spans.extend(key_hints(
+        app,
+        Scope::TuiRepos,
+        &[
+            (Action::Gc, "git gc"),
+            (Action::Branches, "merged branches"),
+            (Action::GcAll, "gc all"),
+            (Action::BranchesAll, "branches all"),
+        ],
+    ));
+    spans.extend(key_hints(
+        app,
+        Scope::Tui,
+        &[
+            (Action::FilterFocus, "search"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
+        ],
+    ));
+    if !app.filter.is_empty() {
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[(Action::Back, "clear search")],
+        ));
+    }
+    let running = app.repos.running.len();
+    if running > 0 {
+        spans.push(Span::styled(
+            format!(
+                " git running in {} ",
+                counted(running, "repository", "repositories")
+            ),
+            Style::new().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn cells(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
@@ -750,23 +1027,42 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::delete::Mode) {
-    const DIRTY_SHOWN: usize = 3;
-    let checking_lines = usize::from(stats.checking > 0 || stats.unknown);
-    let dirty_lines = stats.dirty.len().min(DIRTY_SHOWN + 1);
+const DIALOG_WIDTH: u16 = 90;
+
+fn dialog(frame: &mut Frame, lines: Vec<Line<'static>>, title: Line<'static>, border: Color) {
     let area = centered(
         frame.area(),
-        90,
-        cells(stats.shown.len() + 10 + dirty_lines + checking_lines),
+        DIALOG_WIDTH,
+        cells(lines.len()).saturating_add(2),
     );
-    let inner_width = usize::from(area.width.saturating_sub(16));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(border))
+                .title(title),
+        ),
+        area,
+    );
+}
+
+fn dialog_width(frame: &Frame) -> usize {
+    usize::from(DIALOG_WIDTH.min(frame.area().width).saturating_sub(16))
+}
+
+fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: Mode) {
+    const DIRTY_SHOWN: usize = 3;
+    let typing = app.pending_confirmation() == Confirmation::TypeCount;
+    let inner_width = dialog_width(frame);
     let mut lines = vec![Line::raw("")];
     for &index in &stats.shown {
-        let candidate = &app.items[index].candidate;
+        let item = &app.items[index];
         lines.push(Line::raw(format!(
             "  {:>10}  {}",
-            ByteSize(candidate.usage.allocated).to_string(),
-            shorten(&display_path(&candidate.path), inner_width)
+            ByteSize(item.candidate.usage.allocated).to_string(),
+            shorten(&shown_path(item), inner_width)
         )));
     }
     if stats.count > stats.shown.len() {
@@ -777,14 +1073,30 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     }
     lines.push(Line::raw(""));
     let action = match mode {
-        crate::delete::Mode::Trash => "Move to trash. Space is freed once the trash is emptied.",
-        crate::delete::Mode::Permanent => "Delete permanently. This cannot be undone.",
-        crate::delete::Mode::DryRun => "Dry run. Nothing is touched.",
+        Mode::Trash => "Move to trash. Space is freed once the trash is emptied.",
+        Mode::Permanent => "Delete permanently. This cannot be undone.",
+        Mode::DryRun => "Dry run. Nothing is touched.",
     };
     lines.push(Line::styled(
         format!("  {action}"),
         Style::new().add_modifier(Modifier::BOLD),
     ));
+    let permanent_source = stats
+        .shown
+        .first()
+        .map(|&index| app.items[index].source)
+        .filter(|source| source.permanent());
+    if app.mode == Mode::Trash
+        && let Some(source) = permanent_source
+    {
+        let what = match source {
+            Source::Docker => "Docker objects",
+            _ => "Toolchains",
+        };
+        lines.push(muted(format!(
+            " {what} never go to the trash, they are removed for good."
+        )));
+    }
     if let (Some(free), Some(after)) = (app.free, app.free_after(stats.bytes, mode)) {
         lines.push(Line::raw(format!(
             "  {} free now, {} free afterwards.",
@@ -818,9 +1130,8 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     if stats.checking > 0 {
         lines.push(Line::styled(
             format!(
-                "  Still checking {} project{} for uncommitted changes.",
-                stats.checking,
-                if stats.checking == 1 { "" } else { "s" }
+                "  Still checking {} for uncommitted changes.",
+                counted(stats.checking, "project", "projects")
             ),
             Style::new().fg(WARNING),
         ));
@@ -832,38 +1143,164 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
         ));
     }
     lines.push(Line::raw(""));
+    if typing {
+        let count = app.confirm_count();
+        lines.push(Line::styled(
+            format!("  Review items are selected. Type {count} to delete them, Esc cancels."),
+            Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!(" {}█ ", app.typed),
+                Style::new().fg(ON_FILL).bg(SEARCH_FILL),
+            ),
+            if app.typed_wrong {
+                Span::styled(format!("  That is not {count}."), Style::new().fg(DANGER))
+            } else {
+                Span::raw("")
+            },
+        ]));
+        lines.push(Line::raw(""));
+    }
+    if typing {
+        let confirm_key = app
+            .keymap
+            .keys(Scope::TuiConfirm, Action::Confirm)
+            .find(|&key| key == "enter")
+            .or_else(|| app.keymap.keys(Scope::TuiConfirm, Action::Confirm).next());
+        let cancel_key = app
+            .keymap
+            .keys(Scope::TuiConfirm, Action::Cancel)
+            .find(|&key| key == "escape")
+            .or_else(|| app.keymap.keys(Scope::TuiConfirm, Action::Cancel).next());
+        let mut hints = Vec::with_capacity(4);
+        if let Some(key) = confirm_key {
+            hints.push(key_chip(key));
+        }
+        hints.push(Span::styled(" delete  ", Style::new().fg(MUTED)));
+        if let Some(key) = cancel_key {
+            hints.push(key_chip(key));
+        }
+        hints.push(Span::styled(" cancel  ", Style::new().fg(MUTED)));
+        lines.push(Line::from(hints));
+    } else {
+        lines.push(Line::from(key_hints(
+            app,
+            Scope::TuiConfirm,
+            &[(Action::Confirm, "confirm"), (Action::Cancel, "cancel")],
+        )));
+    }
+    let title = Line::styled(
+        format!(
+            " Delete {} · {} ",
+            counted(stats.count, "item", "items"),
+            ByteSize(stats.bytes)
+        ),
+        Style::new().add_modifier(Modifier::BOLD),
+    );
+    dialog(frame, lines, title, if typing { WARNING } else { FAINT });
+}
+
+fn button(label: String, focused: bool, fill: Color) -> Span<'static> {
+    let style = if focused {
+        Style::new()
+            .fg(ON_FILL)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    Span::styled(format!(" {label} "), style)
+}
+
+fn branches(frame: &mut Frame, app: &App, scope: &GitScope, delete: bool) {
+    let targets = app.git_targets(GitTask::Branches, scope);
+    let total: usize = targets
+        .iter()
+        .map(|repository| repository.merged.len())
+        .sum();
+    let inner_width = dialog_width(frame);
+    let mut lines = vec![Line::raw("")];
+    for repository in targets.iter().take(SHOWN_REPOS) {
+        let names: Vec<&str> = repository
+            .merged
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        lines.push(Line::raw(format!(
+            "  {}",
+            shorten(&display_path(&repository.root), inner_width)
+        )));
+        lines.push(muted(format!(
+            "   {}",
+            shorten(&names.join(", "), inner_width)
+        )));
+    }
+    if targets.len() > SHOWN_REPOS {
+        lines.push(muted(format!(
+            " and {} more",
+            counted(targets.len() - SHOWN_REPOS, "repository", "repositories")
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  Deletes local branches already merged into the default branch. Remote branches stay.",
+        Style::new().add_modifier(Modifier::BOLD),
+    ));
+    lines.push(muted(
+        " Each branch is checked again first. Restore one with git branch NAME COMMIT.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        button("Cancel".to_owned(), !delete, ACCENT),
+        Span::raw("  "),
+        button(
+            format!("Delete {}", counted(total, "branch", "branches")),
+            delete,
+            DANGER,
+        ),
+    ]));
+    lines.push(Line::raw(""));
     lines.push(Line::from(key_hints(
         app,
         Scope::TuiConfirm,
-        &[(Action::Confirm, "confirm"), (Action::Cancel, "cancel")],
+        &[
+            (Action::DialogToggle, "switch"),
+            (Action::Confirm, "choose"),
+            (Action::Cancel, "cancel"),
+        ],
     )));
-    let title = format!(
-        " Delete {} item{} · {} ",
-        stats.count,
-        if stats.count == 1 { "" } else { "s" },
-        ByteSize(stats.bytes)
+    let title = Line::styled(
+        format!(
+            " Delete merged branches in {} ",
+            counted(targets.len(), "repository", "repositories")
+        ),
+        Style::new().add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::new().borders(Borders::ALL).title(title)),
-        area,
-    );
+    dialog(frame, lines, title, if delete { DANGER } else { FAINT });
 }
 
-fn help(frame: &mut Frame, app: &App) {
+const HELP_LEFT: [HelpSection; 3] = {
     use Action::*;
-    const SECTIONS: [HelpSection; 5] = [
+    [
         (
             "Views",
+            Scope::Tui,
             &[
                 (&[Artifacts], "project artifacts"),
                 (&[Caches], "global tool caches"),
                 (&[Duplicates], "duplicate files, report only"),
                 (&[Issues], "folders that could not be read"),
+                (&[Toolchains], "toolchains, deleted for good"),
+                (&[Docker], "Docker/Podman, deleted for good"),
+                (&[Repos], "git repos: gc & merged branches"),
             ],
         ),
         (
             "Navigate",
+            Scope::Tui,
             &[
                 (&[Down, Up], "move"),
                 (&[ExtendDown, ExtendUp], "select while moving"),
@@ -875,67 +1312,93 @@ fn help(frame: &mut Frame, app: &App) {
         ),
         (
             "Select",
+            Scope::Tui,
             &[
                 (&[Toggle], "toggle and move down"),
-                (&[SelectAll], "select every safe item in view"),
-                (
-                    &[SelectProject],
-                    "project: safe, then add review, then clear",
-                ),
+                (&[SelectAll], "select all safe items in view"),
+                (&[SelectProject], "project: safe, +review, clear"),
                 (&[SelectNone], "clear selection"),
             ],
         ),
+    ]
+};
+
+const HELP_RIGHT: [HelpSection; 4] = {
+    use Action::*;
+    [
         (
             "Filter",
+            Scope::Tui,
             &[
-                (&[SafeOnly], "show only items that are safe to delete"),
-                (
-                    &[Category],
-                    "cycle category: dependencies, build, cache, temp",
-                ),
+                (&[SafeOnly], "show only safe items"),
+                (&[Category], "cycle category filter"),
                 (&[FilterFocus], "search by path or rule"),
                 (&[ResetFilters], "clear all filters"),
             ],
         ),
         (
             "Act",
+            Scope::Tui,
             &[
-                (
-                    &[DeleteCursor],
-                    "delete selection, or the item under the cursor",
-                ),
+                (&[DeleteCursor], "delete selection or cursor item"),
                 (&[Delete], "delete selection"),
                 (&[CycleSort], "cycle sort: size, path, category"),
-                (&[Group], "group by rule or by project"),
-                (&[Back], "back out: filters, then selection"),
-                (&[Quit], "quit, asks while deleting"),
+                (&[Group], "group by rule or project"),
+                (&[Back], "back: search, filter, selection"),
+                (&[Quit], "quit (asks while deleting)"),
             ],
         ),
-    ];
-    let keys_for = |actions: &'static [Action]| {
+        (
+            "Git",
+            Scope::TuiRepos,
+            &[
+                (&[Gc], "git gc in this repository"),
+                (&[GcAll], "git gc in every shown repo"),
+                (&[Branches], "delete merged branches here"),
+                (&[BranchesAll], "delete all merged branches"),
+            ],
+        ),
+        (
+            "Confirm",
+            Scope::TuiConfirm,
+            &[
+                (&[Confirm], "confirm, or activate button"),
+                (&[DialogToggle], "switch Cancel / Delete"),
+                (&[FieldBackspace], "erase typed count digit"),
+                (&[Cancel], "cancel"),
+            ],
+        ),
+    ]
+};
+
+const HELP_MAX_CHIPS: usize = 4;
+
+fn help_column(app: &App, sections: &[HelpSection]) -> (Vec<Line<'static>>, usize) {
+    let keys_for = |scope: Scope, actions: &'static [Action]| {
         actions
             .iter()
-            .flat_map(|action| app.keymap.keys(Scope::Tui, *action))
+            .flat_map(move |action| app.keymap.keys(scope, *action))
+            .take(HELP_MAX_CHIPS)
     };
-    let chips_width = |actions| {
-        keys_for(actions)
-            .map(|key| key.chars().count() + 3)
+    let chips_width = |scope, actions| {
+        keys_for(scope, actions)
+            .map(|key| format_key(key).chars().count() + 3)
             .sum::<usize>()
     };
-    let rows = SECTIONS.iter().flat_map(|(_, rows)| rows.iter());
+    let rows = sections
+        .iter()
+        .flat_map(|&(_, scope, rows)| rows.iter().map(move |row| (scope, row)));
     let key_width = rows
         .clone()
-        .map(|(keys, _)| chips_width(keys))
+        .map(|(scope, (keys, _))| chips_width(scope, keys))
         .max()
         .unwrap_or(0);
     let action_width = rows
-        .clone()
-        .map(|(_, action)| action.chars().count())
+        .map(|(_, (_, action))| action.chars().count())
         .max()
         .unwrap_or(0);
-
     let mut lines = Vec::new();
-    for (title, rows) in SECTIONS {
+    for &(title, scope, rows) in sections {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!("  {}", title.to_uppercase()),
@@ -943,34 +1406,52 @@ fn help(frame: &mut Frame, app: &App) {
         ));
         for (keys, action) in rows {
             let mut spans = vec![Span::raw("  ")];
-            for key in keys_for(keys) {
+            for key in keys_for(scope, keys) {
                 spans.push(key_chip(key));
                 spans.push(Span::raw(" "));
             }
-            spans.push(Span::raw(" ".repeat(key_width - chips_width(keys) + 1)));
+            spans.push(Span::raw(
+                " ".repeat(key_width - chips_width(scope, keys) + 1),
+            ));
             spans.push(Span::raw(*action));
             lines.push(Line::from(spans));
         }
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("  any key to close", Style::new().fg(FAINT)));
+    (lines, 2 + key_width + 1 + action_width + 2)
+}
 
-    let width = cells(2 + key_width + 1 + action_width + 3);
-    let area = centered(frame.area(), width, cells(lines.len()).saturating_add(2));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(FAINT))
-                .title(Span::styled(
-                    " Keys ",
-                    Style::new().add_modifier(Modifier::BOLD),
-                )),
-        ),
-        area,
+fn help(frame: &mut Frame, app: &App) {
+    let (mut left, left_width) = help_column(app, &HELP_LEFT);
+    let (right, right_width) = help_column(app, &HELP_RIGHT);
+    left.push(Line::raw(""));
+    left.push(Line::styled("  any key to close", Style::new().fg(FAINT)));
+    let height = cells(left.len().max(right.len())).saturating_add(2);
+    let area = centered(
+        frame.area(),
+        cells(left_width + right_width).saturating_add(2),
+        height,
     );
+    frame.render_widget(Clear, area);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(FAINT))
+        .title(Span::styled(
+            " Keys ",
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let first_width = if left_width + right_width > usize::from(inner.width) {
+        left_width.min(usize::from(inner.width) / 2)
+    } else {
+        left_width
+    };
+    let [first, second] =
+        Layout::horizontal([Constraint::Length(cells(first_width)), Constraint::Fill(1)])
+            .areas(inner);
+    frame.render_widget(Paragraph::new(left), first);
+    frame.render_widget(Paragraph::new(right), second);
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -993,6 +1474,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 confirm(frame, app, stats, *mode);
             }
         }
+        Overlay::Branches { scope, delete } => branches(frame, app, scope, *delete),
         Overlay::Help => help(frame, app),
         Overlay::None | Overlay::Quit => {}
     }
@@ -1001,6 +1483,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_lines(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
 
     #[test]
     fn shortens_from_the_left() {
@@ -1023,5 +1520,64 @@ mod tests {
     fn cells_saturates_at_the_terminal_limit() {
         assert_eq!(cells(12), 12);
         assert_eq!(cells(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn help_overlay_fits_both_columns_at_120x36() {
+        let mut app = App::new(Mode::Trash, true);
+        app.overlay = Overlay::Help;
+        let rendered = render_lines(&app, 120, 36).join("\n");
+        for expected in [
+            "VIEWS",
+            "NAVIGATE",
+            "SELECT",
+            "FILTER",
+            "ACT",
+            "GIT",
+            "CONFIRM",
+            "cycle sort: size, path, category",
+            "switch Cancel / Delete",
+            "erase typed count digit",
+            "any key to close",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "expected {expected:?} in 120x36 help overlay:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_fits_at_120_columns() {
+        let mut app = App::new(Mode::Trash, true);
+        let candidate = crate::scan::Candidate {
+            id: 1,
+            path: std::path::PathBuf::from("/p/a/node_modules"),
+            kind: crate::detect::Kind::Dir,
+            project: Some(std::path::PathBuf::from("/p/a")),
+            rule: std::sync::Arc::new(crate::detect::RuleInfo {
+                name: "node_modules".to_owned(),
+                category: crate::detect::Category::Dependencies,
+                safety: Safety::Safe,
+                ecosystem: "node".to_owned(),
+            }),
+            usage: crate::scan::Usage {
+                apparent: 1024,
+                allocated: 1024,
+                entries: 1,
+                partial: false,
+            },
+            newest: None,
+            identity: None,
+            project_last_active: None,
+        };
+        app.push(candidate);
+        app.refresh();
+        let lines = render_lines(&app, 120, 24);
+        let bottom = lines.last().unwrap();
+        assert!(
+            bottom.contains("quit"),
+            "footer clipped at 120 cols: {bottom:?}"
+        );
     }
 }

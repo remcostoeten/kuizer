@@ -345,7 +345,7 @@ impl Kuizer {
             .child(head(col::M, "git gc gain", Term::GcGain).text_right())
             .child(head(col::S, "Loose", Term::LooseObjects).text_right())
             .child(head(col::S, "Merged", Term::MergedBranches).text_right())
-            .child(div().flex_1().child("Repository"))
+            .child(div().flex_1().child("REPOSITORY"))
             .child(div().w(unit(size::ACTIONS)).flex_none());
         let rows = shown.len();
         let list = self

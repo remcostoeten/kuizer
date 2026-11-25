@@ -2,8 +2,8 @@ cask "kuizer-gui" do
   arch arm: "aarch64", intel: "x86_64"
 
   version "@VERSION@"
-  sha256 arm:   "@SHA256_ARM@",
-         intel: "@SHA256_INTEL@"
+  sha256 arm:   "@SHA256(kuizer-gui-aarch64-apple-darwin.tar.xz)@",
+         intel: "@SHA256(kuizer-gui-x86_64-apple-darwin.tar.xz)@"
 
   url "https://github.com/remcostoeten/kuizer/releases/download/v#{version}/kuizer-gui-#{arch}-apple-darwin.tar.xz"
   name "kuizer"

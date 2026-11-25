@@ -457,7 +457,7 @@ pub struct Cli {
         long,
         global = true,
         conflicts_with = "json",
-        help = "Print one JSON object per item as it is found, then a summary line",
+        help = "Print one JSON object per item as it is found or removed, then a summary line",
         help_heading = "Global options"
     )]
     pub json_lines: bool,

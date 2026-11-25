@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use super::{Config, ConfigError, Excludes, MAX_SIZE_THREADS};
+use crate::keymap::{self, KeyError, Override, Overrides};
 use crate::platform;
 
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +24,8 @@ pub enum EditError {
     },
     #[error("protected path {path} must be an existing absolute directory")]
     ProtectedPath { path: PathBuf },
+    #[error("cannot change the keys in {path}: {source}")]
+    Keys { path: PathBuf, source: KeyError },
 }
 
 /// @name exclude_pattern
@@ -220,6 +223,78 @@ pub fn set_protected_paths(file: &Path, paths: &[PathBuf]) -> Result<(), EditErr
     write_document(file, &document)
 }
 
+/// @name set_keys
+/// @description Sets the keys of one action in the `[keys]` table of the config file at `file`,
+/// or removes its entry with `None` so the action goes back to its defaults. The change is checked
+/// against the other entries in the file with [`keymap::rebind`], so an invalid key or a key that
+/// clashes with another action is refused and the file is left as it was. Comments and layout of
+/// the rest of the file are kept.
+///
+/// @example
+/// set_keys(&config_path, "nav.down", Some(&Override::Many(vec!["n".into(), "down".into()])))?;
+/// set_keys(&config_path, "nav.down", None)?;
+pub fn set_keys(file: &Path, name: &str, keys: Option<&Override>) -> Result<(), EditError> {
+    let mut document = read_document(file)?;
+    let current = document
+        .get("keys")
+        .map(|item| {
+            item.as_table_like()
+                .ok_or_else(|| EditError::Parse {
+                    path: file.to_path_buf(),
+                    message: "`keys` is not a table".to_owned(),
+                })
+                .map(overrides_of)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if keys.is_none() && !current.contains_key(name) {
+        return Ok(());
+    }
+    keymap::rebind(&current, name, keys.cloned()).map_err(|source| EditError::Keys {
+        path: file.to_path_buf(),
+        source,
+    })?;
+    let table = document
+        .entry("keys")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| EditError::Parse {
+            path: file.to_path_buf(),
+            message: "`keys` is not a table".to_owned(),
+        })?;
+    match keys {
+        Some(Override::One(key)) => {
+            table.insert(name, Item::Value(Value::from(key.as_str())));
+        }
+        Some(Override::Many(keys)) => {
+            let list = keys.iter().map(String::as_str).collect();
+            table.insert(name, Item::Value(Value::Array(list)));
+        }
+        None => {
+            table.remove(name);
+        }
+    }
+    write_document(file, &document)
+}
+
+fn overrides_of(table: &dyn toml_edit::TableLike) -> Overrides {
+    table
+        .iter()
+        .filter_map(|(name, item)| {
+            let keys = match item.as_value()? {
+                Value::String(key) => Override::One(key.value().clone()),
+                Value::Array(list) => Override::Many(
+                    list.iter()
+                        .map(|key| key.as_str().map(str::to_owned))
+                        .collect::<Option<_>>()?,
+                ),
+                _ => return None,
+            };
+            Some((name.to_owned(), keys))
+        })
+        .collect()
+}
+
 fn read_document(file: &Path) -> Result<DocumentMut, EditError> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -383,6 +458,44 @@ mod tests {
         assert!(has_setting(&file, "docker", "engines").expect("reads"));
         let loaded = Config::load(Some(&file)).expect("loads").config;
         assert_eq!(loaded.docker.engines, ["podman", "nerdctl"]);
+    }
+
+    #[test]
+    fn a_rebind_is_written_once_checked_against_the_file_and_reset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let text = "# mine\n[keys]\n\"nav.down\" = \"n\" # keep\n\"nav.top\" = 3\n";
+        fs::write(&file, text).expect("write");
+
+        set_keys(&file, "nav.up", Some(&Override::One("j".to_owned()))).expect("j is free");
+        let clash = Override::Many(vec!["n".to_owned(), "up".to_owned()]);
+        assert!(matches!(
+            set_keys(&file, "nav.up", Some(&clash)),
+            Err(EditError::Keys { .. })
+        ));
+        assert!(set_keys(&file, "nav.up", Some(&Override::One("ctrl-".to_owned()))).is_err());
+        assert!(matches!(
+            set_keys(&file, "nav.down", None),
+            Err(EditError::Keys { source, .. }) if source.name == "nav.up"
+        ));
+        let written = fs::read_to_string(&file).expect("read");
+        assert!(written.starts_with("# mine\n"), "{written}");
+        assert!(written.contains("\"nav.down\" = \"n\" # keep"), "{written}");
+        assert!(written.contains("\"nav.up\" = \"j\""), "{written}");
+        let (config, _) = Config::parse_lenient(&written);
+        let (keys, _) = keymap::Keymap::resolve(&config.keys);
+        let stroke = keymap::Stroke {
+            key: "j",
+            typed: None,
+            modifiers: keymap::Modifiers::default(),
+        };
+        assert_eq!(
+            keys.lookup(keymap::Scope::Tui, stroke),
+            Some(keymap::Action::Up)
+        );
+
+        set_keys(&file, "nav.up", None).expect("resets");
+        assert!(!fs::read_to_string(&file).expect("read").contains("nav.up"));
     }
 
     #[test]

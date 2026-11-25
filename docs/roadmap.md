@@ -69,7 +69,7 @@ Installers today: shell script, npm, crates.io, prebuilt archives. What is missi
 | --- | --- | --- | --- |
 | macOS `.app` bundle with icon, `Info.plist` and a `.dmg` | P1 | M | Today the GUI is a bare binary on macOS. |
 | macOS code signing and notarization | P1 | M | Gatekeeper blocks unsigned downloads. Needs an Apple developer account. |
-| Homebrew tap (`brew install kuizer`, cask for the GUI) | P2 | S | cargo-dist can generate the formula. |
+| Homebrew tap (`brew install kuizer`, cask for the GUI) | P2 | S | The kuizer repository is the tap (`Formula/`, `Casks/`). After each release `.github/workflows/publish-homebrew.yml` renders both from `packaging/homebrew` and commits them with the workflow token; no second repository or personal token. |
 | AUR packages (`kuizer`, `kuizer-bin`) | P2 | S | Development happens on Arch; cheap to keep up to date. |
 | Linux desktop integration: install `packaging/kuizer-gui.desktop` and icons from the installers | P2 | S | The files exist but nothing installs them. |
 | Flatpak on Flathub | P3 | M | Sandbox needs `--filesystem=home` and host access for git and docker, which reviewers question. Decide after AUR and Homebrew. |
@@ -242,8 +242,8 @@ CI now benchmarks `kuizer --json scan` with `hyperfine` on a fixed 200-project, 
 
 ### 7.3 Settings (P1)
 
-- The settings view has no section for `[keys]` yet: add a rebind UI.
-- `delete.protected` and `delete.cross_device` once 4.5 and D6 land.
+- Done: the Keys page lists every action with its keys and defaults, filters with `/`, records a new key with Enter, adds, removes and resets keys, and refuses invalid or conflicting keys inline through `keymap::rebind`. The change is written to `[keys]` and applies to the GUI at once and to the TUI on its next start.
+- Done: `delete.protected` and `delete.cross_device` are on the Deleting page.
 
 ### 7.4 New GUI features (P2 and P3)
 

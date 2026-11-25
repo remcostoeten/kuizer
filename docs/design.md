@@ -316,19 +316,21 @@ Scripts migrating from version 1 can read `candidates` in place of `caches`, `to
 }
 ```
 
-Fields are only added within a schema version; renames or removals bump it. `--json-lines` prints one candidate per line as it is found, with `"type": "candidate"` and the fields of a report row, then one summary line with `"type": "summary"` and every other field of the report. It works on `scan` and the `cache`, `toolchain` and `docker` listings; a removal asks for `--json`. With `--idle`, `--sort idle` or `--limit` a scan prints its lines once it finishes, in sort order.
+Fields are only added within a schema version; renames or removals bump it. `--json-lines` prints one candidate per line as it is found, with `"type": "candidate"` and the fields of a report row, then one summary line with `"type": "summary"` and every other field of the report. It works on `scan` and the `cache`, `toolchain` and `docker` listings. With `--idle`, `--sort idle` or `--limit` a scan prints its lines once it finishes, in sort order. `clean`, `cache clean`, `toolchain clean` and `docker clean` print one line per item with `"type": "removal"` and the fields of a removal report item as soon as that item is removed or has failed, in the order they finish, then one summary line with every other field of the removal report. A dry run, or a removal that is cancelled at the prompt, prints every selected item with status `would-remove`. Confirmation works exactly as with `--json`: the prompt goes to stderr, and without a terminal to ask on the command refuses with exit code 1 and prints nothing unless `--yes` is given. Other commands refuse `--json-lines` and ask for `--json`.
 
 ## 7. TUI interaction model
 
 The TUI shows project artifacts, scan progress, the focused item's details, and selection totals. It draws on input or at most every 50 ms while scanning. A worker streams results and the UI processes a bounded number of events per frame.
 
-Four views sit on `1` to `4`: artifacts, caches, duplicates and issues. Caches are measured and duplicates searched the first time their view opens, on their own threads: each cache appears once it is sized, and duplicates appear when the search finishes, with its progress in the header. Artifacts and caches are lists you select from and delete; each keeps its own selection and cursor, and a delete removes only what the open view selected. Caches are revalidated against their parent folders, as `kuizer cache clean` does. Duplicates and issues are reports: selection and deletion keys say so and do nothing, and `/` searches their paths.
+Seven views sit on `1` to `7`: artifacts, caches, duplicates, issues, toolchains, Docker and git. Caches, toolchains and Docker objects are listed and duplicates searched the first time their view opens, on their own threads: each cache and toolchain appears once it is sized, Docker objects appear once Docker and Podman answer, and duplicates appear when the search finishes, with its progress in the header. Toolchains wait for the pin search under the scan roots when `toolchains.pins` is on, so a pinned version is never shown as safe. Artifacts, caches, toolchains and Docker objects are lists you select from and delete; each keeps its own selection and cursor, and a delete removes only what the open view selected, through the same core executor as the CLI. Caches are revalidated against their parent folders, as `kuizer cache clean` does. Toolchains and Docker objects are always removed for good, whatever `delete.mode` says, and the confirmation says so. Duplicates and issues are reports: selection and deletion keys say so and do nothing, and `/` searches their paths.
+
+The git view lists the repositories the scan walked through that are worth cleaning: what `git gc` would free and the local branches already merged into the default branch. They are read once the scan finishes and the view is open. `c` runs `git gc` in the repository under the cursor and `C` in every repository shown, without asking, since gc only packs what git would pack on its own. `b` and `B` delete merged branches after a confirmation that lists them, opens with the focus on Cancel and takes Tab, Left, Right, `h` and `l` to move it, so an Enter right after asking deletes nothing. Each branch is checked again before it goes, through the same core functions as the GUI and `kuizer git`. Busy repositories and repositories still running git are skipped.
 
 The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI help overlay shows the effective bindings. These are the TUI defaults.
 
 | Key | Action |
 | --- | --- |
-| `1`, `2`, `3`, `4` | Switch view: artifacts, caches, duplicates, issues |
+| `1` to `7` | Switch view: artifacts, caches, duplicates, issues, toolchains, Docker, git |
 | `j`, `k`, up, down | Move one row |
 | `g`, `G`, Home, End | Jump to the first or last row |
 | `J`, `K`, Shift+Up, Shift+Down | Move and extend selection |
@@ -341,15 +343,19 @@ The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI 
 | `c` | Cycle the category filter |
 | `f` | Toggle the safe-only filter |
 | `x` | Clear all filters |
-| Esc | Back out of filters or selection |
+| Esc | Back out one level: a dialog, the search, the filters, then the selection. It never quits |
 | `s` | Cycle sort by size, path, or category |
 | `p` | Switch between grouping by rule and grouping by project |
 | `d`, Delete | Delete the selection, or the item under the cursor |
 | Enter | Delete the selection when it is non-empty |
+| `c`, `C` | In the git view: `git gc` in this repository, or in every repository shown |
+| `b`, `B` | In the git view: delete merged branches here, or in every repository shown, after a confirmation |
 | `q`, Ctrl+Q, Ctrl+C | Quit, asking first if a deletion is running |
 | `?` | Show shortcut help |
 
-Deleting uses the mode set by `delete.mode`. By default, deletion asks for confirmation and lists the selected items with size and safety. Press `y` or Enter to confirm. With `delete.confirm = false`, the TUI still asks for review items and projects with uncommitted changes or unknown Git status. `kuizer --confirm` forces a confirmation. The TUI starts with an empty selection.
+Deleting uses the mode set by `delete.mode`. By default, deletion asks for confirmation and lists the selected items with size and safety. Press `y` or Enter to confirm. A selection with review items asks for its item count instead: only the exact number followed by `y` or Enter deletes, a wrong number clears the field and keeps the dialog open, Backspace erases a digit and Esc cancels. A held key never confirms any dialog. With `delete.confirm = false`, the TUI still asks for review items and projects with uncommitted changes or unknown Git status. `kuizer --confirm` forces a confirmation. The TUI starts with an empty selection.
+
+Colors follow the GUI palette, adapted to 256-color terminals in `src/tui/palette.rs`: accent for the open view and focus, yellow for review and warnings, a red fill for the destructive button when it has the focus.
 
 ## 8. Threat model
 

@@ -13,7 +13,7 @@ impl Kuizer {
             .map(|root| display_path(root))
             .collect::<Vec<_>>()
             .join(", ");
-        let busy = self.busy();
+        let busy = self.working();
         let refreshing = self.refreshing();
         let scanning = matches!(self.phase, Phase::Loading(_)) || refreshing;
         let finished = matches!(self.phase, Phase::Ready(_) | Phase::Failed(_)) && !refreshing;
@@ -114,7 +114,7 @@ impl Kuizer {
                         !busy,
                         cx,
                         |app, _, cx| {
-                            if !app.busy() {
+                            if !app.working() {
                                 app.rescan(cx);
                             }
                         },
@@ -567,18 +567,18 @@ impl Kuizer {
         let warn = tab == Tab::Issues && figure.is_some();
         let shortcuts = &self.config.route_shortcuts;
         let hints = shortcuts.enabled && shortcuts.hints;
+        let keys: Vec<String> = self
+            .keymap
+            .keys(Scope::Gui, tab.action())
+            .filter(|_| hints)
+            .map(commands::label)
+            .collect();
         let tip = Tooltip::new(tab.term().text())
             .title(match (collapsed, &figure) {
                 (true, Some(figure)) => format!("{}  {figure}", tab.label()),
                 _ => tab.label().to_owned(),
             })
-            .keys(
-                &self
-                    .keymap
-                    .keys(Scope::Gui, tab.action())
-                    .filter(|_| hints)
-                    .collect::<Vec<_>>(),
-            )
+            .keys(&keys.iter().map(String::as_str).collect::<Vec<_>>())
             .build();
         let item = ui::nav_item(tab.label(), active)
             .debug_selector(|| tab.label().to_owned())
@@ -632,7 +632,7 @@ impl Kuizer {
         let review = self.selection.stats().total().review.count;
         let (fill, color) = match mode {
             keys::Mode::Normal => (theme::hover(), theme::muted()),
-            keys::Mode::Visual => (theme::bar(), theme::on_accent()),
+            keys::Mode::Visual | keys::Mode::Record => (theme::bar(), theme::on_accent()),
             keys::Mode::Filter => (theme::review_soft(), theme::review()),
             keys::Mode::Confirm => (theme::danger_solid(), theme::on_danger()),
             keys::Mode::Palette
@@ -753,6 +753,7 @@ impl Kuizer {
                 ),
                 (self.key_hint(Scope::GuiFilter, Key::Back), "clear it"),
             ],
+            keys::Mode::Record => vec![(self.key_hint(Scope::Settings, Key::Back), "cancel")],
             mode => {
                 let (scope, action) = match mode {
                     keys::Mode::Palette => (Scope::Palette, Key::Back),

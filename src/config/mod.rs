@@ -15,7 +15,7 @@ use crate::units::ByteSize;
 
 pub use edit::{
     EditError, SettingValue, add_exclude, check_setting, exclude_pattern, has_setting,
-    home_relative, set_protected_paths, set_setting,
+    home_relative, set_keys, set_protected_paths, set_setting,
 };
 pub use exclude::{ExcludeError, Excludes};
 pub use lenient::{ConfigWarning, rejected_scope};
