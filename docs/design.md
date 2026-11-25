@@ -198,9 +198,10 @@ idle = "60d"
 min_size = "50MB"
 exclude = []              # globs, added to scan.exclude
 select = "safe"           # safe, all or a list of rule names
+permanent = false         # true to allow --permanent and skip the trash
 ```
 
-Every key except `source` is optional. Policies are not yet implemented; when added, unknown policy keys and unknown rule names will be warned on load and rejected by `config check`.
+Every key except `source` is optional. Unknown policy keys, invalid globs, `paths`/`idle` on non-project policies, and unknown rule names are warned and skipped on load and rejected by `config check`.
 
 ## 6. CLI
 
@@ -215,7 +216,8 @@ kuizer scan  [PATHS...] [FILTERS]         list project items
     --safe-only
     --report[=FILE] [--no-open] [--force] write an interactive HTML report and open it
 kuizer clean [PATHS...] [FILTERS] [REMOVAL]
-    --policy NAME                         filters and selection from the config (planned)
+    --policy NAME                         filters and selection from the config; flags only narrow
+    --permanent                           skip the trash (refused with --policy unless permanent = true)
 
 kuizer cache            [FILTERS]                  list global tool caches
 kuizer cache clean      [FILTERS] [REMOVAL]        (`--clean` is a hidden alias per D8)
@@ -242,7 +244,7 @@ kuizer history show SESSION               every item of one session
 kuizer history prune [OPTIONS]            trim old runs and compact the history file
 kuizer restore ID... | --last [--dry-run] put trashed items back
 
-kuizer policy list | show NAME            (planned)
+kuizer policy list | show NAME            list or inspect configured cleanup policies
 
 kuizer rules                              active detection rules
 kuizer config show | path | init | check

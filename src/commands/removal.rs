@@ -15,6 +15,7 @@ use crate::source::Source;
 
 pub struct Request<'a> {
     pub command: &'static str,
+    pub policy: Option<&'a str>,
     pub roots: &'a [PathBuf],
     pub mode: Mode,
     pub yes: bool,
@@ -197,7 +198,9 @@ pub fn run(
         return print_untouched(request, mode, candidates, issues);
     }
 
-    let executor = Executor::new(request.roots, request.delete).with_engines(request.engines);
+    let executor = Executor::new(request.roots, request.delete)
+        .with_engines(request.engines)
+        .with_policy(request.policy.map(str::to_owned));
     let interrupt = Interrupt::catch();
     let batch = Batch {
         source: request.source,

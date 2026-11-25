@@ -127,6 +127,19 @@ impl fmt::Display for Idle {
     }
 }
 
+impl Serialize for Idle {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Idle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// @name age
 /// @description Formats the time elapsed since `time` as a short age such as `today`, `5d`,
 /// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future. Every frontend shows

@@ -1370,6 +1370,7 @@ mod tests {
             started_at: "2026-04-01T10:00:00+00:00".to_owned(),
             finished_at: "2026-04-01T10:00:02+00:00".to_owned(),
             command: "kuizer clean /p/alpha".to_owned(),
+            policy: None,
             roots: vec![PathBuf::from("/p/alpha")],
             total: Total {
                 items: 2,

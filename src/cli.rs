@@ -37,6 +37,7 @@ const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
 const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
 const ABOUT_DASHBOARD: &str = "Open a web overview of artifacts, caches, duplicates and history";
 const ABOUT_RULES: &str = "List the active detection rules";
+const ABOUT_POLICY: &str = "List and inspect configured cleanup policies";
 const ABOUT_CONFIG: &str = "Show, create and validate the config file";
 
 const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
@@ -63,6 +64,7 @@ const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
     (
         "Setup",
         &[
+            ("policy", ABOUT_POLICY),
             ("rules", ABOUT_RULES),
             ("config", ABOUT_CONFIG),
             ("help", "Show help for a command"),
@@ -223,6 +225,11 @@ fn clean_help() -> String {
                 "kuizer clean",
                 "~/apps --category build --yes",
                 "Remove build output without asking"
+            ),
+            (
+                "kuizer clean",
+                "--policy stale-deps --dry-run",
+                "Preview a configured policy"
             ),
         ])
     )
@@ -397,6 +404,23 @@ fn dashboard_help() -> String {
     )
 }
 
+fn policy_examples() -> String {
+    examples(&[
+        ("kuizer policy", "list", "List configured cleanup policies"),
+        (
+            "kuizer policy",
+            "show stale-deps",
+            "Show the effective filters and selection of a policy",
+        ),
+        (
+            "kuizer clean",
+            "--policy stale-deps --dry-run",
+            "Preview what a policy would remove",
+        ),
+        ("kuizer --json policy", "list", "Print policies as JSON"),
+    ])
+}
+
 fn rules_examples() -> String {
     examples(&[
         ("kuizer rules", "", "List built-in and custom rules"),
@@ -524,6 +548,8 @@ pub enum Command {
     Docker(DockerArgs),
     #[command(about = ABOUT_GIT, visible_alias = "repos", after_help = git_help())]
     Git(GitArgs),
+    #[command(about = ABOUT_POLICY, visible_alias = "policies", after_help = policy_examples())]
+    Policy(PolicyArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
     #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
@@ -647,6 +673,13 @@ pub struct CleanArgs {
     )]
     pub paths: Vec<PathBuf>,
     #[arg(
+        long,
+        value_name = "NAME",
+        help = "Run a named policy from the config; other flags narrow it and never widen it",
+        help_heading = "Filters"
+    )]
+    pub policy: Option<String>,
+    #[arg(
         long = "category",
         value_name = "NAME",
         value_parser = parse_category,
@@ -673,6 +706,12 @@ pub struct CleanArgs {
     pub scope: ScopeArgs,
     #[command(flatten)]
     pub removal: RemovalArgs,
+    #[arg(
+        long,
+        help = "Delete permanently instead of using the trash; refused with --policy unless permanent = true",
+        help_heading = "Removal"
+    )]
+    pub permanent: bool,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }
@@ -1162,6 +1201,26 @@ pub struct CommandArgs {
 #[derive(Debug, Subcommand, Clone, Copy, PartialEq, Eq)]
 #[command(disable_help_subcommand = true)]
 pub enum NestedCommand {
+    Help,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: Option<PolicyAction>,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum PolicyAction {
+    #[command(about = "List configured policies")]
+    List,
+    #[command(about = "Show the effective filters and selection of one policy")]
+    Show {
+        #[arg(value_name = "NAME", help = "Policy name from the config")]
+        name: String,
+    },
+    #[command(hide = true)]
     Help,
 }
 

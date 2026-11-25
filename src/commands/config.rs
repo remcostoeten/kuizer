@@ -28,7 +28,7 @@ pub fn run(loaded: &Loaded, action: Option<ConfigAction>, json: bool) -> Result<
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&path, Config::default().to_toml())?;
+            fs::write(&path, Config::default().init_toml())?;
             println!("wrote {}", path.display());
         }
         ConfigAction::Check => {

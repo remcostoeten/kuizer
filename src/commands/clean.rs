@@ -2,15 +2,20 @@ use std::io::IsTerminal;
 
 use super::AppError;
 use super::filter::{self, Filters};
+use super::policy;
 use super::removal::{self, Request};
 use super::scan::{keep_idle, resolve_roots};
 use crate::cli::{CleanArgs, Format};
 use crate::config::Config;
+use crate::delete::Mode;
 use crate::output;
 use crate::scan::{self, Cancel};
 use crate::source::Source;
 
 pub fn run(config: &Config, args: CleanArgs, format: Format, quiet: bool) -> Result<(), AppError> {
+    if let Some(name) = args.policy.clone() {
+        return policy::execute(config, &name, args, format, quiet);
+    }
     let rules = filter::project_rules(config);
     let names: Vec<&str> = rules.iter().map(String::as_str).collect();
     let filters = Filters::new(config, &args.categories, args.min_size, &args.scope, &names)?;
@@ -29,10 +34,18 @@ pub fn run(config: &Config, args: CleanArgs, format: Format, quiet: bool) -> Res
     if show_progress {
         output::clear_progress();
     }
+    let mode = if args.removal.dry_run {
+        Mode::DryRun
+    } else if args.permanent {
+        Mode::Permanent
+    } else {
+        removal::mode(&args.removal, config)
+    };
     let request = Request {
         command: "clean",
+        policy: None,
         roots: &roots,
-        mode: removal::mode(&args.removal, config),
+        mode,
         yes: args.removal.yes,
         confirm: config.delete.confirm,
         format,

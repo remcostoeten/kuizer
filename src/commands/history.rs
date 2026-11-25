@@ -108,6 +108,13 @@ fn trash_column(history: &History, trash: &TrashSnapshot, run_index: usize) -> S
     }
 }
 
+fn command_column(run: &Run) -> String {
+    match &run.policy {
+        Some(policy) => format!("[policy: {policy}] {}", run.command),
+        None => run.command.clone(),
+    }
+}
+
 fn print_runs(history: &History, trash: &TrashSnapshot) {
     println!(
         "{:<6}  {:<25}  {:>5}  {:>10}  {:<9}  COMMAND",
@@ -121,7 +128,7 @@ fn print_runs(history: &History, trash: &TrashSnapshot) {
             run.total.items,
             run.total.size,
             trash_column(history, trash, index),
-            run.command
+            command_column(run)
         );
     }
 }
@@ -159,6 +166,9 @@ fn show(history: &History, trash: &TrashSnapshot, id: &str, json: bool) -> Resul
         run.total.items,
         run.total.size
     );
+    if let Some(policy) = &run.policy {
+        println!("policy: {policy}");
+    }
     println!("{}", run.command);
     println!();
     for item in &items {

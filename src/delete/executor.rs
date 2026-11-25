@@ -57,6 +57,7 @@ enum Log {
 pub struct Executor {
     roots: Vec<PathBuf>,
     started_at: String,
+    policy: Option<String>,
     protected: Vec<PathBuf>,
     cross_device: bool,
     engines: Vec<String>,
@@ -78,6 +79,7 @@ impl Executor {
         Self {
             roots: roots.to_vec(),
             started_at: history::now(),
+            policy: None,
             protected: delete.protected.clone(),
             cross_device: delete.cross_device,
             engines: Vec::new(),
@@ -87,6 +89,16 @@ impl Executor {
             tools: Mutex::new(()),
             stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// @name Executor::with_policy
+    /// @description Records the named policy on any history runs opened by this executor.
+    ///
+    /// @example
+    /// let executor = Executor::new(&roots, &config.delete).with_policy(Some("stale-deps".into()));
+    pub fn with_policy(mut self, policy: Option<String>) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// @name Executor::with_engines
@@ -240,7 +252,7 @@ impl Executor {
     }
 
     fn recorder(&self) -> Recorder {
-        match &self.log {
+        let recorder = match &self.log {
             Log::User => Recorder::for_user(self.started_at.clone(), &self.roots),
             Log::At(path) => Recorder::at(
                 path.clone(),
@@ -248,7 +260,8 @@ impl Executor {
                 self.started_at.clone(),
                 &self.roots,
             ),
-        }
+        };
+        recorder.with_policy(self.policy.clone())
     }
 
     /// @name Executor::flush

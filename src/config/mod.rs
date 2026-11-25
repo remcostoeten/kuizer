@@ -1,7 +1,9 @@
 mod edit;
 mod exclude;
 mod lenient;
+mod policy;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +21,7 @@ pub use edit::{
 };
 pub use exclude::{ExcludeError, Excludes};
 pub use lenient::{ConfigWarning, rejected_scope};
+pub use policy::{EXAMPLE_POLICY, Policy, PolicySelect, SourceKind, known_rules};
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
 pub const MAX_SIZE_THREADS: usize = 64;
@@ -40,6 +43,7 @@ pub struct Config {
     pub keys: Overrides,
     pub toolchains: ToolchainConfig,
     pub docker: DockerConfig,
+    pub policy: BTreeMap<String, Policy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -386,6 +390,12 @@ pub enum ConfigError {
     UnknownDisabled(String),
     #[error("appearance.zoom must be between {MIN_ZOOM} and {MAX_ZOOM}, not {0}")]
     Zoom(u16),
+    #[error("policy.{policy}.{field}: {message}")]
+    Policy {
+        policy: String,
+        field: String,
+        message: String,
+    },
 }
 
 #[derive(Default)]
@@ -477,6 +487,9 @@ impl Config {
         for extension in &mut self.scan.exclude_extensions {
             *extension = extension.trim_start_matches('.').to_ascii_lowercase();
         }
+        for policy in self.policy.values_mut() {
+            policy.normalize();
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -487,6 +500,9 @@ impl Config {
         }
         if !(MIN_ZOOM..=MAX_ZOOM).contains(&self.appearance.zoom) {
             return Err(ConfigError::Zoom(self.appearance.zoom));
+        }
+        for (name, policy) in &self.policy {
+            policy::validate_policy(self, name, policy)?;
         }
         Ok(())
     }
@@ -548,6 +564,16 @@ impl Config {
 
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// @name init_toml
+    /// @description Renders the starter config written by `kuizer config init`, including a
+    /// commented example policy.
+    ///
+    /// @example
+    /// let text = Config::default().init_toml();
+    pub fn init_toml(&self) -> String {
+        format!("{}{}", self.to_toml(), EXAMPLE_POLICY)
     }
 }
 

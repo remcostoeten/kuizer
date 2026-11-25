@@ -290,6 +290,30 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
         ));
         config.appearance.zoom = DEFAULT_ZOOM;
     }
+    let policies = std::mem::take(&mut config.policy);
+    for (name, policy) in policies {
+        match super::policy::validate_policy(config, &name, &policy) {
+            Ok(()) => {
+                config.policy.insert(name, policy);
+            }
+            Err(super::ConfigError::Policy {
+                policy: policy_name,
+                field,
+                message,
+            }) => {
+                warnings.push(ConfigWarning::new(
+                    format!("policy.{policy_name}.{field}"),
+                    message,
+                ));
+            }
+            Err(error) => {
+                warnings.push(ConfigWarning::new(
+                    format!("policy.{name}"),
+                    error.to_string(),
+                ));
+            }
+        }
+    }
 }
 
 fn syntax_warning(text: &str, error: &toml::de::Error) -> ConfigWarning {

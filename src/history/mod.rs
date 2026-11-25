@@ -50,6 +50,8 @@ pub struct Run {
     pub started_at: String,
     pub finished_at: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
     #[serde(with = "stored_path::many")]
     pub roots: Vec<PathBuf>,
     pub deleted: Vec<Entry>,
@@ -174,10 +176,16 @@ impl Run {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join(" "),
+            policy: None,
             roots: roots.to_vec(),
             total: Total::of(&deleted),
             deleted,
         }
+    }
+
+    pub fn with_policy(mut self, policy: Option<String>) -> Self {
+        self.policy = policy;
+        self
     }
 
     pub fn restore(started_at: String, restored: Vec<Entry>) -> Self {
@@ -594,6 +602,15 @@ impl Recorder {
         Self::with_options(source, target, started_at, roots, DEFAULT_MAX_BYTES, false)
     }
 
+    pub fn with_policy(self, policy: Option<String>) -> Self {
+        self.shared
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .policy = policy;
+        self
+    }
+
     fn with_options(
         source: PathBuf,
         target: PathBuf,
@@ -616,6 +633,7 @@ impl Recorder {
                     source,
                     target,
                     started_at,
+                    policy: None,
                     roots: roots.to_vec(),
                     max_bytes,
                     create_parent,

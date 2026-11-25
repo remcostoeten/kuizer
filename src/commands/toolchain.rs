@@ -62,6 +62,7 @@ pub fn run(
     let roots = toolchains::roots(&selected);
     let request = Request {
         command: "toolchain",
+        policy: None,
         roots: &roots,
         mode: Source::Toolchain.mode(removal::mode(&plan.removal, config)),
         yes: plan.removal.yes,

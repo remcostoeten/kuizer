@@ -44,6 +44,7 @@ pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Res
     let roots = caches::guard_roots(&selected);
     let request = Request {
         command: "cache",
+        policy: None,
         roots: &roots,
         mode: removal::mode(&plan.removal, config),
         yes: plan.removal.yes,

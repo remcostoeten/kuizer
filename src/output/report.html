@@ -285,6 +285,13 @@ tr.entries table td { border-bottom: 0; padding: 4px 14px; }
       <section class="card"><div class="body"><h2>Top rules</h2><div class="bars" id="hist-rules"></div></div></section>
       <section class="card"><div class="body"><h2>Most cleaned folders</h2><div class="bars" id="hist-folders"></div></div></section>
     </div>
+    <section class="card tablecard" id="hist-policies-card" hidden>
+      <div class="tablehead"><h2>Policies</h2><span class="note" id="hist-policies-note"></span></div>
+      <div class="scroll"><table class="plain">
+        <thead><tr><th>Policy</th><th class="num">Runs</th><th class="num">Removed</th><th>Last run</th><th>Average gap</th></tr></thead>
+        <tbody id="hist-policies"></tbody>
+      </table></div>
+    </section>
     <section class="card tablecard">
       <div class="tablehead"><h2>Runs</h2><span class="note" id="hist-note"></span></div>
       <div class="scroll"><table class="plain">
@@ -1676,6 +1683,38 @@ function renderHistory() {
   bars($("hist-rules"), totalsBy(entries, (entry) => entry.rule, (entry) => entry.bytes).slice(0, 8).map(([rule, value]) => barRow(rule, value, removed, null)), "Nothing deleted yet");
   bars($("hist-folders"), totalsBy(entries, (entry) => parentOf(entry.path), (entry) => entry.bytes).slice(0, 8).map(([folder, value]) => barRow(display(folder), value, removed, null)), "Nothing deleted yet");
 
+  const policyGroups = new Map();
+  for (const run of RUNS) {
+    if (!run.policy || isRestore(run)) continue;
+    const group = policyGroups.get(run.policy) || { name: run.policy, runs: 0, bytes: 0, times: [] };
+    group.runs += 1;
+    group.bytes += run.total.bytes;
+    const started = Date.parse(run.started_at);
+    if (Number.isFinite(started)) group.times.push(started);
+    policyGroups.set(run.policy, group);
+  }
+  const policies = [...policyGroups.values()].sort((a, b) => (Math.max(0, ...b.times) - Math.max(0, ...a.times)) || a.name.localeCompare(b.name));
+  $("hist-policies-card").hidden = policies.length === 0;
+  if (policies.length) {
+    $("hist-policies-note").textContent = `${count(policies.length, "policy", "policies")} recorded`;
+    $("hist-policies").replaceChildren(...policies.map((group) => {
+      const sorted = [...group.times].sort((a, b) => a - b);
+      const last = sorted.length ? sorted[sorted.length - 1] : null;
+      const pGaps = sorted.slice(1).map((time, idx) => time - sorted[idx]);
+      const avgGap = pGaps.length ? sumBy(pGaps, (v) => v) / pGaps.length : 0;
+      const gapText = !pGaps.length ? "needs two runs" : avgGap < DAY ? "daily" : count(Math.round(avgGap / DAY), "day");
+      const row = el("tr");
+      row.append(
+        el("td", "mono", group.name),
+        el("td", "num", group.runs.toLocaleString()),
+        el("td", "num", bytes(group.bytes)),
+        el("td", "", last ? `${ago(last)} · ${shortDate(last)}` : "unknown"),
+        el("td", "", gapText),
+      );
+      return row;
+    }));
+  }
+
   $("hist-note").textContent = RUNS.length ? `${count(RUNS.length, "run")}, newest first` : "";
   const body = $("hist-rows");
   body.replaceChildren();
@@ -1703,7 +1742,8 @@ function renderHistory() {
             ? "emptied"
             : "permanent";
     const row = el("tr");
-    const command = el("td", "mono", commandLabel(run.command));
+    const label = run.policy ? `[policy: ${run.policy}] ${commandLabel(run.command)}` : commandLabel(run.command);
+    const command = el("td", "mono", label);
     command.style.whiteSpace = "normal";
     if (restorable) {
       const restore = `kuizer restore ${session}`;

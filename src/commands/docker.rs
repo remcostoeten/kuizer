@@ -58,6 +58,7 @@ pub fn run(config: &Config, args: DockerArgs, format: Format, quiet: bool) -> Re
     let selected = removal::select(candidates, &plan.removal.select);
     let request = Request {
         command: "docker",
+        policy: None,
         roots: &[],
         mode: Source::Docker.mode(removal::mode(&plan.removal, config)),
         yes: plan.removal.yes,

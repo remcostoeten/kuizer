@@ -1960,6 +1960,7 @@ mod tests {
                 started_at: "2026-04-01T10:00:00+00:00".to_owned(),
                 finished_at: "2026-04-01T10:00:02+00:00".to_owned(),
                 command: "kuizer clean /p/web".to_owned(),
+                policy: None,
                 roots: vec![std::path::PathBuf::from("/p/web")],
                 total: Total {
                     items: 1,

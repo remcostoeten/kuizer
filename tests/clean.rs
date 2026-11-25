@@ -304,7 +304,7 @@ fn select_by_rule_and_reject_unknown_rules() {
         &home,
         &["clean", root.to_str().unwrap(), "--select", "nope", "-y"],
     );
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown selection `nope`"));
     assert!(root.join("web/node_modules").exists());
 }

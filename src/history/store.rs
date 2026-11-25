@@ -28,6 +28,8 @@ enum LogRecord {
         started_at: String,
         finished_at: String,
         command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy: Option<String>,
         #[serde(with = "stored_path::many")]
         roots: Vec<PathBuf>,
         entries: Vec<Entry>,
@@ -48,6 +50,7 @@ impl LogRecord {
             started_at: run.started_at.clone(),
             finished_at: run.finished_at.clone(),
             command: run.command.clone(),
+            policy: run.policy.clone(),
             roots: run.roots.clone(),
             entries: run.deleted.clone(),
         }
@@ -176,6 +179,7 @@ pub(super) fn parse_history(path: &Path, text: &str) -> Result<(History, Format)
                     started_at,
                     finished_at,
                     command,
+                    policy,
                     roots,
                     entries,
                 } => {
@@ -186,6 +190,7 @@ pub(super) fn parse_history(path: &Path, text: &str) -> Result<(History, Format)
                         started_at,
                         finished_at,
                         command,
+                        policy,
                         roots,
                         deleted: entries,
                         total,
@@ -435,6 +440,7 @@ pub(super) struct Store {
     pub(super) source: PathBuf,
     pub(super) target: PathBuf,
     pub(super) started_at: String,
+    pub(super) policy: Option<String>,
     pub(super) roots: Vec<PathBuf>,
     pub(super) max_bytes: u64,
     pub(super) create_parent: bool,
@@ -501,7 +507,8 @@ impl Store {
                 id
             }
             None => {
-                let mut run = Run::new(self.started_at.clone(), &self.roots, entries.to_vec());
+                let mut run = Run::new(self.started_at.clone(), &self.roots, entries.to_vec())
+                    .with_policy(self.policy.clone());
                 run.id = history.next_session;
                 let id = run.id;
                 let record = LogRecord::from_run(&run);

@@ -10,7 +10,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("kuizer: {error}");
-            ExitCode::FAILURE
+            error.exit_code()
         }
     }
 }

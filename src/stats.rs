@@ -244,6 +244,7 @@ mod tests {
             started_at: started_at.to_owned(),
             finished_at: started_at.to_owned(),
             command: "clean".to_owned(),
+            policy: None,
             roots: Vec::new(),
             deleted: Vec::new(),
             total: Total {

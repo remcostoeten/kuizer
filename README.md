@@ -50,6 +50,9 @@ kuizer dashboard ~/projects                # open a web overview of everything
 kuizer clean ~/projects --dry-run          # show what clean would remove
 kuizer clean ~/projects --idle 3mo         # remove safe items of projects untouched for three months
 kuizer clean ~/projects --select all       # remove safe and review items, after a confirmation
+kuizer clean --policy stale-deps --dry-run # preview a named policy from config.toml
+kuizer policy list                         # list configured cleanup policies
+kuizer policy show stale-deps              # show effective filters and selection of a policy
 kuizer cache clean --select npm            # remove the npm cache
 kuizer toolchain clean ~/projects          # remove toolchain versions no project pins
 kuizer docker clean                        # remove dangling images, stopped containers and build cache
@@ -60,6 +63,36 @@ kuizer --json scan ~/projects              # every command prints JSON with --js
 ```
 
 Deletion is permanent by default: nothing goes to the trash. Set `delete.mode = "trash"` in the config, or turn on "Move to the trash" in the desktop app settings, to move project artifacts and caches to the trash instead. Every command shows what it will remove and asks first. With `delete.confirm = false` the CLI only asks for `review` items and projects with uncommitted changes. A tool downloads a toolchain version again when needed, and a merged branch's commits stay in the default branch.
+
+### Policies and scheduled cleanups
+
+A `[policy.NAME]` table in `config.toml` saves a source, filters and a selection so you can inspect it with `kuizer policy show NAME` and run it with `kuizer clean --policy NAME`. Extra flags next to `--policy` can only narrow it further; widening `--select` or passing `--permanent` without `permanent = true` exits with status `2`.
+
+kuizer does not include its own scheduler. To run a policy weekly, call it from `crontab` or a `systemd` user timer with `--yes -q` (`--yes` is required when there is no terminal to confirm on):
+
+```cron
+# Every Sunday at 03:00
+0 3 * * 0 kuizer clean --policy stale-deps --yes -q
+```
+
+Or with a `systemd` user unit (`~/.config/systemd/user/kuizer-stale-deps.service` and `.timer`):
+
+```ini
+[Service]
+Type=oneshot
+ExecStart=kuizer clean --policy stale-deps --yes -q
+```
+
+```ini
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Each run records its policy name in `kuizer history`, and `kuizer dashboard` groups policy runs with their last run time and average cadence.
 
 ## Desktop app
 

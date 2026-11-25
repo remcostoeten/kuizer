@@ -9,6 +9,7 @@ mod generate;
 mod git;
 mod history;
 mod interrupt;
+mod policy;
 mod removal;
 mod restore;
 mod rules;
@@ -17,8 +18,9 @@ mod toolchain;
 mod ui;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-use crate::cli::{Cli, Command, Format, HistoryAction, NestedCommand, ScanArgs};
+use crate::cli::{Cli, Command, Format, HistoryAction, NestedCommand, PolicyAction, ScanArgs};
 use crate::config::{Config, ConfigError, Loaded, rejected_scope};
 use crate::history::HistoryError;
 use crate::scan::ScopeError;
@@ -41,6 +43,8 @@ pub enum AppError {
     ConfigProblems,
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Usage(String),
     #[error("unknown selection `{name}`, expected safe, all or one of: {known}")]
     UnknownSelection { name: String, known: String },
     #[error("unknown rule `{name}`, expected one of: {known}")]
@@ -81,6 +85,20 @@ pub enum AppError {
     GitFailed(usize),
 }
 
+impl AppError {
+    /// @name AppError::exit_code
+    /// @description Maps usage errors to exit code `2` and all other runtime errors to `1`.
+    ///
+    /// @example
+    /// std::process::ExitCode::from(error.exit_code());
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::Usage(_) | Self::UnknownSelection { .. } => ExitCode::from(2),
+            _ => ExitCode::FAILURE,
+        }
+    }
+}
+
 fn interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
@@ -97,6 +115,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Toolchain(args) if args.wants_help() => Some("toolchain"),
         Command::Docker(args) if args.wants_help() => Some("docker"),
         Command::Git(args) if args.command == Some(NestedCommand::Help) => Some("git"),
+        Command::Policy(args) if args.command == Some(PolicyAction::Help) => Some("policy"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
         Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
@@ -187,6 +206,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Scan(args)) => scan::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
+        Some(Command::Policy(args)) => policy::run(&loaded.config, args, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
         Some(Command::History(args)) => history::run(args, cli.json),
         Some(Command::Restore(args)) => restore::run(args, cli.json),

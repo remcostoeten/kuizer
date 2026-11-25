@@ -346,6 +346,23 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     SPECS.iter().map(|spec| spec.name)
 }
 
+/// @name safety
+/// @description Returns the safety level of a known global cache by name, or `None` if unknown.
+/// If multiple specs share a name, `Review` takes precedence over `Safe`.
+///
+/// @example
+/// assert_eq!(caches::safety("npm"), Some(Safety::Safe));
+pub fn safety(name: &str) -> Option<Safety> {
+    let mut found = None;
+    for spec in SPECS.iter().filter(|spec| spec.name == name) {
+        if spec.safety == Safety::Review {
+            return Some(Safety::Review);
+        }
+        found = Some(spec.safety);
+    }
+    found
+}
+
 /// @name known
 /// @description Rebuilds the description of a known global cache from its name, for a cache
 /// that was found at `path` earlier. Returns `None` for a name kuizer does not know.

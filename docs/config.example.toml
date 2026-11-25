@@ -109,3 +109,16 @@ recent_hours = 24
 # "nav.down" = ["n", "down"]
 # "nav.up" = ["shift-n", "up"]
 # "palette.open" = "secondary-shift-k"
+
+# Named cleanup policies, run with `kuizer clean --policy NAME`.
+# Inspect them with `kuizer policy list` and `kuizer policy show NAME`.
+# [policy.stale-deps]
+# source = "projects"
+# paths = ["~/apps"]
+# category = ["dependencies", "build"]
+# rule = []
+# idle = "60d"
+# min_size = "50MB"
+# exclude = []
+# select = "safe"
+# permanent = false
