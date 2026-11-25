@@ -1,5 +1,8 @@
 [advisories]
-ignore = []
+ignore = [
+    # chrono is pulled in transitively by trash v5.2.9 with no upstream replacement yet
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 allow = [

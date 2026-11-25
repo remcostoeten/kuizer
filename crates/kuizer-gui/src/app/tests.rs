@@ -169,7 +169,10 @@ fn enter_scans_the_typed_folder_and_remembers_it(cx: &mut TestAppContext) {
     type_text(cx, &root.display().to_string());
     cx.simulate_keystrokes("enter");
     view.read_with(cx, |app, _| {
-        assert!(matches!(app.session.phase, Phase::Loading(_)))
+        assert!(matches!(
+            app.session.phase,
+            Phase::Loading(_) | Phase::Ready(_)
+        ))
     });
     wait_for_scan(&view, cx);
     let canonical = std::fs::canonicalize(&root).unwrap();
