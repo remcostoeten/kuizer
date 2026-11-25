@@ -1,0 +1,39 @@
+# Flatpak manifest for kuizer (desktop GUI + CLI).
+#
+# Note for Flathub review: kuizer is a developer disk cleaner that scans
+# arbitrary project directories and inspects git / docker / podman / toolchains.
+# As a result, a Flatpak build requires `--filesystem=home` and host tool access
+# (`--talk-name=org.freedesktop.Flatpak` for `flatpak-spawn --host`).
+# Build locally with:
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/com.remcostoeten.kuizer.yml
+id: com.remcostoeten.kuizer
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: kuizer-gui
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Flatpak
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/kuizer/cargo
+modules:
+  - name: kuizer
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p kuizer -p kuizer-gui
+      - install -Dm755 target/release/kuizer /app/bin/kuizer
+      - install -Dm755 target/release/kuizer-gui /app/bin/kuizer-gui
+      - install -Dm644 packaging/kuizer-gui.desktop /app/share/applications/com.remcostoeten.kuizer.desktop
+      - install -Dm644 packaging/kuizer-gui.svg /app/share/icons/hicolor/scalable/apps/com.remcostoeten.kuizer.svg
+      - sed -i 's/^Icon=kuizer-gui$/Icon=com.remcostoeten.kuizer/' /app/share/applications/com.remcostoeten.kuizer.desktop
+    sources:
+      - type: dir
+        path: ../..

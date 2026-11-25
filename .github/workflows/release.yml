@@ -225,9 +225,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
             libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev
+      - run: cargo install cargo-deb --locked --version 3.8.0 --jobs 2
       - run: cargo install cargo-packager --locked --version 0.11.8 --jobs 2
       - run: cargo install cargo-generate-rpm --locked --version 0.21.1 --jobs 2
-      - run: cargo build --locked --release -p kuizer-gui -j 2
+      - run: cargo build --locked --release -p kuizer -p kuizer-gui -j 2
+      - run: mkdir -p target/linux-packages
+      - run: cargo deb --no-build --output target/linux-packages
+      - run: cargo generate-rpm --output target/linux-packages
       - run: >-
           cargo packager --release --manifest-path crates/kuizer-gui/Cargo.toml
           --formats deb,pacman --binaries-dir target/release --out-dir target/linux-packages

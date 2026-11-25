@@ -73,3 +73,28 @@ rustix = { version = "1.1.5", features = ["event", "fs", "process"] }
 pkg-url = "{ repo }/releases/download/v{ version }/kuizer-{ target }{ archive-suffix }"
 bin-dir = "kuizer-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "txz"
+
+[package.metadata.deb]
+name = "kuizer"
+maintainer = "Remco Stoeten <remco@kuizer.app>"
+copyright = "2026, Remco Stoeten"
+license-file = ["LICENSE", "0"]
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/kuizer", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/kuizer/README.md", "644"],
+    ["LICENSE", "usr/share/doc/kuizer/LICENSE", "644"],
+    ["docs/config.example.toml", "usr/share/doc/kuizer/config.example.toml", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "kuizer"
+summary = "Keyboard-driven disk cleanup for developers"
+assets = [
+    { source = "target/release/kuizer", dest = "/usr/bin/kuizer", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/kuizer/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/kuizer/LICENSE", mode = "644", doc = true },
+    { source = "docs/config.example.toml", dest = "/usr/share/doc/kuizer/config.example.toml", mode = "644", doc = true },
+]
