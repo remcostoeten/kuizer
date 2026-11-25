@@ -952,6 +952,7 @@ mod tests {
         cx.simulate_mouse_down(tile.center(), MouseButton::Right, Modifiers::default());
         cx.simulate_mouse_up(tile.center(), MouseButton::Right, Modifiers::default());
         cx.simulate_keystrokes("x");
+        cx.simulate_keystrokes("tab enter");
         view.read_with(cx, |app, _| {
             assert!(
                 app.map.path.is_empty(),

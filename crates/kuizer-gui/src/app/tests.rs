@@ -667,6 +667,7 @@ fn a_failed_exclude_keeps_the_item_and_says_why(cx: &mut TestAppContext) {
     });
     right_click(cx, "artifact-row-0");
     click_item(cx, "menu-Always exclude");
+    click_item(cx, "confirm-exclude");
     view.read_with(cx, |app, _| {
         assert_eq!(app.report().unwrap().candidates.len(), 1);
         assert!(app.excluded.is_empty());
@@ -1759,6 +1760,7 @@ fn duplicates_can_be_excluded_from_their_menu(cx: &mut TestAppContext) {
         assert_eq!(choices, [Choice::Reveal, Choice::CopyPath, Choice::Exclude]);
     });
     cx.simulate_keystrokes("x");
+    cx.simulate_keystrokes("tab enter");
     assert_eq!(groups(cx), 0, "one copy left is no longer a duplicate");
     let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
     assert!(written.contains(&kuizer::config::exclude_pattern(&path)));
