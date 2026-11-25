@@ -35,6 +35,8 @@ pub(super) const ABOUT_DASHBOARD: &str =
     "Open a web overview of artifacts, caches, duplicates and history";
 pub(super) const ABOUT_RULES: &str = "List the active detection rules";
 pub(super) const ABOUT_EXPLAIN: &str = "Explain why a path is or is not a candidate";
+pub(super) const ABOUT_WATCH: &str =
+    "Rescan folders on a timer and show what grew, without deleting";
 pub(super) const ABOUT_POLICY: &str = "List and inspect configured cleanup policies";
 pub(super) const ABOUT_CONFIG: &str = "Show, create and validate the config file";
 
@@ -58,6 +60,7 @@ pub(super) const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("duplicates", ABOUT_DUPLICATES),
             ("explain", ABOUT_EXPLAIN),
             ("history", ABOUT_HISTORY),
+            ("watch", ABOUT_WATCH),
         ],
     ),
     (
@@ -450,6 +453,25 @@ pub(super) fn explain_examples() -> String {
             "Print the explanation as JSON",
         ),
     ])
+}
+
+pub(super) fn watch_examples() -> String {
+    format!(
+        "Runs in the foreground and rescans on a timer to report what grew. Never deletes anything; press Ctrl-C to stop.\n\n{}",
+        examples(&[
+            ("kuizer watch", "~/apps", "Rescan ~/apps every 30 seconds"),
+            (
+                "kuizer watch",
+                "~/apps --interval 2m",
+                "Rescan every two minutes"
+            ),
+            (
+                "kuizer --json watch",
+                "~/apps --interval 15s",
+                "Stream one JSON line per scan"
+            ),
+        ])
+    )
 }
 
 pub(super) fn config_examples() -> String {

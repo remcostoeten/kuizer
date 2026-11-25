@@ -13,6 +13,7 @@ pub use json::{
 };
 pub use text::{
     clear_progress, display_path, largest_count, print_caches, print_docker, print_duplicates,
-    print_duplicates_link, print_issues, print_overview, print_progress, print_removal,
-    print_removal_plan, print_removal_summary, print_scan, print_status, print_toolchains,
+    print_duplicates_link, print_issues, print_mount_spaces, print_overview, print_progress,
+    print_removal, print_removal_plan, print_removal_summary, print_scan, print_status,
+    print_toolchains,
 };

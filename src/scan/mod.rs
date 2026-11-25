@@ -1,5 +1,7 @@
 mod activity;
 mod cancel;
+mod diff;
+mod mount;
 mod options;
 mod pool;
 mod query;
@@ -18,6 +20,8 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 pub use activity::{ActivityScope, annotate, annotate_in};
 pub use cancel::Cancel;
+pub use diff::{ProjectGrowth, ScanDiff, diff_candidates, diff_entries};
+pub use mount::{MountSpace, mount_spaces};
 pub use options::ScanOptions;
 pub use query::{
     CandidateFilter, Group, Query, Scope, ScopeError, SortKey, group_indices, sort_candidates,

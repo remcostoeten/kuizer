@@ -117,6 +117,24 @@ pub fn run(config: &Config, args: ScanArgs, format: Format, quiet: bool) -> Resu
     let collected = if live {
         tui::watch(&handle, safe_only)?
     } else {
+        if show_progress {
+            let mounts = scan::mount_spaces(&roots, &[]);
+            if !mounts.is_empty() {
+                let summary = mounts
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{}: {} free of {}",
+                            output::display_path(&m.mount),
+                            ByteSize(m.available),
+                            ByteSize(m.total)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  |  ");
+                eprintln!("{summary}");
+            }
+        }
         let mut failed = None;
         let collected = scan::collect_with(
             &handle,
@@ -163,6 +181,7 @@ pub fn run(config: &Config, args: ScanArgs, format: Format, quiet: bool) -> Resu
 
     if live {
         output::print_overview(
+            &roots,
             &candidates,
             &collected.issues,
             &collected.summary,
@@ -191,9 +210,13 @@ pub fn run(config: &Config, args: ScanArgs, format: Format, quiet: bool) -> Resu
                 output::scan_summary_line(&roots, &collected.issues, &collected.summary)?
             );
         }
-        Format::Text => {
-            output::print_scan(&candidates, &collected.issues, &collected.summary, quiet)
-        }
+        Format::Text => output::print_scan(
+            &roots,
+            &candidates,
+            &collected.issues,
+            &collected.summary,
+            quiet,
+        ),
     }
     announce_report(written.as_deref(), open);
     Ok(())

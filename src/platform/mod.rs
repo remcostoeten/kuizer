@@ -121,6 +121,13 @@ impl MountTable {
             .find(|mount| path.starts_with(&mount.point))
             .map(|mount| mount.fs_type.as_str())
     }
+
+    pub fn mount_point(&self, path: &Path) -> Option<&Path> {
+        self.mounts
+            .iter()
+            .find(|mount| path.starts_with(&mount.point))
+            .map(|mount| mount.point.as_path())
+    }
 }
 
 /// @name home_dir
@@ -246,6 +253,13 @@ pub fn available_space(path: &Path) -> Option<u64> {
 pub fn total_space(path: &Path) -> Option<u64> {
     let stats = rustix::fs::statvfs(path).ok()?;
     Some(stats.f_blocks.saturating_mul(stats.f_frsize))
+}
+
+pub fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
+    let stats = rustix::fs::statvfs(path).ok()?;
+    let available = stats.f_bavail.saturating_mul(stats.f_frsize);
+    let total = stats.f_blocks.saturating_mul(stats.f_frsize);
+    Some((available, total))
 }
 
 /// @name open_in_browser

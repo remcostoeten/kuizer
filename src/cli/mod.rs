@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use self::help::*;
 use crate::detect::Category;
 pub use crate::scan::SortKey;
-use crate::units::{ByteSize, Idle};
+use crate::units::{ByteSize, Idle, WatchInterval};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -118,6 +118,8 @@ pub enum Command {
     Rules(CommandArgs),
     #[command(about = ABOUT_EXPLAIN, after_help = explain_examples())]
     Explain(ExplainArgs),
+    #[command(about = ABOUT_WATCH, after_help = watch_examples())]
+    Watch(WatchArgs),
     #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
     History(HistoryArgs),
     #[command(about = ABOUT_RESTORE, after_help = restore_help())]
@@ -138,6 +140,47 @@ pub enum Command {
 pub struct ExplainArgs {
     #[arg(value_name = "PATH", help = "Path to inspect")]
     pub path: PathBuf,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct WatchArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to watch [default: scan.roots or current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DURATION",
+        help = "Time between rescans, e.g. 30s or 5m [default: 30s]"
+    )]
+    pub interval: Option<WatchInterval>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Stop after N scans instead of running until Ctrl-C"
+    )]
+    pub count: Option<usize>,
+    #[arg(
+        long = "category",
+        value_name = "NAME",
+        value_parser = parse_category,
+        help = "Only include this category, repeatable: dependencies, build, cache, temp",
+        help_heading = "Filters"
+    )]
+    pub categories: Vec<Category>,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        help = "Skip entries smaller than this, e.g. 50MB",
+        help_heading = "Filters"
+    )]
+    pub min_size: Option<ByteSize>,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]

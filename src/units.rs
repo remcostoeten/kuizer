@@ -140,6 +140,58 @@ impl<'de> Deserialize<'de> for Idle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WatchInterval(pub Duration);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("invalid interval `{0}`: use a positive whole number with s, m, h or d, e.g. 30s or 5m")]
+pub struct IntervalError(String);
+
+impl FromStr for WatchInterval {
+    type Err = IntervalError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let text = input.trim();
+        let split = text
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(split);
+        let count: u64 = number
+            .parse()
+            .map_err(|_| IntervalError(input.to_owned()))?;
+        if count == 0 {
+            return Err(IntervalError(input.to_owned()));
+        }
+        let secs: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+            "" | "s" => 1,
+            "m" => 60,
+            "h" => 3_600,
+            "d" => 86_400,
+            _ => return Err(IntervalError(input.to_owned())),
+        };
+        count
+            .checked_mul(secs)
+            .map(Duration::from_secs)
+            .map(Self)
+            .ok_or_else(|| IntervalError(input.to_owned()))
+    }
+}
+
+impl fmt::Display for WatchInterval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secs = self.0.as_secs();
+        if secs.is_multiple_of(86_400) && secs >= 86_400 {
+            write!(f, "{}d", secs / 86_400)
+        } else if secs.is_multiple_of(3_600) && secs >= 3_600 {
+            write!(f, "{}h", secs / 3_600)
+        } else if secs.is_multiple_of(60) && secs >= 60 {
+            write!(f, "{}m", secs / 60)
+        } else {
+            write!(f, "{secs}s")
+        }
+    }
+}
+
 /// @name age
 /// @description Formats the time elapsed since `time` as a short age such as `today`, `5d`,
 /// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future. Every frontend shows
@@ -246,5 +298,24 @@ mod tests {
         assert!("1.5d".parse::<Idle>().is_err());
         assert!("d".parse::<Idle>().is_err());
         assert!("3h".parse::<Idle>().is_err());
+    }
+
+    #[test]
+    fn watch_interval_parses_and_formats() {
+        assert_eq!(
+            "30s".parse::<WatchInterval>().unwrap(),
+            WatchInterval(Duration::from_secs(30))
+        );
+        assert_eq!(
+            "5m".parse::<WatchInterval>().unwrap(),
+            WatchInterval(Duration::from_secs(300))
+        );
+        assert_eq!(
+            "2h".parse::<WatchInterval>().unwrap(),
+            WatchInterval(Duration::from_secs(7_200))
+        );
+        assert_eq!(WatchInterval(Duration::from_secs(120)).to_string(), "2m");
+        assert!("0s".parse::<WatchInterval>().is_err());
+        assert!("abc".parse::<WatchInterval>().is_err());
     }
 }

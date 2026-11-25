@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::style::{bold, dim};
 use crate::caches::KnownCache;
@@ -9,7 +9,7 @@ use crate::detect::{Category, Safety};
 use crate::docker::Item;
 use crate::dupes::{Duplicates, Group, LinkMode, LinkReport, LinkStatus};
 use crate::platform;
-use crate::scan::{Candidate, Issue, Progress, Summary};
+use crate::scan::{Candidate, Issue, MountSpace, Progress, Summary};
 use crate::toolchains::Toolchain;
 use crate::units::{ByteSize, age};
 
@@ -89,7 +89,13 @@ fn row(candidate: &Candidate, idle: bool) -> String {
     )
 }
 
-pub fn print_scan(candidates: &[Candidate], issues: &[Issue], summary: &Summary, quiet: bool) {
+pub fn print_scan(
+    roots: &[PathBuf],
+    candidates: &[Candidate],
+    issues: &[Issue],
+    summary: &Summary,
+    quiet: bool,
+) {
     let mut out = BufWriter::new(io::stdout().lock());
     let idle = shows_idle(candidates);
     if !candidates.is_empty() {
@@ -101,8 +107,35 @@ pub fn print_scan(candidates: &[Candidate], issues: &[Issue], summary: &Summary,
     drop(out);
     if !quiet {
         print_distribution(candidates, LARGEST);
+        print_mount_spaces(&crate::scan::mount_spaces(roots, candidates));
         print_totals(candidates, summary);
         print_issues(issues);
+    }
+}
+
+pub fn print_mount_spaces(mounts: &[MountSpace]) {
+    if mounts.is_empty() {
+        return;
+    }
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "\n{}", bold("Disk space"));
+    for mount in mounts {
+        let reclaim = if mount.reclaimable > 0 {
+            format!(
+                "  (+{} from scan, {} safe)",
+                ByteSize(mount.reclaimable),
+                ByteSize(mount.safe_reclaimable)
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "  {:<18} {:>10} free of {:>10}{reclaim}",
+            display_path(&mount.mount),
+            ByteSize(mount.available).to_string(),
+            ByteSize(mount.total).to_string(),
+        );
     }
 }
 
@@ -211,12 +244,14 @@ fn print_distribution(candidates: &[Candidate], largest: usize) {
 }
 
 pub fn print_overview(
+    roots: &[PathBuf],
     candidates: &[Candidate],
     issues: &[Issue],
     summary: &Summary,
     largest: usize,
 ) {
     print_distribution(candidates, largest);
+    print_mount_spaces(&crate::scan::mount_spaces(roots, candidates));
     print_totals(candidates, summary);
     print_issues(issues);
 }

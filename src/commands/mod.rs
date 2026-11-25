@@ -17,6 +17,7 @@ mod rules;
 mod scan;
 mod toolchain;
 mod ui;
+mod watch;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -119,6 +120,7 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Git(args) if args.command == Some(NestedCommand::Help) => Some("git"),
         Command::Policy(args) if args.command == Some(PolicyAction::Help) => Some("policy"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
+        Command::Watch(args) if args.command == Some(NestedCommand::Help) => Some("watch"),
         Command::History(args) if args.command == Some(HistoryAction::Help) => Some("history"),
         Command::Restore(args) if args.command == Some(NestedCommand::Help) => Some("restore"),
         Command::Dashboard(args) if args.command == Some(NestedCommand::Help) => Some("dashboard"),
@@ -220,6 +222,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Some(Command::Policy(args)) => policy::run(&loaded.config, args, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
         Some(Command::Explain(args)) => explain::run(&loaded.config, &args.path, cli.json),
+        Some(Command::Watch(args)) => watch::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::History(args)) => history::run(args, cli.json),
         Some(Command::Restore(args)) => restore::run(args, cli.json),
         Some(Command::Duplicates(args)) => {
