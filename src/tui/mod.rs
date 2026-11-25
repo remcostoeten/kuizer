@@ -555,37 +555,9 @@ impl Background {
     }
 }
 
-/// @name run
+/// @name run_with_config
 /// @description Runs the interactive interface: streams scan results into a selectable list
 /// and deletes confirmed selections on a background thread through the delete guard.
-///
-/// @example
-/// tui::run(&config, &roots, false)?;
-pub fn run(config: &Config, roots: &[PathBuf], confirm: bool) -> std::io::Result<()> {
-    run_with_notice(config, roots, confirm, None)
-}
-
-/// @name run_with_notice
-/// @description Like `run`, and shows `notice` in the footer until the first key press, for
-/// problems found before the interface opened such as ignored config settings.
-///
-/// @example
-/// tui::run_with_notice(&config, &roots, false, Some("config: bad key".to_owned()))?;
-pub fn run_with_notice(
-    config: &Config,
-    roots: &[PathBuf],
-    confirm: bool,
-    notice: Option<String>,
-) -> std::io::Result<()> {
-    run_with_config(
-        config,
-        roots,
-        confirm,
-        notice,
-        crate::config::default_path(),
-    )
-}
-
 pub(crate) fn run_with_config(
     config: &Config,
     roots: &[PathBuf],

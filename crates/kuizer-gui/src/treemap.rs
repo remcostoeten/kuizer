@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use kuizer::detect::{Category, Safety};
-use kuizer::output::display_path;
+use kuizer::platform::display_path;
 
 use crate::model::Source;
 

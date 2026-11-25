@@ -9,7 +9,7 @@ use crate::protect::Protected;
 use crate::scan::{self, Cancel, Candidate};
 use crate::source::Source;
 
-pub use crate::caches::{measure, measure_threaded, measure_with};
+pub(crate) use crate::caches::measure_threaded;
 
 pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Result<(), AppError> {
     let json = format != Format::Text;
@@ -60,7 +60,7 @@ pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caches::KnownCache;
+    use crate::caches::{KnownCache, measure_with};
     use crate::detect::Safety;
 
     #[test]

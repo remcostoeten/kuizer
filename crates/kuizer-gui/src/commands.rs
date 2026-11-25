@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use gpui::{App, KeyBinding, Keystroke, SharedString, actions};
 use kuizer::keymap::{Action, Keymap, Modifiers, Overrides, Scope, Stroke};
-use kuizer::output::display_path;
+use kuizer::platform::display_path;
 
 use crate::squarify::Direction;
 use crate::tab::Tab;

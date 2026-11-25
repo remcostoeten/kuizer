@@ -16,10 +16,7 @@ fn root(tmp: &TempDir) -> PathBuf {
 
 fn target(path: &Path) -> Target {
     let metadata = fs::symlink_metadata(path).unwrap();
-    Target {
-        path: path.to_path_buf(),
-        identity: Some((metadata.dev(), metadata.ino())),
-    }
+    Target::new(path.to_path_buf(), Some((metadata.dev(), metadata.ino())))
 }
 
 fn guard(root: &Path) -> Guard {
@@ -148,10 +145,7 @@ fn refuses_a_parent_of_the_working_directory() {
 fn missing_targets_are_reported() {
     let tmp = TempDir::new().unwrap();
     let root = root(&tmp);
-    let gone = Target {
-        path: root.join("web/node_modules"),
-        identity: None,
-    };
+    let gone = Target::new(root.join("web/node_modules"), None);
     assert_eq!(
         refusal(delete(&guard(&root), &gone, Mode::Permanent)),
         Refusal::Missing

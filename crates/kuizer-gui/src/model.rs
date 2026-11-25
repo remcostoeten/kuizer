@@ -11,14 +11,13 @@ pub use kuizer::source::Source;
 
 use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::config::{Config, DeleteConfig, DeleteMode};
-use kuizer::delete::{self, Executor, Removal, Status};
+use kuizer::delete::{Executor, Removal, Status};
 use kuizer::detect::Category;
 use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
 use kuizer::history::restore::Status as RestoreStatus;
 use kuizer::history::{self, Action, History, TrashSnapshot, TrashView};
-use kuizer::output::display_path;
-use kuizer::platform;
+use kuizer::platform::{self, display_path};
 use kuizer::protect::Protected;
 use kuizer::repos::{self, Repository};
 use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, SortKey, Summary, sort_candidates};
@@ -909,7 +908,7 @@ pub fn clean(
     roots.sort();
     roots.dedup();
     let executor = Executor::new(&roots, delete).with_engines(engines);
-    let report = executor.run(batches, delete.mode.into(), delete::workers(), |_, _| {});
+    let report = executor.run(batches, delete.mode.into(), |_, _| {});
     let (view, history_error) = match (executor.finish(), history) {
         (Ok(runs), Some((history, mut trash))) => {
             let mut history = std::sync::Arc::unwrap_or_clone(history);

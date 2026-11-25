@@ -12,7 +12,7 @@ pub use pins::{Pin, PinFinder};
 use crate::config::{Config, Excludes};
 use crate::delete::{self, DeleteError, Guard, Mode, Target};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
-use crate::output::display_path;
+use crate::platform::display_path;
 use crate::process;
 use crate::scan::{self, Cancel, Candidate, Usage};
 use crate::source::Source;
@@ -595,7 +595,7 @@ pub fn remove(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), De
     let mode = Source::Toolchain.mode(mode);
     match tool.uninstaller() {
         Some(program) => {
-            guard.check(&target.path, target.identity)?;
+            guard.check(target.path(), target.identity())?;
             if mode == Mode::DryRun {
                 return Ok(());
             }

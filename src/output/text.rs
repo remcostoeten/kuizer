@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
 use super::style::{bold, dim};
 use crate::caches::KnownCache;
@@ -14,38 +13,13 @@ use crate::scan::{Candidate, Issue, Progress, Summary};
 use crate::toolchains::Toolchain;
 use crate::units::{ByteSize, age};
 
+pub use crate::platform::display_path;
+
 const MAX_ISSUES: usize = 10;
 const LARGEST: usize = 10;
 
-fn home() -> Option<&'static Path> {
-    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
-    HOME.get_or_init(platform::home_dir).as_deref()
-}
-
-fn push_sanitized(out: &mut String, text: &str) {
-    out.extend(text.chars().map(|c| if c.is_control() { '?' } else { c }));
-}
-
 fn sanitize(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    push_sanitized(&mut out, text);
-    out
-}
-
-pub fn display_path(path: &Path) -> String {
-    let mut display = String::with_capacity(path.as_os_str().len() + 2);
-    let rest = match home().and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) => {
-            display.push('~');
-            if !rest.as_os_str().is_empty() {
-                display.push('/');
-            }
-            rest
-        }
-        None => path,
-    };
-    push_sanitized(&mut display, &rest.to_string_lossy());
-    display
+    platform::sanitize_text(text)
 }
 
 pub fn print_progress(progress: Progress) {
@@ -636,6 +610,7 @@ pub fn print_docker(entries: &[(Item, Candidate)], issues: &[String], quiet: boo
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::*;

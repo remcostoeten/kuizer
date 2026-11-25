@@ -21,8 +21,7 @@ use kuizer::detect::{Category, Safety};
 use kuizer::dupes::{self, Duplicates};
 use kuizer::history::Action;
 use kuizer::keymap::{Action as Key, Keymap, Scope};
-use kuizer::output::display_path;
-use kuizer::platform;
+use kuizer::platform::{self, display_path};
 use kuizer::scan::{self, Cancel, Candidate};
 
 use crate::activity::{self, Activity, State, Step, Tracker, plural};

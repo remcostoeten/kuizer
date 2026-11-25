@@ -281,14 +281,23 @@ impl Executor {
     }
 
     /// @name Executor::run
-    /// @description Removes every item of `batches` in `mode` on up to `workers` threads, each
-    /// batch against a guard over its own roots. Calls `on_removal` as each item finishes and
-    /// returns the removals in the order the items were given. Nested paths never run at the
-    /// same time, and toolchains and Docker objects go one at a time.
+    /// @description Removes every item of `batches` in `mode`, each batch against a guard over its
+    /// own roots. Calls `on_removal` as each item finishes and returns the removals in the order
+    /// the items were given. Nested paths never run at the same time, and toolchains and Docker
+    /// objects go one at a time.
     ///
     /// @example
-    /// let report = executor.run(batches, Mode::Trash, delete::workers(), |_, removal| show(removal));
+    /// let report = executor.run(batches, Mode::Trash, |_, removal| show(removal));
     pub fn run(
+        &self,
+        batches: Vec<Batch>,
+        mode: Mode,
+        on_removal: impl Fn(Source, &Removal) + Sync,
+    ) -> Report {
+        self.run_with_workers(batches, mode, super::workers(), on_removal)
+    }
+
+    pub(crate) fn run_with_workers(
         &self,
         batches: Vec<Batch>,
         mode: Mode,
@@ -362,7 +371,8 @@ impl Executor {
     ///
     /// @example
     /// executor.serve(&guard, &jobs, delete::workers(), |mode, removal| results.send((mode, removal)).is_ok());
-    pub fn serve(
+    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
+    pub(crate) fn serve(
         &self,
         guard: &Guard,
         jobs: &Receiver<Job>,
@@ -469,7 +479,7 @@ mod tests {
             candidates: candidates.clone(),
         };
 
-        let report = executor.run(vec![batch], Mode::Permanent, 2, |_, _| {});
+        let report = executor.run_with_workers(vec![batch], Mode::Permanent, 2, |_, _| {});
         executor.finish().unwrap();
 
         let statuses: Vec<Status> = report
@@ -500,7 +510,7 @@ mod tests {
                 roots: vec![root.clone()],
                 candidates,
             };
-            executor.run(vec![batch], Mode::Permanent, 1, |_, _| {});
+            executor.run_with_workers(vec![batch], Mode::Permanent, 1, |_, _| {});
             executor.finish().unwrap()
         };
 
@@ -531,7 +541,7 @@ mod tests {
             candidates: candidates.clone(),
         };
 
-        let report = executor.run(vec![batch], Mode::Permanent, 2, |_, _| {});
+        let report = executor.run_with_workers(vec![batch], Mode::Permanent, 2, |_, _| {});
         let single = executor.remove(
             &executor.guard(&[root]),
             Source::Artifact,

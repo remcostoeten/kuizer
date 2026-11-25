@@ -135,6 +135,48 @@ pub fn home_dir() -> Option<PathBuf> {
         .clone()
 }
 
+/// @name sanitize_text
+/// @description Replaces control characters with `?` so untrusted paths or tool errors cannot
+/// inject terminal escapes or broken lines.
+///
+/// @example
+/// assert_eq!(platform::sanitize_text("ok\x1b[31m"), "ok?[31m");
+pub fn sanitize_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    out.extend(text.chars().map(|c| if c.is_control() { '?' } else { c }));
+    out
+}
+
+/// @name display_path
+/// @description Formats a path for display: replaces the home directory prefix with `~` and
+/// escapes control characters.
+///
+/// @example
+/// let shown = platform::display_path(Path::new("/tmp/project"));
+pub fn display_path(path: &Path) -> String {
+    let mut display = String::with_capacity(path.as_os_str().len() + 2);
+    let home = home_dir();
+    let rest = match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) => {
+            display.push('~');
+            if !rest.as_os_str().is_empty() {
+                display.push('/');
+            }
+            rest
+        }
+        None => path,
+    };
+    display.extend(
+        rest.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c }),
+    );
+    display
+}
+
 /// @name rotational
 /// @description Returns whether `device` is a spinning disk, read from sysfs on Linux, so a
 /// scan can stay sequential where parallel reads would only add seeks. Anonymous devices, such

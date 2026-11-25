@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::{Action, Entry, History, HistoryError, Restored, Run, TrashRecord, TrashView};
 use crate::delete::Mode;
-use crate::output;
+use crate::platform;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -174,12 +174,12 @@ fn blocked(path: &Path) -> Option<String> {
     if path.symlink_metadata().is_ok() {
         return Some(format!(
             "{} exists, not overwriting",
-            output::display_path(path)
+            platform::display_path(path)
         ));
     }
     path.parent()
         .filter(|parent| !parent.is_dir())
-        .map(|parent| format!("{} no longer exists", output::display_path(parent)))
+        .map(|parent| format!("{} no longer exists", platform::display_path(parent)))
 }
 
 /// @name restore_with

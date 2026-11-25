@@ -7,7 +7,7 @@ use super::interrupt::Interrupt;
 use super::sort_candidates;
 use crate::cli::{Format, RemovalArgs, Selection, SortKey};
 use crate::config::{Config, DeleteConfig};
-use crate::delete::{self, Batch, Confirmation, Executor, Mode, Removal, Risk, Status, confirm};
+use crate::delete::{Batch, Confirmation, Executor, Mode, Removal, Risk, Status, confirm};
 use crate::detect::Safety;
 use crate::output;
 use crate::scan::{Candidate, Issue};
@@ -208,7 +208,7 @@ pub fn run(
         candidates,
     };
     let unwritten: Mutex<Option<AppError>> = Mutex::new(None);
-    let report = executor.run(vec![batch], mode, delete::workers(), |_, removal| {
+    let report = executor.run(vec![batch], mode, |_, removal| {
         match request.format {
             Format::Text => output::print_removal(removal),
             Format::Json => {}

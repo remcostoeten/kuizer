@@ -9,7 +9,7 @@ use gpui::{
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Styled, Task, Window,
     anchored, canvas, deferred, div, point, prelude::*,
 };
-use kuizer::output::display_path;
+use kuizer::platform::display_path;
 
 use crate::glossary::Term;
 use crate::motion;

@@ -75,8 +75,22 @@ pub struct Removal {
 
 #[derive(Debug, Clone)]
 pub struct Target {
-    pub path: PathBuf,
-    pub identity: Option<(u64, u64)>,
+    path: PathBuf,
+    identity: Option<(u64, u64)>,
+}
+
+impl Target {
+    pub fn new(path: PathBuf, identity: Option<(u64, u64)>) -> Self {
+        Self { path, identity }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn identity(&self) -> Option<(u64, u64)> {
+        self.identity
+    }
 }
 
 impl From<&crate::scan::Candidate> for Target {
@@ -94,7 +108,7 @@ impl From<&crate::scan::Candidate> for Target {
 ///
 /// @example
 /// let threads = delete::workers();
-pub fn workers() -> usize {
+pub(crate) fn workers() -> usize {
     thread::available_parallelism()
         .map_or(1, NonZero::get)
         .min(4)
@@ -118,12 +132,12 @@ fn remove(path: &Path, _identity: Option<(u64, u64)>, _cross_device: bool) -> st
 /// Serializes removals of paths that contain one another, so two workers never fight over a
 /// folder and something inside it.
 #[derive(Default)]
-pub struct Lanes {
+pub(crate) struct Lanes {
     active: Mutex<Vec<PathBuf>>,
     freed: Condvar,
 }
 
-pub struct Lane<'a> {
+pub(crate) struct Lane<'a> {
     lanes: &'a Lanes,
     path: PathBuf,
 }
@@ -136,7 +150,7 @@ impl Lanes {
     /// @example
     /// let _lane = lanes.claim(&target.path);
     /// delete(&guard, &target, mode)?;
-    pub fn claim(&self, path: &Path) -> Lane<'_> {
+    pub(crate) fn claim(&self, path: &Path) -> Lane<'_> {
         let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         while active
             .iter()

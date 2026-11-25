@@ -4,8 +4,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use kuizer::config::Config;
-use kuizer::output::display_path;
 use kuizer::platform;
+use kuizer::platform::display_path;
 pub use kuizer::scan::ScanOptions;
 
 use crate::persist;
