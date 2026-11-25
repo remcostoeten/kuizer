@@ -31,6 +31,7 @@ impl Kuizer {
                     .child(self.overview_switch(cx)),
             )
             .child(overview_hero(report, figures))
+            .children(self.overview_growth(report))
             .child(self.overview_wins(report, cx))
             .child(self.overview_sections(cx))
             .child(
@@ -245,6 +246,92 @@ impl Kuizer {
             .id(("win", index))
             .tip(tooltip::path(&candidate.path))
         }))
+    }
+
+    /// What grew since the previous scan of the same folder, grouped per project.
+    fn overview_growth(&self, report: &Report) -> Option<Div> {
+        let (since, diff) = self.session.growth.as_ref()?;
+        let grown: Vec<&scan::ProjectGrowth> = diff.grown_projects().collect();
+        if grown.is_empty() {
+            return None;
+        }
+        let added: u64 = grown
+            .iter()
+            .map(|project| u64::try_from(project.delta_bytes).unwrap_or(0))
+            .sum();
+        let largest = grown
+            .first()
+            .and_then(|project| u64::try_from(project.delta_bytes).ok())
+            .unwrap_or(0);
+        let compared = snapshot::age_label(*since, report.scanned).to_lowercase();
+        let net = match diff.delta_bytes {
+            delta if delta > 0 && u64::try_from(delta).ok() != Some(added) => {
+                format!(" · net +{}", theme::bytes(delta as u64))
+            }
+            delta if delta < 0 => {
+                format!(" · net -{}", theme::bytes(delta.unsigned_abs()))
+            }
+            _ => String::new(),
+        };
+        let subtitle = format!(
+            "in {} · compared to previous scan ({compared}){net}",
+            plural(grown.len(), "project"),
+        );
+        Some(
+            ui::card("Grew since last scan")
+                .debug_selector(|| "overview-growth".to_owned())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(unit(space::XXS))
+                        .child(ui::tabular(
+                            div()
+                                .text_size(unit(font::HEADING))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::review())
+                                .child(format!("+{}", theme::bytes(added))),
+                        ))
+                        .child(
+                            div()
+                                .text_size(unit(font::SMALL))
+                                .text_color(theme::faint())
+                                .child(subtitle),
+                        ),
+                )
+                .children(
+                    grown
+                        .into_iter()
+                        .take(8)
+                        .enumerate()
+                        .map(|(index, project)| {
+                            let delta = u64::try_from(project.delta_bytes).unwrap_or(0);
+                            let name = model::short_path(&project.project, &report.roots);
+                            let mut tip = Tooltip::details(name.clone())
+                                .row("Previous", theme::bytes(project.previous_bytes))
+                                .row("Now", theme::bytes(project.current_bytes))
+                                .row("Grew", format!("+{}", theme::bytes(delta)));
+                            for (path, item_delta) in project.grown_paths.iter().take(4) {
+                                let item_bytes = u64::try_from(*item_delta).unwrap_or(0);
+                                let item_name = path
+                                    .strip_prefix(&project.project)
+                                    .ok()
+                                    .filter(|rel| !rel.as_os_str().is_empty())
+                                    .map(|rel| rel.display().to_string())
+                                    .unwrap_or_else(|| model::short_path(path, &report.roots));
+                                tip = tip.row(item_name, format!("+{}", theme::bytes(item_bytes)));
+                            }
+                            ui::bar_row(
+                                name,
+                                format!("+{}", theme::bytes(delta)),
+                                theme::share(delta, largest),
+                                theme::review(),
+                            )
+                            .id(("growth", index))
+                            .tip(tip.build())
+                        }),
+                ),
+        )
     }
 
     /// The sections that can free space, largest share first to read, each a way into its list.

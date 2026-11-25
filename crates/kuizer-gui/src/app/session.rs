@@ -4,10 +4,22 @@ impl Kuizer {
     pub(super) fn rescan(&mut self, cx: &mut Context<Self>) {
         let shown = if let Phase::Ready(report) = &self.session.phase {
             self.session.stale = Some(report.scanned);
+            if report.roots == self.session.roots {
+                self.session.previous_scan = Some(PreviousScan {
+                    scanned: report.scanned,
+                    roots: report.roots.clone(),
+                    entries: snapshot_entries(report),
+                });
+            } else {
+                self.session.previous_scan = None;
+                self.session.growth = None;
+            }
             true
         } else {
             self.set_phase(Phase::Loading(Box::default()), cx);
             self.session.stale = None;
+            self.session.previous_scan = None;
+            self.session.growth = None;
             self.list.selection.clear();
             self.list.rows.clear();
             false
@@ -98,6 +110,13 @@ impl Kuizer {
                     if !self.session.gone.is_empty() {
                         report.remove(&self.session.gone);
                     }
+                    if self.session.previous_scan.is_none() && report.roots == self.session.roots {
+                        self.session.previous_scan = Some(PreviousScan {
+                            scanned: report.scanned,
+                            roots: report.roots.clone(),
+                            entries: snapshot_entries(&report),
+                        });
+                    }
                     if self.session.cancel.is_some() && self.cached(*report, &mut dropped) {
                         rows = true;
                         map = true;
@@ -128,6 +147,30 @@ impl Kuizer {
                     if let Phase::Ready(report) = &mut self.session.phase {
                         report.scanned = scanned;
                     }
+                    self.session.growth = self.session.previous_scan.take().and_then(|previous| {
+                        let Phase::Ready(report) = &self.session.phase else {
+                            return None;
+                        };
+                        if previous.roots != report.roots {
+                            return None;
+                        }
+                        let diff = scan::diff_entries(
+                            previous.entries.iter().map(|(path, project, bytes)| {
+                                (path.as_path(), project.as_path(), *bytes)
+                            }),
+                            report.candidates.iter().map(|candidate| {
+                                (
+                                    candidate.path.as_path(),
+                                    candidate
+                                        .project
+                                        .as_deref()
+                                        .unwrap_or(candidate.path.as_path()),
+                                    candidate.usage.allocated,
+                                )
+                            }),
+                        );
+                        Some((previous.scanned, diff))
+                    });
                     self.scan_over();
                     rows = true;
                     map = true;
@@ -407,6 +450,21 @@ pub(super) fn spawn_worker<T: Send + 'static>(
     Ok(receiver)
 }
 
+fn snapshot_entries(report: &Report) -> Vec<(PathBuf, PathBuf, u64)> {
+    report
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let project = candidate
+                .project
+                .as_deref()
+                .unwrap_or(candidate.path.as_path())
+                .to_path_buf();
+            (candidate.path.clone(), project, candidate.usage.allocated)
+        })
+        .collect()
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the scan thread takes everything it works with by value or reference"
@@ -422,22 +480,25 @@ pub(super) fn scan_parts(
     shown: bool,
     excluded: Vec<PathBuf>,
 ) {
-    if !shown {
+    let snapshot_handle = if !shown {
         let (snapshots, roots, options, sender) = (
             snapshots.clone(),
             roots.to_vec(),
             options.clone(),
             sender.clone(),
         );
-        let _ = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("kuizer-gui-snapshot".to_owned())
             .spawn(move || {
                 if let Some(mut report) = snapshot::load(&snapshots, &roots, &options) {
                     report.drop_paths(&excluded);
                     let _ = sender.unbounded_send(Update::Cached(Box::new(report)));
                 }
-            });
-    }
+            })
+            .ok()
+    } else {
+        None
+    };
     let tracker = {
         let sender = sender.clone();
         Tracker::new(move |activity| {
@@ -451,6 +512,9 @@ pub(super) fn scan_parts(
     });
     let scanned = SystemTime::now();
     let finished = result.is_ok();
+    if finished && let Some(handle) = snapshot_handle {
+        let _ = handle.join();
+    }
     let _ = sender.unbounded_send(Update::Done(result.map(|()| scanned)));
     if finished {
         recorder.save(snapshots, scanned);

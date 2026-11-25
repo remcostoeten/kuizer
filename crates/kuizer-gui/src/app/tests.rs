@@ -1994,3 +1994,94 @@ fn paths_excluded_while_saved_results_load_stay_out(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn rescan_shows_project_growth_since_previous_scan(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = project(dir.path());
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_scan(&view, cx);
+    cx.update(|window, cx| window.draw(cx).clear());
+
+    view.read_with(cx, |app, _| {
+        assert!(
+            app.session.growth.is_none(),
+            "first scan of a folder has no previous scan to compare against"
+        );
+    });
+    assert!(cx.debug_bounds("overview-growth").is_none());
+
+    // Grow the project's artifact and rescan in place.
+    std::fs::write(
+        root.join("site")
+            .join("node_modules")
+            .join("left-pad")
+            .join("extra.js"),
+        vec![b'y'; 128 * 1024],
+    )
+    .unwrap();
+    view.update(cx, |app, cx| app.rescan(cx));
+    wait_for_refresh(&view, cx);
+    cx.update(|window, cx| window.draw(cx).clear());
+
+    let canonical_site = std::fs::canonicalize(root.join("site")).unwrap();
+    view.read_with(cx, |app, _| {
+        let (_, diff) = app
+            .session
+            .growth
+            .as_ref()
+            .expect("rescan should compute growth against previous scan");
+        let grown: Vec<_> = diff.grown_projects().collect();
+        assert_eq!(grown.len(), 1);
+        assert_eq!(grown[0].project, canonical_site);
+        assert!(
+            grown[0].delta_bytes >= 64 * 1024,
+            "expected substantial growth, got {}",
+            grown[0].delta_bytes
+        );
+    });
+    assert!(
+        cx.debug_bounds("overview-growth").is_some(),
+        "overview should render the Grew since last scan card"
+    );
+}
+
+#[gpui::test]
+fn rescanning_saved_folder_from_start_shows_project_growth(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = project(dir.path());
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_scan(&view, cx);
+    wait_for_saved(dir.path());
+
+    std::fs::write(
+        root.join("site")
+            .join("node_modules")
+            .join("left-pad")
+            .join("bundle.js"),
+        vec![b'z'; 128 * 1024],
+    )
+    .unwrap();
+
+    scan_again_from_the_start(&view, cx);
+    wait_for_scan(&view, cx);
+    cx.update(|window, cx| window.draw(cx).clear());
+
+    let canonical_site = std::fs::canonicalize(root.join("site")).unwrap();
+    view.read_with(cx, |app, _| {
+        let (_, diff) = app
+            .session
+            .growth
+            .as_ref()
+            .expect("scanning a folder with a saved snapshot should compute growth");
+        let grown: Vec<_> = diff.grown_projects().collect();
+        assert_eq!(grown.len(), 1);
+        assert_eq!(grown[0].project, canonical_site);
+        assert!(grown[0].delta_bytes > 0);
+    });
+    assert!(cx.debug_bounds("overview-growth").is_some());
+}

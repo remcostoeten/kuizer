@@ -311,6 +311,14 @@ struct StartForm {
     scroll: ScrollHandle,
 }
 
+/// Minimal summary of the previous scan's artifact sizes, kept so the finished scan can show
+/// what grew per project without re-reading the snapshot from disk.
+struct PreviousScan {
+    scanned: SystemTime,
+    roots: Vec<PathBuf>,
+    entries: Vec<(PathBuf, PathBuf, u64)>,
+}
+
 /// Active scan, loaded report, background jobs, and cleanup / git tasks.
 struct ScanSession {
     roots: Vec<PathBuf>,
@@ -319,6 +327,8 @@ struct ScanSession {
     forgotten: Forgotten,
     phase: Phase,
     stale: Option<SystemTime>,
+    previous_scan: Option<PreviousScan>,
+    growth: Option<(SystemTime, scan::ScanDiff)>,
     pending: HashSet<Part>,
     early: Vec<Loaded>,
     streamed: bool,
@@ -465,6 +475,8 @@ impl Kuizer {
                 forgotten: Forgotten::default(),
                 phase: Phase::Start,
                 stale: None,
+                previous_scan: None,
+                growth: None,
                 pending: HashSet::new(),
                 early: Vec::new(),
                 streamed: false,

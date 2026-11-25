@@ -489,6 +489,8 @@ impl Kuizer {
         }
         self.list.selection.clear();
         self.list.rows.clear();
+        self.session.previous_scan = None;
+        self.session.growth = None;
         self.overlays.toast = None;
         self.set_phase(Phase::Start, cx);
         cx.notify();
