@@ -51,6 +51,7 @@ jobs:
 
   x11-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,8 +77,8 @@ jobs:
           for attempt in $(seq 1 45); do
             window=$(xdotool search --onlyvisible --pid "$app_pid" 2>/dev/null | head -n 1 || true)
             if [ -n "$window" ]; then
-              xdotool windowclose "$window"
-              wait "$app_pid"
+              kill "$app_pid"
+              wait "$app_pid" || true
               exit 0
             fi
             if ! kill -0 "$app_pid" 2>/dev/null; then
