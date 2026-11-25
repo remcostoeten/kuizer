@@ -56,6 +56,7 @@ impl Safety {
 pub enum Kind {
     Dir,
     File,
+    Symlink,
     External,
 }
 

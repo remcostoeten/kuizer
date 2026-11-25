@@ -77,11 +77,16 @@ pub struct Removal {
 pub struct Target {
     path: PathBuf,
     identity: Option<(u64, u64)>,
+    allow_symlink: bool,
 }
 
 impl Target {
     pub fn new(path: PathBuf, identity: Option<(u64, u64)>) -> Self {
-        Self { path, identity }
+        Self {
+            path,
+            identity,
+            allow_symlink: false,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -91,6 +96,10 @@ impl Target {
     pub fn identity(&self) -> Option<(u64, u64)> {
         self.identity
     }
+
+    pub(crate) fn allow_symlink(&self) -> bool {
+        self.allow_symlink
+    }
 }
 
 impl From<&crate::scan::Candidate> for Target {
@@ -98,6 +107,7 @@ impl From<&crate::scan::Candidate> for Target {
         Self {
             path: candidate.path.clone(),
             identity: candidate.identity,
+            allow_symlink: candidate.kind == crate::detect::Kind::Symlink,
         }
     }
 }
@@ -191,7 +201,7 @@ impl Drop for Lane<'_> {
 /// let guard = Guard::new(&roots);
 /// delete(&guard, &target, Mode::Trash)?;
 pub fn delete(guard: &Guard, target: &Target, mode: Mode) -> Result<(), DeleteError> {
-    guard.check(&target.path, target.identity)?;
+    guard.check_target(target)?;
     if mode != Mode::DryRun {
         writable(&target.path, mode)?;
     }
@@ -330,10 +340,10 @@ mod tests {
         std::fs::write(locked.join("pkg/index.js"), "x").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
         let guard = Guard::new(&[base.path().to_path_buf()]).with_cwd(None);
-        let target = Target {
-            path: locked.clone(),
-            identity: crate::platform::identity(&std::fs::symlink_metadata(&locked).unwrap()),
-        };
+        let target = Target::new(
+            locked.clone(),
+            crate::platform::identity(&std::fs::symlink_metadata(&locked).unwrap()),
+        );
 
         let outcome = delete(&guard, &target, Mode::Permanent);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();

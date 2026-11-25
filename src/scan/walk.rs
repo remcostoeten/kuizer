@@ -582,7 +582,29 @@ impl<'a> Context<'a> {
         for entry in entries.iter() {
             let name = name_of(names, entry);
             match entry.kind {
-                EntryKind::Symlink | EntryKind::Unknown => {}
+                EntryKind::Unknown => {}
+                EntryKind::Symlink => {
+                    if self.excludes.name(name) {
+                        continue;
+                    }
+                    let path = pending.path.join(name);
+                    if self.excludes.full_path(&path) {
+                        continue;
+                    }
+                    if let Some(rule) = self.detector.classify_symlink(&path, &own)
+                        && self.detector.reports(&rule)
+                        && let Flow::Stop = self.emit(
+                            visitor,
+                            Found {
+                                path,
+                                kind: Kind::Symlink,
+                                rule,
+                            },
+                        )
+                    {
+                        return Flow::Stop;
+                    }
+                }
                 EntryKind::Dir => {
                     if name == GIT_DIR {
                         visitor.repository(&pending.path);

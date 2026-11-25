@@ -140,6 +140,19 @@ impl Guard {
     }
 
     pub fn check(&self, path: &Path, identity: Option<(u64, u64)>) -> Result<(), Refusal> {
+        self.check_inner(path, identity, false)
+    }
+
+    pub(crate) fn check_target(&self, target: &super::Target) -> Result<(), Refusal> {
+        self.check_inner(target.path(), target.identity(), target.allow_symlink())
+    }
+
+    fn check_inner(
+        &self,
+        path: &Path,
+        identity: Option<(u64, u64)>,
+        allow_symlink: bool,
+    ) -> Result<(), Refusal> {
         self.check_path(path)?;
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -148,8 +161,12 @@ impl Guard {
             }
             Err(error) => return Err(Refusal::Inspect(error.to_string())),
         };
-        if metadata.file_type().is_symlink() {
+        let is_symlink = metadata.file_type().is_symlink();
+        if is_symlink && !allow_symlink {
             return Err(Refusal::Symlink);
+        }
+        if !is_symlink && allow_symlink {
+            return Err(Refusal::Changed);
         }
         if identity.is_none() {
             return Err(Refusal::Unverified);

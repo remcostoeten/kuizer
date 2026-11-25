@@ -33,7 +33,7 @@ pub enum RuleError {
     Duplicate(String),
     #[error("rule `{name}`: `{value}` must be a plain file name, not a path")]
     NotAName { name: String, value: String },
-    #[error("rule `{0}`: kind must be dir or file")]
+    #[error("rule `{0}`: kind must be dir, file or symlink")]
     External(String),
 }
 
@@ -208,6 +208,8 @@ struct Compiled {
     contains: Listing,
     contains_tag: Option<u32>,
     needs_contents: bool,
+    check_stale_venv: bool,
+    check_nix_store: bool,
 }
 
 #[derive(Default)]
@@ -263,6 +265,7 @@ pub struct Detector {
     rules: Vec<Compiled>,
     dirs: Index,
     files: Index,
+    symlinks: Index,
     evidence: Evidence,
     reported: Vec<Category>,
 }
@@ -290,11 +293,58 @@ fn valid_cachedir_tag(dir: &Path) -> bool {
         .is_ok_and(|()| header == CACHEDIR_SIGNATURE)
 }
 
+fn is_nix_store_link(path: &Path) -> bool {
+    std::fs::read_link(path).is_ok_and(|target| target.starts_with("/nix/store"))
+}
+
+fn is_stale_python_venv(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("pyvenv.cfg")) else {
+        return false;
+    };
+    let mut executable: Option<&str> = None;
+    let mut home: Option<&str> = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if key == "executable" {
+            executable = Some(value);
+        } else if key == "home" {
+            home = Some(value);
+        }
+    }
+    if let Some(exec) = executable {
+        if !Path::new(exec).exists() {
+            return true;
+        }
+    } else if let Some(home_dir) = home
+        && !Path::new(home_dir).is_dir()
+    {
+        return true;
+    }
+    for rel in ["bin/python", "bin/python3", "Scripts/python.exe"] {
+        let candidate = dir.join(rel);
+        if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::metadata(&candidate)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 impl Detector {
     pub fn new(specs: &[RuleSpec]) -> Result<Self, RuleError> {
         let mut rules = Vec::with_capacity(specs.len());
         let mut dirs = Index::default();
         let mut files = Index::default();
+        let mut symlinks = Index::default();
         let mut evidence = Evidence::default();
         let mut seen = HashSet::new();
 
@@ -314,6 +364,7 @@ impl Detector {
             let target = match spec.kind {
                 Kind::Dir => &mut dirs,
                 Kind::File => &mut files,
+                Kind::Symlink => &mut symlinks,
                 Kind::External => return Err(RuleError::External(spec.name.clone())),
             };
             if has_glob_meta(&spec.pattern) {
@@ -356,6 +407,8 @@ impl Detector {
                 contains,
                 contains_tag,
                 needs_contents: !spec.contains.is_empty(),
+                check_stale_venv: spec.name == "python-venv-stale",
+                check_nix_store: spec.name == "nix-result",
             });
         }
 
@@ -363,6 +416,7 @@ impl Detector {
             rules,
             dirs,
             files,
+            symlinks,
             evidence,
             reported: Category::ALL.to_vec(),
         };
@@ -460,7 +514,9 @@ impl Detector {
                 || rule
                     .contains_tag
                     .is_some_and(|bit| own.get(bit) && valid_cachedir_tag(path));
-            (contained && Self::markers_match(rule, parent)).then(|| Arc::clone(&rule.info))
+            let extra = !rule.check_stale_venv || is_stale_python_venv(path);
+            (contained && extra && Self::markers_match(rule, parent))
+                .then(|| Arc::clone(&rule.info))
         })
     }
 
@@ -471,6 +527,18 @@ impl Detector {
         self.files.find_map(name, |index| {
             let rule = &self.rules[index];
             Self::markers_match(rule, parent).then(|| Arc::clone(&rule.info))
+        })
+    }
+
+    pub fn classify_symlink(&self, path: &Path, parent: &Listing) -> Option<Match> {
+        if self.symlinks.literal.is_empty() && self.symlinks.patterns.is_empty() {
+            return None;
+        }
+        let name = path.file_name()?;
+        self.symlinks.find_map(name, |index| {
+            let rule = &self.rules[index];
+            let extra = !rule.check_nix_store || is_nix_store_link(path);
+            (extra && Self::markers_match(rule, parent)).then(|| Arc::clone(&rule.info))
         })
     }
 }

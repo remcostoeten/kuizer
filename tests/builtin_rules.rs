@@ -11,6 +11,7 @@ use tempfile::TempDir;
 #[derive(Clone, Copy)]
 enum Entry {
     File(&'static str),
+    FileContent(&'static str, &'static str),
     Dir(&'static str),
     ValidCacheTag,
     InvalidCacheTag,
@@ -19,6 +20,7 @@ enum Entry {
 struct Fixture {
     target: &'static str,
     target_kind: Kind,
+    link_target: Option<&'static str>,
     siblings: &'static [Entry],
     contents: &'static [Entry],
 }
@@ -31,6 +33,7 @@ const fn dir(
     Fixture {
         target,
         target_kind: Kind::Dir,
+        link_target: None,
         siblings,
         contents,
     }
@@ -40,6 +43,21 @@ const fn file(target: &'static str, siblings: &'static [Entry]) -> Fixture {
     Fixture {
         target,
         target_kind: Kind::File,
+        link_target: None,
+        siblings,
+        contents: &[],
+    }
+}
+
+const fn symlink(
+    target: &'static str,
+    link_target: &'static str,
+    siblings: &'static [Entry],
+) -> Fixture {
+    Fixture {
+        target,
+        target_kind: Kind::Symlink,
+        link_target: Some(link_target),
         siblings,
         contents: &[],
     }
@@ -628,6 +646,97 @@ const CASES: &[RuleCase] = &[
         ),
     },
     RuleCase {
+        rule: "nx-cache",
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "nx",
+        positive: dir(".nx", &[Entry::File("nx.json")], &[Entry::Dir("cache")]),
+        negative: dir(".nx", &[Entry::File("nx.json")], &[Entry::File("notes.md")]),
+    },
+    RuleCase {
+        rule: "bazel-cache",
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "bazel",
+        positive: dir(".bazel-cache", &[Entry::File("MODULE.bazel")], &[]),
+        negative: dir(".bazel-cache", &[Entry::File("README.md")], &[]),
+    },
+    RuleCase {
+        rule: "deno-cache",
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "deno",
+        positive: dir(".deno", &[Entry::File("deno.json")], &[]),
+        negative: dir(".deno", &[Entry::File("README.md")], &[]),
+    },
+    RuleCase {
+        rule: "bun-cache",
+        category: Category::Cache,
+        safety: Safety::Safe,
+        ecosystem: "bun",
+        positive: dir(".bun", &[Entry::File("bun.lock")], &[]),
+        negative: dir(".bun", &[Entry::File("package.json")], &[]),
+    },
+    RuleCase {
+        rule: "python-venv-stale",
+        category: Category::Dependencies,
+        safety: Safety::Safe,
+        ecosystem: "python",
+        positive: dir(
+            ".venv",
+            &[Entry::File("pyproject.toml")],
+            &[Entry::FileContent(
+                "pyvenv.cfg",
+                "home = /nonexistent/python/bin\n",
+            )],
+        ),
+        negative: dir(
+            ".venv",
+            &[Entry::File("pyproject.toml")],
+            &[Entry::Dir("lib")],
+        ),
+    },
+    RuleCase {
+        rule: "jupyter-checkpoints",
+        category: Category::Temp,
+        safety: Safety::Review,
+        ecosystem: "jupyter",
+        positive: dir(
+            ".ipynb_checkpoints",
+            &[Entry::File("analysis.ipynb")],
+            &[Entry::File("analysis-checkpoint.ipynb")],
+        ),
+        negative: dir(
+            ".ipynb_checkpoints",
+            &[Entry::File("README.md")],
+            &[Entry::File("analysis-checkpoint.ipynb")],
+        ),
+    },
+    RuleCase {
+        rule: "android-cxx",
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "android",
+        positive: dir(".cxx", &[Entry::File("build.gradle.kts")], &[]),
+        negative: dir(".cxx", &[Entry::File("CMakeLists.txt")], &[]),
+    },
+    RuleCase {
+        rule: "nix-result",
+        category: Category::Build,
+        safety: Safety::Safe,
+        ecosystem: "nix",
+        positive: symlink(
+            "result",
+            "/nix/store/00000000000000000000000000000000-demo",
+            &[Entry::File("flake.nix")],
+        ),
+        negative: symlink(
+            "result",
+            "/tmp/not-a-nix-store",
+            &[Entry::File("flake.nix")],
+        ),
+    },
+    RuleCase {
         rule: "cachedir-tag",
         category: Category::Cache,
         safety: Safety::Review,
@@ -641,6 +750,9 @@ fn materialize_entry(dir: &Path, entry: Entry) {
     match entry {
         Entry::File(name) => {
             fs::write(dir.join(name), b"x").expect("write fixture file");
+        }
+        Entry::FileContent(name, content) => {
+            fs::write(dir.join(name), content).expect("write fixture file with content");
         }
         Entry::Dir(name) => {
             fs::create_dir(dir.join(name)).expect("create fixture dir");
@@ -695,7 +807,15 @@ fn classify(detector: &Detector, project_dir: &Path, fixture: &Fixture) -> Optio
             let parent = listing_of(detector, project_dir);
             detector.classify_file(target_path.file_name().expect("target file name"), &parent)
         }
-        Kind::External => unreachable!("built-in rules only use dir or file kinds"),
+        Kind::Symlink => {
+            let link_target = fixture
+                .link_target
+                .expect("symlink fixture must set link_target");
+            std::os::unix::fs::symlink(link_target, &target_path).expect("create target symlink");
+            let parent = listing_of(detector, project_dir);
+            detector.classify_symlink(&target_path, &parent)
+        }
+        Kind::External => unreachable!("built-in rules only use dir, file, or symlink kinds"),
     }
 }
 
@@ -761,4 +881,99 @@ fn every_builtin_rule_has_positive_and_negative_case() {
             negative_hit.as_ref().map(|m| m.name.as_str())
         );
     }
+}
+
+#[test]
+fn stale_and_healthy_python_venvs_classify_distinctly() {
+    let detector = Detector::new(&builtin_rules()).expect("builtin rules");
+    let tmp = TempDir::new().expect("tempdir");
+    let real_bin = tmp.path().join("real-python-bin");
+    fs::create_dir_all(&real_bin).expect("real bin");
+    let real_python = real_bin.join("python3");
+    fs::write(&real_python, b"#!/bin/sh\n").expect("real python");
+
+    let healthy = tmp.path().join("healthy/.venv");
+    fs::create_dir_all(healthy.join("bin")).expect("healthy venv");
+    fs::write(
+        healthy.join("pyvenv.cfg"),
+        format!(
+            "home = {}\nexecutable = {}\n",
+            real_bin.display(),
+            real_python.display()
+        ),
+    )
+    .expect("healthy cfg");
+    std::os::unix::fs::symlink(&real_python, healthy.join("bin/python3")).expect("healthy link");
+
+    let parent = listing_of(&detector, healthy.parent().unwrap());
+    let own = listing_of(&detector, &healthy);
+    let hit = detector
+        .classify_dir(&healthy, &parent, &own)
+        .expect("healthy venv matches");
+    assert_eq!(hit.name, "python-venv");
+    assert_eq!(hit.safety, Safety::Review);
+
+    // Dangling bin/python symlink makes an otherwise-configured venv stale.
+    let broken_link = tmp.path().join("broken-link/.venv");
+    fs::create_dir_all(broken_link.join("bin")).expect("broken venv");
+    fs::write(
+        broken_link.join("pyvenv.cfg"),
+        format!("home = {}\n", real_bin.display()),
+    )
+    .expect("cfg");
+    std::os::unix::fs::symlink("/nonexistent/python3.99", broken_link.join("bin/python"))
+        .expect("dangling link");
+    let hit = detector
+        .classify_dir(
+            &broken_link,
+            &listing_of(&detector, broken_link.parent().unwrap()),
+            &listing_of(&detector, &broken_link),
+        )
+        .expect("stale venv matches");
+    assert_eq!(hit.name, "python-venv-stale");
+    assert_eq!(hit.safety, Safety::Safe);
+}
+
+#[test]
+fn nix_result_symlink_scans_and_deletes_safely() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = fs::canonicalize(tmp.path()).expect("canonical root");
+    let project = root.join("flake-app");
+    fs::create_dir_all(&project).expect("project dir");
+    fs::write(project.join("flake.nix"), "{ }\n").expect("flake.nix");
+    let nix_link = project.join("result");
+    std::os::unix::fs::symlink("/nix/store/11111111111111111111111111111111-app", &nix_link)
+        .expect("nix symlink");
+    let other_link = project.join("result-other");
+    std::os::unix::fs::symlink(root.join("outside"), &other_link).expect("non-nix symlink");
+
+    let config = kuizer::config::Config::default();
+    let handle = kuizer::scan::start(
+        &config,
+        std::slice::from_ref(&root),
+        kuizer::scan::Cancel::new(),
+    )
+    .expect("scan starts");
+    let report = kuizer::scan::collect(&handle, |_| {});
+    assert_eq!(report.candidates.len(), 1);
+    let cand = &report.candidates[0];
+    assert_eq!(cand.path, nix_link);
+    assert_eq!(cand.kind, Kind::Symlink);
+    assert_eq!(cand.rule.name, "nix-result");
+
+    // Deleting via Guard + Target removes the Nix symlink safely.
+    let guard = kuizer::delete::Guard::new(std::slice::from_ref(&root)).with_cwd(None);
+    let target = kuizer::delete::Target::from(cand);
+    kuizer::delete::delete(&guard, &target, kuizer::delete::Mode::Permanent)
+        .expect("nix result symlink deleted");
+    assert!(fs::symlink_metadata(&nix_link).is_err());
+
+    // A regular non-symlink Target pointing at a symlink is still refused.
+    let swapped = kuizer::delete::Target::new(other_link.clone(), Some((0, 0)));
+    let err = kuizer::delete::delete(&guard, &swapped, kuizer::delete::Mode::Permanent)
+        .expect_err("non-symlink target pointing at symlink must be refused");
+    assert!(matches!(
+        err,
+        kuizer::delete::DeleteError::Refused(kuizer::delete::Refusal::Symlink)
+    ));
 }

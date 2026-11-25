@@ -9,17 +9,18 @@ pub fn run(config: &Config, json: bool) -> Result<(), AppError> {
         return Ok(());
     }
     println!(
-        "{:<22}  {:<4}  {:<14}  {:<12}  {:<6}  {:<28}  CONTAINS",
+        "{:<22}  {:<7}  {:<14}  {:<12}  {:<6}  {:<28}  CONTAINS",
         "NAME", "KIND", "PATTERN", "CATEGORY", "SAFETY", "MARKERS"
     );
     for spec in specs {
         let kind = match spec.kind {
             Kind::Dir => "dir",
             Kind::File => "file",
+            Kind::Symlink => "symlink",
             Kind::External => "external",
         };
         println!(
-            "{:<22}  {:<4}  {:<14}  {:<12}  {:<6}  {:<28}  {}",
+            "{:<22}  {:<7}  {:<14}  {:<12}  {:<6}  {:<28}  {}",
             spec.name,
             kind,
             spec.pattern,

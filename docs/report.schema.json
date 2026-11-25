@@ -49,7 +49,7 @@
         "id": {"$ref": "#/$defs/count", "description": "Numeric identifier within this report."},
         "source": {"enum": ["projects", "cache", "toolchain", "docker"]},
         "path": {"type": "string", "description": "Filesystem path or an engine object locator."},
-        "kind": {"enum": ["dir", "file", "external"]},
+        "kind": {"enum": ["dir", "file", "symlink", "external"]},
         "rule": {"type": "string"},
         "category": {"enum": ["dependencies", "build", "cache", "temp"]},
         "safety": {"enum": ["safe", "review"]},

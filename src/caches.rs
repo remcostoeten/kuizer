@@ -15,6 +15,10 @@ enum Base {
     GoModules,
     Gradle,
     Bun,
+    Android,
+    AndroidAvd,
+    HuggingFace,
+    Ollama,
 }
 
 struct Spec {
@@ -254,10 +258,18 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "huggingface",
         tool: "huggingface",
-        base: Base::Cache,
-        relative: "huggingface",
+        base: Base::HuggingFace,
+        relative: "",
         safety: Safety::Review,
         note: "downloaded models and datasets",
+    },
+    Spec {
+        name: "ollama",
+        tool: "ollama",
+        base: Base::Ollama,
+        relative: "",
+        safety: Safety::Review,
+        note: "downloaded Ollama models; `ollama rm <model>` removes individual models",
     },
     Spec {
         name: "bazel",
@@ -266,6 +278,46 @@ const SPECS: &[Spec] = &[
         relative: "bazel",
         safety: Safety::Review,
         note: "",
+    },
+    Spec {
+        name: "android-avd",
+        tool: "android",
+        base: Base::AndroidAvd,
+        relative: "",
+        safety: Safety::Review,
+        note: "Android Virtual Device images; deleting removes emulator state and installed apps",
+    },
+    Spec {
+        name: "android-build-cache",
+        tool: "android",
+        base: Base::Android,
+        relative: "build-cache",
+        safety: Safety::Safe,
+        note: "Android Gradle build cache",
+    },
+    Spec {
+        name: "xcode-derived-data",
+        tool: "xcode",
+        base: Base::Home,
+        relative: "Library/Developer/Xcode/DerivedData",
+        safety: Safety::Safe,
+        note: "Xcode build intermediates and indexes; rebuilt on next build",
+    },
+    Spec {
+        name: "ios-simulators",
+        tool: "xcode",
+        base: Base::Home,
+        relative: "Library/Developer/CoreSimulator/Devices",
+        safety: Safety::Review,
+        note: "iOS Simulator devices and app data; `xcrun simctl delete unavailable` removes old runtimes",
+    },
+    Spec {
+        name: "ios-simulator-caches",
+        tool: "xcode",
+        base: Base::Home,
+        relative: "Library/Developer/CoreSimulator/Caches",
+        safety: Safety::Safe,
+        note: "iOS Simulator runtime and dyld caches",
     },
 ];
 
@@ -278,6 +330,10 @@ pub struct Locations {
     pub go_modules: PathBuf,
     pub gradle: PathBuf,
     pub bun: PathBuf,
+    pub android: PathBuf,
+    pub android_avd: PathBuf,
+    pub huggingface: PathBuf,
+    pub ollama: PathBuf,
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {
@@ -288,22 +344,33 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 
 impl Locations {
     pub fn under(home: &Path) -> Self {
+        let cache = home.join(".cache");
+        let android = home.join(".android");
         Self {
             home: home.to_path_buf(),
-            cache: home.join(".cache"),
+            huggingface: cache.join("huggingface"),
+            cache,
             data: home.join(".local/share"),
             cargo: home.join(".cargo"),
             go_modules: home.join("go/pkg/mod"),
             gradle: home.join(".gradle"),
             bun: home.join(".bun"),
+            android_avd: android.join("avd"),
+            android,
+            ollama: home.join(".ollama/models"),
         }
     }
 
     pub fn for_user() -> Option<Self> {
         let home = dirs::home_dir()?;
         let defaults = Self::under(&home);
+        let cache = dirs::cache_dir().unwrap_or(defaults.cache);
+        let android = env_dir("ANDROID_USER_HOME").unwrap_or(defaults.android);
+        let android_avd = env_dir("ANDROID_AVD_HOME").unwrap_or_else(|| android.join("avd"));
+        let huggingface = env_dir("HF_HOME").unwrap_or_else(|| cache.join("huggingface"));
+        let ollama = env_dir("OLLAMA_MODELS").unwrap_or(defaults.ollama);
         Some(Self {
-            cache: dirs::cache_dir().unwrap_or(defaults.cache),
+            cache,
             data: dirs::data_dir().unwrap_or(defaults.data),
             cargo: env_dir("CARGO_HOME").unwrap_or(defaults.cargo),
             go_modules: env_dir("GOMODCACHE")
@@ -311,6 +378,10 @@ impl Locations {
                 .unwrap_or(defaults.go_modules),
             gradle: env_dir("GRADLE_USER_HOME").unwrap_or(defaults.gradle),
             bun: env_dir("BUN_INSTALL").unwrap_or(defaults.bun),
+            android,
+            android_avd,
+            huggingface,
+            ollama,
             home,
         })
     }
@@ -324,6 +395,10 @@ impl Locations {
             Base::GoModules => &self.go_modules,
             Base::Gradle => &self.gradle,
             Base::Bun => &self.bun,
+            Base::Android => &self.android,
+            Base::AndroidAvd => &self.android_avd,
+            Base::HuggingFace => &self.huggingface,
+            Base::Ollama => &self.ollama,
         }
     }
 }
@@ -578,5 +653,40 @@ mod tests {
         let count = all.len();
         all.dedup();
         assert_eq!(all.len(), count);
+    }
+
+    #[test]
+    fn finds_mobile_and_model_caches_with_expected_safety() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::create_dir_all(home.join(".cache/huggingface")).expect("hf");
+        fs::create_dir_all(home.join(".ollama/models")).expect("ollama");
+        fs::create_dir_all(home.join(".android/avd")).expect("avd");
+        fs::create_dir_all(home.join(".android/build-cache")).expect("android-build-cache");
+        fs::create_dir_all(home.join("Library/Developer/Xcode/DerivedData")).expect("derived");
+        fs::create_dir_all(home.join("Library/Developer/CoreSimulator/Devices")).expect("sim");
+        fs::create_dir_all(home.join("Library/Developer/CoreSimulator/Caches")).expect("sim-cache");
+
+        let found = find(&Locations::under(home), &Protected::new(Some(home)));
+        let by_name: std::collections::HashMap<&str, Safety> =
+            found.iter().map(|c| (c.name, c.safety)).collect();
+
+        assert_eq!(by_name.get("huggingface"), Some(&Safety::Review));
+        assert_eq!(by_name.get("ollama"), Some(&Safety::Review));
+        assert_eq!(by_name.get("android-avd"), Some(&Safety::Review));
+        assert_eq!(by_name.get("android-build-cache"), Some(&Safety::Safe));
+        assert_eq!(by_name.get("xcode-derived-data"), Some(&Safety::Safe));
+        assert_eq!(by_name.get("ios-simulators"), Some(&Safety::Review));
+        assert_eq!(by_name.get("ios-simulator-caches"), Some(&Safety::Safe));
+
+        // Negative: missing caches are not returned
+        let empty = tempfile::tempdir().expect("empty tempdir");
+        assert!(
+            find(
+                &Locations::under(empty.path()),
+                &Protected::new(Some(empty.path()))
+            )
+            .is_empty()
+        );
     }
 }
