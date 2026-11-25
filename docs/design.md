@@ -126,7 +126,7 @@ It stays one crate until compile times or reuse justify a workspace split (`kuiz
 
 ## 5. Configuration
 
-File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is optional. Normal runs use the lenient loader (`src/config/lenient.rs`): unknown or invalid keys are warned and ignored, each bad setting falls back to its default (and list entries are dropped one by one), and the app keeps running. When a rejected setting could widen what gets removed (`scan.*`, `detect.*`, `delete.*`, `git.*`, `toolchains.*`, `docker.*`, or an unknown section), `delete.confirm` is forced on and unattended `--yes` removal is refused until fixed; an unreadable or unparseable file, or an invalid `delete.mode`, also falls back to `delete.mode = "trash"`. `kuizer config show` prints the effective config, `kuizer config check` validates strictly and fails on any warning (including unknown keys), and `kuizer config init` writes the defaults. A full example is in [`config.example.toml`](config.example.toml).
+File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is optional. Normal runs use the lenient loader (`src/config/lenient.rs`): unknown or invalid keys are warned and ignored, each bad setting falls back to its default (and list entries are dropped one by one), and the app keeps running. When a rejected setting could widen what gets removed (`scan.*`, `detect.*`, `delete.*`, `git.*`, `toolchains.*`, `docker.*`, or an unknown section), `delete.confirm` is forced on and unattended `--yes` removal is refused until fixed; an unreadable or unparseable file, or an invalid `delete.mode`, also falls back to `delete.mode = "trash"`. `kuizer config show` prints the effective config, `kuizer config check` validates strictly and fails on any warning (including unknown keys), `kuizer config check --fix` rewrites deprecated keys and removes or corrects invalid settings while printing every change, and `kuizer config init` writes the defaults. A full example is in [`config.example.toml`](config.example.toml).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -247,7 +247,7 @@ kuizer restore ID... | --last [--dry-run] put trashed items back
 kuizer policy list | show NAME            list or inspect configured cleanup policies
 
 kuizer rules                              active detection rules
-kuizer config show | path | init | check
+kuizer config show | path | init | check [--fix]
 
 FILTERS
     --category NAME                      repeatable: dependencies, build, cache, temp

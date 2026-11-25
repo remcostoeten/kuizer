@@ -20,8 +20,10 @@ mod ui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::cli::{Cli, Command, Format, HistoryAction, NestedCommand, PolicyAction, ScanArgs};
-use crate::config::{Config, ConfigError, Loaded, rejected_scope};
+use crate::cli::{
+    Cli, Command, ConfigAction, Format, HistoryAction, NestedCommand, PolicyAction, ScanArgs,
+};
+use crate::config::{Config, ConfigError, EditError, Loaded, rejected_scope};
 use crate::history::HistoryError;
 use crate::scan::ScopeError;
 use clap::CommandFactory;
@@ -35,6 +37,8 @@ pub use cache::measure_with as measure_caches_with;
 pub enum AppError {
     #[error(transparent)]
     Config(#[from] ConfigError),
+    #[error(transparent)]
+    ConfigEdit(#[from] EditError),
     #[error(transparent)]
     History(#[from] HistoryError),
     #[error("cannot write the report: {0}")]
@@ -181,8 +185,16 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     }
     let json = format != Format::Text;
     let loaded = Config::load(cli.config.as_deref())?;
-    for warning in &loaded.warnings {
-        eprintln!("kuizer: config: {warning}");
+    let fixing = matches!(
+        cli.command,
+        Some(Command::Config {
+            action: Some(ConfigAction::Check { fix: true })
+        })
+    );
+    if !fixing {
+        for warning in &loaded.warnings {
+            eprintln!("kuizer: config: {warning}");
+        }
     }
     let rejected = rejected_scope(&loaded.warnings);
     if !rejected.is_empty() && removes_unattended(cli.command.as_ref()) {

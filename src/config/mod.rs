@@ -1,5 +1,6 @@
 mod edit;
 mod exclude;
+mod fix;
 mod lenient;
 mod policy;
 
@@ -20,6 +21,7 @@ pub use edit::{
     home_relative, set_keys, set_protected_paths, set_setting,
 };
 pub use exclude::{ExcludeError, Excludes};
+pub use fix::{ConfigChange, FixReport, fix_file, fix_text};
 pub use lenient::{ConfigWarning, rejected_scope};
 pub use policy::{EXAMPLE_POLICY, Policy, PolicySelect, SourceKind, known_rules};
 

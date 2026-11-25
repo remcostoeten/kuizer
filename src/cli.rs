@@ -436,6 +436,11 @@ fn config_examples() -> String {
             "Write a config file with the defaults",
         ),
         ("kuizer config", "check", "Validate the config file"),
+        (
+            "kuizer config",
+            "check --fix",
+            "Rewrite deprecated keys and fix invalid settings",
+        ),
         ("kuizer config", "show", "Print the effective configuration"),
         (
             "kuizer --config",
@@ -1233,7 +1238,13 @@ pub enum ConfigAction {
     #[command(about = "Write a default config file")]
     Init,
     #[command(about = "Validate the config file")]
-    Check,
+    Check {
+        #[arg(
+            long,
+            help = "Rewrite deprecated keys and remove or correct invalid ones"
+        )]
+        fix: bool,
+    },
 }
 
 fn parse_selection(value: &str) -> Result<Selection, String> {
