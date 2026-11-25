@@ -232,7 +232,10 @@ fn the_whole_home_option_ignores_the_typed_folder(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     view.update(cx, |app, cx| {
-        assert!(matches!(app.session.phase, Phase::Loading(_)));
+        assert!(matches!(
+            app.session.phase,
+            Phase::Loading(_) | Phase::Ready(_)
+        ));
         assert_eq!(
             app.session.roots,
             scan::normalize_roots(&[platform::home_dir().unwrap()])
@@ -1855,11 +1858,16 @@ fn a_broken_saved_scan_falls_back_to_a_normal_scan(cx: &mut TestAppContext) {
     std::fs::write(&files[0], b"\0garbage").unwrap();
 
     scan_again_from_the_start(&view, cx);
-    view.read_with(cx, |app, _| {
-        assert!(matches!(app.session.phase, Phase::Loading(_)))
-    });
     cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("activity").is_some());
+    // A fast runner can stream the first artifacts in before this frame, which leaves the loader.
+    if view.read_with(cx, |app, _| matches!(app.session.phase, Phase::Loading(_))) {
+        assert!(cx.debug_bounds("activity").is_some());
+    } else {
+        view.read_with(cx, |app, _| {
+            assert!(matches!(app.session.phase, Phase::Ready(_)));
+            assert!(app.session.stale.is_none(), "no saved scan is shown");
+        });
+    }
     assert!(!wait_until_shown(&view, cx), "no saved scan is shown");
     wait_for_refresh(&view, cx);
     let (roots, options) = view.read_with(cx, |app, _| {
