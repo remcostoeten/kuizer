@@ -1,5 +1,7 @@
 pub mod caches;
+#[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
 pub mod commands;
 pub mod config;
 pub mod delete;
@@ -8,12 +10,16 @@ pub mod docker;
 pub mod dupes;
 pub mod git;
 pub mod history;
+pub mod keymap;
 pub mod output;
 pub mod platform;
+mod process;
 pub mod protect;
 pub mod repos;
 pub mod scan;
+pub mod snapshot;
 pub mod stats;
 pub mod toolchains;
+#[cfg(feature = "cli")]
 pub mod tui;
 pub mod units;

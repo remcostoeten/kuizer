@@ -61,7 +61,8 @@ pub fn run(config: &Config, args: DockerArgs, json: bool, quiet: bool) -> Result
         yes: plan.removal.yes,
         confirm: config.delete.confirm,
         json,
-        remove: docker::remove,
+        remove: &|_, candidate, mode| docker::remove(&config.docker.engines, candidate, mode),
+        delete: &config.delete,
     };
     removal::run(&request, selected, &issues)
 }

@@ -65,8 +65,11 @@ impl Tooltip {
         self
     }
 
-    pub fn keys(mut self, keys: &[&'static str]) -> Self {
-        self.keys = keys.iter().map(|key| SharedString::from(*key)).collect();
+    pub fn keys(mut self, keys: &[&str]) -> Self {
+        self.keys = keys
+            .iter()
+            .map(|key| SharedString::from((*key).to_owned()))
+            .collect();
         self
     }
 

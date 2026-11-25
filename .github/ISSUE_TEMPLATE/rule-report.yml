@@ -1,0 +1,52 @@
+name: Missing rule or false positive
+description: Request a cleanup rule or report a folder Kuizer classified incorrectly
+labels: [rules]
+body:
+  - type: input
+    id: ecosystem
+    attributes:
+      label: Ecosystem or tool
+      placeholder: Rust, Node.js, Python, Docker
+    validations:
+      required: true
+  - type: input
+    id: folder
+    attributes:
+      label: Folder name and path
+      placeholder: project/.cache/tool-output
+    validations:
+      required: true
+  - type: textarea
+    id: markers
+    attributes:
+      label: Markers beside the folder
+      description: List files or folders beside it that identify the project or tool.
+  - type: textarea
+    id: contents
+    attributes:
+      label: Contents
+      description: List representative files inside the folder.
+    validations:
+      required: true
+  - type: textarea
+    id: regeneration
+    attributes:
+      label: What regenerates this folder?
+  - type: dropdown
+    id: classification
+    attributes:
+      label: Kuizer classification
+      options:
+        - Missing rule
+        - Marked safe
+        - Marked review
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kuizer version
+      placeholder: kuizer 0.1.3
+    validations:
+      required: true

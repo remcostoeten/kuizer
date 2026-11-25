@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::detect::{APP_DATA_MARKERS, Detector, Listing};
 
@@ -84,6 +86,34 @@ const TOOL_DIRS: &[&str] = &[
     ".config/coc/extensions",
 ];
 
+pub const SYSTEM_PATHS: &[&str] = &[
+    "/bin",
+    "/boot",
+    "/dev",
+    "/efi",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/nix",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/snap",
+    "/srv",
+    "/sys",
+    "/usr",
+    "/var/lib",
+    "/var/log",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/private/etc",
+    "/private/var/db",
+];
+
 /// @name holds_app_data
 /// @description Reports whether a directory listing belongs to a browser or Electron profile:
 /// a Chromium user data directory (`Local State`), a Firefox profile root (`profiles.ini`), or a
@@ -106,12 +136,35 @@ fn marked_on_disk(dir: &Path) -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerStamp {
+    device: u64,
+    inode: u64,
+    modified: SystemTime,
+    changed: (i64, i64),
+}
+
+impl MarkerStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            modified: metadata.modified().ok()?,
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Protected {
     dirs: HashSet<PathBuf>,
     names: HashSet<OsString>,
     homes: Vec<PathBuf>,
     exempt: Vec<PathBuf>,
+    extra: Vec<PathBuf>,
+    marker_cache: Arc<Mutex<HashMap<PathBuf, (MarkerStamp, bool)>>>,
 }
 
 impl Protected {
@@ -141,6 +194,8 @@ impl Protected {
             names,
             homes,
             exempt: Vec::new(),
+            extra: Vec::new(),
+            marker_cache: Arc::default(),
         }
     }
 
@@ -165,8 +220,19 @@ impl Protected {
                 }
                 self.dirs.insert(dir);
             }
+            self.extra.push(path.clone());
         }
         self
+    }
+
+    /// @name Protected::protects_system_path
+    /// @description Returns whether `path` lies under a built-in operating-system path that
+    /// deletion refuses.
+    ///
+    /// @example
+    /// if Protected::protects_system_path(path) { return Err(Refusal::Protected); }
+    pub fn protects_system_path(path: &Path) -> bool {
+        SYSTEM_PATHS.iter().any(|prefix| path.starts_with(prefix))
     }
 
     /// @name is_known
@@ -194,8 +260,58 @@ impl Protected {
     ///     return Err(Refusal::AppData);
     /// }
     pub fn covers(&self, path: &Path) -> bool {
-        path.ancestors()
-            .any(|dir| marked_on_disk(dir) || (self.dirs.contains(dir) && !self.exempts(dir, path)))
+        let target = std::fs::symlink_metadata(path).ok();
+        let target_dir = target
+            .as_ref()
+            .filter(|metadata| metadata.is_dir())
+            .cloned()
+            .or_else(|| {
+                target
+                    .as_ref()
+                    .filter(|metadata| metadata.file_type().is_symlink())
+                    .and_then(|_| std::fs::metadata(path).ok())
+            });
+        if self
+            .extra
+            .iter()
+            .any(|protected| path.starts_with(protected))
+        {
+            return true;
+        }
+        for dir in path.ancestors() {
+            if self.dirs.contains(dir) && !self.exempts(dir, path) {
+                return true;
+            }
+            let metadata = if dir == path {
+                target_dir.clone()
+            } else {
+                std::fs::metadata(dir).ok()
+            };
+            if let Some(metadata) = metadata
+                && metadata.is_dir()
+                && self.marked_on_disk(dir, &metadata)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn marked_on_disk(&self, dir: &Path, metadata: &std::fs::Metadata) -> bool {
+        let Some(stamp) = MarkerStamp::from_metadata(metadata) else {
+            return marked_on_disk(dir);
+        };
+        if let Ok(cache) = self.marker_cache.lock()
+            && let Some((cached_stamp, marked)) = cache.get(dir)
+            && *cached_stamp == stamp
+        {
+            return *marked;
+        }
+        let marked = marked_on_disk(dir);
+        if let Ok(mut cache) = self.marker_cache.lock() {
+            cache.insert(dir.to_path_buf(), (stamp, marked));
+        }
+        marked
     }
 
     fn exempts(&self, dir: &Path, path: &Path) -> bool {
@@ -283,6 +399,21 @@ mod tests {
     }
 
     #[test]
+    fn marker_cache_tracks_directory_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app = tmp.path().join("app");
+        let child = app.join("data");
+        fs::create_dir_all(&child).expect("app");
+        let protected = Protected::default();
+
+        assert!(!protected.covers(&child));
+        fs::write(app.join("Local State"), "{}").expect("marker");
+        assert!(protected.covers(&child));
+        fs::remove_file(app.join("Local State")).expect("remove marker");
+        assert!(!protected.covers(&child));
+    }
+
+    #[test]
     fn extra_paths_add_to_the_built_in_ones() {
         let home = Path::new("/home/me");
         let protected = Protected::new(Some(home))
@@ -292,6 +423,22 @@ mod tests {
         assert!(!protected.covers(&home.join("thesis-old/node_modules")));
         assert!(!protected.covers(Path::new("relative/dir/x")));
         assert!(protected.is_known(&home.join(".ssh")));
+    }
+
+    #[test]
+    fn configured_paths_are_protected_and_relative_paths_are_ignored() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let protected_path = tmp.path().join("important");
+        fs::create_dir(&protected_path).expect("protected directory");
+        let future_path = tmp.path().join("future");
+        let protected = Protected::default().with_paths(&[
+            protected_path.clone(),
+            future_path.clone(),
+            PathBuf::from("relative/path"),
+        ]);
+        assert!(protected.covers(&protected_path.join("file")));
+        assert!(protected.covers(&future_path.join("file")));
+        assert!(!protected.covers(Path::new("relative/path/file")));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use kuizer::keymap::Action;
+
 use crate::activity::{Activity, State, Step};
 use crate::glossary::Term;
 use crate::icon::Icon;
@@ -108,18 +110,17 @@ impl Tab {
         }
     }
 
-    /// The keys that open this section: its place in the sidebar.
-    pub fn keys(self) -> &'static [&'static str] {
+    pub fn action(self) -> Action {
         match self {
-            Self::Overview => &["shift-1"],
-            Self::Artifacts => &["shift-2"],
-            Self::Caches => &["shift-3"],
-            Self::Toolchains => &["shift-4"],
-            Self::Docker => &["shift-5"],
-            Self::Repos => &["shift-6"],
-            Self::Duplicates => &["shift-7"],
-            Self::History => &["shift-8"],
-            Self::Issues => &["shift-9"],
+            Self::Overview => Action::Overview,
+            Self::Artifacts => Action::Artifacts,
+            Self::Caches => Action::Caches,
+            Self::Toolchains => Action::Toolchains,
+            Self::Docker => Action::Docker,
+            Self::Repos => Action::Repos,
+            Self::Duplicates => Action::Duplicates,
+            Self::History => Action::History,
+            Self::Issues => Action::Issues,
         }
     }
 

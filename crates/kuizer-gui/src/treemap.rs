@@ -76,22 +76,13 @@ impl Node {
         self.children.iter().find(|child| child.key == key)
     }
 
-    /// Every item in this subtree with its size, including the grouped small ones.
-    pub fn leaves(&self) -> Vec<(Item, u64)> {
-        let mut found = Vec::new();
-        self.collect(&mut found);
-        found
-    }
-
-    fn collect(&self, found: &mut Vec<(Item, u64)>) {
-        match self.kind {
-            Kind::Item(item) => found.push((item, self.bytes)),
-            _ => {
-                for child in &self.children {
-                    child.collect(found);
-                }
-            }
+    pub fn fold_leaves<T>(&self, initial: T, fold: &impl Fn(T, Item, u64) -> T) -> T {
+        if let Some(item) = self.item() {
+            return fold(initial, item, self.bytes);
         }
+        self.children
+            .iter()
+            .fold(initial, |value, child| child.fold_leaves(value, fold))
     }
 
     /// The nodes from this one down along `path`, stopping at the first key that is gone.
@@ -477,7 +468,10 @@ mod tests {
         assert_eq!(rest.bytes, 50);
         assert_eq!(rest.items, 5);
         assert!(!rest.opens());
-        assert_eq!(tree.leaves().len(), 6, "grouped items still count");
+        let folded = tree.fold_leaves((0, 0), &|(count, total), _, bytes| {
+            (count + 1, total + bytes)
+        });
+        assert_eq!(folded, (6, 100_050), "grouped items still count");
 
         let many: Vec<Leaf> = (0..200)
             .map(|index| leaf(index, &format!("/p/p{index:03}/node_modules"), 1_000))
@@ -546,7 +540,7 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(tree.bytes, 60, "nothing is counted twice");
-        assert_eq!(tree.leaves().len(), 2);
+        assert_eq!(tree.items, 2);
     }
 
     #[test]

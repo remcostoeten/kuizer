@@ -98,13 +98,15 @@ impl Stops {
     }
 }
 
-/// Whether a key is Tab or Shift+Tab, the keys that move the ring from anywhere.
-pub(super) fn is_tab(keystroke: &Keystroke) -> bool {
-    let modifiers = keystroke.modifiers;
-    keystroke.key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform
-}
-
 impl Kuizer {
+    pub(super) fn is_control_cycle(&self, keystroke: &Keystroke) -> bool {
+        matches!(
+            self.keymap
+                .lookup(Scope::Control, commands::stroke(keystroke)),
+            Some(Key::ControlNext | Key::ControlPrevious)
+        )
+    }
+
     /// Starts drawing a region of the window, see `Stops::enter`.
     pub(super) fn region(&self, region: Region) {
         self.stops.borrow_mut().enter(region);
@@ -192,14 +194,14 @@ impl Kuizer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let modifiers = keystroke.modifiers;
-        let plain = !modifiers.control && !modifiers.alt && !modifiers.platform;
+        let stroke = commands::stroke(keystroke);
+        let action = self.keymap.lookup(Scope::Control, stroke);
         if !self.ringed() {
             self.ring = None;
         }
-        if is_tab(keystroke) {
+        if matches!(action, Some(Key::ControlNext | Key::ControlPrevious)) {
             self.move_ring(Move::Cycle {
-                back: modifiers.shift,
+                back: action == Some(Key::ControlPrevious),
             });
             cx.notify();
             return true;
@@ -207,22 +209,23 @@ impl Kuizer {
         let Some(ring) = self.ring.clone() else {
             return false;
         };
-        let vim = plain && !modifiers.shift && !matches!(self.phase, Phase::Start);
-        let back = match keystroke.key.as_str() {
-            "left" | "up" if plain && !modifiers.shift => Some(true),
-            "right" | "down" if plain && !modifiers.shift => Some(false),
-            "h" | "k" if vim => Some(true),
-            "l" | "j" if vim => Some(false),
+        let back = match action {
+            Some(key @ (Key::ControlBack | Key::ControlForward))
+                if !matches!(self.phase, Phase::Start)
+                    || self.keymap.matches(Scope::StartControl, key, stroke) =>
+            {
+                Some(key == Key::ControlBack)
+            }
             _ => None,
         };
         if let Some(back) = back {
             self.move_ring(Move::Step { back });
-        } else if matches!(keystroke.key.as_str(), "enter" | "space") && plain && !modifiers.shift {
+        } else if action == Some(Key::ControlPress) {
             let press = self.stops.borrow().press(&ring).filter(|_| !repeat);
             if let Some(press) = press {
                 press(self, window, cx);
             }
-        } else if keystroke.key == "escape" {
+        } else if action == Some(Key::Back) {
             self.ring = None;
         } else {
             self.ring = None;

@@ -345,7 +345,7 @@ impl Kuizer {
                                 Some(reason) => Tooltip::new(reason),
                                 None => {
                                     Tooltip::new("Pack every listed repository that is worth it")
-                                        .keys(&[hint(&Command::GcAll)])
+                                        .keys(&[&self.hint(&Command::GcAll)])
                                 }
                             }
                             .build(),
@@ -367,7 +367,7 @@ impl Kuizer {
                                 None => Tooltip::new(
                                     "Delete every listed merged branch, after a confirmation",
                                 )
-                                .keys(&[hint(&Command::BranchesAll)]),
+                                .keys(&[&self.hint(&Command::BranchesAll)]),
                             }
                             .build(),
                         ),
@@ -511,7 +511,7 @@ impl Kuizer {
                                     "Pack loose objects, frees up to {}",
                                     theme::bytes(repository.objects.gain())
                                 ))
-                                .keys(&[hint(&Command::Gc)]),
+                                .keys(&[&self.hint(&Command::Gc)]),
                             }
                             .build(),
                         )
@@ -535,7 +535,7 @@ impl Kuizer {
                                 Some(reason) => Tooltip::new(reason),
                                 None => {
                                     Tooltip::new("Delete the merged branches, after a confirmation")
-                                        .keys(&[hint(&Command::Branches)])
+                                        .keys(&[&self.hint(&Command::Branches)])
                                 }
                             }
                             .build(),
@@ -633,7 +633,7 @@ impl Kuizer {
                     .gap(unit(space::M))
                     .child(
                         ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
-                            .tip(Tooltip::new("Keep every branch").keys(&["Esc"]).build())
+                            .tip(Tooltip::new("Keep every branch").keys(&[&self.key_hint(Scope::Dialog, Key::Back)]).build())
                             .when(cancel, |this| this.child(ring()))
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.dialog = None;
@@ -645,7 +645,7 @@ impl Kuizer {
                             .debug_selector(|| "confirm-branches".to_owned())
                             .tip(
                                 Tooltip::new("Delete these local branches")
-                                    .keys(&["Enter"])
+                                    .keys(&[&self.key_hint(Scope::Dialog, Key::Confirm)])
                                     .build(),
                             )
                             .when(!cancel, |this| this.child(ring()))

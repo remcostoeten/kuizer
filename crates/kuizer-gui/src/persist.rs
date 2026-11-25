@@ -66,10 +66,7 @@ fn write(file: &Path, text: &str) {
     {
         return;
     }
-    let mut temporary = file.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let result = std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, file));
+    let result = kuizer::platform::write_atomic(file, text.as_bytes());
     if let Err(error) = result {
         eprintln!("kuizer-gui: cannot save {}: {error}", file.display());
     }

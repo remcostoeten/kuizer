@@ -470,7 +470,14 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
 
         app.select((Source::Artifact, 2));
         app.take(
-            vec![Update::Loaded(Loaded::Found(vec![artifact(5, a)]))],
+            vec![
+                Update::Loaded(Loaded::Found(vec![artifact(5, a)])),
+                Update::Loaded(Loaded::ArtifactsDone {
+                    issues: Vec::new(),
+                    summary: app.report().unwrap().summary,
+                    disks: Vec::new(),
+                }),
+            ],
             cx,
         );
         let paths: Vec<&Path> = app
@@ -821,9 +828,7 @@ fn a_known_folder_opens_with_the_last_scan_while_it_refreshes(cx: &mut TestAppCo
 
     let id = view.update(cx, |app, cx| {
         let report = app.report().unwrap();
-        let saved = app
-            .snapshots
-            .load(&report.roots, &report.options)
+        let saved = crate::snapshot::load(&app.snapshots, &report.roots, &report.options)
             .expect("the saved scan");
         app.set_phase(Phase::Loading(Box::default()), cx);
         app.cancel = Some(Cancel::new());

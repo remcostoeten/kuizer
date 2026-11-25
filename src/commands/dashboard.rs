@@ -2,9 +2,8 @@ use std::io::IsTerminal;
 
 use super::AppError;
 use super::cache;
-use super::scan::{
-    announce_report, generated_at, refuse_overwrite, resolve_roots, sort_candidates, write_page,
-};
+use super::scan::{announce_report, generated_at, refuse_overwrite, resolve_roots, write_page};
+use super::sort_candidates;
 use crate::caches::{self, Locations};
 use crate::cli::{DashboardArgs, SortKey};
 use crate::config::Config;

@@ -115,7 +115,7 @@ fn main() -> ExitCode {
             if let Some(reason) = problem {
                 fallback::remember(reason, font.clone());
             }
-            app::bind_keys(cx);
+            commands::bind_configured_keys(cx, &config.keys);
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),

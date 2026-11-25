@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::StreamExt;
@@ -20,6 +20,7 @@ use kuizer::config::{Config, DeleteMode, Sidebar};
 use kuizer::detect::{Category, Safety};
 use kuizer::dupes::{self, Duplicates};
 use kuizer::history::Action;
+use kuizer::keymap::{Action as Key, Keymap, Scope};
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::scan::{self, Cancel, Candidate};
@@ -81,6 +82,7 @@ use repos::{GitJob, GitScope};
 use ring::{Region, Stops};
 use session::spawn_worker;
 
+#[cfg(test)]
 pub use crate::commands::bind_keys;
 
 enum Phase {
@@ -239,18 +241,16 @@ enum Choice {
 struct MenuItem {
     choice: Choice,
     label: &'static str,
-    key: &'static str,
     enabled: bool,
     tip: Option<&'static str>,
     divided: bool,
 }
 
 impl MenuItem {
-    fn new(choice: Choice, label: &'static str, key: &'static str) -> Self {
+    fn new(choice: Choice, label: &'static str) -> Self {
         Self {
             choice,
             label,
-            key,
             enabled: true,
             tip: None,
             divided: false,
@@ -274,13 +274,6 @@ impl MenuItem {
         self.divided = true;
         self
     }
-
-    fn answers(&self, key: &str) -> bool {
-        match self.key {
-            "Del" => key == "delete",
-            letter => letter.eq_ignore_ascii_case(key),
-        }
-    }
 }
 
 struct Menu {
@@ -301,6 +294,7 @@ static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
 pub struct Kuizer {
     config: Config,
+    keymap: Keymap,
     roots: Vec<PathBuf>,
     options: ScanOptions,
     folder: String,
@@ -318,6 +312,7 @@ pub struct Kuizer {
     pending: HashSet<Part>,
     early: Vec<Loaded>,
     streamed: bool,
+    refreshed: Vec<Candidate>,
     progress: Activity,
     search: Option<Search>,
     search_error: Option<String>,
@@ -415,6 +410,7 @@ impl Kuizer {
         let collapsed = config.appearance.sidebar == Sidebar::Collapsed;
         let mut app = Self {
             options: ScanOptions::from_config(&config),
+            keymap: Keymap::resolve(&config.keys).0,
             config,
             roots,
             folder,
@@ -432,6 +428,7 @@ impl Kuizer {
             pending: HashSet::new(),
             early: Vec::new(),
             streamed: false,
+            refreshed: Vec::new(),
             progress: Activity::default(),
             search: None,
             search_error: None,
@@ -885,8 +882,7 @@ impl Kuizer {
         }
     }
 
-    fn render_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.ensure_map();
+    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.phase {
             Phase::Start => self.render_start(cx),
             Phase::Loading(activity) => self.render_loading(activity),
@@ -1544,20 +1540,20 @@ impl Render for Kuizer {
     }
 }
 
-fn hint(command: &Command) -> &'static str {
-    static HINTS: OnceLock<Vec<(Command, String)>> = OnceLock::new();
-    HINTS
-        .get_or_init(|| {
-            commands::table()
-                .iter()
-                .filter_map(|spec| {
-                    Some((spec.command.clone(), commands::label(spec.keys.first()?)))
-                })
-                .collect()
-        })
-        .iter()
-        .find(|(known, _)| known == command)
-        .map_or("", |(_, key)| key.as_str())
+impl Kuizer {
+    fn key_hint(&self, scope: Scope, action: Key) -> String {
+        self.keymap
+            .keys(scope, action)
+            .next()
+            .map(commands::label)
+            .unwrap_or_default()
+    }
+
+    fn hint(&self, command: &Command) -> String {
+        command
+            .binding()
+            .map_or_else(String::new, |(scope, action)| self.key_hint(scope, action))
+    }
 }
 
 fn centered(child: impl IntoElement) -> AnyElement {

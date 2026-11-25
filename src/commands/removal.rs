@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::AppError;
 use super::interrupt::Interrupt;
-use super::scan::sort_candidates;
+use super::sort_candidates;
 use crate::cli::{RemovalArgs, Selection, SortKey};
-use crate::config::Config;
+use crate::config::{Config, DeleteConfig};
 use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
 use crate::detect::Safety;
 use crate::git;
@@ -14,7 +14,7 @@ use crate::history::{self, Entry, Recorder};
 use crate::output;
 use crate::scan::{Candidate, Issue};
 
-pub type Remove = fn(&Guard, &Candidate, Mode) -> Result<(), DeleteError>;
+pub type Remove<'a> = &'a dyn Fn(&Guard, &Candidate, Mode) -> Result<(), DeleteError>;
 
 pub struct Request<'a> {
     pub command: &'static str,
@@ -23,7 +23,8 @@ pub struct Request<'a> {
     pub yes: bool,
     pub confirm: bool,
     pub json: bool,
-    pub remove: Remove,
+    pub remove: Remove<'a>,
+    pub delete: &'a DeleteConfig,
 }
 
 /// @name files
@@ -31,7 +32,7 @@ pub struct Request<'a> {
 /// projects and caches are removed.
 ///
 /// @example
-/// let request = Request { remove: removal::files, ..request };
+/// let request = Request { remove: &removal::files, ..request };
 pub fn files(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
     delete::delete(guard, &target(candidate), mode)
 }
@@ -231,7 +232,9 @@ pub fn run(
     }
 
     let started_at = history::now();
-    let guard = Guard::new(request.roots);
+    let guard = Guard::new(request.roots)
+        .with_protected(&request.delete.protected)
+        .with_cross_device(request.delete.cross_device);
     let mut removals = Vec::with_capacity(candidates.len());
     let mut recorder = Recorder::for_user(started_at, request.roots);
     let interrupt = Interrupt::catch();

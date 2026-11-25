@@ -123,7 +123,7 @@ impl Kuizer {
                         self.button("start-scan", "Start scan", ButtonKind::Primary, true, cx, |app, _, cx| {
                             app.start_scan(cx);
                         })
-                        .tip(Tooltip::new("Scan the chosen folder").keys(&["Enter"]).build()),
+                        .tip(Tooltip::new("Scan the chosen folder").keys(&[&self.key_hint(Scope::Folder, Key::StartScan)]).build()),
                     ),
             )
             .children(
@@ -452,7 +452,7 @@ impl Kuizer {
         self.scan_over();
         self.refresh_stats();
         self.refresh_rows();
-        self.refresh_map();
+        self.refresh_map(cx);
         if !dropped.is_empty() {
             cx.background_spawn(async move { drop(dropped) }).detach();
         }
@@ -524,12 +524,21 @@ impl Kuizer {
     /// the field does not take, so it can run a command instead.
     pub(super) fn type_folder(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let keystroke = &event.keystroke;
-        if keystroke.key == "enter" {
+        if self
+            .keymap
+            .matches(Scope::Folder, Key::StartScan, commands::stroke(keystroke))
+        {
             self.start_scan(cx);
             return true;
         }
         let paste = || cx.read_from_clipboard().and_then(|item| item.text());
-        if !field::edit(&mut self.folder, keystroke, field::PATH, paste) {
+        if !field::edit(
+            &self.keymap,
+            &mut self.folder,
+            keystroke,
+            field::PATH,
+            paste,
+        ) {
             return false;
         }
         self.whole_home = false;
@@ -575,9 +584,9 @@ impl Kuizer {
                         ui::tabular(div().text_color(theme::muted()))
                             .child(activity::took(self.started.elapsed())),
                     )
-                    .child(ui::kbd("S"))
+                    .child(ui::kbd(self.hint(&Command::StopScan)))
                     .child("keeps what it found")
-                    .child(ui::kbd("Esc"))
+                    .child(ui::kbd(self.key_hint(Scope::GuiBack, Key::Back)))
                     .child("cancels"),
             );
         let steps = ui::card("Progress").child(

@@ -1,6 +1,8 @@
 mod activity;
 mod cancel;
+mod options;
 mod pool;
+mod query;
 mod size;
 mod types;
 pub(crate) mod walk;
@@ -16,6 +18,8 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 pub use activity::{ActivityScope, annotate, annotate_in};
 pub use cancel::Cancel;
+pub use options::ScanOptions;
+pub use query::{CandidateFilter, Group, Query, SortKey, group_indices, sort_candidates};
 pub use size::{Measured, measure, measure_many, measure_parallel};
 pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary, Usage};
 
@@ -168,6 +172,10 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
         self.companion.wants_files()
     }
 
+    fn wants_stat(&self) -> bool {
+        self.companion.wants_stat()
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         Counters::add(&self.shared.counters.issues, 1);
         match self.shared.events.send(Event::Issue(issue)) {
@@ -176,7 +184,7 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
         }
     }
 
-    fn entered(&mut self, path: &Path) {
+    fn entered(&mut self, path: &Path) -> Flow {
         if self.entered.is_multiple_of(CURRENT_EVERY)
             && let Ok(mut current) = self.shared.current.lock()
         {
@@ -187,6 +195,7 @@ impl<C: Visitor> Visitor for Sink<'_, C> {
         if self.dirs >= FLUSH_EVERY {
             self.flush();
         }
+        self.companion.entered(path)
     }
 
     fn counted(&mut self, kind: EntryKind) {

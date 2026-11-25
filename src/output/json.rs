@@ -11,7 +11,7 @@ use crate::dupes::{Duplicates, Group};
 use crate::scan::{Candidate, Issue, IssueKind, Summary};
 use crate::toolchains::Toolchain;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub(super) fn lossy_path<S: Serializer>(path: &&Path, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&path.to_string_lossy())
@@ -61,9 +61,39 @@ fn issues_json(issues: &[Issue]) -> Vec<IssueJson<'_>> {
         .collect()
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Source {
+    Projects,
+    Cache,
+    Toolchain,
+    Docker,
+}
+
+impl Source {
+    fn command(self) -> &'static str {
+        match self {
+            Self::Projects => "scan",
+            Self::Cache => "cache",
+            Self::Toolchain => "toolchain",
+            Self::Docker => "docker",
+        }
+    }
+
+    fn removal(command: &str) -> Self {
+        match command {
+            "cache" => Self::Cache,
+            "toolchain" => Self::Toolchain,
+            "docker" => Self::Docker,
+            _ => Self::Projects,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CandidateJson<'a> {
     id: u64,
+    source: Source,
     #[serde(serialize_with = "lossy_path")]
     path: &'a Path,
     kind: Kind,
@@ -81,6 +111,29 @@ struct CandidateJson<'a> {
     project_last_active: Option<u64>,
     #[serde(skip_serializing_if = "is_false")]
     path_lossy: bool,
+}
+
+impl<'a> CandidateJson<'a> {
+    fn new(source: Source, candidate: &'a Candidate) -> Self {
+        Self {
+            id: candidate.id,
+            source,
+            path: &candidate.path,
+            kind: candidate.kind,
+            rule: &candidate.rule.name,
+            category: candidate.rule.category,
+            safety: candidate.rule.safety,
+            ecosystem: &candidate.rule.ecosystem,
+            project: candidate.project.as_deref(),
+            allocated_bytes: candidate.usage.allocated,
+            apparent_bytes: candidate.usage.apparent,
+            entries: candidate.usage.entries,
+            partial: candidate.usage.partial,
+            newest_modified: seconds(candidate.newest),
+            project_last_active: seconds(candidate.project_last_active),
+            path_lossy: lossy(&candidate.path) || candidate.project.as_deref().is_some_and(lossy),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -106,24 +159,7 @@ pub fn scan_report(
         roots,
         candidates: candidates
             .iter()
-            .map(|candidate| CandidateJson {
-                id: candidate.id,
-                path: &candidate.path,
-                kind: candidate.kind,
-                rule: &candidate.rule.name,
-                category: candidate.rule.category,
-                safety: candidate.rule.safety,
-                ecosystem: &candidate.rule.ecosystem,
-                project: candidate.project.as_deref(),
-                allocated_bytes: candidate.usage.allocated,
-                apparent_bytes: candidate.usage.apparent,
-                entries: candidate.usage.entries,
-                partial: candidate.usage.partial,
-                newest_modified: seconds(candidate.newest),
-                project_last_active: seconds(candidate.project_last_active),
-                path_lossy: lossy(&candidate.path)
-                    || candidate.project.as_deref().is_some_and(lossy),
-            })
+            .map(|candidate| CandidateJson::new(Source::Projects, candidate))
             .collect(),
         issues: issues_json(issues),
         summary,
@@ -133,19 +169,10 @@ pub fn scan_report(
 
 #[derive(Serialize)]
 struct RemovalJson<'a> {
-    #[serde(serialize_with = "lossy_path")]
-    path: &'a Path,
-    kind: Kind,
-    rule: &'a str,
-    category: Category,
-    safety: Safety,
-    ecosystem: &'a str,
-    allocated_bytes: u64,
-    project_last_active: Option<u64>,
+    #[serde(flatten)]
+    candidate: CandidateJson<'a>,
     status: Status,
     error: Option<&'a str>,
-    #[serde(skip_serializing_if = "is_false")]
-    path_lossy: bool,
 }
 
 #[derive(Serialize)]
@@ -187,21 +214,10 @@ pub fn removal_report(
         roots,
         items: removals
             .iter()
-            .map(|removal| {
-                let candidate = &removal.candidate;
-                RemovalJson {
-                    path: &candidate.path,
-                    kind: candidate.kind,
-                    rule: &candidate.rule.name,
-                    category: candidate.rule.category,
-                    safety: candidate.rule.safety,
-                    ecosystem: &candidate.rule.ecosystem,
-                    allocated_bytes: candidate.usage.allocated,
-                    project_last_active: seconds(candidate.project_last_active),
-                    status: removal.status,
-                    error: removal.error.as_deref(),
-                    path_lossy: lossy(&candidate.path),
-                }
+            .map(|removal| RemovalJson {
+                candidate: CandidateJson::new(Source::removal(command), &removal.candidate),
+                status: removal.status,
+                error: removal.error.as_deref(),
             })
             .collect(),
         issues: issues_json(issues),
@@ -317,68 +333,81 @@ pub fn duplicates_report(
 }
 
 #[derive(Serialize)]
-struct CacheJson<'a> {
-    name: &'a str,
-    tool: &'a str,
-    #[serde(serialize_with = "lossy_path")]
-    path: &'a Path,
-    safety: Safety,
-    note: Option<&'a str>,
-    allocated_bytes: u64,
-    apparent_bytes: u64,
-    entries: u64,
-    partial: bool,
-    newest_modified: Option<u64>,
+struct CandidateDetails<'a, Details: Serialize> {
+    #[serde(flatten)]
+    candidate: CandidateJson<'a>,
+    #[serde(flatten)]
+    details: Details,
 }
 
 #[derive(Serialize)]
-struct CacheSummary {
+struct ListingSummary {
     items: usize,
     bytes: u64,
     safe_bytes: u64,
 }
 
 #[derive(Serialize)]
-struct CacheReport<'a> {
+struct ListingReport<'a, Details: Serialize> {
     schema_version: u32,
     command: &'static str,
-    caches: Vec<CacheJson<'a>>,
-    summary: CacheSummary,
+    candidates: Vec<CandidateDetails<'a, Details>>,
+    issues: Vec<IssueJson<'a>>,
+    summary: ListingSummary,
 }
 
-pub fn cache_report(entries: &[(KnownCache, Candidate)]) -> Result<String, serde_json::Error> {
-    let report = CacheReport {
+fn listing_report<'a, Item, Details: Serialize>(
+    source: Source,
+    entries: &'a [(Item, Candidate)],
+    issues: Vec<IssueJson<'a>>,
+    details: impl Fn(&'a Item) -> Details,
+) -> Result<String, serde_json::Error> {
+    let mut summary = ListingSummary {
+        items: entries.len(),
+        bytes: 0,
+        safe_bytes: 0,
+    };
+    let candidates = entries
+        .iter()
+        .map(|(item, candidate)| {
+            summary.bytes += candidate.usage.allocated;
+            if candidate.rule.safety == Safety::Safe {
+                summary.safe_bytes += candidate.usage.allocated;
+            }
+            CandidateDetails {
+                candidate: CandidateJson::new(source, candidate),
+                details: details(item),
+            }
+        })
+        .collect();
+    let report = ListingReport {
         schema_version: SCHEMA_VERSION,
-        command: "cache",
-        caches: entries
-            .iter()
-            .map(|(cache, candidate)| CacheJson {
-                name: cache.name,
-                tool: cache.tool,
-                path: &cache.path,
-                safety: cache.safety,
-                note: (!cache.note.is_empty()).then_some(cache.note),
-                allocated_bytes: candidate.usage.allocated,
-                apparent_bytes: candidate.usage.apparent,
-                entries: candidate.usage.entries,
-                partial: candidate.usage.partial,
-                newest_modified: seconds(candidate.newest),
-            })
-            .collect(),
-        summary: CacheSummary {
-            items: entries.len(),
-            bytes: entries
-                .iter()
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-            safe_bytes: entries
-                .iter()
-                .filter(|(cache, _)| cache.safety == Safety::Safe)
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-        },
+        command: source.command(),
+        candidates,
+        issues,
+        summary,
     };
     serde_json::to_string_pretty(&report)
+}
+
+#[derive(Serialize)]
+struct CacheJson {
+    name: &'static str,
+    tool: &'static str,
+    note: Option<&'static str>,
+}
+
+/// @name cache_report
+/// @description Serializes global cache candidates and their allocated byte totals.
+///
+/// @example
+/// let report = cache_report(&entries)?;
+pub fn cache_report(entries: &[(KnownCache, Candidate)]) -> Result<String, serde_json::Error> {
+    listing_report(Source::Cache, entries, Vec::new(), |cache| CacheJson {
+        name: cache.name,
+        tool: cache.tool,
+        note: (!cache.note.is_empty()).then_some(cache.note),
+    })
 }
 
 #[derive(Serialize)]
@@ -386,119 +415,61 @@ struct ToolchainJson<'a> {
     tool: &'static str,
     runtime: &'a str,
     version: &'a str,
-    #[serde(serialize_with = "lossy_path")]
-    path: &'a Path,
-    safety: Safety,
     default: bool,
     #[serde(serialize_with = "lossy_paths")]
     pinned_by: &'a [PathBuf],
-    allocated_bytes: u64,
-    apparent_bytes: u64,
-    entries: u64,
-    partial: bool,
 }
 
-#[derive(Serialize)]
-struct ToolchainReport<'a> {
-    schema_version: u32,
-    command: &'static str,
-    toolchains: Vec<ToolchainJson<'a>>,
-    summary: CacheSummary,
-}
-
+/// @name toolchain_report
+/// @description Serializes installed toolchains as candidates with version and pin metadata.
+///
+/// @example
+/// let report = toolchain_report(&entries)?;
 pub fn toolchain_report(entries: &[(Toolchain, Candidate)]) -> Result<String, serde_json::Error> {
-    let report = ToolchainReport {
-        schema_version: SCHEMA_VERSION,
-        command: "toolchain",
-        toolchains: entries
-            .iter()
-            .map(|(toolchain, candidate)| ToolchainJson {
-                tool: toolchain.tool.name(),
-                runtime: &toolchain.runtime,
-                version: &toolchain.version,
-                path: &toolchain.path,
-                safety: toolchain.safety(),
-                default: toolchain.default,
-                pinned_by: &toolchain.pins,
-                allocated_bytes: candidate.usage.allocated,
-                apparent_bytes: candidate.usage.apparent,
-                entries: candidate.usage.entries,
-                partial: candidate.usage.partial,
-            })
-            .collect(),
-        summary: CacheSummary {
-            items: entries.len(),
-            bytes: entries
-                .iter()
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-            safe_bytes: entries
-                .iter()
-                .filter(|(toolchain, _)| toolchain.safety() == Safety::Safe)
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-        },
-    };
-    serde_json::to_string_pretty(&report)
+    listing_report(Source::Toolchain, entries, Vec::new(), |toolchain| {
+        ToolchainJson {
+            tool: toolchain.tool.name(),
+            runtime: &toolchain.runtime,
+            version: &toolchain.version,
+            default: toolchain.default,
+            pinned_by: &toolchain.pins,
+        }
+    })
 }
 
 #[derive(Serialize)]
 struct DockerJson<'a> {
     engine: &'a str,
     object: Object,
-    id: &'a str,
+    object_id: &'a str,
     name: &'a str,
-    #[serde(serialize_with = "lossy_path")]
-    path: &'a Path,
-    safety: Safety,
     note: Option<&'a str>,
-    allocated_bytes: u64,
 }
 
-#[derive(Serialize)]
-struct DockerReport<'a> {
-    schema_version: u32,
-    command: &'static str,
-    objects: Vec<DockerJson<'a>>,
-    issues: &'a [String],
-    summary: CacheSummary,
-}
-
+/// @name docker_report
+/// @description Serializes container engine candidates and reports engine failures as issues.
+///
+/// @example
+/// let report = docker_report(&entries, &listing.issues)?;
 pub fn docker_report(
     entries: &[(Item, Candidate)],
     issues: &[String],
 ) -> Result<String, serde_json::Error> {
-    let report = DockerReport {
-        schema_version: SCHEMA_VERSION,
-        command: "docker",
-        objects: entries
-            .iter()
-            .map(|(item, candidate)| DockerJson {
-                engine: &item.engine,
-                object: item.object,
-                id: &item.id,
-                name: &item.label,
-                path: &candidate.path,
-                safety: item.safety,
-                note: (!item.note.is_empty()).then_some(item.note.as_str()),
-                allocated_bytes: candidate.usage.allocated,
-            })
-            .collect(),
-        issues,
-        summary: CacheSummary {
-            items: entries.len(),
-            bytes: entries
-                .iter()
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-            safe_bytes: entries
-                .iter()
-                .filter(|(item, _)| item.safety == Safety::Safe)
-                .map(|(_, candidate)| candidate.usage.allocated)
-                .sum(),
-        },
-    };
-    serde_json::to_string_pretty(&report)
+    let issues = issues
+        .iter()
+        .map(|message| IssueJson {
+            path: Path::new("docker"),
+            kind: IssueKind::Io,
+            message,
+        })
+        .collect();
+    listing_report(Source::Docker, entries, issues, |item| DockerJson {
+        engine: &item.engine,
+        object: item.object,
+        object_id: &item.id,
+        name: &item.label,
+        note: (!item.note.is_empty()).then_some(item.note.as_str()),
+    })
 }
 
 #[cfg(all(test, unix))]

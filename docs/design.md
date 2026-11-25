@@ -1,6 +1,6 @@
 # kuizer design
 
-Status: CLI, Ratatui TUI and GPUI desktop app (`kuizer-gui`) are shipped on Linux and macOS: project artifacts, global caches, toolchains, Docker/Podman, git repositories, duplicates, `--idle`, HTML reports and dashboard, guarded deletion (permanent by default, opt-in trash), deletion history with ids, and `restore`. Still open from this spec: shared keymap, `--json-lines`, `big`, policies, `--rule`/`--project`/`--exclude` filters and filters on non-project sources, `cache`/`toolchain`/`docker` `clean` subcommands, a JSON schema file, exclusion from the UI, and the caches/duplicates/issues views in the TUI.
+Status: CLI, Ratatui TUI and GPUI desktop app (`kuizer-gui`) are shipped on Linux and macOS: project artifacts, global caches, toolchains, Docker/Podman, git repositories, duplicates, `--idle`, HTML reports and dashboard, guarded deletion (permanent by default, opt-in trash), deletion history with ids, and `restore`. Still open from this spec: `--json-lines`, `big`, policies, `--rule`/`--project`/`--exclude` filters and filters on non-project sources, `cache`/`toolchain`/`docker` `clean` subcommands, a JSON schema file, exclusion from the UI, and the caches/duplicates/issues views in the TUI.
 
 ## 1. Product specification
 
@@ -290,11 +290,13 @@ Each session in the history file gets an id `s<N>`, and each item in it `s<N>.<M
 
 Exit codes: `0` success, `1` error, `2` usage error. Unreadable paths are reported as issues and do not change the exit code; scripts read `issues` in the JSON.
 
-JSON (`--json`) is one document with `schema_version: 1`. Items from every source share the `candidates` shape; `source`, `project_last_active` and, in history output, `id` are added fields:
+Versioned JSON reports use `schema_version: 2`. Scan, cache, toolchain and Docker listings use `candidates`. Their rows include `source` and the same candidate fields. Removal reports use `items` with the candidate fields and a removal outcome. [JSON Schema for versioned reports](report.schema.json)
+
+Scripts migrating from version 1 can read `candidates` in place of `caches`, `toolchains` and `objects`. The Docker row's numeric `id` identifies the candidate in the report. The engine's object ID is in `object_id`, and Docker issues have `path`, `kind` and `message` fields.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "scan",
   "roots": ["/home/me/projects"],
   "candidates": [{
@@ -314,34 +316,33 @@ Fields are only added within a schema version; renames or removals bump it. `--j
 
 ## 7. TUI interaction model
 
-Layout: header with roots, scan state and totals; main list; detail pane (path, rule, evidence, project, newest file, duplicate members); footer with key hints and the selected total.
+The TUI shows project artifacts, scan progress, the focused item's details, and selection totals. It draws on input or at most every 50 ms while scanning. A worker streams results and the UI processes a bounded number of events per frame.
 
-Rendering runs at most every 50 ms or on input. The scan runs on its own threads; the UI thread drains up to a fixed number of events per frame, so a burst of results never delays a keypress.
+The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI help overlay shows the effective bindings. These are the TUI defaults.
 
 | Key | Action |
 | --- | --- |
-| `j` `k` / arrows | move |
-| `g` `G` | top, bottom |
-| `J` `K` / shift ↑ ↓ | move and select the rows passed |
-| `space` | toggle selection |
-| `a` | select all `safe` in the current view; press again to add `review` items, again to clear |
-| `P` | the same three steps for the current project |
-| `c` | select or clear the current category |
-| `u` | clear selection |
-| `/` | filter by path or rule; `esc` clears |
-| `esc` | back out one level; never quits |
-| `s` | cycle sort: size, path, category, idle |
-| `1` `2` `3` `4` | views: artifacts, caches, duplicates, issues |
-| `enter` / `l` | expand detail or duplicate group |
-| `x` | exclude path (writes to config after confirmation) |
-| `d` | delete selection, or the item under the cursor |
-| `enter` | delete selection when something is selected |
-| `D` | toggle permanent deletion for the next dialog |
-| `p` | pause or resume the scan |
-| `ctrl-c` / `ctrl-q` / `q` | cancel the scan, then quit |
-| `?` | help |
+| `j`, `k`, up, down | Move one row |
+| `g`, `G`, Home, End | Jump to the first or last row |
+| `J`, `K`, Shift+Up, Shift+Down | Move and extend selection |
+| Page Up, Page Down, Ctrl+U, Ctrl+D | Move a full or half page |
+| Space | Toggle selection and advance |
+| `a` | Select the safe items in the current view |
+| `P` | Select safe items in the current project. Press again to add review items, then again to clear |
+| `u` | Clear selection |
+| `/` | Filter by path or rule. Enter applies and Esc clears |
+| `c` | Cycle the category filter |
+| `f` | Toggle the safe-only filter |
+| `x` | Clear all filters |
+| Esc | Back out of filters or selection |
+| `s` | Cycle sort by size, path, or category |
+| `p` | Switch between grouping by rule and grouping by project |
+| `d`, Delete | Delete the selection, or the item under the cursor |
+| Enter | Delete the selection when it is non-empty |
+| `q`, Ctrl+Q, Ctrl+C | Quit, asking first if a deletion is running |
+| `?` | Show shortcut help |
 
-Deletion is permanent unless `delete.mode = "trash"`, which moves items to the trash instead. By default `d` and `enter` open a dialog that lists every selected path with size and safety and needs `y` or `enter`. With `delete.confirm = false` the selection is deleted straight away, unless it holds a `review` item or a project with uncommitted changes: then the dialog always shows. `kuizer --confirm` forces the dialog on. Nothing is preselected for deletion.
+Deleting uses the mode set by `delete.mode`. By default, deletion asks for confirmation and lists the selected items with size and safety. Press `y` or Enter to confirm. With `delete.confirm = false`, the TUI still asks for review items and projects with uncommitted changes or unknown Git status. `kuizer --confirm` forces a confirmation. The TUI starts with an empty selection.
 
 ## 8. Threat model
 
@@ -374,6 +375,8 @@ Measure first, optimize second, and only with numbers from both warm and cold ca
 - Comparisons: sizing threads 1, 2, 4, 8; single-threaded discovery against `jwalk` and a work-stealing walker; `stat` against `statx`.
 
 Phase 1 baseline (container, 4 cores, warm cache, 200 projects with 100 dependencies each, 109k entries, 250 candidates totalling 472 MiB): 0.30 s with 1 sizing thread, 0.11 s with 4, 0.10 s with 8. Cold-cache and slow-storage numbers come from the Arch machine.
+
+CI benchmarks `kuizer --json scan` on the same 200-project, 100-dependency fixture with four sizing threads. The initial 0.11 s median reference comes from the phase 1 warm-cache measurement above; that measurement did not record the output mode. `benchmarks/scan-baseline.json` stores the reference and CI fails when the measured median exceeds it by more than 15 percent.
 
 ## 10. Phases and acceptance criteria
 

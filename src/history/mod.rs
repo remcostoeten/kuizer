@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -719,17 +719,7 @@ fn set_aside(path: &Path) -> bool {
 fn write(path: &Path, history: &History) -> io::Result<()> {
     let mut text = serde_json::to_string(history).map_err(io::Error::other)?;
     text.push('\n');
-    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let saved = fs::File::create(&temporary)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&temporary, path));
-    if saved.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    saved
+    crate::platform::write_atomic(path, text.as_bytes())
 }
 
 struct Lock {

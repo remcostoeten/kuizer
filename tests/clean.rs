@@ -351,7 +351,7 @@ fn cache_lists_and_cleans_known_caches_only() {
     let output = kuizer(&home, &["--json", "cache"]);
     assert!(output.status.success(), "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let names: Vec<&str> = report["caches"]
+    let names: Vec<&str> = report["candidates"]
         .as_array()
         .unwrap()
         .iter()

@@ -1,21 +1,18 @@
-use std::io::Read;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::delete::{DeleteError, Guard, Mode};
+use crate::delete::{DeleteError, Mode};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
+use crate::process;
 use crate::scan::{Candidate, Usage};
 use crate::units::ByteSize;
-
-const REMOVE_TIMEOUT: Duration = Duration::from_secs(300);
-const INSPECT_TIMEOUT: Duration = Duration::from_secs(30);
-const TEXT_BUSY: i32 = 26;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -113,65 +110,20 @@ enum Failure {
     Failed(String),
 }
 
-fn spawn(program: &str, args: &[&str]) -> std::io::Result<std::process::Child> {
-    let mut attempts = 0;
-    loop {
-        let result = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        match result {
-            Err(error) if error.raw_os_error() == Some(TEXT_BUSY) && attempts < 10 => {
-                attempts += 1;
-                thread::sleep(Duration::from_millis(20));
-            }
-            other => return other,
-        }
-    }
-}
-
-fn drain(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
-    thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_string(&mut text);
-        }
-        text
-    })
-}
-
 fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, Failure> {
-    let mut child = spawn(program, args).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Failure::Missing
-        } else {
-            Failure::Failed(error.to_string())
+    let output = process::run(Command::new(program).args(args), timeout).map_err(|error| {
+        match error.kind() {
+            io::ErrorKind::NotFound => Failure::Missing,
+            io::ErrorKind::TimedOut => Failure::TimedOut,
+            _ => Failure::Failed(error.to_string()),
         }
     })?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Failure::TimedOut);
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(Failure::Failed(error.to_string())),
-        }
-    };
-    let out = stdout.join().unwrap_or_default();
-    let err = stderr.join().unwrap_or_default();
-    if status.success() {
-        Ok(out)
+    if output.status.success() {
+        String::from_utf8(output.stdout).map_err(|error| Failure::Failed(error.to_string()))
     } else {
         Err(Failure::Failed(
-            err.lines()
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
                 .map(str::trim)
                 .rfind(|line| !line.is_empty())
                 .unwrap_or("no output")
@@ -694,20 +646,19 @@ pub fn entries(items: Vec<Item>) -> Vec<(Item, Candidate)> {
         .collect()
 }
 
-fn parse_path(path: &Path) -> Option<(String, Object, String)> {
+fn parse_path(path: &Path) -> Option<(&str, Object, &str)> {
     let text = path.to_str()?;
     let (program, rest) = text.split_once(':')?;
     let (object, id) = rest.split_once('/')?;
     let object = Object::from_name(object)?;
-    (!program.is_empty() && !id.is_empty() && !id.starts_with('-'))
-        .then(|| (program.to_owned(), object, id.to_owned()))
+    (!program.is_empty() && !id.is_empty() && !id.starts_with('-')).then_some((program, object, id))
 }
 
 fn still_untagged(program: &str, id: &str) -> Result<bool, Failure> {
     let out = run(
         program,
         &["image", "inspect", "--format", "{{len .RepoTags}}", id],
-        INSPECT_TIMEOUT,
+        process::QUERY_TIMEOUT,
     )?;
     Ok(out.trim() == "0")
 }
@@ -724,34 +675,40 @@ fn refusal(engine: &str, failure: Failure) -> DeleteError {
 /// `builder prune --force` or `volume rm`, never with force on an image, container or volume, so
 /// anything still in use is refused by the engine itself. An image is inspected right before it
 /// is removed and left alone once it carries a tag. Nothing under `/var/lib/docker` is touched.
-/// These removals are permanent; a dry run does nothing.
+/// These removals are permanent. The engine must be listed in `engines`. A dry run only
+/// checks the object path and the engine.
 ///
 /// @example
-/// docker::remove(&guard, &candidate, Mode::Permanent)?;
-pub fn remove(_guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
+/// docker::remove(&config.docker.engines, &candidate, Mode::Permanent)?;
+pub fn remove(engines: &[String], candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
     let (program, object, id) = parse_path(&candidate.path).ok_or_else(|| {
         DeleteError::Tool(format!(
             "{} is not a Docker or Podman object",
             candidate.path.display()
         ))
     })?;
+    if !engines.iter().any(|engine| engine == program) {
+        return Err(DeleteError::Tool(format!(
+            "{program} is not enabled in docker.engines"
+        )));
+    }
     if mode == Mode::DryRun {
         return Ok(());
     }
-    let engine = engine_name(&program);
-    if object == Object::Image && !still_untagged(&program, &id).map_err(|f| refusal(engine, f))? {
+    let engine = engine_name(program);
+    if object == Object::Image && !still_untagged(program, id).map_err(|f| refusal(engine, f))? {
         return Err(DeleteError::Tool(format!(
             "{engine} image {} is tagged now, not removed",
-            short(&id)
+            short(id)
         )));
     }
     let args: Vec<&str> = match object {
-        Object::Image => vec!["image", "rm", &id],
-        Object::Container => vec!["container", "rm", &id],
+        Object::Image => vec!["image", "rm", id],
+        Object::Container => vec!["container", "rm", id],
         Object::BuildCache => vec!["builder", "prune", "--force"],
-        Object::Volume => vec!["volume", "rm", &id],
+        Object::Volume => vec!["volume", "rm", id],
     };
-    run(&program, &args, REMOVE_TIMEOUT)
+    run(program, &args, process::MUTATION_TIMEOUT)
         .map(drop)
         .map_err(|failure| refusal(engine, failure))
 }
@@ -760,6 +717,7 @@ pub fn remove(_guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), D
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
 
     use super::*;
 
@@ -839,14 +797,13 @@ esac"#,
     fn removes_through_the_engine_without_force() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let program = fake_docker(tmp.path());
-        let entries = entries(list(&[program], TIMEOUT, 24).items);
-        let guard = Guard::new(&[]);
+        let entries = entries(list(std::slice::from_ref(&program), TIMEOUT, 24).items);
         for (_, candidate) in &entries {
-            remove(&guard, candidate, Mode::DryRun).expect("dry run");
+            remove(std::slice::from_ref(&program), candidate, Mode::DryRun).expect("dry run");
         }
         let before = fs::read_to_string(tmp.path().join("calls")).expect("calls");
         for (_, candidate) in &entries {
-            remove(&guard, candidate, Mode::Permanent).expect("removed");
+            remove(std::slice::from_ref(&program), candidate, Mode::Permanent).expect("removed");
         }
         let calls = fs::read_to_string(tmp.path().join("calls")).expect("calls");
         let removals: Vec<&str> = calls[before.len()..].lines().collect();
@@ -870,14 +827,14 @@ esac"#,
     fn an_image_tagged_after_listing_is_not_removed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let program = fake_docker(tmp.path());
-        let entries = entries(list(&[program], TIMEOUT, 24).items);
+        let entries = entries(list(std::slice::from_ref(&program), TIMEOUT, 24).items);
         let (_, image) = entries
             .iter()
             .find(|(item, _)| item.id == "aaaaaaaaaaaaaaaa")
             .expect("image");
         fs::write(tmp.path().join("tags"), "1\n").expect("tags");
 
-        let error = remove(&Guard::new(&[]), image, Mode::Permanent).unwrap_err();
+        let error = remove(std::slice::from_ref(&program), image, Mode::Permanent).unwrap_err();
 
         assert!(error.to_string().contains("is tagged now"), "{error}");
         let calls = fs::read_to_string(tmp.path().join("calls")).expect("calls");
@@ -1019,7 +976,12 @@ esac"#,
             safety: Safety::Review,
             note: String::new(),
         };
-        let error = remove(&Guard::new(&[]), &item.candidate(1), Mode::Permanent).unwrap_err();
+        let error = remove(
+            std::slice::from_ref(&item.program),
+            &item.candidate(1),
+            Mode::Permanent,
+        )
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
             "podman refused: Error: volume pgdata is being used"

@@ -54,7 +54,10 @@ include_hidden = false
 [delete]
 mode = "permanent"
 confirm = true
-
+# Extra existing absolute directories the deletion guard refuses.
+protected = []
+# Allow deleting a selected directory across a filesystem boundary. Defaults to false.
+cross_device = false
 # Git repositories found under the scan roots. kuizer lists a repository when `git gc`
 # would free at least min_gain, or when it has local branches already merged into its
 # default branch. Neither action can be undone from the trash.
@@ -91,3 +94,14 @@ pins = true
 engines = ["docker", "podman"]
 timeout_secs = 10
 recent_hours = 24
+
+# Override a shortcut with one key or a list of alternatives. Quote action names with dots.
+# Each action replaces all its defaults. Shared actions apply in both interfaces.
+# Use modifier prefixes such as ctrl-, alt-, shift-, and secondary- (Cmd in the macOS GUI,
+# Ctrl in the TUI and on Linux). Named keys include space, enter, escape, and pageup.
+# Invalid or conflicting overrides report a warning and keep that action's defaults.
+# See src/keymap.rs for the full action list and the contexts where each action works.
+[keys]
+# "nav.down" = ["n", "down"]
+# "nav.up" = ["shift-n", "up"]
+# "palette.open" = "secondary-shift-k"

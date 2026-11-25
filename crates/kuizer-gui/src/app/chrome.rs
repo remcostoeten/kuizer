@@ -36,7 +36,7 @@ impl Kuizer {
                 )
                 .child(
                     ui::tag("refreshing", "Refreshing", ui::Tone::Neutral)
-                        .tip(Tooltip::new("Stop the fresh scan").keys(&["Esc"]).build()),
+                        .tip(Tooltip::new("Stop the fresh scan").keys(&[&self.key_hint(Scope::GuiBack, Key::Back)]).build()),
                 )
         });
         let controls = frame::controls(window);
@@ -68,7 +68,7 @@ impl Kuizer {
                     ))
                     .tip(
                         Tooltip::new("Stop the scan and keep what it found so far")
-                            .keys(&["S"])
+                            .keys(&[&self.hint(&Command::StopScan)])
                             .build(),
                     ),
                 )
@@ -83,7 +83,7 @@ impl Kuizer {
                     ))
                     .tip(
                         Tooltip::new("Stop the scan and go back to the start screen")
-                            .keys(&["Esc"])
+                            .keys(&[&self.key_hint(Scope::GuiBack, Key::Back)])
                             .build(),
                     ),
                 )
@@ -102,7 +102,7 @@ impl Kuizer {
                     ))
                     .tip(
                         Tooltip::new("Choose another folder or change the scan options")
-                            .keys(&[hint(&Command::NewScan)])
+                            .keys(&[&self.hint(&Command::NewScan)])
                             .build(),
                     ),
                 )
@@ -120,10 +120,10 @@ impl Kuizer {
                         },
                     ))
                     .pl(unit(space::S))
-                    .child(ui::kbd(hint(&Command::Rescan)))
+                    .child(ui::kbd(self.hint(&Command::Rescan)))
                     .tip(
                         Tooltip::new("Scan the same folders again with the same options")
-                            .keys(&[hint(&Command::Rescan)])
+                            .keys(&[&self.hint(&Command::Rescan)])
                             .build(),
                     ),
                 )
@@ -404,7 +404,7 @@ impl Kuizer {
                 } else {
                     "Show only icons"
                 })
-                .keys(&[hint(&Command::Sidebar)])
+                .keys(&[&self.hint(&Command::Sidebar)])
                 .build(),
                 cx.listener(|app, hovered: &bool, _, cx| {
                     app.hover_icon(Icon::Sidebar, *hovered, cx);
@@ -520,7 +520,7 @@ impl Kuizer {
             .when(collapsed, |this| this.justify_center().px_0())
             .tip_hover(
                 Tooltip::new("Settings")
-                    .keys(&[hint(&Command::Settings)])
+                    .keys(&[&self.hint(&Command::Settings)])
                     .build(),
                 cx.listener(|app, hovered: &bool, _, cx| {
                     app.hover_icon(Icon::Settings, *hovered, cx);
@@ -534,7 +534,7 @@ impl Kuizer {
             ))
             .when(!collapsed, |this| {
                 this.child(div().flex_1().min_w_0().truncate().child("Settings"))
-                    .child(ui::kbd(commands::label("secondary-,")))
+                    .child(ui::kbd(self.hint(&Command::Settings)))
             });
         let settings = self.control(settings, cx, |app, _, cx| app.open_settings(cx));
         div()
@@ -600,7 +600,13 @@ impl Kuizer {
                 (true, Some(figure)) => format!("{}  {figure}", tab.label()),
                 _ => tab.label().to_owned(),
             })
-            .keys(if hints { tab.keys() } else { &[] })
+            .keys(
+                &self
+                    .keymap
+                    .keys(Scope::Gui, tab.action())
+                    .filter(|_| hints)
+                    .collect::<Vec<_>>(),
+            )
             .build();
         let item = ui::nav_item(tab.label(), active)
             .debug_selector(|| tab.label().to_owned())
@@ -693,7 +699,10 @@ impl Kuizer {
                     .when(mode == keys::Mode::Visual, |this| {
                         this.tip(
                             Tooltip::new("Motions select the rows they pass")
-                                .keys(&["v", "Esc"])
+                                .keys(&[
+                                    &self.hint(&Command::Visual),
+                                    &self.key_hint(Scope::GuiBack, Key::Back),
+                                ])
                                 .build(),
                         )
                     }),
@@ -726,7 +735,7 @@ impl Kuizer {
                         "mode-asking",
                         format!(
                             "Only review items. {} again selects {left}",
-                            hint(&Command::SelectAll)
+                            self.hint(&Command::SelectAll)
                         ),
                         ui::Tone::Review,
                     )
@@ -749,31 +758,47 @@ impl Kuizer {
     /// The keys that do the most in the current mode, read from the keymap so a rebind shows.
     fn render_hints(&self) -> Div {
         let list = self.report().is_some() && self.tab != Tab::Overview;
-        let hints: Vec<(&'static str, &'static str)> = match self.mode() {
+        let hints: Vec<(String, &'static str)> = match self.mode() {
             keys::Mode::Normal if list => {
                 let mut hints = vec![
-                    (hint(&Command::Down), "move"),
-                    (hint(&Command::Toggle), "select"),
-                    (hint(&Command::Visual), "visual"),
-                    (hint(&Command::FocusFilter), "filter"),
+                    (self.hint(&Command::Down), "move"),
+                    (self.hint(&Command::Toggle), "select"),
+                    (self.hint(&Command::Visual), "visual"),
+                    (self.hint(&Command::FocusFilter), "filter"),
                 ];
                 if self.tab.selects() {
-                    hints.push((hint(&Command::Trash), "delete"));
+                    hints.push((self.hint(&Command::Trash), "delete"));
                 }
-                hints.push((hint(&Command::Palette), "commands"));
+                hints.push((self.hint(&Command::Palette), "commands"));
                 hints
             }
             keys::Mode::Normal => vec![
-                (hint(&Command::Palette), "commands"),
-                (hint(&Command::Shortcuts), "shortcuts"),
+                (self.hint(&Command::Palette), "commands"),
+                (self.hint(&Command::Shortcuts), "shortcuts"),
             ],
             keys::Mode::Visual => vec![
-                (hint(&Command::Down), "extend the selection"),
-                (hint(&Command::Trash), "delete"),
-                ("Esc", "back to normal"),
+                (self.hint(&Command::Down), "extend the selection"),
+                (self.hint(&Command::Trash), "delete"),
+                (self.key_hint(Scope::GuiBack, Key::Back), "back to normal"),
             ],
-            keys::Mode::Filter => vec![("Enter", "keep the filter"), ("Esc", "clear it")],
-            _ => vec![("Esc", "close")],
+            keys::Mode::Filter => vec![
+                (
+                    self.key_hint(Scope::GuiFilter, Key::ApplyFilter),
+                    "keep the filter",
+                ),
+                (self.key_hint(Scope::GuiFilter, Key::Back), "clear it"),
+            ],
+            mode => {
+                let (scope, action) = match mode {
+                    keys::Mode::Palette => (Scope::Palette, Key::Back),
+                    keys::Mode::Settings => (Scope::Settings, Key::Back),
+                    keys::Mode::Menu => (Scope::Menu, Key::MenuClose),
+                    keys::Mode::Shortcuts => (Scope::Shortcuts, Key::ShortcutsClose),
+                    keys::Mode::Confirm => (Scope::Dialog, Key::Back),
+                    _ => (Scope::GuiBack, Key::Back),
+                };
+                vec![(self.key_hint(scope, action), "close")]
+            }
         };
         div()
             .flex()

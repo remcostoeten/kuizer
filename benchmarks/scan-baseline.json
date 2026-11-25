@@ -1,0 +1,9 @@
+{
+  "benchmark": "kuizer --json scan",
+  "projects": 200,
+  "dependencies_per_project": 100,
+  "size_threads": 4,
+  "median_seconds": 0.11,
+  "max_regression_percent": 15,
+  "source": "docs/design.md section 9, phase 1 warm-cache scan of the same synthetic tree; its output mode was not recorded"
+}

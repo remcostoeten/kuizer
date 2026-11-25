@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use crate::cli::SortKey;
 use crate::delete::{Mode, Target};
 use crate::detect::{Category, Safety};
+use crate::keymap::{Action as Key, Keymap, Scope};
 use crate::scan::{Candidate, Progress, Summary};
+use ratatui::crossterm::event::KeyEvent;
 
 const SHOWN: usize = 8;
 const KEY_HOLD: Duration = Duration::from_millis(600);
@@ -98,6 +100,8 @@ fn review_items(count: usize) -> String {
 
 pub struct App {
     last_enter: Option<Instant>,
+    last_action_key: Option<(KeyEvent, Instant)>,
+    pub keymap: Keymap,
     last_project_press: Option<Instant>,
     widen_armed: Option<PathBuf>,
     pub items: Vec<Item>,
@@ -152,6 +156,8 @@ impl App {
     pub fn new(mode: Mode, confirm_before_delete: bool) -> Self {
         Self {
             last_enter: None,
+            last_action_key: None,
+            keymap: Keymap::default(),
             last_project_press: None,
             widen_armed: None,
             items: Vec::new(),
@@ -600,8 +606,15 @@ impl App {
         } else if self.selected_count > 0 {
             self.clear_selection();
         } else {
-            self.message = Some("nothing to back out of, q quits".to_owned());
+            self.message = Some(format!("nothing to back out of, {} quits", self.quit_key()));
         }
+    }
+
+    fn quit_key(&self) -> &str {
+        self.keymap
+            .keys(Scope::Tui, Key::Quit)
+            .next()
+            .unwrap_or("q")
     }
 
     pub fn request_quit(&mut self) {
@@ -809,6 +822,15 @@ impl App {
         self.index.get(&id).map(|&index| &self.items[index])
     }
 
+    pub fn action_key_repeats(&mut self, key: KeyEvent, now: Instant) -> bool {
+        let previous = self.last_action_key.replace((key, now));
+        previous.is_some_and(|(previous, at)| {
+            previous.code == key.code
+                && previous.modifiers == key.modifiers
+                && now.duration_since(at) < KEY_HOLD
+        })
+    }
+
     pub fn enter_repeats(&mut self, now: Instant) -> bool {
         repeats(&mut self.last_enter, now)
     }
@@ -861,7 +883,7 @@ impl App {
                 self.deleting_count -= 1;
                 if self.deleting_count == 0 && self.overlay == Overlay::Quit {
                     self.overlay = Overlay::None;
-                    self.message = Some("deletions finished, q quits".to_owned());
+                    self.message = Some(format!("deletions finished, {} quits", self.quit_key()));
                 }
             }
             match (before == Status::Deleted, now_deleted) {

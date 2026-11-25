@@ -14,12 +14,7 @@ This phase is three pull requests: benchmarks, fuzzing, platforms.
 
 ### CI regression gate
 
-Wall time on shared runners varies by 20 percent or more between runs, which hides real regressions. The gate measures instruction counts instead, which are stable to a fraction of a percent:
-
-- `benches/ci.rs` with `iai-callgrind` (Linux only, needs `valgrind`), running a scan of a 50k entry synthetic tree and a duplicate pass over a 2k file tree, both generated into a temp dir by the bench itself.
-- A `bench` job in `ci.yml` runs on pull requests, compares against the base branch with `iai-callgrind`'s baseline support and fails above a 5 percent instruction increase.
-
-Criterion numbers stay local and go into `design.md` by hand.
+`benchmarks/scan.sh` builds the release CLI and synthetic tree generator, creates a 200-project tree with 100 dependencies per project, and times `kuizer --json scan` with four sizing threads. `hyperfine` runs one warmup and five measured runs. The `scan-benchmark` job in `ci.yml` compares the median against `benchmarks/scan-baseline.json` and fails above a 15 percent regression. The initial 0.11 s reference is the phase 1 warm-cache measurement in `design.md` section 9; its original output mode was not recorded.
 
 ### Questions this answers
 

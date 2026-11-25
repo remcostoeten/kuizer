@@ -272,7 +272,7 @@ impl Kuizer {
         let keystroke = &event.keystroke;
         let repeat = self.held.press(event, Instant::now());
         if self.menu.is_some() {
-            self.menu_key(event, cx);
+            self.menu_key(event, repeat, cx);
             return;
         }
         if self.dialog.is_some() {
@@ -292,7 +292,7 @@ impl Kuizer {
             return;
         }
         if self.filtering {
-            if !ring::is_tab(keystroke) {
+            if !self.is_control_cycle(keystroke) {
                 self.filter_key(keystroke, cx);
                 return;
             }
@@ -304,7 +304,9 @@ impl Kuizer {
         if matches!(self.phase, Phase::Start) && self.type_folder(event, cx) {
             return;
         }
-        let escape = keystroke.key == "escape";
+        let escape = self
+            .keymap
+            .matches(Scope::GuiBack, Key::Back, commands::stroke(keystroke));
         match self.phase {
             Phase::Loading(_) if escape => {
                 self.cancel_scan(cx);
@@ -320,9 +322,13 @@ impl Kuizer {
             cx.notify();
             return;
         }
-        if let Some(command) = commands::lookup(keystroke, self.map_active())
+        if let Some(command) = commands::lookup(&self.keymap, keystroke, self.map_active())
             && (self.config.route_shortcuts.enabled || !matches!(command, Command::GoTo(_)))
-            && !(repeat && matches!(command, Command::Trash | Command::SelectAll))
+            && !(repeat
+                && matches!(
+                    command,
+                    Command::Trash | Command::SelectAll | Command::Restore | Command::Exclude
+                ))
         {
             self.run(command, window, cx);
         }
@@ -333,7 +339,10 @@ impl Kuizer {
     }
 
     fn shortcuts_key(&mut self, keystroke: &Keystroke, window: &Window, cx: &mut Context<Self>) {
-        if matches!(keystroke.key.as_str(), "escape" | "enter") || commands::matches("?", keystroke)
+        let stroke = commands::stroke(keystroke);
+        if self
+            .keymap
+            .matches(Scope::Shortcuts, Key::ShortcutsClose, stroke)
         {
             self.shortcuts = false;
             cx.notify();
@@ -343,7 +352,7 @@ impl Kuizer {
         let line = unit(size::SEGMENT).to_pixels(window.rem_size());
         let page = (scroll.bounds().size.height - line).max(line);
         let (from, end) = (-scroll.offset().y, scroll.max_offset().height);
-        let Some(to) = commands::lookup(keystroke, false)
+        let Some(to) = commands::lookup(&self.keymap, keystroke, false)
             .and_then(|command| scrolled(&command, from, end, line, page))
         else {
             return;
@@ -449,16 +458,18 @@ impl Kuizer {
     }
 
     fn dialog_key(&mut self, keystroke: &Keystroke, repeat: bool, cx: &mut Context<Self>) {
-        let key = keystroke.key.as_str();
-        let plain = !keystroke.modifiers.modified();
+        let action = self
+            .keymap
+            .lookup(Scope::Dialog, commands::stroke(keystroke));
         match &mut self.dialog {
-            Some(Dialog::Finished(_)) if matches!(key, "escape" | "enter") => self.dialog = None,
-            Some(Dialog::Branches { cancel, .. }) => match key {
-                "escape" => self.dialog = None,
-                "tab" | "left" | "right" => *cancel = !*cancel,
-                "up" | "down" | "h" | "j" | "k" | "l" if plain => *cancel = !*cancel,
-                "enter" if *cancel => self.dialog = None,
-                "enter" => {
+            Some(Dialog::Finished(_)) if matches!(action, Some(Key::Back | Key::Confirm)) => {
+                self.dialog = None;
+            }
+            Some(Dialog::Branches { cancel, .. }) => match action {
+                Some(Key::Back) => self.dialog = None,
+                Some(Key::DialogToggle) => *cancel = !*cancel,
+                Some(Key::Confirm) if *cancel => self.dialog = None,
+                Some(Key::Confirm) => {
                     if !repeat {
                         self.accept_branches(cx);
                     }
@@ -521,14 +532,15 @@ impl Kuizer {
     fn palette_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
         let entries = self.palette_entries();
         let count = entries.len();
-        let modifiers = keystroke.modifiers;
-        let ctrl = modifiers.control && !modifiers.shift && !modifiers.alt;
+        let action = self
+            .keymap
+            .lookup(Scope::Palette, commands::stroke(keystroke));
         let Some(palette) = &mut self.palette else {
             return;
         };
-        match keystroke.key.as_str() {
-            "escape" => self.palette = None,
-            "enter" => {
+        match action {
+            Some(Key::Back) => self.palette = None,
+            Some(Key::PaletteRun) => {
                 let chosen = entries.into_iter().nth(palette.active);
                 if let Some(entry) = chosen
                     && entry.blocked.is_none()
@@ -538,15 +550,17 @@ impl Kuizer {
                 }
                 return;
             }
-            "down" => palette.step(1, count),
-            "up" => palette.step(-1, count),
-            "tab" if modifiers.shift => palette.step(-1, count),
-            "tab" => palette.step(1, count),
-            "n" if ctrl => palette.step(1, count),
-            "p" if ctrl => palette.step(-1, count),
+            Some(Key::PaletteNext) => palette.step(1, count),
+            Some(Key::PalettePrevious) => palette.step(-1, count),
             _ => {
                 let paste = || cx.read_from_clipboard().and_then(|item| item.text());
-                if !field::edit(&mut palette.query, keystroke, field::WORDS, paste) {
+                if !field::edit(
+                    &self.keymap,
+                    &mut palette.query,
+                    keystroke,
+                    field::WORDS,
+                    paste,
+                ) {
                     return;
                 }
                 palette.active = 0;
@@ -575,19 +589,22 @@ impl Kuizer {
     }
 
     fn filter_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        match keystroke.key.as_str() {
-            "escape" => {
+        match self
+            .keymap
+            .lookup(Scope::GuiFilter, commands::stroke(keystroke))
+        {
+            Some(Key::Back) => {
                 self.filters.remove(&self.tab);
                 self.filtering = false;
                 self.filtered();
             }
-            "enter" => self.filtering = false,
-            "down" => self.move_cursor(Motion::Down),
-            "up" => self.move_cursor(Motion::Up),
+            Some(Key::ApplyFilter) => self.filtering = false,
+            Some(Key::FilterDown) => self.move_cursor(Motion::Down),
+            Some(Key::FilterUp) => self.move_cursor(Motion::Up),
             _ => {
                 let text = self.filters.entry(self.tab).or_default();
                 let paste = || cx.read_from_clipboard().and_then(|item| item.text());
-                if !field::edit(text, keystroke, field::WORDS, paste) {
+                if !field::edit(&self.keymap, text, keystroke, field::WORDS, paste) {
                     return;
                 }
                 self.filtered();
@@ -622,6 +639,7 @@ impl Kuizer {
             self.asked = None;
         }
         self.tab = tab;
+        self.ensure_map(cx);
         if tab == Tab::Duplicates {
             self.load_duplicates(cx);
         }
@@ -730,6 +748,19 @@ impl Kuizer {
             Command::Branches => self.branches_blocked(repo().as_ref()),
             Command::BranchesAll => {
                 self.branches_blocked(self.in_repos().then_some(&GitScope::All))
+            }
+            Command::Restore | Command::Exclude | Command::CopyRerun => {
+                let Some(target) = cursor() else {
+                    return Some(NO_ROWS);
+                };
+                self.menu_unavailable(
+                    target,
+                    match command {
+                        Command::Restore => Choice::Restore,
+                        Command::Exclude => Choice::Exclude,
+                        _ => Choice::CopyCommand,
+                    },
+                )
             }
             Command::Reveal | Command::CopyPath | Command::OpenMenu if self.map_active() => {
                 cursor().is_none().then_some("Focus an item tile first")
@@ -873,6 +904,16 @@ impl Kuizer {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
+            Command::Restore | Command::Exclude | Command::CopyRerun => {
+                if let Some(target) = self.cursor_target() {
+                    let choice = match command {
+                        Command::Restore => Choice::Restore,
+                        Command::Exclude => Choice::Exclude,
+                        _ => Choice::CopyCommand,
+                    };
+                    self.run_choice(choice, target, cx);
+                }
+            }
             Command::OpenMenu => self.open_menu_at_cursor(window, cx),
             Command::FocusFilter => self.focus_filter(window, cx),
             Command::ZoomIn => {
@@ -894,7 +935,7 @@ impl Kuizer {
                     self.go_to(Tab::Overview, cx);
                     self.map.shown = true;
                 }
-                self.ensure_map();
+                self.ensure_map(cx);
             }
             Command::MapIn => {
                 if let Some(key) = self.map_focused().map(|node| node.key.clone()) {
@@ -2136,7 +2177,7 @@ mod tests {
                 spec.label
             );
         }
-        for (label, _) in commands::HINTS.iter().chain(&commands::CONTROLS) {
+        for (label, _, _) in commands::HINTS.iter().chain(commands::CONTROLS) {
             assert!(
                 painted(cx, format!("shortcut-{label}")),
                 "{label} is listed"

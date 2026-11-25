@@ -2,6 +2,8 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The release workflow puts the section that matches the tagged version on the GitHub release.
 
+For each release, record the uncompressed sizes of `kuizer` and `kuizer-gui` for `x86_64-unknown-linux-gnu`. Measure the packaged executables in decimal MB (1 MB = 1,000,000 bytes).
+
 ## [Unreleased]
 
 - `delete.mode = "trash"` is back as an opt-in, also as a switch in the GUI settings. Deletion stays permanent by default. In trash mode project artifacts and caches go to the trash; toolchains, Docker objects and git branches are still removed for good.
@@ -49,6 +51,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - Documentation at kuizer.app/docs.
 - Deletion is always permanent. Trash mode, the `delete.mode` key, `--permanent`, the TUI `t` toggle and the GUI undo bar are gone; `delete.confirm` now defaults to `true`. `kuizer restore` still brings back runs that older versions moved to the trash.
 - A folder your user cannot remove, such as a `node_modules` installed with `sudo`, is refused before anything is touched, with the owner and how to remove it instead of a raw permission error.
+- The packaged `kuizer` binary is 5.15 MB and `kuizer-gui` is 17.59 MB.
 
 ## [0.1.2] - 2026-10-24
 
@@ -57,6 +60,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - Faster scan with streaming results in the GUI; Docker queries run side by side.
 - Ctrl+Q quits the GUI and the TUI.
 - Releases publish to crates.io.
+- The packaged `kuizer` binary is 5.15 MB and `kuizer-gui` is 17.31 MB.
 
 ## [0.1.1] - 2026-10-17
 
@@ -65,7 +69,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 - GUI start screen with folder choice and scan options.
 - Releases built with cargo-dist: shell installers, an npm package and prebuilt binaries for Linux and macOS.
 - CI builds and tests on macOS.
+- The packaged `kuizer` binary is 4.79 MB and `kuizer-gui` is 16.33 MB.
 
 ## [0.1.0] - 2026-10-16
 
 First release: `scan`, `clean`, `cache`, `duplicates`, `history` and `restore`, the HTML report and dashboard, a terminal UI and a desktop app, with deletion to the trash and the safety checks.
+
+- The packaged `kuizer` binary is 4.71 MB and `kuizer-gui` is 16.26 MB.

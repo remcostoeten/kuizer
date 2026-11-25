@@ -38,6 +38,58 @@ jobs:
       - run: cargo clippy -p kuizer-gui --all-targets -- -D warnings
       - run: cargo test -p kuizer-gui
 
+  scan-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y hyperfine
+      - run: bash benchmarks/scan.sh
+
+  x11-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev \
+            xvfb xdotool x11-utils mesa-vulkan-drivers
+      - run: cargo build -p kuizer-gui
+      - name: Start the GUI under X11
+        run: |
+          mkdir -p /tmp/kuizer-fixture
+          Xvfb :99 -screen 0 1280x800x24 &
+          export DISPLAY=:99
+          export WGPU_BACKEND=vulkan
+          for attempt in $(seq 1 30); do
+            xdpyinfo >/dev/null 2>&1 && break
+            sleep 1
+          done
+          target/debug/kuizer-gui /tmp/kuizer-fixture &
+          app_pid=$!
+          for attempt in $(seq 1 45); do
+            window=$(xdotool search --onlyvisible --pid "$app_pid" 2>/dev/null | head -n 1 || true)
+            if [ -n "$window" ]; then
+              xdotool windowclose "$window"
+              wait "$app_pid"
+              exit 0
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              wait "$app_pid"
+              exit 1
+            fi
+            sleep 1
+          done
+          kill "$app_pid"
+          wait "$app_pid" || true
+          exit 1
+
   macos:
     runs-on: macos-latest
     steps:

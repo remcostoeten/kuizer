@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::process::Output;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -14,6 +14,7 @@ use crate::config::{Config, ConfigError, GitConfig};
 use crate::dupes::{Files, Options};
 use crate::platform::dir::EntryKind;
 use crate::platform::{self, MountTable};
+use crate::process;
 use crate::protect::Protected;
 use crate::scan::walk::{Companion, FileEntry, Flow, Visitor, Walker};
 use crate::scan::{self, Cancel, Issue, IssueKind, Scan};
@@ -171,6 +172,10 @@ impl Visitor for Walked {
         self.files.wants_files() || self.pins.wants_files()
     }
 
+    fn wants_stat(&self) -> bool {
+        self.files.wants_stat() || self.pins.wants_stat()
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         match (self.files.issue(issue.clone()), self.pins.issue(issue)) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
@@ -181,6 +186,14 @@ impl Visitor for Walked {
     fn counted(&mut self, kind: EntryKind) {
         self.files.counted(kind);
         self.pins.counted(kind);
+    }
+
+    fn entered(&mut self, path: &Path) -> Flow {
+        match (self.files.entered(path), self.pins.entered(path)) {
+            (Flow::Stop, _) | (_, Flow::Stop) => Flow::Stop,
+            (Flow::Skip, _) | (_, Flow::Skip) => Flow::Skip,
+            _ => Flow::Continue,
+        }
     }
 
     fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
@@ -525,7 +538,8 @@ pub fn collect_garbage(
     if config.aggressive {
         args.push("--aggressive");
     }
-    let output = git(&repository.root, &args).map_err(RepoError::Git)?;
+    let output = process::git(&repository.root, &args, process::MUTATION_TIMEOUT)
+        .map_err(|error| RepoError::Git(error.to_string()))?;
     if !output.status.success() {
         return Err(RepoError::Git(stderr(&output)));
     }
@@ -792,49 +806,8 @@ fn stderr(output: &Output) -> String {
     }
 }
 
-fn git_binary() -> &'static Path {
-    static GIT: OnceLock<PathBuf> = OnceLock::new();
-    GIT.get_or_init(|| {
-        std::env::var_os("PATH")
-            .and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|dir| dir.join("git"))
-                    .find(|candidate| is_executable(candidate))
-            })
-            .unwrap_or_else(|| PathBuf::from("git"))
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
 fn git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(git_binary())
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| error.to_string())
+    process::git(root, args, process::QUERY_TIMEOUT).map_err(|error| error.to_string())
 }
 
 const PACK_INDEX_HEADER: u64 = 8 + 256 * 4;
@@ -1118,6 +1091,8 @@ fn sorted_contains(names: &[u8], id: &[u8; 20]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     fn run(dir: &Path, args: &[&str]) -> bool {

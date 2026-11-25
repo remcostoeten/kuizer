@@ -1,0 +1,189 @@
+[
+  {
+    "schema_version": 2,
+    "command": "scan",
+    "roots": [
+      "/fixture"
+    ],
+    "candidates": [
+      {
+        "id": 1,
+        "source": "projects",
+        "path": "/fixture/app/node_modules",
+        "kind": "dir",
+        "rule": "node-modules",
+        "category": "dependencies",
+        "safety": "safe",
+        "ecosystem": "node",
+        "project": "/fixture/app",
+        "allocated_bytes": 4096,
+        "apparent_bytes": 128,
+        "entries": 2,
+        "partial": false,
+        "newest_modified": 1700000000,
+        "project_last_active": 1700010000
+      }
+    ],
+    "issues": [
+      {
+        "path": "/fixture/locked",
+        "kind": "permission-denied",
+        "message": "unreadable"
+      }
+    ],
+    "summary": {
+      "progress": {
+        "dirs": 2,
+        "files": 1,
+        "candidates": 1,
+        "bytes": 4096,
+        "issues": 1
+      },
+      "duration": 10,
+      "cancelled": false
+    }
+  },
+  {
+    "schema_version": 2,
+    "command": "cache",
+    "candidates": [
+      {
+        "id": 2,
+        "source": "cache",
+        "path": "/fixture/.npm/_cacache",
+        "kind": "dir",
+        "rule": "npm",
+        "category": "cache",
+        "safety": "safe",
+        "ecosystem": "npm",
+        "project": null,
+        "allocated_bytes": 4096,
+        "apparent_bytes": 128,
+        "entries": 2,
+        "partial": true,
+        "newest_modified": null,
+        "project_last_active": null,
+        "name": "npm",
+        "tool": "npm",
+        "note": null
+      }
+    ],
+    "issues": [],
+    "summary": {
+      "items": 1,
+      "bytes": 4096,
+      "safe_bytes": 4096
+    }
+  },
+  {
+    "schema_version": 2,
+    "command": "toolchain",
+    "candidates": [
+      {
+        "id": 3,
+        "source": "toolchain",
+        "path": "/fixture/.rustup/toolchains/stable",
+        "kind": "dir",
+        "rule": "rustup",
+        "category": "dependencies",
+        "safety": "review",
+        "ecosystem": "rust",
+        "project": null,
+        "allocated_bytes": 4096,
+        "apparent_bytes": 128,
+        "entries": 2,
+        "partial": true,
+        "newest_modified": null,
+        "project_last_active": null,
+        "tool": "rustup",
+        "runtime": "rust",
+        "version": "stable",
+        "default": true,
+        "pinned_by": [
+          "/fixture/app/rust-toolchain.toml"
+        ]
+      }
+    ],
+    "issues": [],
+    "summary": {
+      "items": 1,
+      "bytes": 4096,
+      "safe_bytes": 0
+    }
+  },
+  {
+    "schema_version": 2,
+    "command": "docker",
+    "candidates": [
+      {
+        "id": 4,
+        "source": "docker",
+        "path": "podman:volume/preview-data",
+        "kind": "external",
+        "rule": "volume",
+        "category": "cache",
+        "safety": "review",
+        "ecosystem": "podman",
+        "project": null,
+        "allocated_bytes": 8192,
+        "apparent_bytes": 8192,
+        "entries": 1,
+        "partial": false,
+        "newest_modified": null,
+        "project_last_active": null,
+        "engine": "podman",
+        "object": "volume",
+        "object_id": "preview-data",
+        "name": "Preview data",
+        "note": "unused volume"
+      }
+    ],
+    "issues": [
+      {
+        "path": "docker",
+        "kind": "io",
+        "message": "docker is not running"
+      }
+    ],
+    "summary": {
+      "items": 1,
+      "bytes": 8192,
+      "safe_bytes": 0
+    }
+  },
+  {
+    "schema_version": 2,
+    "command": "docker",
+    "mode": "dry-run",
+    "roots": [],
+    "items": [
+      {
+        "id": 4,
+        "source": "docker",
+        "path": "podman:volume/preview-data",
+        "kind": "external",
+        "rule": "volume",
+        "category": "cache",
+        "safety": "review",
+        "ecosystem": "podman",
+        "project": null,
+        "allocated_bytes": 8192,
+        "apparent_bytes": 8192,
+        "entries": 1,
+        "partial": false,
+        "newest_modified": null,
+        "project_last_active": null,
+        "status": "would-remove",
+        "error": null
+      }
+    ],
+    "issues": [],
+    "summary": {
+      "selected": 1,
+      "selected_bytes": 8192,
+      "removed": 0,
+      "removed_bytes": 0,
+      "failed": 0
+    }
+  }
+]

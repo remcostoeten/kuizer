@@ -57,7 +57,8 @@ pub fn run(config: &Config, args: ToolchainArgs, json: bool, quiet: bool) -> Res
         yes: plan.removal.yes,
         confirm: config.delete.confirm || clean_may_mean_a_folder(&args),
         json,
-        remove: toolchains::remove,
+        remove: &toolchains::remove,
+        delete: &config.delete,
     };
     removal::run(&request, selected, &[])
 }

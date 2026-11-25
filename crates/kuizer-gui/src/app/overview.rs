@@ -186,7 +186,7 @@ impl Kuizer {
         let largest = picks
             .first()
             .map_or(0, |candidate| candidate.usage.allocated);
-        let key = hint(&Command::SelectWins);
+        let key = self.hint(&Command::SelectWins);
         let button = self
             .button(
                 "overview-wins-select",
@@ -198,7 +198,7 @@ impl Kuizer {
             )
             .tip(
                 Tooltip::new("Selects them and opens Project artifacts. Nothing is deleted yet")
-                    .keys(&[key])
+                    .keys(&[&key])
                     .build(),
             );
         card.child(
@@ -227,7 +227,7 @@ impl Kuizer {
                                     "in the {} largest safe {}. Select them, check the list, then press {} to delete them",
                                     ids.len(),
                                     if ids.len() == 1 { "item" } else { "items" },
-                                    hint(&Command::Trash),
+                                    self.hint(&Command::Trash),
                                 )),
                         ),
                 )
@@ -328,12 +328,7 @@ impl Kuizer {
                         .w(unit(col::M))
                         .when(bytes == 0, |this| this.text_color(theme::faint())),
                 )
-                .children(
-                    tab.keys()
-                        .first()
-                        .filter(|_| hints)
-                        .map(|key| ui::kbd(commands::label(key))),
-                );
+                .children(hints.then(|| ui::kbd(self.hint(&Command::GoTo(tab)))));
             self.control(row, cx, move |app, _, cx| app.go_to(tab, cx))
         });
         div()

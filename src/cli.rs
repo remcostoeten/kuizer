@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 use crate::detect::Category;
+pub use crate::scan::SortKey;
 use crate::units::{ByteSize, Idle};
 
 const STYLES: Styles = Styles::styled()
@@ -1031,15 +1032,6 @@ pub enum ConfigAction {
     Init,
     #[command(about = "Validate the config file")]
     Check,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum SortKey {
-    #[default]
-    Size,
-    Path,
-    Category,
-    Idle,
 }
 
 fn parse_selection(value: &str) -> Result<Selection, String> {

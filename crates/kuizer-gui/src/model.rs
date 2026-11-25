@@ -6,10 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use kuizer::caches::{self, KnownCache, Locations};
-use kuizer::cli::SortKey;
-use kuizer::commands::{measure_caches_with, sort_candidates};
-use kuizer::config::{Config, DeleteMode};
+use kuizer::caches::{self, KnownCache, Locations, measure_with as measure_caches_with};
+use kuizer::config::{Config, DeleteConfig, DeleteMode};
 use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
 use kuizer::detect::{Category, RuleInfo};
 use kuizer::docker;
@@ -20,7 +18,7 @@ use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
 use kuizer::repos::{self, Repository};
-use kuizer::scan::{self, Cancel, Candidate, Collected, Issue, Progress, Summary};
+use kuizer::scan::{self, Cancel, Candidate, Issue, Progress, SortKey, Summary, sort_candidates};
 use kuizer::toolchains::{self, Toolchain};
 
 use crate::activity::{self, Found, Step, Tracker, grouped, plural};
@@ -83,6 +81,11 @@ pub enum Loaded {
         summary: Summary,
         disks: Vec<Disk>,
     },
+    ArtifactsDone {
+        issues: Vec<Issue>,
+        summary: Summary,
+        disks: Vec<Disk>,
+    },
     Caches(Vec<(KnownCache, Candidate)>),
     Toolchains(Vec<(Toolchain, Candidate)>),
     Docker {
@@ -97,7 +100,7 @@ impl Loaded {
     pub fn part(&self) -> Option<Part> {
         match self {
             Self::Found(_) => None,
-            Self::Artifacts { .. } => Some(Part::Artifacts),
+            Self::Artifacts { .. } | Self::ArtifactsDone { .. } => Some(Part::Artifacts),
             Self::Caches(_) => Some(Part::Caches),
             Self::Toolchains(_) => Some(Part::Toolchains),
             Self::Docker { .. } => Some(Part::Docker),
@@ -115,7 +118,9 @@ impl Loaded {
     /// loaded.without(&excluded, &gone);
     pub fn without(&mut self, excluded: &[PathBuf], gone: &HashMap<Source, HashSet<PathBuf>>) {
         let source = match self {
-            Self::Found(_) | Self::Artifacts { .. } => Some(Source::Artifact),
+            Self::Found(_) | Self::Artifacts { .. } | Self::ArtifactsDone { .. } => {
+                Some(Source::Artifact)
+            }
             Self::Caches(_) => Some(Source::Cache),
             Self::Toolchains(_) => Some(Source::Toolchain),
             Self::Docker { .. } => Some(Source::Docker),
@@ -137,6 +142,7 @@ impl Loaded {
                 candidates.retain(|candidate| stays(&candidate.path));
                 issues.retain(|issue| stays(&issue.path));
             }
+            Self::ArtifactsDone { issues, .. } => issues.retain(|issue| stays(&issue.path)),
             Self::Caches(caches) => caches.retain(|(_, candidate)| stays(&candidate.path)),
             Self::Toolchains(toolchains) => {
                 toolchains.retain(|(_, candidate)| stays(&candidate.path));
@@ -332,7 +338,6 @@ impl Report {
         match loaded {
             Loaded::Found(batch) => {
                 self.candidates.extend(batch);
-                sort_candidates(&mut self.candidates, SortKey::Size);
                 Loaded::Found(Vec::new())
             }
             Loaded::Artifacts {
@@ -346,6 +351,19 @@ impl Report {
                 summary: std::mem::replace(&mut self.summary, summary),
                 disks: std::mem::replace(&mut self.disks, disks),
             },
+            Loaded::ArtifactsDone {
+                issues,
+                summary,
+                disks,
+            } => {
+                sort_candidates(&mut self.candidates, SortKey::Size);
+                Loaded::Artifacts {
+                    candidates: Vec::new(),
+                    issues: std::mem::replace(&mut self.issues, issues),
+                    summary: std::mem::replace(&mut self.summary, summary),
+                    disks: std::mem::replace(&mut self.disks, disks),
+                }
+            }
             Loaded::Caches(caches) => Loaded::Caches(std::mem::replace(&mut self.caches, caches)),
             Loaded::Toolchains(toolchains) => {
                 Loaded::Toolchains(std::mem::replace(&mut self.toolchains, toolchains))
@@ -626,15 +644,11 @@ pub fn load(
             ticker.thread().unpark();
             return Err(CANCELLED.to_owned());
         }
-        let mut candidates = collected.candidates;
-        sort_candidates(&mut candidates, SortKey::Size);
-        let artifact_bytes: u64 = candidates.iter().map(|c| c.usage.allocated).sum();
-        let found = candidates.len();
-        let dirs = collected.summary.progress.dirs;
-        emit(Loaded::Artifacts {
-            candidates,
-            issues: collected.issues,
-            summary: collected.summary,
+        let (issues, summary, found, artifact_bytes) = collected;
+        let dirs = summary.progress.dirs;
+        emit(Loaded::ArtifactsDone {
+            issues,
+            summary,
             disks: disks(roots),
         });
         tracker.update_now(|activity| {
@@ -729,45 +743,71 @@ struct Streamed {
     batch: Vec<Candidate>,
     found: u64,
     bytes: u64,
+    total_found: usize,
+    total_bytes: u64,
     largest: Vec<Found>,
 }
 
-fn walk(handle: &scan::Scan, tracker: &Tracker, emit: &(dyn Fn(Loaded) + Sync)) -> Collected {
+fn walk(
+    handle: &scan::Scan,
+    tracker: &Tracker,
+    emit: &(dyn Fn(Loaded) + Sync),
+) -> (Vec<Issue>, Summary, usize, u64) {
     let streamed = RefCell::new(Streamed::default());
-    scan::collect_with(
+    let (issues, summary) = scan::collect_streaming(
         handle,
         |progress| {
-            let mut streamed = streamed.borrow_mut();
-            let (found, bytes) = (streamed.found, streamed.bytes);
-            streamed.found = 0;
-            streamed.bytes = 0;
+            let (found, bytes, batch) = {
+                let mut streamed = streamed.borrow_mut();
+                let (found, bytes) = (streamed.found, streamed.bytes);
+                streamed.found = 0;
+                streamed.bytes = 0;
+                let batch =
+                    (!streamed.batch.is_empty()).then(|| std::mem::take(&mut streamed.batch));
+                (found, bytes, batch)
+            };
             tracker.update(|activity| {
                 activity.walked = progress;
                 activity.touch(Step::Folders, handle.current());
-                activity.merge(found, bytes, &streamed.largest);
+                activity.merge(found, bytes, &streamed.borrow().largest);
             });
-            if !streamed.batch.is_empty() {
-                emit(Loaded::Found(std::mem::take(&mut streamed.batch)));
+            if let Some(batch) = batch {
+                emit(Loaded::Found(batch));
             }
         },
         |candidate| {
-            let mut streamed = streamed.borrow_mut();
-            let bytes = candidate.usage.allocated;
-            streamed.batch.push(candidate.clone());
-            streamed.found += 1;
-            streamed.bytes += bytes;
-            if activity::beats(&streamed.largest, bytes) {
-                activity::keep(
-                    &mut streamed.largest,
-                    Found {
-                        path: candidate.path.clone(),
-                        name: candidate.rule.name.clone(),
-                        bytes,
-                    },
-                );
+            let batch = {
+                let mut guard = streamed.borrow_mut();
+                let streamed = &mut *guard;
+                let bytes = candidate.usage.allocated;
+                streamed.batch.push(candidate);
+                streamed.found += 1;
+                streamed.bytes += bytes;
+                streamed.total_found += 1;
+                streamed.total_bytes += bytes;
+                let candidate = streamed.batch.last().expect("just added");
+                if activity::beats(&streamed.largest, bytes) {
+                    activity::keep(
+                        &mut streamed.largest,
+                        Found {
+                            path: candidate.path.clone(),
+                            name: candidate.rule.name.clone(),
+                            bytes,
+                        },
+                    );
+                }
+                (streamed.batch.len() >= 256).then(|| std::mem::take(&mut streamed.batch))
+            };
+            if let Some(batch) = batch {
+                emit(Loaded::Found(batch));
             }
         },
-    )
+    );
+    let mut streamed = streamed.into_inner();
+    if !streamed.batch.is_empty() {
+        emit(Loaded::Found(std::mem::take(&mut streamed.batch)));
+    }
+    (issues, summary, streamed.total_found, streamed.total_bytes)
 }
 
 fn disks(roots: &[PathBuf]) -> Vec<Disk> {
@@ -945,6 +985,8 @@ impl Outcome {
 fn run_batches(
     batches: Vec<Batch>,
     mode: Mode,
+    delete: &DeleteConfig,
+    engines: &[String],
     removals: &mut Vec<(Source, Removal)>,
 ) -> Option<String> {
     let mut roots: Vec<PathBuf> = batches
@@ -955,11 +997,13 @@ fn run_batches(
     roots.dedup();
     let mut recorder = Recorder::for_user(history::now(), &roots);
     for batch in batches {
-        let guard = Guard::new(&batch.roots);
+        let guard = Guard::new(&batch.roots)
+            .with_protected(&delete.protected)
+            .with_cross_device(delete.cross_device);
         for candidate in batch.candidates {
             let result = match batch.source {
                 Source::Toolchain => toolchains::remove(&guard, &candidate, mode),
-                Source::Docker => docker::remove(&guard, &candidate, mode),
+                Source::Docker => docker::remove(engines, &candidate, mode),
                 Source::Artifact | Source::Cache => {
                     let target = Target {
                         path: candidate.path.clone(),
@@ -997,8 +1041,9 @@ fn run_batches(
 /// never lists items that cannot come back.
 ///
 /// @example
-/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], config.delete.mode);
-pub fn clean(batches: Vec<Batch>, mode: DeleteMode) -> Outcome {
+/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], &config.delete, &config.docker.engines);
+pub fn clean(batches: Vec<Batch>, delete: &DeleteConfig, engines: &[String]) -> Outcome {
+    let mode = delete.mode;
     let (trashed, permanent): (Vec<Batch>, Vec<Batch>) = batches
         .into_iter()
         .partition(|batch| mode == DeleteMode::Trash && !batch.source.permanent());
@@ -1006,7 +1051,7 @@ pub fn clean(batches: Vec<Batch>, mode: DeleteMode) -> Outcome {
     let mut history_error = None;
     for (batches, mode) in [(trashed, Mode::Trash), (permanent, Mode::Permanent)] {
         if !batches.is_empty() {
-            let error = run_batches(batches, mode, &mut removals);
+            let error = run_batches(batches, mode, delete, engines, &mut removals);
             history_error = history_error.or(error);
         }
     }
@@ -1208,6 +1253,43 @@ mod tests {
         let walked = groups(dupes::group(files, duplicate_options, |_| {}));
         assert_eq!(lazy.len(), 2);
         assert_eq!(lazy, walked);
+    }
+
+    #[test]
+    fn streamed_candidates_keep_arrival_order_until_the_scan_finishes() {
+        let options = ScanOptions::from_config(&Config::default());
+        let mut report = Report::empty(&[], &options);
+        report.apply(Loaded::Found(vec![
+            candidate(1, "/p/small", Safety::Safe),
+            candidate(3, "/p/large", Safety::Safe),
+        ]));
+        assert_eq!(
+            report
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        report.apply(Loaded::ArtifactsDone {
+            issues: Vec::new(),
+            summary: Summary {
+                progress: Progress::default(),
+                duration: Duration::ZERO,
+                cancelled: false,
+            },
+            disks: Vec::new(),
+        });
+
+        assert_eq!(
+            report
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id)
+                .collect::<Vec<_>>(),
+            [3, 1]
+        );
     }
 
     #[test]

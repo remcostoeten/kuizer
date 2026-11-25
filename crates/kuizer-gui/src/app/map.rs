@@ -40,26 +40,21 @@ impl Kuizer {
         self.tab == Tab::Overview && self.map.shown && self.report().is_some()
     }
 
-    pub(super) fn refresh_map(&mut self) {
-        if self.map.shown {
-            self.rebuild_map();
-        } else {
-            self.map.dirty = true;
-        }
+    pub(super) fn refresh_map(&mut self, cx: &Context<Self>) {
+        self.map.dirty = true;
+        self.ensure_map(cx);
     }
 
-    pub(super) fn ensure_map(&mut self) {
-        if self.map.dirty && self.map.shown {
-            self.rebuild_map();
+    pub(super) fn ensure_map(&mut self, cx: &Context<Self>) {
+        if self.map.dirty && self.map_active() {
+            self.rebuild_map(cx);
         }
     }
 
     /// Builds the map again from the report on screen, keeping as much of the zoom path and
     /// the focus tile as still exists.
-    pub(super) fn rebuild_map(&mut self) {
-        self.map.dirty = false;
+    fn rebuild_map(&mut self, cx: &Context<Self>) {
         let Some(report) = self.report() else {
-            self.map.tree = None;
             return;
         };
         let leaf = |source: Source, candidate: &Candidate| Leaf {
@@ -85,7 +80,8 @@ impl Kuizer {
         let tree = treemap::build(&report.roots, artifacts, caches);
         let depth = tree.trail(&self.map.path).len() - 1;
         self.map.path.truncate(depth);
-        self.map.tree = Some(tree);
+        self.replace_map_tree(Some(tree), cx);
+        self.map.dirty = false;
         self.map.built += 1;
         let kept = self.map.focus.as_deref().is_some_and(|focus| {
             self.map_level()
@@ -93,6 +89,17 @@ impl Kuizer {
         });
         if !kept {
             self.map.focus = None;
+        }
+    }
+
+    pub(super) fn clear_map_tree(&mut self, cx: &Context<Self>) {
+        self.replace_map_tree(None, cx);
+        self.map.dirty = true;
+    }
+
+    fn replace_map_tree(&mut self, tree: Option<Node>, cx: &Context<Self>) {
+        if let Some(old) = std::mem::replace(&mut self.map.tree, tree) {
+            cx.background_spawn(async move { drop(old) }).detach();
         }
     }
 
@@ -140,12 +147,13 @@ impl Kuizer {
         {
             return bytes;
         }
-        let bytes = level
-            .leaves()
-            .iter()
-            .filter(|(item, _)| self.selection.contains(&(item.source, item.id)))
-            .map(|(_, bytes)| bytes)
-            .sum();
+        let bytes = level.fold_leaves(0, &|total, item, bytes| {
+            if self.selection.contains(&(item.source, item.id)) {
+                total + bytes
+            } else {
+                total
+            }
+        });
         self.map.selected.set(Some((key, bytes)));
         bytes
     }
@@ -244,7 +252,7 @@ impl Kuizer {
 
     /// The Summary and Space map switch at the top of the Overview.
     pub(super) fn overview_switch(&self, cx: &mut Context<Self>) -> Div {
-        let key = commands::shortcut(&Command::SpaceMap).unwrap_or_default();
+        let key = self.hint(&Command::SpaceMap);
         ui::segments()
             .child(self.control(
                 ui::segment("view-summary", "Summary", !self.map.shown)
@@ -268,7 +276,7 @@ impl Kuizer {
                 cx,
                 |app, _, cx| {
                     app.map.shown = true;
-                    app.ensure_map();
+                    app.ensure_map(cx);
                     cx.notify();
                 },
             ))
@@ -687,7 +695,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_hidden_map_is_built_when_it_is_shown(cx: &mut TestAppContext) {
+    fn a_hidden_map_is_built_only_when_it_is_visible(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(bind_keys);
         let root = workspace(dir.path());
@@ -703,9 +711,26 @@ mod tests {
             assert!(app.map.dirty);
         });
         cx.simulate_keystrokes("m");
-        view.read_with(cx, |app, _| {
+        let built = view.read_with(cx, |app, _| {
             assert!(!app.map.dirty);
             assert!(app.map_level().is_some_and(|level| level.items > 0));
+            app.map.built
+        });
+
+        cx.simulate_keystrokes("shift-2");
+        view.update(cx, |app, cx| app.rescan(cx));
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| {
+            assert!(app.map.shown);
+            assert_eq!(app.tab, Tab::Artifacts);
+            assert!(app.map.dirty);
+            assert_eq!(app.map.built, built);
+        });
+        cx.simulate_keystrokes("shift-1");
+        view.read_with(cx, |app, _| {
+            assert!(app.map_active());
+            assert!(!app.map.dirty);
+            assert_eq!(app.map.built, built + 1);
         });
     }
 
@@ -865,7 +890,7 @@ mod tests {
         view.read_with(cx, |app, _| {
             assert!(app.selection.is_empty(), "the list cleared it");
             let level = app.map_level().unwrap();
-            assert_eq!(level.leaves().len(), 2);
+            assert_eq!(level.items, 2);
         });
         draw(cx);
         assert!(cx.debug_bounds("map-total").is_some());

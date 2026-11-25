@@ -4,8 +4,11 @@ mod linux;
 
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
@@ -20,6 +23,47 @@ pub struct MountTable {
 }
 
 const SPLIT_DEVICE_FS_TYPES: &[&str] = &["btrfs", "bcachefs"];
+
+static ATOMIC_WRITE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// @name write_atomic
+/// @description Writes bytes to a sibling temporary file, syncs it, preserves the target's
+/// permissions when it exists, then atomically replaces the target and syncs its directory.
+///
+/// @example
+/// platform::write_atomic(&path, serialized.as_bytes())?;
+pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let temp = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        ATOMIC_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
 
 impl MountTable {
     pub fn load() -> Self {

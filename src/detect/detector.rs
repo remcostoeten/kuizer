@@ -7,10 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use globset::{Glob, GlobMatcher};
+use serde::{Deserialize, Serialize};
 
 use super::{CACHEDIR_SIGNATURE, CACHEDIR_TAG, Category, Kind, RuleSpec, Safety};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleInfo {
     pub name: String,
     pub category: Category,

@@ -203,11 +203,11 @@ impl Kuizer {
         };
         let tip = if self.search.is_some() {
             Tooltip::new("Stop the search. Nothing it found so far is kept")
-                .keys(&[hint(&Command::StopDuplicates)])
+                .keys(&[&self.hint(&Command::StopDuplicates)])
                 .build()
         } else {
             Tooltip::new("Hash files under the scanned folders to find identical copies")
-                .keys(&[hint(&Command::FindDuplicates)])
+                .keys(&[&self.hint(&Command::FindDuplicates)])
                 .build()
         };
         centered(

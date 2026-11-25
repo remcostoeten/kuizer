@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ pub enum EditError {
         path: PathBuf,
         source: Box<ConfigError>,
     },
+    #[error("protected path {path} must be an existing absolute directory")]
+    ProtectedPath { path: PathBuf },
 }
 
 /// @name exclude_pattern
@@ -124,6 +127,42 @@ pub fn set_setting(
     write_document(file, &document)
 }
 
+/// @name set_protected_paths
+/// @description Replaces `delete.protected` in the config file with existing absolute
+/// directories, preserving the surrounding TOML and removing duplicate paths.
+///
+/// @example
+/// set_protected_paths(&config_path, &[PathBuf::from("/home/me/notes")])?;
+pub fn set_protected_paths(file: &Path, paths: &[PathBuf]) -> Result<(), EditError> {
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        let path = super::expand_home(path);
+        if !path.is_absolute() || !fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            return Err(EditError::ProtectedPath { path });
+        }
+        if seen.insert(path.clone()) {
+            unique.push(path);
+        }
+    }
+    let mut document = read_document(file)?;
+    let parse_error = |message: String| EditError::Parse {
+        path: file.to_path_buf(),
+        message,
+    };
+    let delete = document
+        .entry("delete")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| parse_error("`delete` is not a table".to_owned()))?;
+    let mut protected = Array::new();
+    for path in unique {
+        protected.push(path.to_string_lossy().into_owned());
+    }
+    delete.insert("protected", Item::Value(Value::Array(protected)));
+    write_document(file, &document)
+}
+
 fn read_document(file: &Path) -> Result<DocumentMut, EditError> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -150,9 +189,7 @@ fn write_document(file: &Path, document: &DocumentMut) -> Result<(), EditError> 
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent).map_err(write_error)?;
     }
-    let partial = file.with_extension("toml.partial");
-    fs::write(&partial, document.to_string()).map_err(write_error)?;
-    fs::rename(&partial, file).map_err(write_error)
+    platform::write_atomic(file, document.to_string().as_bytes()).map_err(write_error)
 }
 
 #[cfg(test)]
@@ -257,5 +294,32 @@ mod tests {
             Err(EditError::Invalid { .. })
         ));
         assert_eq!(fs::read_to_string(&file).expect("read"), written);
+    }
+
+    #[test]
+    fn protected_paths_are_written_once_and_must_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        let protected = dir.path().join("notes");
+        fs::create_dir(&protected).expect("directory");
+        fs::write(&file, "# keep\n[appearance]\nmotion = false\n").expect("config");
+
+        set_protected_paths(&file, &[protected.clone(), protected.clone()])
+            .expect("sets protected path");
+
+        let loaded = Config::load(Some(&file)).expect("loads");
+        assert_eq!(
+            loaded.config.delete.protected,
+            std::slice::from_ref(&protected)
+        );
+        assert!(
+            fs::read_to_string(&file)
+                .expect("read")
+                .starts_with("# keep\n")
+        );
+        assert!(matches!(
+            set_protected_paths(&file, &[dir.path().join("missing")]),
+            Err(EditError::ProtectedPath { .. })
+        ));
     }
 }

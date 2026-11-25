@@ -3,39 +3,14 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::AppError;
-use crate::cli::{ScanArgs, SortKey};
+use crate::cli::ScanArgs;
 use crate::config::Config;
 use crate::detect::{Category, Safety};
 use crate::output;
 use crate::platform;
-use crate::scan::{self, Cancel, Candidate, Issue, Summary};
+use crate::scan::{self, Cancel, Candidate, Issue, SortKey, Summary};
 use crate::tui;
 use crate::units::{ByteSize, Idle};
-
-pub fn sort_candidates(candidates: &mut [Candidate], key: SortKey) {
-    match key {
-        SortKey::Size => candidates.sort_by(|a, b| {
-            b.usage
-                .allocated
-                .cmp(&a.usage.allocated)
-                .then_with(|| a.path.cmp(&b.path))
-        }),
-        SortKey::Path => candidates.sort_by(|a, b| a.path.cmp(&b.path)),
-        SortKey::Category => candidates.sort_by(|a, b| {
-            a.rule
-                .category
-                .cmp(&b.rule.category)
-                .then_with(|| b.usage.allocated.cmp(&a.usage.allocated))
-        }),
-        SortKey::Idle => candidates.sort_by(|a, b| {
-            a.project_last_active
-                .is_none()
-                .cmp(&b.project_last_active.is_none())
-                .then_with(|| a.project_last_active.cmp(&b.project_last_active))
-                .then_with(|| b.usage.allocated.cmp(&a.usage.allocated))
-        }),
-    }
-}
 
 /// @name keep_idle
 /// @description Measures project activity when `idle` is set or `annotate` asks for it, then
@@ -137,7 +112,7 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     }
     keep_idle(&config, &mut candidates, args.idle, annotate)?;
 
-    sort_candidates(&mut candidates, args.sort);
+    scan::sort_candidates(&mut candidates, args.sort);
     let written = report
         .map(|target| {
             write_report(

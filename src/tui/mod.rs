@@ -1,5 +1,6 @@
 mod app;
 mod jobs;
+mod keys;
 mod palette;
 mod view;
 mod watch;
@@ -10,12 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TryRecvError, unbounded};
-use ratatui::crossterm::event::{
-    self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
+use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::config::Config;
 use crate::delete::{Mode, Target};
+use crate::keymap::{Action, Keymap, Scope};
 use crate::scan::{self, Cancel, Event};
 use app::{App, Overlay, project_of};
 use jobs::{Changes, Job, Outcome};
@@ -52,138 +52,109 @@ fn notify(app: &mut App, problem: String) {
     });
 }
 
-fn handle_quit_prompt(app: &mut App, key: KeyEvent) {
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    {
-        return;
-    }
-    let held_enter = key.code == KeyCode::Enter && app.enter_repeats(Instant::now());
-    match key.code {
-        KeyCode::Char('y') => app.quit = true,
-        KeyCode::Enter if !held_enter => app.quit = true,
-        KeyCode::Enter | KeyCode::Char('q') => {}
-        _ => app.overlay = Overlay::None,
-    }
-}
-
 fn handle_filter(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
+    match keys::action(&app.keymap, Scope::TuiFilter, key) {
+        Some(Action::Back) => {
             app.filtering = false;
             app.set_filter(String::new());
         }
-        KeyCode::Enter => app.filtering = false,
-        KeyCode::Backspace => {
+        Some(Action::ApplyFilter) => app.filtering = false,
+        Some(Action::FieldBackspace) => {
             let mut filter = app.filter.clone();
             filter.pop();
             app.set_filter(filter);
         }
-        KeyCode::Char(c) => {
-            let mut filter = app.filter.clone();
-            filter.push(c);
-            app.set_filter(filter);
+        _ if !keys::modifiers(key).modified() => {
+            if let KeyCode::Char(c) = key.code {
+                let mut filter = app.filter.clone();
+                filter.push(c);
+                app.set_filter(filter);
+            }
         }
-        _ => {}
-    }
-}
-
-fn handle_chord(app: &mut App, key: KeyEvent) {
-    app.message = None;
-    app.end_range();
-    let plain_control =
-        key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT);
-    if app.filtering || app.overlay != Overlay::None || !plain_control {
-        return;
-    }
-    match key.code {
-        KeyCode::Char('d') => app.move_by(PAGE / 2),
-        KeyCode::Char('u') => app.move_by(-PAGE / 2),
         _ => {}
     }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let now = Instant::now();
+    let held_enter = key.code == KeyCode::Enter && app.enter_repeats(now);
+    let held_key = app.action_key_repeats(key, now);
+    let action = keys::action(&app.keymap, Scope::Tui, key);
+    let modified = keys::modifiers(key).modified();
     if app.overlay == Overlay::Quit {
-        handle_quit_prompt(app, key);
+        match keys::action(&app.keymap, Scope::TuiQuit, key) {
+            Some(Action::QuitAccept) if !(held_enter || held_key) => app.quit = true,
+            Some(Action::QuitAccept) => {}
+            Some(Action::QuitCancel) => app.overlay = Overlay::None,
+            _ if !modified && action != Some(Action::Quit) => app.overlay = Overlay::None,
+            _ => {}
+        }
         return;
     }
-    let chord = key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-    if chord || key.code != KeyCode::Char('P') {
+    if action != Some(Action::SelectProject) || app.filtering || app.overlay != Overlay::None {
         app.disarm_widen();
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
+    if action == Some(Action::Quit) && (!app.filtering && app.overlay == Overlay::None || modified)
     {
         app.request_quit();
         return;
     }
-    if chord {
-        handle_chord(app, key);
-        return;
-    }
-    if key.code == KeyCode::Char('P')
-        && !app.filtering
-        && app.overlay == Overlay::None
-        && app.project_key_repeats(Instant::now())
-    {
-        return;
-    }
     app.message = None;
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let extending = matches!(key.code, KeyCode::Char('J' | 'K'))
-        || (shift && matches!(key.code, KeyCode::Up | KeyCode::Down));
-    if !extending || app.filtering {
+    if app.filtering || !matches!(action, Some(Action::ExtendDown | Action::ExtendUp)) {
         app.end_range();
     }
     if app.filtering {
         handle_filter(app, key);
         return;
     }
-    let held_enter = key.code == KeyCode::Enter && app.enter_repeats(Instant::now());
-    match (&app.overlay, key.code) {
-        (Overlay::Confirm { .. }, KeyCode::Enter) if held_enter => {}
-        (Overlay::Confirm { .. }, KeyCode::Char('y') | KeyCode::Enter) => {
-            let batch = app.confirm();
-            dispatch(app, jobs, batch);
+    match app.overlay {
+        Overlay::Confirm { .. } => match keys::action(&app.keymap, Scope::TuiConfirm, key) {
+            Some(Action::Confirm) if !(held_enter || held_key) => {
+                let batch = app.confirm();
+                dispatch(app, jobs, batch);
+            }
+            Some(Action::Confirm) => {}
+            Some(Action::Cancel) => app.overlay = Overlay::None,
+            _ if !modified => app.overlay = Overlay::None,
+            _ => {}
+        },
+        Overlay::Help => {
+            if !modified {
+                app.overlay = Overlay::None;
+            }
         }
-        (Overlay::Confirm { .. }, _) => app.overlay = Overlay::None,
-        (Overlay::Help, _) => app.overlay = Overlay::None,
-        (Overlay::Quit, _) => {}
-        (Overlay::None, code) => match code {
-            KeyCode::Char('J') => app.extend(1),
-            KeyCode::Char('K') => app.extend(-1),
-            KeyCode::Down if shift => app.extend(1),
-            KeyCode::Up if shift => app.extend(-1),
-            KeyCode::Char('q') => app.request_quit(),
-            KeyCode::Esc => app.back_out(),
-            KeyCode::Char('j') | KeyCode::Down => app.move_by(1),
-            KeyCode::Char('k') | KeyCode::Up => app.move_by(-1),
-            KeyCode::PageDown => app.move_by(PAGE),
-            KeyCode::PageUp => app.move_by(-PAGE),
-            KeyCode::Char('g') | KeyCode::Home => app.move_to(0),
-            KeyCode::Char('G') | KeyCode::End => app.move_to(usize::MAX),
-            KeyCode::Char(' ') => app.toggle(),
-            KeyCode::Char('a') => app.select_safe(),
-            KeyCode::Char('u') => app.clear_selection(),
-            KeyCode::Char('d') | KeyCode::Delete => {
+        Overlay::Quit => {}
+        Overlay::None => match action {
+            Some(Action::ExtendDown) => app.extend(1),
+            Some(Action::ExtendUp) => app.extend(-1),
+            Some(Action::Back) => app.back_out(),
+            Some(Action::Down) => app.move_by(1),
+            Some(Action::Up) => app.move_by(-1),
+            Some(Action::PageDown) => app.move_by(PAGE),
+            Some(Action::PageUp) => app.move_by(-PAGE),
+            Some(Action::HalfPageDown) => app.move_by(PAGE / 2),
+            Some(Action::HalfPageUp) => app.move_by(-PAGE / 2),
+            Some(Action::First) => app.move_to(0),
+            Some(Action::Last) => app.move_to(usize::MAX),
+            Some(Action::Toggle) => app.toggle(),
+            Some(Action::SelectAll) => app.select_safe(),
+            Some(Action::SelectNone) => app.clear_selection(),
+            Some(Action::DeleteCursor) if !held_key => {
                 let batch = app.delete();
                 dispatch(app, jobs, batch);
             }
-            KeyCode::Enter => {
+            Some(Action::Delete) if !held_key => {
                 let batch = app.delete_selected();
                 dispatch(app, jobs, batch);
             }
-            KeyCode::Char('s') => app.cycle_sort(),
-            KeyCode::Char('p') => app.toggle_grouping(),
-            KeyCode::Char('P') => app.select_project(),
-            KeyCode::Char('/') => app.filtering = true,
-            KeyCode::Char('c') => app.cycle_category(),
-            KeyCode::Char('f') => app.toggle_safe_only(),
-            KeyCode::Char('x') => app.reset_filters(),
-            KeyCode::Char('?') => app.overlay = Overlay::Help,
+            Some(Action::CycleSort) => app.cycle_sort(),
+            Some(Action::Group) => app.toggle_grouping(),
+            Some(Action::SelectProject) if !app.project_key_repeats(now) => app.select_project(),
+            Some(Action::FilterFocus) => app.filtering = true,
+            Some(Action::Category) => app.cycle_category(),
+            Some(Action::SafeOnly) => app.toggle_safe_only(),
+            Some(Action::ResetFilters) => app.reset_filters(),
+            Some(Action::Help) => app.overlay = Overlay::Help,
             _ => {}
         },
     }
@@ -212,6 +183,7 @@ pub fn run_with_notice(
     notice: Option<String>,
 ) -> std::io::Result<()> {
     let mut app = App::new(config.delete.mode.into(), confirm);
+    app.keymap = Keymap::resolve(&config.keys).0;
     app.message = notice;
     let mut terminal = ratatui::try_init()?;
     let started = terminal
@@ -228,7 +200,13 @@ pub fn run_with_notice(
     let (job_tx, job_rx) = unbounded::<Job>();
     let (result_tx, result_rx) = unbounded::<Outcome>();
     let stop = Arc::new(AtomicBool::new(false));
-    let deleter = match jobs::spawn_deleters(roots.to_vec(), job_rx, result_tx, Arc::clone(&stop)) {
+    let deleter = match jobs::spawn_deleters(
+        roots.to_vec(),
+        config.delete.clone(),
+        job_rx,
+        result_tx,
+        Arc::clone(&stop),
+    ) {
         Ok(deleter) => Some(deleter),
         Err(error) => {
             notify(
@@ -398,6 +376,8 @@ mod tests {
         app.refresh();
         app
     }
+
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode, modifiers: KeyModifiers) {
         handle_key(app, KeyEvent::new(code, modifiers), jobs);

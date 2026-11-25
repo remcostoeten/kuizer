@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::detect::{Kind, Match};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub allocated: u64,
     pub apparent: u64,
@@ -15,7 +15,7 @@ pub struct Usage {
     pub partial: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: u64,
     pub path: PathBuf,
@@ -28,7 +28,7 @@ pub struct Candidate {
     pub project_last_active: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IssueKind {
     PermissionDenied,
@@ -39,7 +39,7 @@ pub enum IssueKind {
     Protected,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub path: PathBuf,
     pub kind: IssueKind,
@@ -61,7 +61,7 @@ impl Issue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub dirs: u64,
     pub files: u64,
@@ -70,16 +70,24 @@ pub struct Progress {
     pub issues: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
     pub progress: Progress,
-    #[serde(serialize_with = "millis")]
+    #[serde(serialize_with = "millis", deserialize_with = "duration_from_millis")]
     pub duration: Duration,
     pub cancelled: bool,
 }
 
 fn millis<S: serde::Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_u128(duration.as_millis())
+}
+
+fn duration_from_millis<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Duration, D::Error> {
+    let millis = u128::deserialize(deserializer)?;
+    let millis = u64::try_from(millis).map_err(serde::de::Error::custom)?;
+    Ok(Duration::from_millis(millis))
 }
 
 #[derive(Debug)]

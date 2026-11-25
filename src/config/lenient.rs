@@ -5,6 +5,7 @@ use toml::{Table, Value};
 
 use super::{Config, DeleteConfig, DeleteMode, Excludes, MAX_SIZE_THREADS};
 use crate::detect::{Detector, builtin_rules};
+use crate::keymap::Keymap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigWarning {
@@ -13,7 +14,7 @@ pub struct ConfigWarning {
     pub widens_scope: bool,
 }
 
-const NARROWING_SECTIONS: [&str; 3] = ["appearance", "route_shortcuts", "rules"];
+const NARROWING_SECTIONS: [&str; 4] = ["appearance", "route_shortcuts", "rules", "keys"];
 
 fn widens_scope(key: &str) -> bool {
     let section = key.split(['.', '[']).next().unwrap_or_default();
@@ -179,7 +180,8 @@ fn absorb(
         let Err(message) = try_set(root, path, &key, whole.clone()) else {
             continue;
         };
-        if let Value::Array(items) = whole
+        if path.first().is_none_or(|section| section != "keys")
+            && let Value::Array(items) = whole
             && try_set(root, path, &key, Value::Array(Vec::new())).is_ok()
         {
             absorb_items(root, path, &key, items, warnings);
@@ -203,6 +205,13 @@ fn from_absorbed(root: Table, warnings: &mut Vec<ConfigWarning>) -> Config {
 }
 
 fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
+    for problem in Keymap::resolve(&config.keys).1 {
+        config.keys.remove(&problem.name);
+        warnings.push(ConfigWarning::new(
+            format!("keys.{}", problem.name),
+            problem.message,
+        ));
+    }
     let mut known: HashSet<String> = if config.detect.builtin_rules {
         builtin_rules().into_iter().map(|rule| rule.name).collect()
     } else {
@@ -246,6 +255,19 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
             }
         },
     );
+    config.delete.protected.retain(|path| {
+        let valid = path.is_absolute() && path.is_dir();
+        if !valid {
+            warnings.push(ConfigWarning::note(
+                "delete.protected",
+                format!(
+                    "{} is not an existing absolute directory, skipped",
+                    path.display()
+                ),
+            ));
+        }
+        valid
+    });
     if config.scan.size_threads > MAX_SIZE_THREADS {
         warnings.push(ConfigWarning::note(
             "scan.size_threads",
@@ -489,5 +511,24 @@ mod tests {
             Config::parse_lenient(&format!("[scan]\nsize_threads = {MAX_SIZE_THREADS}\n"));
         assert_eq!(at_cap.scan.size_threads, MAX_SIZE_THREADS);
         assert!(at_cap_warnings.is_empty(), "{at_cap_warnings:?}");
+    }
+
+    #[test]
+    fn protected_paths_keep_existing_directories_and_warn_on_invalid_entries() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let valid = temp.path().join("important");
+        std::fs::create_dir(&valid).expect("protected directory");
+        let missing = temp.path().join("missing");
+        let text = format!(
+            "[delete]\nprotected = [\"{}\", \"{}\"]",
+            valid.display(),
+            missing.display()
+        );
+
+        let (config, warnings) = Config::parse_lenient(&text);
+
+        assert_eq!(config.delete.protected, [valid]);
+        assert_eq!(keys(&warnings), ["delete.protected"]);
+        assert!(warnings[0].message.contains("missing"));
     }
 }

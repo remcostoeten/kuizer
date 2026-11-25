@@ -3,9 +3,11 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::process;
 
 /// @name uncommitted_changes
 /// @description Counts the uncommitted changes, untracked files included, in the git repository
@@ -178,21 +180,14 @@ pub fn last_commit(dir: &Path) -> Option<SystemTime> {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Option<Output> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", "core.fsmonitor=false"])
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = process::git(dir, args, process::QUERY_TIMEOUT).ok()?;
     output.status.success().then_some(output)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) -> bool {

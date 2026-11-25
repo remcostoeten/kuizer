@@ -4,11 +4,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use kuizer::config::Config;
-use kuizer::detect::Category;
 use kuizer::output::display_path;
 use kuizer::platform;
-use kuizer::units::ByteSize;
-use serde::{Deserialize, Serialize};
+pub use kuizer::scan::ScanOptions;
 
 use crate::persist;
 
@@ -17,68 +15,6 @@ const NUL_HEX_PREFIX: char = '\0';
 
 pub const SIZE_STEPS: [u64; 4] = [0, 1_000_000, 10_000_000, 100_000_000];
 pub const DEPTH_STEPS: [Option<usize>; 4] = [None, Some(3), Some(5), Some(8)];
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScanOptions {
-    pub categories: Vec<Category>,
-    pub min_size: u64,
-    pub max_depth: Option<usize>,
-    pub caches: bool,
-    #[serde(default = "enabled")]
-    pub toolchains: bool,
-    #[serde(default = "enabled")]
-    pub docker: bool,
-    #[serde(default = "enabled")]
-    pub repos: bool,
-    pub duplicates: bool,
-    pub one_file_system: bool,
-}
-
-fn enabled() -> bool {
-    true
-}
-
-impl ScanOptions {
-    pub fn from_config(config: &Config) -> Self {
-        Self {
-            categories: config.detect.categories.clone(),
-            min_size: config.scan.min_size.0,
-            max_depth: config.scan.max_depth,
-            caches: true,
-            toolchains: true,
-            docker: true,
-            repos: true,
-            duplicates: config.duplicates.enabled,
-            one_file_system: config.scan.one_file_system,
-        }
-    }
-
-    /// @name ScanOptions::apply
-    /// @description Returns a copy of the config with these options laid over it, the same way
-    /// `kuizer scan --category` and `--min-size` override the config file for one run.
-    ///
-    /// @example
-    /// let config = options.apply(&loaded.config);
-    pub fn apply(&self, config: &Config) -> Config {
-        let mut config = config.clone();
-        config.detect.categories = self.categories.clone();
-        config.scan.min_size = ByteSize(self.min_size);
-        config.scan.max_depth = self.max_depth;
-        config.scan.one_file_system = self.one_file_system;
-        config
-    }
-
-    pub fn toggle_category(&mut self, category: Category) {
-        if let Some(index) = self.categories.iter().position(|&item| item == category) {
-            if self.categories.len() > 1 {
-                self.categories.remove(index);
-            }
-        } else {
-            self.categories.push(category);
-            self.categories.sort();
-        }
-    }
-}
 
 /// @name expand
 /// @description Turns what was typed into the folder field into a path: trims it, expands a
@@ -269,6 +205,8 @@ pub fn depth_label(depth: Option<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuizer::detect::Category;
+    use kuizer::units::ByteSize;
 
     #[test]
     fn expand_trims_and_handles_home() {

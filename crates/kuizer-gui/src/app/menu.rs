@@ -1,11 +1,27 @@
 use super::*;
 
+impl Choice {
+    fn binding(self) -> Key {
+        match self {
+            Self::Reveal => Key::MenuReveal,
+            Self::CopyPath => Key::MenuCopyPath,
+            Self::Exclude => Key::MenuExclude,
+            Self::Toggle => Key::MenuToggle,
+            Self::Trash => Key::MenuDelete,
+            Self::Restore => Key::MenuRestore,
+            Self::CopyCommand => Key::MenuCopyCommand,
+            Self::Gc => Key::MenuGc,
+            Self::Branches => Key::MenuBranches,
+        }
+    }
+}
+
 impl Kuizer {
     pub(super) fn menu_items(&self, target: &Target) -> Vec<MenuItem> {
-        let reveal = MenuItem::new(Choice::Reveal, "Reveal in file manager", "R")
+        let reveal = MenuItem::new(Choice::Reveal, "Reveal in file manager")
             .tip("Open the folder that holds this item");
-        let copy = MenuItem::new(Choice::CopyPath, "Copy path", "C");
-        let exclude = MenuItem::new(Choice::Exclude, "Always exclude", "X")
+        let copy = MenuItem::new(Choice::CopyPath, "Copy path");
+        let exclude = MenuItem::new(Choice::Exclude, "Always exclude")
             .tip(EXCLUDE_TIP)
             .divided();
         match target {
@@ -19,19 +35,14 @@ impl Kuizer {
                     } else {
                         "Delete"
                     },
-                    "Del",
                 )
                 .tip("Remove only this item, right away");
                 vec![
                     reveal.unless(external.then_some(NOT_ON_DISK)),
                     copy,
-                    MenuItem::new(
-                        Choice::Toggle,
-                        if selected { "Deselect" } else { "Select" },
-                        "S",
-                    )
-                    .divided()
-                    .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
+                    MenuItem::new(Choice::Toggle, if selected { "Deselect" } else { "Select" })
+                        .divided()
+                        .unless(self.restoring().then_some(WAIT_FOR_RESTORE)),
                     remove.unless(self.locked([*source].into_iter())),
                     exclude.unless(external.then_some(NOT_ON_DISK)),
                 ]
@@ -42,11 +53,11 @@ impl Kuizer {
                 vec![
                     reveal.tip("Open the folder that holds this repository"),
                     copy,
-                    MenuItem::new(Choice::Gc, "Run git gc", "G")
+                    MenuItem::new(Choice::Gc, "Run git gc")
                         .tip("Pack loose objects now")
                         .divided()
                         .unless(self.gc_blocked(Some(&scope))),
-                    MenuItem::new(Choice::Branches, "Delete merged branches", "B")
+                    MenuItem::new(Choice::Branches, "Delete merged branches")
                         .tip("Delete the merged local branches, after a confirmation")
                         .unless(self.branches_blocked(Some(&scope))),
                     exclude,
@@ -77,10 +88,10 @@ impl Kuizer {
                     None
                 };
                 vec![
-                    MenuItem::new(Choice::Restore, "Restore", "R")
+                    MenuItem::new(Choice::Restore, "Restore")
                         .tip("Put what is still in the trash back where it was")
                         .unless(lock),
-                    MenuItem::new(Choice::CopyCommand, "Copy command", "C"),
+                    MenuItem::new(Choice::CopyCommand, "Copy command"),
                 ]
             }
         }
@@ -133,7 +144,7 @@ impl Kuizer {
         }
     }
 
-    pub(super) fn menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub(super) fn menu_key(&mut self, event: &KeyDownEvent, repeat: bool, cx: &mut Context<Self>) {
         let Some(menu) = &self.menu else {
             return;
         };
@@ -148,41 +159,34 @@ impl Kuizer {
             .active
             .and_then(|active| enabled.iter().position(|&index| index == active));
         let count = enabled.len();
-        let keystroke = &event.keystroke;
-        let plain = !keystroke.modifiers.control
-            && !keystroke.modifiers.alt
-            && !keystroke.modifiers.platform;
-        let key = match keystroke.key.as_str() {
-            "tab" if keystroke.modifiers.shift => "up",
-            "tab" => "down",
-            key => key,
-        };
-        let next = match key {
-            "escape" | "menu" => {
+        let stroke = commands::stroke(&event.keystroke);
+        let next = match self.keymap.lookup(Scope::Menu, stroke) {
+            Some(Key::MenuClose) => {
                 self.close_menu(cx);
                 return;
             }
-            "f10" if keystroke.modifiers.shift => {
-                self.close_menu(cx);
-                return;
-            }
-            "down" | "j" if count > 0 => Some(enabled[at.map_or(0, |at| (at + 1) % count)]),
-            "up" | "k" if count > 0 => {
+            Some(Key::MenuDown) if count > 0 => Some(enabled[at.map_or(0, |at| (at + 1) % count)]),
+            Some(Key::MenuUp) if count > 0 => {
                 Some(enabled[at.map_or(count - 1, |at| (at + count - 1) % count)])
             }
-            "home" => enabled.first().copied(),
-            "end" => enabled.last().copied(),
-            "enter" | "space" => {
-                if let Some(active) = menu.active {
+            Some(Key::MenuFirst) => enabled.first().copied(),
+            Some(Key::MenuLast) => enabled.last().copied(),
+            Some(Key::MenuRun) => {
+                if let Some(active) = menu.active
+                    && !repeat
+                {
                     self.choose(active, cx);
                 }
                 return;
             }
             _ => {
-                if plain
-                    && let Some(index) = items
-                        .iter()
-                        .position(|item| item.enabled && item.answers(key))
+                if !repeat
+                    && let Some(index) = items.iter().position(|item| {
+                        item.enabled
+                            && self
+                                .keymap
+                                .matches(Scope::Menu, item.choice.binding(), stroke)
+                    })
                 {
                     self.choose(index, cx);
                 }
@@ -209,7 +213,25 @@ impl Kuizer {
             return;
         };
         cx.notify();
-        let target = menu.target;
+        self.run_choice(choice, menu.target, cx);
+    }
+
+    pub(super) fn menu_unavailable(&self, target: &Target, choice: Choice) -> Option<&'static str> {
+        match self
+            .menu_items(target)
+            .into_iter()
+            .find(|item| item.choice == choice)
+        {
+            Some(item) if item.enabled => None,
+            Some(item) => item.tip,
+            _ => Some(match choice {
+                Choice::Restore | Choice::CopyCommand => "Focus a cleanup in History",
+                _ => "Focus a file or folder first",
+            }),
+        }
+    }
+
+    pub(super) fn run_choice(&mut self, choice: Choice, target: Target, cx: &mut Context<Self>) {
         let path = target.path().map(Path::to_path_buf);
         match (choice, target) {
             (Choice::Reveal, _) => {
@@ -322,7 +344,7 @@ impl Kuizer {
             self.config.scan.exclude.push(pattern);
         }
         self.excluded.push(path);
-        self.prune();
+        self.prune(cx);
         self.tell(
             Notice::Info(format!("{shown} is excluded from every scan")),
             cx,
@@ -332,14 +354,14 @@ impl Kuizer {
 
     /// Removes excluded paths from the report on screen and forgets selections of items that
     /// are gone.
-    pub(super) fn prune(&mut self) {
+    fn prune(&mut self, cx: &Context<Self>) {
         if let Phase::Ready(report) = &mut self.phase {
             report.drop_paths(&self.excluded);
             report.remove(&self.gone);
         }
         self.refresh_stats();
         self.refresh_rows();
-        self.refresh_map();
+        self.refresh_map(cx);
         if self
             .menu
             .as_ref()
@@ -456,7 +478,7 @@ impl Kuizer {
                     .when(enabled, |this| this.cursor_pointer())
                     .when_some(item.tip, |this, tip| this.tip(tooltip::plain(tip)))
                     .child(div().flex_1().child(label))
-                    .child(ui::kbd(item.key))
+                    .child(ui::kbd(self.key_hint(Scope::Menu, item.choice.binding())))
                     .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
                         if let Some(menu) = &mut app.menu
                             && enabled

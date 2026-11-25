@@ -21,10 +21,10 @@ use crate::config::{Config, ConfigError, Loaded, rejected_scope};
 use crate::history::HistoryError;
 use clap::CommandFactory;
 
+pub use crate::scan::sort_candidates;
 pub use cache::measure as measure_caches;
 pub use cache::measure_threaded as measure_caches_threaded;
 pub use cache::measure_with as measure_caches_with;
-pub use scan::sort_candidates;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {

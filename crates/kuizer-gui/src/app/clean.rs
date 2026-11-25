@@ -73,7 +73,7 @@ impl Kuizer {
         let locked = self
             .locked(items.iter().map(|(source, _)| *source))
             .is_some();
-        if items.is_empty() || self.busy() || locked {
+        if items.is_empty() || self.busy() || locked || self.saving_protected_paths() {
             return;
         }
         let mut paths: HashMap<Source, HashSet<PathBuf>> = HashMap::new();
@@ -125,9 +125,10 @@ impl Kuizer {
                 candidates: docker,
             });
         }
-        let mode = self.config.delete.mode;
+        let delete_config = self.config.delete.clone();
+        let engines = self.config.docker.engines.clone();
         let spawned = spawn_worker("kuizer-gui-clean", move || {
-            let outcome = model::clean(batches, mode);
+            let outcome = model::clean(batches, &delete_config, &engines);
             let history = HistoryView::load();
             (outcome, history)
         });
@@ -285,7 +286,11 @@ impl Kuizer {
             .h(unit(size::SEGMENT))
             .px(unit(space::M))
             .text_size(unit(font::SMALL))
-            .tip(Tooltip::new("Hide this message").keys(&["Esc"]).build())
+            .tip(
+                Tooltip::new("Hide this message")
+                    .keys(&[&self.key_hint(Scope::GuiBack, Key::Back)])
+                    .build(),
+            )
         };
         let line = div()
             .flex()
@@ -463,7 +468,11 @@ impl Kuizer {
                 .child(
                     div().flex().justify_end().child(
                         ui::button("done", "Done", ButtonKind::Primary, true)
-                            .tip(Tooltip::new("Close this summary").keys(&["Enter"]).build())
+                            .tip(
+                                Tooltip::new("Close this summary")
+                                    .keys(&[&self.key_hint(Scope::Dialog, Key::Confirm)])
+                                    .build(),
+                            )
                             .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.dialog = None;
                                 cx.notify();
@@ -591,7 +600,7 @@ impl Kuizer {
                 )
                 .flex_none()
                 .pr(unit(space::S))
-                .child(ui::kbd("Esc"))
+                .child(ui::kbd(self.key_hint(Scope::Dialog, Key::Back)))
                 .tip(tooltip::plain("Clear the selection in every tab")),
             )
             .child(
@@ -623,7 +632,11 @@ impl Kuizer {
                     } else {
                         theme::kbd_on_danger()
                     };
-                    this.child(ui::kbd_on(commands::label("enter"), fill, ink))
+                    this.child(ui::kbd_on(
+                        self.key_hint(Scope::Dialog, Key::Confirm),
+                        fill,
+                        ink,
+                    ))
                 })
                 .map(|this| match lock {
                     Some(reason) => this.tip(tooltip::plain(reason)),

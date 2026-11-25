@@ -13,12 +13,13 @@ use super::palette::{
 use crate::cli::SortKey;
 use crate::delete::Mode;
 use crate::detect::{Category, Safety};
+use crate::keymap::{Action, Scope};
 use crate::output::display_path;
 use crate::units::{ByteSize, age};
 
 const BAR: u16 = 8;
 pub(super) const CURRENT_WIDTH: usize = 48;
-type HelpRow = (&'static [&'static str], &'static str);
+type HelpRow = (&'static [Action], &'static str);
 type HelpSection = (&'static str, &'static [HelpRow]);
 
 const FIXED_COLUMNS: u16 = 3 + 10 + 9 + 8 + 12 + 20 + 6 + 8;
@@ -328,10 +329,12 @@ fn key_chip(key: &str) -> Span<'static> {
     )
 }
 
-fn key_hints(hints: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
+fn key_hints(app: &App, scope: Scope, hints: &[(Action, &str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(hints.len() * 2);
     for (key, label) in hints {
-        spans.push(key_chip(key));
+        if let Some(key) = app.keymap.keys(scope, *key).next() {
+            spans.push(key_chip(key));
+        }
         spans.push(Span::styled(format!(" {label}  "), Style::new().fg(MUTED)));
     }
     spans
@@ -365,7 +368,14 @@ fn quit_prompt(app: &App) -> Line<'static> {
             Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
         ),
     ];
-    spans.extend(key_hints(&[("y", "quit"), ("n", "keep deleting")]));
+    spans.extend(key_hints(
+        app,
+        Scope::TuiQuit,
+        &[
+            (Action::QuitAccept, "quit"),
+            (Action::QuitCancel, "keep deleting"),
+        ],
+    ));
     Line::from(spans)
 }
 
@@ -375,7 +385,11 @@ fn footer(app: &App) -> Line<'static> {
     }
     if app.filtering {
         let mut spans = vec![mode_chip(app), Span::raw(format!(" {}█   ", app.filter))];
-        spans.extend(key_hints(&[("enter", "apply"), ("esc", "clear")]));
+        spans.extend(key_hints(
+            app,
+            Scope::TuiFilter,
+            &[(Action::ApplyFilter, "apply"), (Action::Back, "clear")],
+        ));
         return Line::from(spans);
     }
     let selected = app.selected_count();
@@ -391,25 +405,33 @@ fn footer(app: &App) -> Line<'static> {
         spans.push(Span::raw(format!(" {message}  ")));
     }
     let delete_hint = if selected > 0 {
-        ("enter", "delete selected")
+        (Action::Delete, "delete selected")
     } else {
-        ("d", "delete this")
+        (Action::DeleteCursor, "delete this")
     };
-    spans.extend(key_hints(&[
-        ("space", "select"),
-        ("a", "select all safe"),
-        delete_hint,
-        ("f", "safe only"),
-        ("c", "category"),
-        ("/", "search"),
-        ("?", "help"),
-        ("q", "quit"),
-    ]));
+    spans.extend(key_hints(
+        app,
+        Scope::Tui,
+        &[
+            (Action::Toggle, "select"),
+            (Action::SelectAll, "select all safe"),
+            delete_hint,
+            (Action::SafeOnly, "safe only"),
+            (Action::Category, "category"),
+            (Action::FilterFocus, "search"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
+        ],
+    ));
     if app.filtered() || selected > 0 {
-        spans.extend(key_hints(&[("esc", "back")]));
+        spans.extend(key_hints(app, Scope::Tui, &[(Action::Back, "back")]));
     }
     if app.filtered() {
-        spans.extend(key_hints(&[("x", "clear filters")]));
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[(Action::ResetFilters, "clear filters")],
+        ));
     }
     if selected > 0 {
         spans.push(Span::styled(
@@ -530,10 +552,11 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "  y confirm   n cancel",
-        Style::new().fg(MUTED),
-    ));
+    lines.push(Line::from(key_hints(
+        app,
+        Scope::TuiConfirm,
+        &[(Action::Confirm, "confirm"), (Action::Cancel, "cancel")],
+    )));
     let title = format!(
         " Delete {} item{} · {} ",
         stats.count,
@@ -547,55 +570,69 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
     );
 }
 
-fn help(frame: &mut Frame) {
+fn help(frame: &mut Frame, app: &App) {
+    use Action::*;
     const SECTIONS: [HelpSection; 4] = [
         (
             "Navigate",
             &[
-                (&["j", "k", "↑", "↓"], "move"),
-                (&["J", "K", "shift ↑↓"], "select while moving"),
-                (&["g", "home"], "first"),
-                (&["G", "end"], "last"),
-                (&["pgup", "pgdn"], "page"),
-                (&["ctrl-d", "ctrl-u"], "half page"),
+                (&[Down, Up], "move"),
+                (&[ExtendDown, ExtendUp], "select while moving"),
+                (&[First], "first"),
+                (&[Last], "last"),
+                (&[PageUp, PageDown], "page"),
+                (&[HalfPageDown, HalfPageUp], "half page"),
             ],
         ),
         (
             "Select",
             &[
-                (&["space"], "toggle and move down"),
-                (&["a"], "select every safe item in view"),
-                (&["P"], "project: safe, then add review, then clear"),
-                (&["u"], "clear selection"),
+                (&[Toggle], "toggle and move down"),
+                (&[SelectAll], "select every safe item in view"),
+                (
+                    &[SelectProject],
+                    "project: safe, then add review, then clear",
+                ),
+                (&[SelectNone], "clear selection"),
             ],
         ),
         (
             "Filter",
             &[
-                (&["f"], "show only items that are safe to delete"),
-                (&["c"], "cycle category: dependencies, build, cache, temp"),
-                (&["/"], "search by path or rule"),
-                (&["x"], "clear all filters"),
+                (&[SafeOnly], "show only items that are safe to delete"),
+                (
+                    &[Category],
+                    "cycle category: dependencies, build, cache, temp",
+                ),
+                (&[FilterFocus], "search by path or rule"),
+                (&[ResetFilters], "clear all filters"),
             ],
         ),
         (
             "Act",
             &[
                 (
-                    &["d", "del"],
+                    &[DeleteCursor],
                     "delete selection, or the item under the cursor",
                 ),
-                (&["enter"], "delete selection"),
-                (&["s"], "cycle sort: size, path, category"),
-                (&["p"], "group by rule or by project"),
-                (&["esc"], "back out: filters, then selection"),
-                (&["q", "ctrl-c", "ctrl-q"], "quit, asks while deleting"),
+                (&[Delete], "delete selection"),
+                (&[CycleSort], "cycle sort: size, path, category"),
+                (&[Group], "group by rule or by project"),
+                (&[Back], "back out: filters, then selection"),
+                (&[Quit], "quit, asks while deleting"),
             ],
         ),
     ];
-    fn chips_width(keys: &[&str]) -> usize {
-        keys.iter().map(|key| key.chars().count() + 3).sum()
-    }
+    let keys_for = |actions: &'static [Action]| {
+        actions
+            .iter()
+            .flat_map(|action| app.keymap.keys(Scope::Tui, *action))
+    };
+    let chips_width = |actions| {
+        keys_for(actions)
+            .map(|key| key.chars().count() + 3)
+            .sum::<usize>()
+    };
     let rows = SECTIONS.iter().flat_map(|(_, rows)| rows.iter());
     let key_width = rows
         .clone()
@@ -617,7 +654,7 @@ fn help(frame: &mut Frame) {
         ));
         for (keys, action) in rows {
             let mut spans = vec![Span::raw("  ")];
-            for key in *keys {
+            for key in keys_for(keys) {
                 spans.push(key_chip(key));
                 spans.push(Span::raw(" "));
             }
@@ -665,7 +702,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 confirm(frame, app, stats, *mode);
             }
         }
-        Overlay::Help => help(frame),
+        Overlay::Help => help(frame, app),
         Overlay::None | Overlay::Quit => {}
     }
 }

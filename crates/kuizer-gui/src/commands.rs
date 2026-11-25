@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use gpui::{App, KeyBinding, Keystroke, SharedString, actions};
+use kuizer::keymap::{Action, Keymap, Modifiers, Overrides, Scope, Stroke};
 use kuizer::output::display_path;
 
 use crate::squarify::Direction;
@@ -38,6 +39,9 @@ pub enum Command {
     Trash,
     Reveal,
     CopyPath,
+    CopyRerun,
+    Exclude,
+    Restore,
     OpenMenu,
     FocusFilter,
     ZoomIn,
@@ -91,21 +95,13 @@ impl Group {
     }
 }
 
-/// One row of the command table: what it does, how it is called and which keys run it.
-///
-/// `keys` are shown and matched, `extra` are only matched. Keys use GPUI's keystroke syntax,
-/// with `secondary` for Cmd on macOS and Ctrl elsewhere. A `global` command is bound as a GPUI
-/// action, so it also works while a text field has the keyboard.
 #[derive(Debug, Clone)]
 pub struct Spec {
     pub command: Command,
     pub label: SharedString,
-    pub keys: &'static [&'static str],
-    pub extra: &'static [&'static str],
     pub group: Group,
     pub palette: bool,
     pub global: bool,
-    parsed: Vec<Keystroke>,
 }
 
 impl Spec {
@@ -113,33 +109,10 @@ impl Spec {
         Self {
             command,
             label: label.into(),
-            keys: &[],
-            extra: &[],
             group,
             palette: true,
             global: false,
-            parsed: Vec::new(),
         }
-    }
-
-    fn keys(mut self, keys: &'static [&'static str]) -> Self {
-        self.keys = keys;
-        self.parse()
-    }
-
-    fn extra(mut self, extra: &'static [&'static str]) -> Self {
-        self.extra = extra;
-        self.parse()
-    }
-
-    fn parse(mut self) -> Self {
-        self.parsed = self
-            .keys
-            .iter()
-            .chain(self.extra)
-            .filter_map(|pattern| Keystroke::parse(pattern).ok())
-            .collect();
-        self
     }
 
     fn hidden(mut self) -> Self {
@@ -151,19 +124,8 @@ impl Spec {
         self.global = true;
         self
     }
-
-    /// Whether one of this command's keys is the keystroke.
-    pub fn answers(&self, keystroke: &Keystroke) -> bool {
-        self.parsed.iter().any(|want| names(want, keystroke))
-    }
 }
 
-/// @name table
-/// @description The command table. The palette, the key handling, the GPUI key bindings and the
-/// shortcuts overlay are all generated from it, so they cannot drift apart.
-///
-/// @example
-/// let spec = table().iter().find(|spec| spec.answers(&keystroke));
 pub fn table() -> &'static [Spec] {
     static TABLE: OnceLock<Vec<Spec>> = OnceLock::new();
     TABLE.get_or_init(build_table)
@@ -173,30 +135,24 @@ fn build_table() -> Vec<Spec> {
     use Group::{General, Git, Lists, Map, Sections, View};
     let mut specs = vec![
         Spec::new(Command::Palette, "Command palette", General)
-            .keys(&["secondary-k"])
-            .extra(&["secondary-shift-p"])
             .hidden()
             .global(),
-        Spec::new(Command::Quit, "Quit", General)
-            .keys(&["secondary-q"])
-            .global(),
-        Spec::new(Command::Shortcuts, "Keyboard shortcuts", General).keys(&["?"]),
-        Spec::new(Command::Settings, "Settings", General).keys(&["secondary-,"]),
-        Spec::new(Command::Rescan, "Rescan", General).keys(&["secondary-r"]),
-        Spec::new(Command::NewScan, "New scan", General).keys(&["secondary-n"]),
+        Spec::new(Command::Quit, "Quit", General).global(),
+        Spec::new(Command::Shortcuts, "Keyboard shortcuts", General),
+        Spec::new(Command::Settings, "Settings", General),
+        Spec::new(Command::Rescan, "Rescan", General),
+        Spec::new(Command::NewScan, "New scan", General),
         Spec::new(
             Command::StopScan,
             "Stop the scan and keep what it found",
             General,
-        )
-        .keys(&["s"]),
-        Spec::new(Command::FindDuplicates, "Find duplicate files", General).keys(&["D"]),
+        ),
+        Spec::new(Command::FindDuplicates, "Find duplicate files", General),
         Spec::new(
             Command::StopDuplicates,
             "Stop the duplicate search",
             General,
-        )
-        .keys(&["escape"]),
+        ),
     ];
     specs.extend(Tab::ALL.into_iter().map(|tab| {
         Spec::new(
@@ -204,157 +160,210 @@ fn build_table() -> Vec<Spec> {
             format!("Go to {}", tab.label()),
             Sections,
         )
-        .keys(tab.keys())
     }));
     specs.extend([
-        Spec::new(Command::SpaceMap, "Show or hide the space map", Sections).keys(&["m"]),
-        Spec::new(Command::NextTab, "Next section", Sections)
-            .keys(&["ctrl-tab"])
-            .hidden(),
-        Spec::new(Command::PreviousTab, "Previous section", Sections)
-            .keys(&["ctrl-shift-tab"])
-            .hidden(),
-        Spec::new(Command::Down, "Move down", Lists)
-            .keys(&["j", "down"])
-            .hidden(),
-        Spec::new(Command::Up, "Move up", Lists)
-            .keys(&["k", "up"])
-            .hidden(),
-        Spec::new(Command::ExtendDown, "Extend the selection down", Lists)
-            .keys(&["J", "shift-down"])
-            .hidden(),
-        Spec::new(Command::ExtendUp, "Extend the selection up", Lists)
-            .keys(&["K", "shift-up"])
-            .hidden(),
-        Spec::new(Command::Visual, "Visual mode: motions select rows", Lists).keys(&["v"]),
-        Spec::new(Command::First, "First row", Lists)
-            .keys(&["g", "home"])
-            .hidden(),
-        Spec::new(Command::Last, "Last row", Lists)
-            .keys(&["G", "end"])
-            .hidden(),
-        Spec::new(Command::PageDown, "Page down", Lists)
-            .keys(&["pagedown"])
-            .extra(&["ctrl-d"])
-            .hidden(),
-        Spec::new(Command::PageUp, "Page up", Lists)
-            .keys(&["pageup"])
-            .extra(&["ctrl-u"])
-            .hidden(),
-        Spec::new(Command::Toggle, "Select or deselect the row", Lists)
-            .keys(&["space"])
-            .hidden(),
-        Spec::new(Command::SelectAll, "Select all, safe first", Lists).keys(&["secondary-a"]),
-        Spec::new(Command::SelectNone, "Select none in this list", Lists)
-            .keys(&["secondary-shift-a"]),
+        Spec::new(Command::SpaceMap, "Show or hide the space map", Sections),
+        Spec::new(Command::NextTab, "Next section", Sections).hidden(),
+        Spec::new(Command::PreviousTab, "Previous section", Sections).hidden(),
+        Spec::new(Command::Down, "Move down", Lists).hidden(),
+        Spec::new(Command::Up, "Move up", Lists).hidden(),
+        Spec::new(Command::ExtendDown, "Extend the selection down", Lists).hidden(),
+        Spec::new(Command::ExtendUp, "Extend the selection up", Lists).hidden(),
+        Spec::new(Command::Visual, "Visual mode: motions select rows", Lists),
+        Spec::new(Command::First, "First row", Lists).hidden(),
+        Spec::new(Command::Last, "Last row", Lists).hidden(),
+        Spec::new(Command::PageDown, "Page down", Lists).hidden(),
+        Spec::new(Command::PageUp, "Page up", Lists).hidden(),
+        Spec::new(Command::Toggle, "Select or deselect the row", Lists).hidden(),
+        Spec::new(Command::SelectAll, "Select all, safe first", Lists),
+        Spec::new(Command::SelectNone, "Select none in this list", Lists),
         Spec::new(
             Command::SelectWins,
             "Select the biggest safe artifacts",
             Lists,
-        )
-        .keys(&["w"]),
-        Spec::new(Command::Trash, "Delete selected", Lists).keys(&["enter", "delete", "d"]),
-        Spec::new(Command::Reveal, "Reveal in file manager", Lists).keys(&["o"]),
-        Spec::new(Command::CopyPath, "Copy path", Lists).keys(&["y"]),
-        Spec::new(Command::OpenMenu, "Open item menu", Lists).keys(&["menu", "shift-f10"]),
-        Spec::new(Command::FocusFilter, "Filter this list", Lists).keys(&["/"]),
-        Spec::new(Command::MapIn, "Open the folder tile", Map).keys(&["enter"]),
-        Spec::new(Command::MapOut, "Zoom out one level", Map).keys(&["backspace", "escape"]),
-        Spec::new(Command::MapTop, "Zoom out to the top", Map).keys(&["home"]),
-        Spec::new(Command::MapToggle, "Select or deselect the tile", Map)
-            .keys(&["space"])
-            .hidden(),
+        ),
+        Spec::new(Command::Trash, "Delete selected", Lists),
+        Spec::new(Command::Reveal, "Reveal in file manager", Lists),
+        Spec::new(Command::CopyPath, "Copy path", Lists),
+        Spec::new(Command::CopyRerun, "Copy command", Lists),
+        Spec::new(Command::Exclude, "Always exclude", Lists),
+        Spec::new(Command::Restore, "Restore", Lists),
+        Spec::new(Command::OpenMenu, "Open item menu", Lists),
+        Spec::new(Command::FocusFilter, "Filter this list", Lists),
+        Spec::new(Command::MapIn, "Open the folder tile", Map),
+        Spec::new(Command::MapOut, "Zoom out one level", Map),
+        Spec::new(Command::MapTop, "Zoom out to the top", Map),
+        Spec::new(Command::MapToggle, "Select or deselect the tile", Map).hidden(),
         Spec::new(
             Command::MapMove(Direction::Left),
             "Focus the tile to the left",
             Map,
         )
-        .keys(&["left"])
-        .extra(&["h"])
         .hidden(),
         Spec::new(
             Command::MapMove(Direction::Right),
             "Focus the tile to the right",
             Map,
         )
-        .keys(&["right"])
-        .extra(&["l"])
         .hidden(),
-        Spec::new(Command::MapMove(Direction::Up), "Focus the tile above", Map)
-            .keys(&["up"])
-            .extra(&["k"])
-            .hidden(),
+        Spec::new(Command::MapMove(Direction::Up), "Focus the tile above", Map).hidden(),
         Spec::new(
             Command::MapMove(Direction::Down),
             "Focus the tile below",
             Map,
         )
-        .keys(&["down"])
-        .extra(&["j"])
         .hidden(),
-        Spec::new(Command::Gc, "Run git gc in the repository", Git).keys(&["c"]),
-        Spec::new(Command::GcAll, "Run git gc in every listed repository", Git).keys(&["C"]),
+        Spec::new(Command::Gc, "Run git gc in the repository", Git),
+        Spec::new(Command::GcAll, "Run git gc in every listed repository", Git),
         Spec::new(
             Command::Branches,
             "Delete merged branches of the repository",
             Git,
-        )
-        .keys(&["b"]),
+        ),
         Spec::new(
             Command::BranchesAll,
             "Delete every listed merged branch",
             Git,
-        )
-        .keys(&["B"]),
-        Spec::new(Command::ZoomIn, "Zoom in", View)
-            .keys(&["secondary-="])
-            .extra(&["secondary-+", "secondary-shift-="])
-            .global(),
-        Spec::new(Command::ZoomOut, "Zoom out", View)
-            .keys(&["secondary--"])
-            .global(),
-        Spec::new(Command::ResetZoom, "Reset zoom", View)
-            .keys(&["secondary-0"])
-            .global(),
-        Spec::new(Command::Sidebar, "Collapse or expand the sidebar", View).keys(&["secondary-b"]),
+        ),
+        Spec::new(Command::ZoomIn, "Zoom in", View).global(),
+        Spec::new(Command::ZoomOut, "Zoom out", View).global(),
+        Spec::new(Command::ResetZoom, "Reset zoom", View).global(),
+        Spec::new(Command::Sidebar, "Collapse or expand the sidebar", View),
     ]);
     specs
 }
 
-/// @name lookup
-/// @description The command a keystroke runs. While the space map has the keyboard its own keys
-/// come first, so Enter opens a tile there instead of moving the selection to the trash; outside
-/// the map its keys do nothing.
-///
-/// @example
-/// let command = lookup(&keystroke, app.map_active());
-pub fn lookup(keystroke: &Keystroke, map: bool) -> Option<Command> {
-    let specs = table();
-    let scoped = specs.iter().filter(|spec| map && spec.group == Group::Map);
-    let general = specs.iter().filter(|spec| spec.group != Group::Map);
-    scoped
-        .chain(general)
-        .find(|spec| spec.answers(keystroke))
+impl Command {
+    pub fn binding(&self) -> Option<(Scope, Action)> {
+        use Action as Key;
+        let action = match *self {
+            Self::Palette => Key::Palette,
+            Self::Quit => Key::Quit,
+            Self::Shortcuts => Key::Help,
+            Self::Settings => Key::Settings,
+            Self::GoTo(tab) => tab.action(),
+            Self::NextTab => Key::NextTab,
+            Self::PreviousTab => Key::PreviousTab,
+            Self::Rescan => Key::Rescan,
+            Self::NewScan => Key::NewScan,
+            Self::StopScan => Key::StopScan,
+            Self::Down => Key::Down,
+            Self::Up => Key::Up,
+            Self::ExtendDown => Key::ExtendDown,
+            Self::ExtendUp => Key::ExtendUp,
+            Self::Visual => Key::Visual,
+            Self::First => Key::First,
+            Self::Last => Key::Last,
+            Self::PageDown => Key::PageDown,
+            Self::PageUp => Key::PageUp,
+            Self::Toggle => Key::Toggle,
+            Self::SelectAll => Key::SelectAll,
+            Self::SelectNone => Key::SelectNone,
+            Self::SelectWins => Key::SelectWins,
+            Self::Trash => Key::Delete,
+            Self::Reveal => Key::Reveal,
+            Self::CopyPath => Key::CopyPath,
+            Self::CopyRerun => Key::CopyCommand,
+            Self::Exclude => Key::Exclude,
+            Self::Restore => Key::Restore,
+            Self::OpenMenu => Key::OpenMenu,
+            Self::FocusFilter => Key::FilterFocus,
+            Self::ZoomIn => Key::ZoomIn,
+            Self::ZoomOut => Key::ZoomOut,
+            Self::ResetZoom => Key::ResetZoom,
+            Self::Sidebar => Key::Sidebar,
+            Self::SpaceMap => Key::SpaceMap,
+            Self::MapIn => return Some((Scope::Map, Key::MapIn)),
+            Self::MapOut => return Some((Scope::Map, Key::MapOut)),
+            Self::MapTop => return Some((Scope::Map, Key::MapTop)),
+            Self::MapMove(Direction::Left) => return Some((Scope::Map, Key::MapLeft)),
+            Self::MapMove(Direction::Right) => return Some((Scope::Map, Key::MapRight)),
+            Self::MapMove(Direction::Up) => return Some((Scope::Map, Key::MapUp)),
+            Self::MapMove(Direction::Down) => return Some((Scope::Map, Key::MapDown)),
+            Self::MapToggle => return Some((Scope::Map, Key::MapToggle)),
+            Self::Scan(_) => return None,
+            Self::Gc => Key::Gc,
+            Self::GcAll => Key::GcAll,
+            Self::Branches => Key::Branches,
+            Self::BranchesAll => Key::BranchesAll,
+            Self::FindDuplicates => Key::FindDuplicates,
+            Self::StopDuplicates => Key::StopDuplicates,
+        };
+        Some((Scope::Gui, action))
+    }
+}
+
+pub fn stroke(key: &Keystroke) -> Stroke<'_> {
+    Stroke {
+        key: &key.key,
+        typed: key.key_char.as_deref(),
+        modifiers: Modifiers {
+            ctrl: key.modifiers.control,
+            alt: key.modifiers.alt,
+            shift: key.modifiers.shift,
+            cmd: key.modifiers.platform,
+            function: key.modifiers.function,
+        },
+    }
+}
+
+pub fn lookup(keys: &Keymap, keystroke: &Keystroke, map: bool) -> Option<Command> {
+    let stroke = stroke(keystroke);
+    let hit = if map {
+        keys.lookup(Scope::Map, stroke)
+            .map(|action| (Scope::Map, action))
+    } else {
+        None
+    };
+    let hit = hit.or_else(|| {
+        keys.lookup(Scope::Gui, stroke)
+            .map(|action| (Scope::Gui, action))
+    })?;
+    table()
+        .iter()
+        .find(|spec| spec.command.binding() == Some(hit))
         .map(|spec| spec.command.clone())
 }
 
-/// Keys that only work inside the palette, a filter field or a dialog, listed in the shortcuts
-/// overlay next to the table.
-pub const HINTS: [(&str, &[&str]); 5] = [
-    ("Move in the palette", &["up", "down", "ctrl-p", "ctrl-n"]),
-    ("Scroll this overlay", &["j", "k", "pagedown", "pageup"]),
-    ("Run the command", &["enter"]),
-    ("Leave the filter, keep it", &["enter"]),
-    ("Close, clear the filter or cancel", &["escape"]),
+type Hint = (&'static str, Scope, &'static [Action]);
+
+pub const HINTS: &[Hint] = &[
+    (
+        "Move in the palette",
+        Scope::Palette,
+        &[Action::PalettePrevious, Action::PaletteNext],
+    ),
+    (
+        "Scroll this overlay",
+        Scope::Gui,
+        &[Action::Down, Action::Up, Action::PageDown, Action::PageUp],
+    ),
+    ("Run the command", Scope::Palette, &[Action::PaletteRun]),
+    (
+        "Leave the filter, keep it",
+        Scope::GuiFilter,
+        &[Action::ApplyFilter],
+    ),
+    (
+        "Close, clear the filter or cancel",
+        Scope::GuiFilter,
+        &[Action::Back],
+    ),
 ];
 
-/// Keys that move the focus ring through the buttons, segments and sidebar items, listed in the
-/// shortcuts overlay next to the table.
-pub const CONTROLS: [(&str, &[&str]); 4] = [
-    ("Next or previous control", &["tab", "shift-tab"]),
-    ("Move along the controls", &["left", "right", "h", "l"]),
-    ("Press the control", &["enter", "space"]),
-    ("Back to the list", &["escape"]),
+pub const CONTROLS: &[Hint] = &[
+    (
+        "Next or previous control",
+        Scope::Control,
+        &[Action::ControlNext, Action::ControlPrevious],
+    ),
+    (
+        "Move along the controls",
+        Scope::Control,
+        &[Action::ControlForward, Action::ControlBack],
+    ),
+    ("Press the control", Scope::Control, &[Action::ControlPress]),
+    ("Back to the list", Scope::Control, &[Action::Back]),
 ];
 
 /// @name scans
@@ -375,29 +384,14 @@ pub fn scans(paths: &[PathBuf]) -> Vec<Spec> {
         .collect()
 }
 
-/// @name shortcut
-/// @description The first key of a command as it is written on screen, for hints next to
-/// buttons.
-///
-/// @example
-/// let key = shortcut(&Command::Palette); // Some("Ctrl+K")
-pub fn shortcut(command: &Command) -> Option<String> {
-    table()
-        .iter()
-        .find(|spec| spec.command == *command)
-        .and_then(|spec| spec.keys.first().map(|key| label(key)))
-}
-
-/// @name bind_keys
-/// @description Binds the table's global commands as GPUI actions, the ones that work in every
-/// mode, including while typing.
-///
-/// @example
-/// app::bind_keys(cx);
-pub fn bind_keys(cx: &mut App) {
+pub fn bind_configured_keys(cx: &mut App, overrides: &Overrides) {
+    let (keymap, _) = Keymap::resolve(overrides);
     let mut bindings = Vec::new();
     for spec in table().iter().filter(|spec| spec.global) {
-        for key in spec.keys.iter().chain(spec.extra) {
+        let Some((scope, action)) = spec.command.binding() else {
+            continue;
+        };
+        for key in keymap.keys(scope, action) {
             bindings.push(match spec.command {
                 Command::ZoomIn => KeyBinding::new(key, ZoomIn, None),
                 Command::ZoomOut => KeyBinding::new(key, ZoomOut, None),
@@ -411,58 +405,9 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
-/// @name matches
-/// @description Whether a keystroke is the key a pattern names. Symbols such as `?` and `/`
-/// compare the typed character, so they work whatever Shift does on the keyboard layout.
-///
-/// @example
-/// assert!(matches("secondary-k", &Keystroke::parse("ctrl-k").unwrap()));
-pub fn matches(pattern: &str, keystroke: &Keystroke) -> bool {
-    Keystroke::parse(pattern).is_ok_and(|want| names(&want, keystroke))
-}
-
-fn names(want: &Keystroke, keystroke: &Keystroke) -> bool {
-    let have = keystroke.modifiers;
-    let need = want.modifiers;
-    if have.control != need.control || have.alt != need.alt || have.platform != need.platform {
-        return false;
-    }
-    if need.shift
-        && !need.control
-        && !need.platform
-        && !need.alt
-        && let Some(shifted) = shifted_digit(&want.key)
-    {
-        return (keystroke.key == want.key && have.shift) || keystroke.key == shifted;
-    }
-    let symbol = want.key.chars().count() == 1 && !want.key.chars().all(char::is_alphanumeric);
-    if symbol && !need.control && !need.platform && !need.alt {
-        return match keystroke.key_char.as_deref() {
-            Some(typed) => typed == want.key,
-            None => keystroke.key == want.key,
-        };
-    }
-    if symbol {
-        return keystroke.key == want.key;
-    }
-    keystroke.key == want.key && have.shift == need.shift
-}
-
-/// The symbol Shift+digit types on a US layout. Linux reports that key as the symbol with Shift
-/// dropped, so `shift-2` has to be recognised as `@` there.
-fn shifted_digit(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "1" => "!",
-        "2" => "@",
-        "3" => "#",
-        "4" => "$",
-        "5" => "%",
-        "6" => "^",
-        "7" => "&",
-        "8" => "*",
-        "9" => "(",
-        _ => return None,
-    })
+#[cfg(test)]
+pub fn bind_keys(cx: &mut App) {
+    bind_configured_keys(cx, &Overrides::default());
 }
 
 /// @name label
@@ -519,48 +464,6 @@ mod tests {
     }
 
     #[test]
-    fn patterns_match_their_keystrokes_only() {
-        assert!(matches("secondary-k", &key("secondary-k")));
-        assert!(!matches("secondary-k", &key("k")));
-        assert!(matches("j", &key("j")));
-        assert!(!matches("j", &key("shift-j")));
-        assert!(matches("G", &key("shift-g")));
-        assert!(!matches("G", &key("g")));
-        assert!(matches("?", &key("?")));
-        assert!(matches("/", &key("/")));
-        assert!(!matches("/", &key("?")));
-        assert!(matches("shift-f10", &key("shift-f10")));
-        assert!(!matches("shift-f10", &key("f10")));
-        assert!(matches("ctrl-shift-tab", &key("ctrl-shift-tab")));
-        assert!(!matches("ctrl-tab", &key("ctrl-shift-tab")));
-    }
-
-    #[test]
-    fn a_shifted_slash_is_a_question_mark() {
-        let shifted = Keystroke {
-            modifiers: gpui::Modifiers::shift(),
-            key: "/".to_owned(),
-            key_char: Some("?".to_owned()),
-        };
-        assert!(matches("?", &shifted));
-        assert!(!matches("/", &shifted));
-    }
-
-    #[test]
-    fn shift_digit_matches_the_digit_and_the_symbol_linux_reports() {
-        let digit = key("shift-2");
-        let symbol = Keystroke {
-            modifiers: gpui::Modifiers::default(),
-            key: "@".to_owned(),
-            key_char: Some("@".to_owned()),
-        };
-        assert!(matches("shift-2", &digit));
-        assert!(matches("shift-2", &symbol));
-        assert!(!matches("shift-2", &key("2")));
-        assert!(!matches("shift-3", &symbol));
-    }
-
-    #[test]
     fn labels_read_like_keys() {
         assert_eq!(label("pagedown"), "PgDn");
         assert_eq!(label("G"), "Shift+G");
@@ -576,65 +479,59 @@ mod tests {
     }
 
     #[test]
-    fn every_key_is_used_once() {
-        let specs = table();
-        let mut seen: Vec<&str> = Vec::new();
-        let mut map: Vec<&str> = Vec::new();
-        for spec in specs {
-            let seen = if spec.group == Group::Map {
-                &mut map
-            } else {
-                &mut seen
-            };
-            assert!(
-                !spec.keys.is_empty(),
-                "{} needs a key to be listed",
-                spec.label
-            );
-            for key in spec.keys.iter().chain(spec.extra) {
-                assert!(Keystroke::parse(key).is_ok(), "{key} parses");
-                assert!(!seen.contains(key), "{key} is bound twice");
-                seen.push(key);
-            }
-        }
-    }
-
-    #[test]
     fn vim_motions_run_the_arrow_and_page_commands() {
-        assert_eq!(lookup(&key("ctrl-d"), false), Some(Command::PageDown));
-        assert_eq!(lookup(&key("ctrl-u"), false), Some(Command::PageUp));
         assert_eq!(
-            lookup(&key("h"), true),
+            lookup(&Keymap::default(), &key("ctrl-d"), false),
+            Some(Command::PageDown)
+        );
+        assert_eq!(
+            lookup(&Keymap::default(), &key("ctrl-u"), false),
+            Some(Command::PageUp)
+        );
+        assert_eq!(
+            lookup(&Keymap::default(), &key("h"), true),
             Some(Command::MapMove(Direction::Left))
         );
         assert_eq!(
-            lookup(&key("l"), true),
+            lookup(&Keymap::default(), &key("l"), true),
             Some(Command::MapMove(Direction::Right))
         );
-        assert_eq!(lookup(&key("h"), false), None);
+        assert_eq!(lookup(&Keymap::default(), &key("h"), false), None);
     }
 
     #[test]
     fn map_keys_win_only_inside_the_map() {
         let enter = key("enter");
-        assert_eq!(lookup(&enter, true), Some(Command::MapIn));
-        assert_eq!(lookup(&enter, false), Some(Command::Trash));
         assert_eq!(
-            lookup(&key("left"), true),
+            lookup(&Keymap::default(), &enter, true),
+            Some(Command::MapIn)
+        );
+        assert_eq!(
+            lookup(&Keymap::default(), &enter, false),
+            Some(Command::Trash)
+        );
+        assert_eq!(
+            lookup(&Keymap::default(), &key("left"), true),
             Some(Command::MapMove(Direction::Left))
         );
-        assert_eq!(lookup(&key("left"), false), None);
-        assert_eq!(lookup(&key("backspace"), false), None);
+        assert_eq!(lookup(&Keymap::default(), &key("left"), false), None);
+        assert_eq!(lookup(&Keymap::default(), &key("backspace"), false), None);
         assert_eq!(
-            lookup(&key("j"), true),
+            lookup(&Keymap::default(), &key("j"), true),
             Some(Command::MapMove(Direction::Down))
         );
         assert_eq!(
-            lookup(&key("k"), true),
+            lookup(&Keymap::default(), &key("k"), true),
             Some(Command::MapMove(Direction::Up))
         );
-        assert_eq!(lookup(&key("j"), false), Some(Command::Down));
-        assert_eq!(lookup(&key("m"), false), Some(Command::SpaceMap));
+        assert_eq!(
+            lookup(&Keymap::default(), &key("j"), false),
+            Some(Command::Down)
+        );
+        assert_eq!(
+            lookup(&Keymap::default(), &key("m"), false),
+            Some(Command::SpaceMap)
+        );
         assert_eq!(label("backspace"), "Backspace");
     }
 }

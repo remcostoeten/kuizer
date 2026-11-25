@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::types::{Issue, IssueKind};
 use crate::config::{Excludes, ScanConfig};
 use crate::detect::{Detector, Kind, Listing, Match, RuleInfo, Safety};
-use crate::platform::dir::{Buffer, Dir, EntryKind};
+use crate::platform::dir::{Buffer, Dir, EntryKind, Stat};
 use crate::platform::{self, MountTable};
 use crate::protect::{self, Protected};
 
@@ -24,6 +24,7 @@ pub struct Found {
 
 pub enum Flow {
     Continue,
+    Skip,
     Stop,
 }
 
@@ -32,6 +33,7 @@ pub struct FileEntry<'a> {
     built: Option<&'a Path>,
     pub name: &'a OsStr,
     pub kind: EntryKind,
+    pub stat: Option<Stat>,
 }
 
 impl FileEntry<'_> {
@@ -59,9 +61,15 @@ pub trait Visitor {
         false
     }
 
+    fn wants_stat(&self) -> bool {
+        false
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow;
 
-    fn entered(&mut self, _path: &Path) {}
+    fn entered(&mut self, _path: &Path) -> Flow {
+        Flow::Continue
+    }
 
     fn counted(&mut self, _kind: EntryKind) {}
 
@@ -109,6 +117,10 @@ impl<V: Visitor> Visitor for Option<V> {
         self.as_ref().is_some_and(V::wants_files)
     }
 
+    fn wants_stat(&self) -> bool {
+        self.as_ref().is_some_and(V::wants_stat)
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         match self {
             Some(visitor) => visitor.issue(issue),
@@ -120,6 +132,11 @@ impl<V: Visitor> Visitor for Option<V> {
         if let Some(visitor) = self {
             visitor.counted(kind);
         }
+    }
+
+    fn entered(&mut self, path: &Path) -> Flow {
+        self.as_mut()
+            .map_or(Flow::Continue, |visitor| visitor.entered(path))
     }
 
     fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
@@ -160,6 +177,10 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
         self.0.wants_files() || self.1.wants_files()
     }
 
+    fn wants_stat(&self) -> bool {
+        self.0.wants_stat() || self.1.wants_stat()
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         match (self.0.issue(issue.clone()), self.1.issue(issue)) {
             (Flow::Continue, Flow::Continue) => Flow::Continue,
@@ -170,6 +191,14 @@ impl<A: Visitor, B: Visitor> Visitor for (A, B) {
     fn counted(&mut self, kind: EntryKind) {
         self.0.counted(kind);
         self.1.counted(kind);
+    }
+
+    fn entered(&mut self, path: &Path) -> Flow {
+        match (self.0.entered(path), self.1.entered(path)) {
+            (Flow::Stop, _) | (_, Flow::Stop) => Flow::Stop,
+            (Flow::Skip, _) | (_, Flow::Skip) => Flow::Skip,
+            _ => Flow::Continue,
+        }
     }
 
     fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
@@ -259,6 +288,7 @@ struct Entry {
     end: usize,
     kind: EntryKind,
     inode: u64,
+    stat: Option<Stat>,
 }
 
 /// Per-thread buffers a walk reuses from one directory to the next.
@@ -468,7 +498,11 @@ impl<'a> Context<'a> {
                 Err(error) => return visitor.issue(Issue::from_io(pending.path, &error)),
             }
         }
-        visitor.entered(&pending.path);
+        match visitor.entered(&pending.path) {
+            Flow::Continue => {}
+            Flow::Skip => return Flow::Continue,
+            Flow::Stop => return Flow::Stop,
+        }
 
         let Scratch {
             buffer,
@@ -485,6 +519,7 @@ impl<'a> Context<'a> {
                 end: names.len(),
                 kind,
                 inode,
+                stat: None,
             });
         });
         if let Err(error) = read
@@ -494,11 +529,15 @@ impl<'a> Context<'a> {
         }
 
         let mut own = Listing::default();
+        let wants_stat = visitor.wants_stat();
         for entry in entries.iter_mut() {
             let name = name_of(names, entry);
-            if entry.kind == EntryKind::Unknown {
-                match dir.kind_at(name) {
-                    Ok(kind) => entry.kind = kind,
+            if entry.kind == EntryKind::Unknown || (wants_stat && entry.kind == EntryKind::File) {
+                match dir.stat_at(name) {
+                    Ok(stat) => {
+                        entry.kind = stat.kind;
+                        entry.stat = Some(stat);
+                    }
                     Err(error) => {
                         if let Flow::Stop =
                             visitor.issue(Issue::from_io(pending.path.join(name), &error))
@@ -581,6 +620,7 @@ impl<'a> Context<'a> {
                             built: path.as_deref(),
                             name,
                             kind: entry.kind,
+                            stat: entry.stat,
                         })
                     {
                         return Flow::Stop;

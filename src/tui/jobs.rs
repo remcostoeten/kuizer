@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
+use crate::config::DeleteConfig;
 use crate::delete::{self, Guard, Lanes, Mode, Target};
 use crate::git;
 use crate::history::{self, Entry, HistoryError, Recorder};
@@ -29,6 +30,7 @@ pub type Changes = (PathBuf, Option<usize>);
 
 pub fn spawn_deleters(
     roots: Vec<PathBuf>,
+    delete_config: DeleteConfig,
     jobs: Receiver<Job>,
     results: Sender<Outcome>,
     stop: Arc<AtomicBool>,
@@ -36,7 +38,9 @@ pub fn spawn_deleters(
     thread::Builder::new()
         .name("kuizer-delete".to_owned())
         .spawn(move || {
-            let guard = Guard::new(&roots);
+            let guard = Guard::new(&roots)
+                .with_protected(&delete_config.protected)
+                .with_cross_device(delete_config.cross_device);
             let recorder = Mutex::new(Recorder::for_user(history::now(), &roots));
             let lanes = Lanes::default();
             let work = || {

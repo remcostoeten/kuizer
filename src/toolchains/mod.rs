@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::delete::{self, DeleteError, Guard, Mode, Target};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::output::display_path;
+use crate::process;
 use crate::scan::{self, Cancel, Candidate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -533,7 +534,7 @@ fn uninstall(program: &str, tool: Tool, version: &str) -> Result<(), DeleteError
         Tool::Rustup => &["toolchain", "uninstall", version],
         _ => &["python", "uninstall", version],
     };
-    let output = Command::new(program).args(args).output().map_err(|error| {
+    let output = process::run(Command::new(program).args(args), process::MUTATION_TIMEOUT).map_err(|error| {
         DeleteError::Tool(if error.kind() == std::io::ErrorKind::NotFound {
             format!(
                 "{program} is not on PATH; it keeps metadata outside the version folder, so kuizer only removes it through `{program} {}`",

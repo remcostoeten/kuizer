@@ -170,17 +170,17 @@ impl Kuizer {
             (deleting(cleaning.started, now), cleaning.paths)
         });
         if let Some(previous) = self.flow.settling.take() {
-            self.depart(previous.removed);
+            self.depart(previous.removed, cx);
         }
         if motion::reduced() {
-            self.depart(removed);
+            self.depart(removed, cx);
             return;
         }
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(STEP).await;
             let _ = this.update(cx, |app, cx| {
                 if let Some(settling) = app.flow.settling.take() {
-                    app.depart(settling.removed);
+                    app.depart(settling.removed, cx);
                     cx.notify();
                 }
             });
@@ -196,7 +196,7 @@ impl Kuizer {
 
     /// Takes removed items out of the report, and keeps them out of what a running scan still
     /// delivers.
-    fn depart(&mut self, removed: Paths) {
+    fn depart(&mut self, removed: Paths, cx: &Context<Self>) {
         if let Phase::Ready(report) = &mut self.phase {
             report.remove(&removed);
         }
@@ -207,7 +207,7 @@ impl Kuizer {
         }
         self.refresh_stats();
         self.refresh_rows();
-        self.refresh_map();
+        self.refresh_map(cx);
     }
 
     /// Follows the selection for the summary bar and asks for the next frame while any row or

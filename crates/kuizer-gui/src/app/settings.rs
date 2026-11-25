@@ -10,6 +10,7 @@ pub(super) struct SettingWrites {
     saved: Vec<(Setting, usize)>,
     queued: Vec<(Setting, usize)>,
     writing: bool,
+    writing_paths: bool,
 }
 
 impl SettingWrites {
@@ -53,6 +54,7 @@ pub(super) enum Setting {
     RoutesEnabled,
     RouteHints,
     Trash,
+    CrossDevice,
 }
 
 const THEMES: [&str; 2] = ["Dark", "Light"];
@@ -70,6 +72,7 @@ impl Setting {
             Self::RoutesEnabled => "Section shortcuts",
             Self::RouteHints => "Show shortcut hints",
             Self::Trash => "Move to the trash",
+            Self::CrossDevice => "Allow crossing filesystem boundaries",
         }
     }
 
@@ -82,12 +85,13 @@ impl Setting {
             Self::SidebarCollapsed => {
                 "Start as a strip of icons. The sidebar shortcut switches it while the app runs."
             }
-            Self::RoutesEnabled => {
-                "Shift+1 to Shift+9 open the sidebar sections. The command palette still opens every section."
-            }
+            Self::RoutesEnabled => "Use keyboard shortcuts to open sidebar sections.",
             Self::RouteHints => "Key badges in the sidebar and in the section tooltips.",
             Self::Trash => {
                 "Project artifacts and caches go to the trash and History can restore them. Off deletes them for good. Toolchains, Docker objects and git branches are always deleted for good."
+            }
+            Self::CrossDevice => {
+                "Allow deletion from a different filesystem, including mounted folders."
             }
         }
     }
@@ -114,6 +118,7 @@ impl Setting {
             Self::RoutesEnabled => usize::from(config.route_shortcuts.enabled),
             Self::RouteHints => usize::from(config.route_shortcuts.hints),
             Self::Trash => usize::from(config.delete.mode == DeleteMode::Trash),
+            Self::CrossDevice => usize::from(config.delete.cross_device),
         }
     }
 
@@ -170,6 +175,7 @@ impl Setting {
                     DeleteMode::Permanent
                 };
             }
+            Self::CrossDevice => config.delete.cross_device = on,
         }
     }
 
@@ -204,6 +210,7 @@ impl Setting {
                 "mode",
                 SettingValue::Text(if on { "trash" } else { "permanent" }),
             ),
+            Self::CrossDevice => ("delete", "cross_device", SettingValue::Bool(on)),
         }
     }
 }
@@ -219,6 +226,8 @@ struct Page {
     detail: &'static str,
     groups: &'static [Group],
 }
+
+const DELETING_PAGE: usize = 1;
 
 const PAGES: [Page; 3] = [
     Page {
@@ -243,7 +252,7 @@ const PAGES: [Page; 3] = [
         groups: &[Group {
             title: "Removed items",
             hint: None,
-            settings: &[Setting::Trash],
+            settings: &[Setting::Trash, Setting::CrossDevice],
         }],
     },
     Page {
@@ -270,6 +279,8 @@ fn rows(page: usize) -> Vec<Setting> {
 pub(super) struct Settings {
     page: usize,
     row: usize,
+    protected_path: Option<String>,
+    protected_error: Option<String>,
 }
 
 impl Kuizer {
@@ -283,7 +294,15 @@ impl Kuizer {
     }
 
     pub(super) fn settings_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        if commands::lookup(keystroke, false) == Some(Command::Settings) {
+        if self
+            .settings
+            .as_ref()
+            .is_some_and(|state| state.protected_path.is_some())
+        {
+            self.protected_path_key(keystroke, cx);
+            return;
+        }
+        if commands::lookup(&self.keymap, keystroke, false) == Some(Command::Settings) {
             self.settings = None;
             cx.notify();
             return;
@@ -291,40 +310,165 @@ impl Kuizer {
         let Some(state) = &mut self.settings else {
             return;
         };
-        let shift = keystroke.modifiers.shift;
-        let count = rows(state.page).len();
-        match keystroke.key.as_str() {
-            "escape" => self.settings = None,
-            "down" | "j" if !shift => state.row = (state.row + 1).min(count - 1),
-            "up" | "k" if !shift => state.row = state.row.saturating_sub(1),
-            "g" | "home" if !shift => state.row = 0,
-            "g" | "end" => state.row = count - 1,
-            "right" | "l" | "left" | "h" => {
-                let setting = rows(state.page)[state.row];
-                if setting.choices().is_some() {
-                    let delta = if matches!(keystroke.key.as_str(), "right" | "l") {
-                        1
-                    } else {
-                        -1
-                    };
+        let action = self
+            .keymap
+            .lookup(Scope::Settings, commands::stroke(keystroke));
+        let settings = rows(state.page);
+        let count = settings.len() + usize::from(state.page == DELETING_PAGE);
+        let setting = settings.get(state.row).copied();
+        match action {
+            Some(Key::Back) => self.settings = None,
+            Some(Key::SettingsNext) => state.row = (state.row + 1).min(count - 1),
+            Some(Key::SettingsPrevious) => state.row = state.row.saturating_sub(1),
+            Some(Key::SettingsFirst) => state.row = 0,
+            Some(Key::SettingsLast) => state.row = count - 1,
+            Some(Key::SettingsRight | Key::SettingsLeft) => {
+                let forward = action == Some(Key::SettingsRight);
+                if let Some(setting) = setting.filter(|setting| setting.choices().is_some()) {
+                    let delta = if forward { 1 } else { -1 };
                     self.change(setting, setting.step(&self.config, delta), cx);
                     return;
                 }
-                let step = if matches!(keystroke.key.as_str(), "right" | "l") {
-                    1
-                } else {
-                    PAGES.len() - 1
-                };
-                switch_page(state, step);
+                switch_page(state, if forward { 1 } else { PAGES.len() - 1 });
             }
-            "tab" if shift => switch_page(state, PAGES.len() - 1),
-            "tab" => switch_page(state, 1),
-            "space" | "enter" => {
-                let setting = rows(state.page)[state.row];
-                self.change(setting, setting.next(&self.config), cx);
+            Some(Key::SettingsPreviousTab) => switch_page(state, PAGES.len() - 1),
+            Some(Key::SettingsNextTab) => switch_page(state, 1),
+            Some(Key::SettingsChange) => {
+                if let Some(setting) = setting {
+                    self.change(setting, setting.next(&self.config), cx);
+                } else {
+                    self.edit_protected_paths(cx);
+                }
                 return;
             }
             _ => return,
+        }
+        cx.notify();
+    }
+
+    fn edit_protected_paths(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.settings
+            && !self.setting_writes.writing_paths
+        {
+            state.row = rows(DELETING_PAGE).len();
+            state.protected_path.get_or_insert_default();
+            state.protected_error = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn saving_protected_paths(&self) -> bool {
+        self.setting_writes.writing_paths
+    }
+
+    fn protected_path_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        if self.setting_writes.writing_paths {
+            return;
+        }
+        match self
+            .keymap
+            .lookup(Scope::PathEditor, commands::stroke(keystroke))
+        {
+            Some(Key::Back) => {
+                state.protected_path = None;
+                state.protected_error = None;
+            }
+            Some(Key::SaveProtectedPath) => {
+                self.save_protected_path(cx);
+                return;
+            }
+            _ => {
+                let Some(input) = &mut state.protected_path else {
+                    return;
+                };
+                let paste = || cx.read_from_clipboard().and_then(|item| item.text());
+                if !field::edit(&self.keymap, input, keystroke, field::PATH, paste) {
+                    return;
+                }
+                state.protected_error = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn save_protected_path(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        let Some(input) = state.protected_path.as_deref().map(str::trim) else {
+            return;
+        };
+        if input.is_empty() {
+            return;
+        }
+        let Some(file) = self.config_path.clone() else {
+            state.protected_error = Some("This system has no config folder".to_owned());
+            cx.notify();
+            return;
+        };
+        let (input, remove) = input
+            .strip_prefix('-')
+            .map_or((input, false), |path| (path, true));
+        let path = kuizer::config::expand_home(Path::new(input));
+        let mut paths = self.config.delete.protected.clone();
+        if remove {
+            let count = paths.len();
+            paths.retain(|known| *known != path);
+            if count == paths.len() {
+                state.protected_error = Some("This folder is absent from the list".to_owned());
+                cx.notify();
+                return;
+            }
+        } else if !paths.contains(&path) {
+            paths.push(path);
+        }
+        self.setting_writes.writing_paths = true;
+        state.protected_error = None;
+        let written = cx.background_spawn(async move {
+            let _one_writer = CONFIG_WRITE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            kuizer::config::set_protected_paths(&file, &paths)
+                .map(|()| paths)
+                .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = written.await;
+            let _ = this.update(cx, |app, cx| app.protected_paths_written(result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn protected_paths_written(
+        &mut self,
+        result: Result<Vec<PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.setting_writes.writing_paths = false;
+        match result {
+            Ok(paths) => {
+                self.config.delete.protected = paths;
+                if let Some(state) = &mut self.settings {
+                    state.protected_path = None;
+                    state.protected_error = None;
+                }
+            }
+            Err(error) => {
+                if let Some(state) = &mut self.settings
+                    && state.protected_path.is_some()
+                {
+                    state.protected_error = Some(error);
+                } else {
+                    self.tell(
+                        Notice::Failed(format!("Could not save protected paths: {error}")),
+                        cx,
+                    );
+                }
+            }
         }
         cx.notify();
     }
@@ -420,6 +564,8 @@ impl Kuizer {
                     if let Some(state) = &mut app.settings {
                         state.page = index;
                         state.row = 0;
+                        state.protected_path = None;
+                        state.protected_error = None;
                         cx.notify();
                     }
                 }))
@@ -462,12 +608,15 @@ impl Kuizer {
                     .children(settings)
             })
             .collect();
-        let hint = |keys: &[&'static str], what: &'static str| {
+        let hint = |keys: &[Key], what: &'static str| {
             div()
                 .flex()
                 .items_center()
                 .gap(unit(space::XS))
-                .children(keys.iter().map(|key| ui::kbd(commands::label(key))))
+                .children(
+                    keys.iter()
+                        .map(|key| ui::kbd(self.key_hint(Scope::Settings, *key))),
+                )
                 .child(div().pl(unit(space::XXS)).child(what))
         };
         let footer = div()
@@ -479,10 +628,10 @@ impl Kuizer {
             .pt(unit(space::L))
             .text_size(unit(font::CAPTION))
             .text_color(theme::faint())
-            .child(hint(&["up", "down"], "move"))
-            .child(hint(&["tab"], "section"))
-            .child(hint(&["space"], "change"))
-            .child(hint(&["escape"], "close"));
+            .child(hint(&[Key::SettingsPrevious, Key::SettingsNext], "move"))
+            .child(hint(&[Key::SettingsNextTab], "section"))
+            .child(hint(&[Key::SettingsChange], "change"))
+            .child(hint(&[Key::Back], "close"));
         let panel = div()
             .id("settings")
             .debug_selector(|| "settings".to_owned())
@@ -551,7 +700,11 @@ impl Kuizer {
                                     )
                                     .child(div().text_color(theme::muted()).child(page.detail)),
                             )
-                            .children(groups),
+                            .children(groups)
+                            .children(
+                                (state.page == DELETING_PAGE)
+                                    .then(|| self.protected_paths_row(state, cx)),
+                            ),
                     ),
             );
         Some(
@@ -574,6 +727,65 @@ impl Kuizer {
                 .child(panel)
                 .into_any_element(),
         )
+    }
+
+    fn protected_paths_row(&self, state: &Settings, cx: &mut Context<Self>) -> Stateful<Div> {
+        let editing = state.protected_path.is_some();
+        let detail = if self.config.delete.protected.is_empty() {
+            "No additional folders".to_owned()
+        } else {
+            self.config
+                .delete
+                .protected
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        div()
+            .id("protected-paths")
+            .debug_selector(|| "setting-Protected paths".to_owned())
+            .flex()
+            .flex_col()
+            .gap(unit(space::XS))
+            .px(unit(space::M))
+            .py(unit(space::row_y()))
+            .rounded(theme::radius_control())
+            .when(state.row == rows(DELETING_PAGE).len(), |row| {
+                row.bg(theme::selected())
+            })
+            .child(ui::heading("Protected paths"))
+            .child(div().text_color(theme::muted()).child(detail))
+            .when(!editing, |row| {
+                row.cursor_pointer()
+                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                        app.edit_protected_paths(cx);
+                    }))
+            })
+            .when_some(state.protected_path.as_deref(), |row, input| {
+                let detail = if self.setting_writes.writing_paths {
+                    "Saving protected paths".to_owned()
+                } else {
+                    format!(
+                        "{} saves. {} cancels. Prefix a path with - to remove it.",
+                        self.key_hint(Scope::PathEditor, Key::SaveProtectedPath),
+                        self.key_hint(Scope::PathEditor, Key::Back),
+                    )
+                };
+                row.child(field::view(
+                    "protected-path-input",
+                    input,
+                    "Folder path",
+                    true,
+                ))
+                .child(div().text_color(theme::muted()).child(detail))
+            })
+            .children(
+                state
+                    .protected_error
+                    .clone()
+                    .map(|error| div().text_color(theme::review()).child(error)),
+            )
     }
 
     fn setting_row(

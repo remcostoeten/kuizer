@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::detect::{Category, Detector, Listing, RuleError, RuleSpec, builtin_rules};
+use crate::keymap::{KeyError, Keymap, Overrides};
 use crate::platform;
 use crate::toolchains::Tool;
 use crate::units::ByteSize;
 
-pub use edit::{EditError, SettingValue, add_exclude, exclude_pattern, set_setting};
+pub use edit::{
+    EditError, SettingValue, add_exclude, exclude_pattern, set_protected_paths, set_setting,
+};
 pub use exclude::{ExcludeError, Excludes};
 pub use lenient::{ConfigWarning, rejected_scope};
 
@@ -30,6 +33,7 @@ pub struct Config {
     pub git: GitConfig,
     pub appearance: AppearanceConfig,
     pub route_shortcuts: RouteShortcutsConfig,
+    pub keys: Overrides,
     pub toolchains: ToolchainConfig,
     pub docker: DockerConfig,
 }
@@ -164,6 +168,8 @@ pub enum DeleteMode {
 pub struct DeleteConfig {
     pub mode: DeleteMode,
     pub confirm: bool,
+    pub protected: Vec<PathBuf>,
+    pub cross_device: bool,
 }
 
 impl DeleteConfig {
@@ -177,6 +183,8 @@ impl DeleteConfig {
         Self {
             mode: DeleteMode::Trash,
             confirm: true,
+            protected: Vec::new(),
+            cross_device: false,
         }
     }
 }
@@ -186,6 +194,8 @@ impl Default for DeleteConfig {
         Self {
             mode: DeleteMode::default(),
             confirm: true,
+            protected: Vec::new(),
+            cross_device: false,
         }
     }
 }
@@ -364,6 +374,8 @@ pub enum ConfigError {
     Rule(#[from] RuleError),
     #[error(transparent)]
     Exclude(#[from] ExcludeError),
+    #[error(transparent)]
+    Key(#[from] KeyError),
     #[error("unknown rule `{0}` in detect.disabled_rules")]
     UnknownDisabled(String),
 }
@@ -451,6 +463,9 @@ impl Config {
         for mount in &mut self.scan.excluded_mounts {
             *mount = expand_home(mount);
         }
+        for path in &mut self.delete.protected {
+            *path = expand_home(path);
+        }
         for extension in &mut self.scan.exclude_extensions {
             *extension = extension.trim_start_matches('.').to_ascii_lowercase();
         }
@@ -459,6 +474,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.detector()?;
         Excludes::new(&self.scan.exclude, &self.scan.exclude_extensions)?;
+        if let Some(error) = Keymap::resolve(&self.keys).1.into_iter().next() {
+            return Err(error.into());
+        }
         Ok(())
     }
 

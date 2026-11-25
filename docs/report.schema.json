@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kuizer versioned JSON report",
+  "description": "Version 2 of the reports emitted by Kuizer with --json.",
+  "oneOf": [
+    {"$ref": "#/$defs/scan"},
+    {"$ref": "#/$defs/cache"},
+    {"$ref": "#/$defs/toolchain"},
+    {"$ref": "#/$defs/docker"},
+    {"$ref": "#/$defs/removal"},
+    {"$ref": "#/$defs/duplicates"},
+    {"$ref": "#/$defs/git"},
+    {"$ref": "#/$defs/restore"}
+  ],
+  "$defs": {
+    "version": {"const": 2},
+    "count": {"type": "integer", "minimum": 0},
+    "paths": {"type": "array", "items": {"type": "string"}},
+    "issue": {
+      "type": "object",
+      "required": ["path", "kind", "message"],
+      "properties": {
+        "path": {"type": "string"},
+        "kind": {"enum": ["permission-denied", "vanished", "io", "skipped-mount", "invalid-root", "protected"]},
+        "message": {"type": "string"}
+      }
+    },
+    "issues": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+    "candidate": {
+      "type": "object",
+      "required": [
+        "id",
+        "source",
+        "path",
+        "kind",
+        "rule",
+        "category",
+        "safety",
+        "ecosystem",
+        "project",
+        "allocated_bytes",
+        "apparent_bytes",
+        "entries",
+        "partial",
+        "newest_modified",
+        "project_last_active"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/count", "description": "Numeric identifier within this report."},
+        "source": {"enum": ["projects", "cache", "toolchain", "docker"]},
+        "path": {"type": "string", "description": "Filesystem path or an engine object locator."},
+        "kind": {"enum": ["dir", "file", "external"]},
+        "rule": {"type": "string"},
+        "category": {"enum": ["dependencies", "build", "cache", "temp"]},
+        "safety": {"enum": ["safe", "review"]},
+        "ecosystem": {"type": "string"},
+        "project": {"type": ["string", "null"], "description": "Containing project path when known."},
+        "allocated_bytes": {"$ref": "#/$defs/count"},
+        "apparent_bytes": {"$ref": "#/$defs/count"},
+        "entries": {"$ref": "#/$defs/count"},
+        "partial": {"type": "boolean", "description": "True when the measurement could not include every entry."},
+        "newest_modified": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Newest modification time in Unix seconds, when known."
+        },
+        "project_last_active": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Project activity time in Unix seconds, when known."
+        },
+        "path_lossy": {"const": true, "description": "Present when a path was converted from non-UTF-8."}
+      }
+    },
+    "listingSummary": {
+      "type": "object",
+      "required": ["items", "bytes", "safe_bytes"],
+      "properties": {
+        "items": {"$ref": "#/$defs/count"},
+        "bytes": {"$ref": "#/$defs/count"},
+        "safe_bytes": {"$ref": "#/$defs/count"}
+      }
+    },
+    "scan": {
+      "type": "object",
+      "required": ["schema_version", "command", "roots", "candidates", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "scan"},
+        "roots": {"$ref": "#/$defs/paths"},
+        "candidates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/candidate"},
+              {
+                "type": "object",
+                "required": ["source"],
+                "properties": {"source": {"const": "projects"}}
+              }
+            ]
+          }
+        },
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {
+          "type": "object",
+          "required": ["progress", "duration", "cancelled"],
+          "properties": {
+            "progress": {
+              "type": "object",
+              "required": ["dirs", "files", "candidates", "bytes", "issues"],
+              "properties": {
+                "dirs": {"$ref": "#/$defs/count"},
+                "files": {"$ref": "#/$defs/count"},
+                "candidates": {"$ref": "#/$defs/count"},
+                "bytes": {"$ref": "#/$defs/count"},
+                "issues": {"$ref": "#/$defs/count"}
+              }
+            },
+            "duration": {"$ref": "#/$defs/count", "description": "Elapsed scan time in milliseconds."},
+            "cancelled": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "required": ["schema_version", "command", "candidates", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "cache"},
+        "candidates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/candidate"},
+              {
+                "type": "object",
+                "required": ["source", "name", "tool", "note"],
+                "properties": {
+                  "source": {"const": "cache"},
+                  "name": {"type": "string"},
+                  "tool": {"type": "string"},
+                  "note": {"type": ["string", "null"]}
+                }
+              }
+            ]
+          }
+        },
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {"$ref": "#/$defs/listingSummary"}
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "required": ["schema_version", "command", "candidates", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "toolchain"},
+        "candidates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/candidate"},
+              {
+                "type": "object",
+                "required": ["source", "tool", "runtime", "version", "default", "pinned_by"],
+                "properties": {
+                  "source": {"const": "toolchain"},
+                  "tool": {"type": "string"},
+                  "runtime": {"type": "string"},
+                  "version": {"type": "string"},
+                  "default": {"type": "boolean"},
+                  "pinned_by": {"$ref": "#/$defs/paths"}
+                }
+              }
+            ]
+          }
+        },
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {"$ref": "#/$defs/listingSummary"}
+      }
+    },
+    "docker": {
+      "type": "object",
+      "required": ["schema_version", "command", "candidates", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "docker"},
+        "candidates": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/candidate"},
+              {
+                "type": "object",
+                "required": ["source", "engine", "object", "object_id", "name", "note"],
+                "properties": {
+                  "source": {"const": "docker"},
+                  "engine": {"type": "string"},
+                  "object": {"enum": ["image", "container", "build-cache", "volume"]},
+                  "object_id": {"type": "string"},
+                  "name": {"type": "string"},
+                  "note": {"type": ["string", "null"]}
+                }
+              }
+            ]
+          }
+        },
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {"$ref": "#/$defs/listingSummary"}
+      }
+    },
+    "removalItem": {
+      "allOf": [
+        {"$ref": "#/$defs/candidate"},
+        {
+          "type": "object",
+          "required": ["status", "error"],
+          "properties": {
+            "status": {"enum": ["would-remove", "removed", "failed"]},
+            "error": {"type": ["string", "null"]}
+          }
+        }
+      ]
+    },
+    "removal": {
+      "type": "object",
+      "required": ["schema_version", "command", "mode", "roots", "items", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"enum": ["clean", "cache", "toolchain", "docker"]},
+        "mode": {"enum": ["trash", "permanent", "dry-run"]},
+        "roots": {"$ref": "#/$defs/paths"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/removalItem"}},
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {
+          "type": "object",
+          "required": ["selected", "selected_bytes", "removed", "removed_bytes", "failed"],
+          "properties": {
+            "selected": {"$ref": "#/$defs/count"},
+            "selected_bytes": {"$ref": "#/$defs/count"},
+            "removed": {"$ref": "#/$defs/count"},
+            "removed_bytes": {"$ref": "#/$defs/count"},
+            "failed": {"$ref": "#/$defs/count"}
+          }
+        }
+      }
+    },
+    "duplicateMember": {
+      "type": "object",
+      "required": ["path", "links", "modified"],
+      "properties": {
+        "path": {"type": "string"},
+        "links": {"$ref": "#/$defs/paths"},
+        "modified": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Modification time in Unix seconds, when known."
+        },
+        "path_lossy": {"const": true}
+      }
+    },
+    "duplicateGroup": {
+      "type": "object",
+      "required": ["size", "allocated_bytes", "hash", "verified", "reclaimable_bytes", "members"],
+      "properties": {
+        "size": {"$ref": "#/$defs/count"},
+        "allocated_bytes": {"$ref": "#/$defs/count"},
+        "hash": {"type": "string"},
+        "verified": {"type": "boolean"},
+        "reclaimable_bytes": {"$ref": "#/$defs/count"},
+        "members": {"type": "array", "items": {"$ref": "#/$defs/duplicateMember"}}
+      }
+    },
+    "duplicates": {
+      "type": "object",
+      "required": ["schema_version", "command", "roots", "groups", "issues", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "duplicates"},
+        "roots": {"$ref": "#/$defs/paths"},
+        "groups": {"type": "array", "items": {"$ref": "#/$defs/duplicateGroup"}},
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {
+          "type": "object",
+          "required": ["files", "groups", "duplicates", "reclaimable_bytes", "duration"],
+          "properties": {
+            "files": {"$ref": "#/$defs/count"},
+            "groups": {"$ref": "#/$defs/count"},
+            "duplicates": {"$ref": "#/$defs/count"},
+            "reclaimable_bytes": {"$ref": "#/$defs/count"},
+            "duration": {"$ref": "#/$defs/count", "description": "Elapsed duplicate search time in milliseconds."}
+          }
+        }
+      }
+    },
+    "gitBranch": {
+      "type": "object",
+      "required": ["name", "commit"],
+      "properties": {"name": {"type": "string"}, "commit": {"type": "string"}}
+    },
+    "gitRepository": {
+      "type": "object",
+      "required": [
+        "path",
+        "loose_objects",
+        "loose_bytes",
+        "packs",
+        "packed_bytes",
+        "garbage_bytes",
+        "estimated_gain",
+        "default_branch",
+        "current_branch",
+        "merged_branches",
+        "busy"
+      ],
+      "properties": {
+        "path": {"type": "string"},
+        "loose_objects": {"$ref": "#/$defs/count"},
+        "loose_bytes": {"$ref": "#/$defs/count"},
+        "packs": {"$ref": "#/$defs/count"},
+        "packed_bytes": {"$ref": "#/$defs/count"},
+        "garbage_bytes": {"$ref": "#/$defs/count"},
+        "estimated_gain": {"$ref": "#/$defs/count"},
+        "default_branch": {"type": ["string", "null"]},
+        "current_branch": {"type": ["string", "null"]},
+        "merged_branches": {"type": "array", "items": {"$ref": "#/$defs/gitBranch"}},
+        "busy": {"enum": ["rebase", "merge", "cherry-pick", "revert", "bisect", "locked", "collecting", null]}
+      }
+    },
+    "gitOutcome": {
+      "type": "object",
+      "required": ["path", "gc", "gc_error", "branches"],
+      "properties": {
+        "path": {"type": "string"},
+        "gc": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["before_bytes", "after_bytes", "freed_bytes"],
+              "properties": {
+                "before_bytes": {"$ref": "#/$defs/count"},
+                "after_bytes": {"$ref": "#/$defs/count"},
+                "freed_bytes": {"$ref": "#/$defs/count"}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "gc_error": {"type": ["string", "null"]},
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "commit", "deleted", "error"],
+            "properties": {
+              "name": {"type": "string"},
+              "commit": {"type": "string"},
+              "deleted": {"type": "boolean"},
+              "error": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "required": ["schema_version", "command", "repositories", "results", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "git"},
+        "repositories": {"type": "array", "items": {"$ref": "#/$defs/gitRepository"}},
+        "results": {"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/gitOutcome"}}, {"type": "null"}]},
+        "summary": {
+          "type": "object",
+          "required": ["repositories", "estimated_gain", "merged_branches"],
+          "properties": {
+            "repositories": {"$ref": "#/$defs/count"},
+            "estimated_gain": {"$ref": "#/$defs/count"},
+            "merged_branches": {"$ref": "#/$defs/count"}
+          }
+        }
+      }
+    },
+    "restore": {
+      "type": "object",
+      "required": ["schema_version", "command", "dry_run", "items", "summary"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"const": "restore"},
+        "dry_run": {"type": "boolean"},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "path", "bytes", "status", "reason"],
+            "properties": {
+              "id": {"type": "string"},
+              "path": {"type": "string"},
+              "bytes": {"$ref": "#/$defs/count"},
+              "status": {"enum": ["would-restore", "restored", "skipped", "failed"]},
+              "reason": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "required": ["restored", "restored_bytes", "skipped", "failed"],
+          "properties": {
+            "restored": {"$ref": "#/$defs/count"},
+            "restored_bytes": {"$ref": "#/$defs/count"},
+            "skipped": {"$ref": "#/$defs/count"},
+            "failed": {"$ref": "#/$defs/count"}
+          }
+        }
+      }
+    }
+  }
+}

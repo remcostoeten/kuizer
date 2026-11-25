@@ -8,56 +8,57 @@ impl Kuizer {
         let palette = self.palette.as_ref()?;
         let entries = self.palette_entries();
         let active = palette.active.min(entries.len().saturating_sub(1));
-        let rows = entries.iter().enumerate().map(|(index, entry)| {
-            let label = entry.spec.label.clone();
-            let selector = format!("palette-{label}");
-            let blocked = entry.blocked;
-            div()
-                .id(("palette-item", index))
-                .debug_selector(move || selector.clone())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(unit(space::M))
-                .h(unit(size::CONTROL))
-                .mx(unit(space::XS))
-                .px(unit(space::M))
-                .rounded(theme::radius_control())
-                .text_color(if blocked.is_some() {
-                    theme::faint()
-                } else {
-                    theme::text()
-                })
-                .when(index == active, |this| this.bg(theme::tile_selected()))
-                .when(blocked.is_none(), |this| this.cursor_pointer())
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .children(blocked.map(|reason| {
-                    div()
-                        .flex_none()
-                        .max_w(unit(size::LABEL))
-                        .truncate()
-                        .text_size(unit(font::CAPTION))
-                        .child(reason)
-                }))
-                .children(
-                    entry
-                        .spec
-                        .keys
-                        .iter()
-                        .map(|key| ui::kbd(commands::label(key))),
-                )
-                .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
-                    if let Some(palette) = &mut app.palette
-                        && palette.active != index
-                    {
-                        palette.active = index;
-                        app.redraw_chrome(cx);
-                    }
-                }))
-                .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
-                    app.choose_entry(index, window, cx);
-                }))
-        });
+        let rows =
+            entries.iter().enumerate().map(|(index, entry)| {
+                let label = entry.spec.label.clone();
+                let selector = format!("palette-{label}");
+                let blocked = entry.blocked;
+                div()
+                    .id(("palette-item", index))
+                    .debug_selector(move || selector.clone())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(unit(space::M))
+                    .h(unit(size::CONTROL))
+                    .mx(unit(space::XS))
+                    .px(unit(space::M))
+                    .rounded(theme::radius_control())
+                    .text_color(if blocked.is_some() {
+                        theme::faint()
+                    } else {
+                        theme::text()
+                    })
+                    .when(index == active, |this| this.bg(theme::tile_selected()))
+                    .when(blocked.is_none(), |this| this.cursor_pointer())
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .children(blocked.map(|reason| {
+                        div()
+                            .flex_none()
+                            .max_w(unit(size::LABEL))
+                            .truncate()
+                            .text_size(unit(font::CAPTION))
+                            .child(reason)
+                    }))
+                    .children(entry.spec.command.binding().into_iter().flat_map(
+                        |(scope, action)| {
+                            self.keymap
+                                .keys(scope, action)
+                                .map(|key| ui::kbd(commands::label(key)))
+                        },
+                    ))
+                    .on_mouse_move(cx.listener(move |app, _: &MouseMoveEvent, _, cx| {
+                        if let Some(palette) = &mut app.palette
+                            && palette.active != index
+                        {
+                            palette.active = index;
+                            app.redraw_chrome(cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
+                        app.choose_entry(index, window, cx);
+                    }))
+            });
         let footer = div()
             .flex()
             .flex_none()
@@ -69,12 +70,12 @@ impl Kuizer {
             .border_color(theme::border())
             .text_size(unit(font::CAPTION))
             .text_color(theme::faint())
-            .child(ui::kbd(commands::label("up")))
-            .child(ui::kbd(commands::label("down")))
+            .child(ui::kbd(self.key_hint(Scope::Palette, Key::PalettePrevious)))
+            .child(ui::kbd(self.key_hint(Scope::Palette, Key::PaletteNext)))
             .child(div().pr(unit(space::M)).child("move"))
-            .child(ui::kbd(commands::label("enter")))
+            .child(ui::kbd(self.key_hint(Scope::Palette, Key::PaletteRun)))
             .child(div().pr(unit(space::M)).child("run"))
-            .child(ui::kbd(commands::label("escape")))
+            .child(ui::kbd(self.key_hint(Scope::Palette, Key::Back)))
             .child("close");
         let panel = div()
             .id("palette")
@@ -145,7 +146,7 @@ impl Kuizer {
         if !self.shortcuts {
             return None;
         }
-        let row = |label: SharedString, keys: &[&str]| {
+        let row = |label: SharedString, keys: Vec<&str>| {
             let selector = format!("shortcut-{label}");
             div()
                 .debug_selector(move || selector.clone())
@@ -167,23 +168,41 @@ impl Kuizer {
         };
         let specs = commands::table();
         let groups = Group::ALL.into_iter().map(|group| {
-            column(group.label()).children(
-                specs
-                    .iter()
-                    .filter(|spec| spec.group == group)
-                    .map(|spec| row(spec.label.clone(), spec.keys)),
-            )
+            column(group.label()).children(specs.iter().filter(|spec| spec.group == group).map(
+                |spec| {
+                    row(
+                        spec.label.clone(),
+                        spec.command
+                            .binding()
+                            .into_iter()
+                            .flat_map(|(scope, action)| self.keymap.keys(scope, action))
+                            .collect(),
+                    )
+                },
+            ))
         });
-        let fields = column("In the palette, filters and dialogs").children(
-            HINTS
-                .iter()
-                .map(|(label, keys)| row(SharedString::from(*label), keys)),
-        );
-        let controls = column("Buttons and controls").children(
-            CONTROLS
-                .iter()
-                .map(|(label, keys)| row(SharedString::from(*label), keys)),
-        );
+        let fields = column("In the palette, filters and dialogs").children(HINTS.iter().map(
+            |(label, scope, actions)| {
+                row(
+                    SharedString::from(*label),
+                    actions
+                        .iter()
+                        .flat_map(|action| self.keymap.keys(*scope, *action))
+                        .collect(),
+                )
+            },
+        ));
+        let controls = column("Buttons and controls").children(CONTROLS.iter().map(
+            |(label, scope, actions)| {
+                row(
+                    SharedString::from(*label),
+                    actions
+                        .iter()
+                        .flat_map(|action| self.keymap.keys(*scope, *action))
+                        .collect(),
+                )
+            },
+        ));
         let panel = div()
             .id("shortcuts")
             .debug_selector(|| "shortcuts".to_owned())
@@ -214,7 +233,9 @@ impl Kuizer {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Keyboard shortcuts"),
                     )
-                    .child(ui::kbd(commands::label("escape")))
+                    .child(ui::kbd(
+                        self.key_hint(Scope::Shortcuts, Key::ShortcutsClose),
+                    ))
                     .child(div().text_color(theme::faint()).child("close")),
             )
             .child(
@@ -253,7 +274,7 @@ impl Kuizer {
     pub(super) fn render_filter(&self, cx: &mut Context<Self>) -> Div {
         let text = self.filters.get(&self.tab).map_or("", String::as_str);
         let active = self.filtering;
-        let key = commands::shortcut(&Command::FocusFilter).unwrap_or_default();
+        let key = self.hint(&Command::FocusFilter);
         div()
             .flex()
             .flex_none()
@@ -390,7 +411,7 @@ impl Kuizer {
 
     /// Opens the palette from the titlebar, and shows the key that does the same.
     pub(super) fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let key = hint(&Command::Palette);
+        let key = self.hint(&Command::Palette);
         let search = div()
             .id("search")
             .debug_selector(|| "search".to_owned())
@@ -413,7 +434,7 @@ impl Kuizer {
             .tip_hover(
                 Tooltip::new("Search every command, section and recent folder")
                     .title("Search or run a command")
-                    .keys(&[key])
+                    .keys(&[&key])
                     .build(),
                 cx.listener(|app, hovered: &bool, _, cx| {
                     app.hover_icon(Icon::Search, *hovered, cx);

@@ -211,14 +211,47 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  linux-packages:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev
+      - run: cargo install cargo-packager --locked --version 0.11.8 --jobs 2
+      - run: cargo install cargo-generate-rpm --locked --version 0.21.1 --jobs 2
+      - run: cargo build --locked --release -p kuizer-gui -j 2
+      - run: >-
+          cargo packager --release --manifest-path crates/kuizer-gui/Cargo.toml
+          --formats deb,pacman --binaries-dir target/release --out-dir target/linux-packages
+      - run: cargo generate-rpm --package kuizer-gui --output target/linux-packages
+      - run: find target/linux-packages -maxdepth 1 -type f -print
+      - uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-linux-packages
+          path: |
+            target/linux-packages/*.deb
+            target/linux-packages/*.rpm
+            target/linux-packages/*.tar.gz
+            target/linux-packages/PKGBUILD
+          if-no-files-found: error
+
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - linux-packages
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.linux-packages.result == 'skipped' || needs.linux-packages.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

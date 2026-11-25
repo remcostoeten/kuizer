@@ -1,6 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
@@ -9,8 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{Config, ConfigError};
-use crate::platform::dir::EntryKind;
+use crate::platform::dir::{EntryKind, Stat};
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
 use crate::scan::walk::{Companion, Flow, Visitor, Walker};
@@ -21,17 +24,24 @@ const SAMPLE: u64 = 16 * 1024;
 const SAMPLED: u64 = 3 * SAMPLE;
 const CHUNK: usize = 1024 * 1024;
 const COMPARE_CHUNK: usize = 64 * 1024;
-const STAT_BATCH: usize = 256;
 const ROTATIONAL_WORKERS: usize = 2;
 
-#[derive(Debug, Clone)]
+thread_local! {
+    static HASH_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(CHUNK));
+    static COMPARE_BUFFERS: RefCell<(Vec<u8>, Vec<u8>)> = RefCell::new((
+        Vec::with_capacity(COMPARE_CHUNK),
+        Vec::with_capacity(COMPARE_CHUNK),
+    ));
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
     pub path: PathBuf,
     pub links: Vec<PathBuf>,
     pub modified: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     pub size: u64,
     pub allocated: u64,
@@ -47,7 +57,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Duplicates {
     pub groups: Vec<Group>,
     pub issues: Vec<Issue>,
@@ -179,14 +189,16 @@ struct Paths {
     dirs: Vec<PathBuf>,
     names: Vec<u8>,
     entries: Vec<Entry>,
+    stats: Vec<Stat>,
 }
 
 impl Paths {
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
 
-    fn push(&mut self, path: &Path) {
+    fn push(&mut self, path: &Path, stat: Stat) {
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
             return;
         };
@@ -205,6 +217,7 @@ impl Paths {
             len,
         });
         self.names.extend_from_slice(name.as_bytes());
+        self.stats.push(stat);
     }
 
     fn fill(&self, index: usize, buffer: &mut PathBuf) {
@@ -228,6 +241,7 @@ impl Paths {
             }));
         self.dirs.extend(other.dirs);
         self.names.extend(other.names);
+        self.stats.extend(other.stats);
     }
 }
 
@@ -281,13 +295,22 @@ impl Visitor for Files {
         !self.skipping
     }
 
+    fn wants_stat(&self) -> bool {
+        true
+    }
+
     fn issue(&mut self, issue: Issue) -> Flow {
         self.issues.push(issue);
         Flow::Continue
     }
 
-    fn entered(&mut self, path: &Path) {
+    fn entered(&mut self, path: &Path) -> Flow {
         self.skipping = self.skip.as_mut().is_some_and(|skip| skip.skips_dir(path));
+        if self.skipping {
+            Flow::Skip
+        } else {
+            Flow::Continue
+        }
     }
 
     fn counted(&mut self, kind: EntryKind) {
@@ -305,7 +328,20 @@ impl Visitor for Files {
         {
             return Flow::Continue;
         }
-        self.paths.push(path);
+        Flow::Continue
+    }
+
+    fn entry(&mut self, entry: &crate::scan::walk::FileEntry<'_>) -> Flow {
+        if entry.kind != EntryKind::File {
+            return Flow::Continue;
+        }
+        let Some(stat) = entry.stat else {
+            return Flow::Continue;
+        };
+        if stat.len == 0 || stat.len < self.min_size {
+            return Flow::Continue;
+        }
+        self.paths.push(&entry.path(), stat);
         Flow::Continue
     }
 }
@@ -342,6 +378,10 @@ impl Visitor for Reporting<'_> {
         self.files.wants_files()
     }
 
+    fn wants_stat(&self) -> bool {
+        self.files.wants_stat()
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -350,8 +390,8 @@ impl Visitor for Reporting<'_> {
         self.files.issue(issue)
     }
 
-    fn entered(&mut self, path: &Path) {
-        self.files.entered(path);
+    fn entered(&mut self, path: &Path) -> Flow {
+        self.files.entered(path)
     }
 
     fn counted(&mut self, kind: EntryKind) {
@@ -366,75 +406,26 @@ impl Visitor for Reporting<'_> {
     fn file(&mut self, path: &Path, kind: EntryKind) -> Flow {
         self.files.file(path, kind)
     }
+
+    fn entry(&mut self, entry: &crate::scan::walk::FileEntry<'_>) -> Flow {
+        self.files.entry(entry)
+    }
 }
 
-fn stat(path: &Path, min_size: u64) -> Result<Option<Seen>, Issue> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| Issue::from_io(path.to_path_buf(), &error))?;
-    let size = metadata.len();
-    if size == 0 || size < min_size || !metadata.is_file() {
-        return Ok(None);
-    }
-    Ok(Some(Seen {
-        path: path.to_path_buf(),
-        size,
-        allocated: platform::allocated(&metadata),
-        identity: platform::shared_inode(&metadata),
-        modified: metadata.modified().ok(),
-    }))
-}
-
-fn stat_all(
-    paths: &Paths,
-    min_size: u64,
-    workers: usize,
-    cancel: &Cancel,
-) -> Option<(Vec<Seen>, Vec<Issue>)> {
-    let total = paths.len();
-    if total == 0 {
-        return Some((Vec::new(), Vec::new()));
-    }
-    let next = AtomicUsize::new(0);
-    let parts: Vec<(Vec<Seen>, Vec<Issue>)> = thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers.clamp(1, total.div_ceil(STAT_BATCH)))
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut seen = Vec::new();
-                    let mut issues = Vec::new();
-                    let mut buffer = PathBuf::new();
-                    loop {
-                        let start = next.fetch_add(STAT_BATCH, Ordering::Relaxed);
-                        if start >= total || cancel.is_cancelled() {
-                            break (seen, issues);
-                        }
-                        for index in start..(start + STAT_BATCH).min(total) {
-                            paths.fill(index, &mut buffer);
-                            match stat(&buffer, min_size) {
-                                Ok(Some(file)) => seen.push(file),
-                                Ok(None) => {}
-                                Err(issue) => issues.push(issue),
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("stat thread panicked"))
-            .collect()
-    });
-    if cancel.is_cancelled() {
-        return None;
-    }
+fn seen(paths: &Paths) -> Vec<Seen> {
     let mut seen = Vec::new();
-    let mut issues = Vec::new();
-    for (found, failed) in parts {
-        seen.extend(found);
-        issues.extend(failed);
+    let mut buffer = PathBuf::new();
+    for (index, stat) in paths.stats.iter().enumerate() {
+        paths.fill(index, &mut buffer);
+        seen.push(Seen {
+            path: buffer.clone(),
+            size: stat.len,
+            allocated: stat.allocated,
+            identity: stat.shared_inode(),
+            modified: stat.modified,
+        });
     }
-    issues.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    Some((seen, issues))
+    seen
 }
 
 fn same_size_candidates(mut seen: Vec<Seen>) -> Vec<Candidate> {
@@ -518,39 +509,43 @@ fn full_hash(path: &Path, size: u64, cancel: &Cancel) -> io::Result<blake3::Hash
         advise_sequential(&file);
     }
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; CHUNK.min(usize::try_from(size).unwrap_or(CHUNK) + 1)];
-    loop {
-        if cancel.is_cancelled() {
-            return Err(interrupted());
+    HASH_BUFFER.with_borrow_mut(|buffer| {
+        buffer.resize(CHUNK.min(usize::try_from(size).unwrap_or(CHUNK) + 1), 0);
+        loop {
+            if cancel.is_cancelled() {
+                return Err(interrupted());
+            }
+            let read = file.read(buffer)?;
+            if read == 0 {
+                return Ok(hasher.finalize());
+            }
+            hasher.update(&buffer[..read]);
         }
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(hasher.finalize());
-        }
-        hasher.update(&buffer[..read]);
-    }
+    })
 }
 
 fn same_bytes(a: &Path, b: &Path, cancel: &Cancel) -> io::Result<bool> {
     let mut left = io::BufReader::with_capacity(COMPARE_CHUNK, File::open(a)?);
     let mut right = io::BufReader::with_capacity(COMPARE_CHUNK, File::open(b)?);
-    let mut left_buf = vec![0u8; COMPARE_CHUNK];
-    let mut right_buf = vec![0u8; COMPARE_CHUNK];
-    loop {
-        if cancel.is_cancelled() {
-            return Err(interrupted());
+    COMPARE_BUFFERS.with_borrow_mut(|(left_buf, right_buf)| {
+        left_buf.resize(COMPARE_CHUNK, 0);
+        right_buf.resize(COMPARE_CHUNK, 0);
+        loop {
+            if cancel.is_cancelled() {
+                return Err(interrupted());
+            }
+            let read = left.read(&mut left_buf[..])?;
+            if read == 0 {
+                return Ok(right.read(&mut right_buf[..1])? == 0);
+            }
+            match right.read_exact(&mut right_buf[..read]) {
+                Ok(()) if left_buf[..read] == right_buf[..read] => {}
+                Ok(()) => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+                Err(error) => return Err(error),
+            }
         }
-        let read = left.read(&mut left_buf)?;
-        if read == 0 {
-            return Ok(right.read(&mut right_buf[..1])? == 0);
-        }
-        match right.read_exact(&mut right_buf[..read]) {
-            Ok(()) if left_buf[..read] == right_buf[..read] => {}
-            Ok(()) => return Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
-            Err(error) => return Err(error),
-        }
-    }
+    })
 }
 
 fn in_parallel<T: Sync, R: Send>(
@@ -800,7 +795,6 @@ pub fn group_cancellable(
     mut on_stage: impl FnMut(Stage),
 ) -> Duplicates {
     let Files {
-        min_size,
         roots,
         paths,
         mut issues,
@@ -816,11 +810,11 @@ pub fn group_cancellable(
         duration: started.elapsed(),
     };
 
-    let Some((seen, failed)) = stat_all(&paths, min_size, workers, cancel) else {
-        return cancelled(issues);
-    };
+    let seen = seen(&paths);
     drop(paths);
-    issues.extend(failed);
+    if cancel.is_cancelled() {
+        return cancelled(issues);
+    }
 
     let (small, large): (Vec<_>, Vec<_>) = same_size_candidates(seen)
         .into_iter()
@@ -1031,14 +1025,51 @@ mod tests {
     }
 
     #[test]
+    fn standalone_walk_prunes_configured_tool_roots_before_reading_them() {
+        let tmp = tempfile::TempDir::new().expect("temp directory");
+        let root = fs::canonicalize(tmp.path()).expect("canonical root");
+        let tool_root = root.join("managed-tools");
+        write(&root, "visible.txt", b"visible");
+        write(&root, "managed-tools/hidden.txt", b"hidden");
+        let config = Config::default();
+        let detector = config.detector().unwrap();
+        let excludes = config.excludes().unwrap();
+        let mounts = MountTable::from_mounts(Vec::new());
+        let protected = Protected::default();
+        let skip = Skip::new(protected.clone(), vec![tool_root], &[]);
+        let mut walker = Walker {
+            scan: &config.scan,
+            detector: &detector,
+            excludes: &excludes,
+            mounts: &mounts,
+            protected: &protected,
+            visitor: Files::with_skip(options(), Some(skip)),
+        };
+
+        walker.walk_root(&root);
+
+        assert_eq!(walker.visitor.counted, 1);
+        assert_eq!(walker.visitor.paths.len(), 1);
+    }
+
+    #[test]
     fn merged_path_stores_rebuild_every_path() {
         let mut left = Paths::default();
         let mut right = Paths::default();
+        let stat = Stat {
+            kind: EntryKind::File,
+            device: 1,
+            inode: 1,
+            links: 1,
+            len: 1,
+            allocated: 1,
+            modified: None,
+        };
         for path in ["/a/x/one", "/a/x/two", "/a/y/three"] {
-            left.push(Path::new(path));
+            left.push(Path::new(path), stat);
         }
         for path in ["/b/four", "/b/five"] {
-            right.push(Path::new(path));
+            right.push(Path::new(path), stat);
         }
         left.append(right);
 

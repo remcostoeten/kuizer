@@ -54,6 +54,7 @@ struct Queue {
 struct Run {
     root: PathBuf,
     device: u64,
+    allow_cross_device: bool,
     workers: usize,
     spawned: AtomicUsize,
     queue: Mutex<Queue>,
@@ -144,7 +145,7 @@ impl Run {
         let opened = open_below(&parent.fd, name.as_c_str())
             .and_then(|fd| fstat(&fd).map(|stat| (fd, stat.st_dev)));
         match opened {
-            Ok((fd, device)) if device == self.device => {
+            Ok((fd, device)) if device == self.device || self.allow_cross_device => {
                 let node = Arc::new(Node {
                     fd,
                     parent: Parent::Dir(parent),
@@ -283,8 +284,13 @@ fn open_below_with<T>(
 ///
 /// @example
 /// remove(Path::new("/home/me/app/node_modules"), Some((dev, ino)), 4)?;
-pub fn remove(path: &Path, expected: Option<(u64, u64)>, workers: usize) -> io::Result<()> {
-    remove_on(path, expected, workers, None)
+pub fn remove(
+    path: &Path,
+    expected: Option<(u64, u64)>,
+    workers: usize,
+    allow_cross_device: bool,
+) -> io::Result<()> {
+    remove_on(path, expected, workers, None, allow_cross_device)
 }
 
 fn changed() -> io::Error {
@@ -296,6 +302,7 @@ fn remove_on(
     expected: Option<(u64, u64)>,
     workers: usize,
     device: Option<u64>,
+    allow_cross_device: bool,
 ) -> io::Result<()> {
     let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
         return Err(io::Error::new(
@@ -328,6 +335,7 @@ fn remove_on(
     let run = Run {
         root: path.to_path_buf(),
         device: device.unwrap_or(stat.st_dev),
+        allow_cross_device,
         workers: workers.max(1),
         spawned: AtomicUsize::new(0),
         queue: Mutex::new(Queue {
@@ -381,7 +389,7 @@ mod tests {
         build(&tree, 6, 3);
         fs::write(base.join("keep.txt"), b"x").unwrap();
 
-        remove(&tree, None, 4).unwrap();
+        remove(&tree, None, 4, false).unwrap();
 
         assert!(!tree.exists());
         assert!(base.join("keep.txt").exists());
@@ -398,14 +406,14 @@ mod tests {
         symlink(&outside, tree.join("d0/escape")).unwrap();
         symlink(outside.join("f0"), tree.join("link-to-file")).unwrap();
 
-        remove(&tree, None, 4).unwrap();
+        remove(&tree, None, 4, false).unwrap();
         assert!(!tree.exists());
         assert!(outside.join("f0").exists());
         assert!(outside.join("d0/f0").exists());
 
         let link = base.join("alone");
         symlink(&outside, &link).unwrap();
-        remove(&link, None, 4).unwrap();
+        remove(&link, None, 4, false).unwrap();
         assert!(fs::symlink_metadata(&link).is_err());
         assert!(outside.join("f0").exists());
     }
@@ -418,7 +426,7 @@ mod tests {
         build(&tree, 2, 1);
         let wrong = fs::symlink_metadata(&tree).unwrap().dev() + 1;
 
-        let error = remove_on(&tree, None, 4, Some(wrong)).unwrap_err();
+        let error = remove_on(&tree, None, 4, Some(wrong), false).unwrap_err();
 
         assert!(error.to_string().contains("mount point"));
         assert!(tree.join("d0/f0").exists());
@@ -439,20 +447,20 @@ mod tests {
             (metadata.dev(), metadata.ino() + 1)
         };
 
-        let error = remove(&tree, Some(scanned(&tree)), 4).unwrap_err();
+        let error = remove(&tree, Some(scanned(&tree)), 4, false).unwrap_err();
         assert!(error.to_string().contains("changed"));
         assert!(tree.join("f0").exists());
         assert!(tree.join("d1/f1").exists());
 
-        assert!(remove(&file, Some(scanned(&file)), 4).is_err());
+        assert!(remove(&file, Some(scanned(&file)), 4, false).is_err());
         assert!(file.exists());
 
         let identity = |path: &Path| {
             let metadata = fs::symlink_metadata(path).unwrap();
             Some((metadata.dev(), metadata.ino()))
         };
-        remove(&tree, identity(&tree), 4).unwrap();
-        remove(&file, identity(&file), 4).unwrap();
+        remove(&tree, identity(&tree), 4, false).unwrap();
+        remove(&file, identity(&file), 4, false).unwrap();
         assert!(!tree.exists());
         assert!(!file.exists());
     }

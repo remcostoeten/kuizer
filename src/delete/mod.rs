@@ -97,12 +97,12 @@ pub fn workers() -> usize {
 }
 
 #[cfg(target_os = "linux")]
-fn remove(path: &Path, identity: Option<(u64, u64)>) -> std::io::Result<()> {
-    tree::remove(path, identity, workers())
+fn remove(path: &Path, identity: Option<(u64, u64)>, cross_device: bool) -> std::io::Result<()> {
+    tree::remove(path, identity, workers(), cross_device)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn remove(path: &Path, _identity: Option<(u64, u64)>) -> std::io::Result<()> {
+fn remove(path: &Path, _identity: Option<(u64, u64)>, _cross_device: bool) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
         fs::remove_dir_all(path)
@@ -179,7 +179,7 @@ pub fn delete(guard: &Guard, target: &Target, mode: Mode) -> Result<(), DeleteEr
     }
     match mode {
         Mode::DryRun => Ok(()),
-        Mode::Permanent => Ok(remove(&target.path, target.identity)?),
+        Mode::Permanent => Ok(remove(&target.path, target.identity, guard.cross_device())?),
         Mode::Trash => trash::delete(&target.path).map_err(|e| DeleteError::Trash(e.to_string())),
     }
 }

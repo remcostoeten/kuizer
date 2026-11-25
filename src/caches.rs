@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::config::Excludes;
-use crate::detect::Safety;
+use crate::config::{Config, Excludes};
+use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::protect::Protected;
+use crate::scan::{self, Cancel, Candidate};
 
 #[derive(Debug, Clone, Copy)]
 enum Base {
@@ -405,6 +407,76 @@ pub fn find_excluding(
     candidates(locations, protected)
         .filter(|cache| !cache.path.ancestors().any(|dir| excludes.path(dir)))
         .collect()
+}
+
+/// @name measure
+/// @description Measures each known global cache and returns nonempty caches, largest first,
+/// paired with candidates that frontends can display or clean.
+///
+/// @example
+/// let entries = caches::measure(caches::find(&locations, &Protected::for_user()));
+pub fn measure(found: Vec<KnownCache>) -> Vec<(KnownCache, Candidate)> {
+    measure_with(found, &Cancel::new(), |_| {})
+}
+
+/// @name measure_with
+/// @description Like [`measure`], and stops sizing when cancelled while reporting each measured
+/// cache as it completes.
+///
+/// @example
+/// let entries = caches::measure_with(found, &cancel, |candidate| rows.push(candidate.clone()));
+pub fn measure_with(
+    found: Vec<KnownCache>,
+    cancel: &Cancel,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(KnownCache, Candidate)> {
+    measure_threaded(
+        found,
+        cancel,
+        scan::size_threads(&Config::default()),
+        on_measured,
+    )
+}
+
+/// @name measure_threaded
+/// @description Like [`measure_with`], using an explicit thread count for each cache walk.
+///
+/// @example
+/// let entries = caches::measure_threaded(found, &cancel, scan::size_threads(&config), |_| {});
+pub fn measure_threaded(
+    found: Vec<KnownCache>,
+    cancel: &Cancel,
+    threads: usize,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(KnownCache, Candidate)> {
+    let mut entries: Vec<(KnownCache, Candidate)> = found
+        .into_iter()
+        .enumerate()
+        .map(|(index, cache)| {
+            let measured = scan::measure_parallel(&cache.path, cancel, threads);
+            let candidate = Candidate {
+                id: index as u64 + 1,
+                path: cache.path.clone(),
+                kind: Kind::Dir,
+                rule: Arc::new(RuleInfo {
+                    name: cache.name.to_owned(),
+                    category: Category::Cache,
+                    safety: cache.safety,
+                    ecosystem: cache.tool.to_owned(),
+                }),
+                project: None,
+                usage: measured.usage,
+                newest: measured.newest,
+                identity: measured.identity,
+                project_last_active: None,
+            };
+            on_measured(&candidate);
+            (cache, candidate)
+        })
+        .collect();
+    entries.retain(|(_, candidate)| candidate.usage.entries > 0);
+    entries.sort_by_key(|(_, candidate)| std::cmp::Reverse(candidate.usage.allocated));
+    entries
 }
 
 fn candidates(locations: &Locations, protected: &Protected) -> impl Iterator<Item = KnownCache> {

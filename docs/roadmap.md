@@ -222,7 +222,7 @@ Claim a speedup only with a measurement (`cargo run --release --example synth`).
 
 ### 6.3 Benchmarks in CI (P2, M)
 
-Phase 7 asks for benchmarks on a fixed dataset with a regression threshold. Nothing runs today. Start with one `synth` tree, a `hyperfine` run of `kuizer scan --json` and a stored baseline, failing CI on a 15% regression. Add time to first candidate and peak RSS once the first one is stable.
+CI now benchmarks `kuizer --json scan` with `hyperfine` on a fixed 200-project, 100-dependency synthetic tree. It compares the median against `benchmarks/scan-baseline.json` and fails above a 15% regression. Add time to first candidate and peak RSS after this wall-time measurement is stable.
 
 ## 7. GUI
 
@@ -287,8 +287,6 @@ Everything `design.md` promises that the CLI does not do. Either build it or tak
 - `--permanent` (removed in 0.1.3; the spec still lists it).
 - `big` (plan 008).
 - `policy list | show` and `clean --policy` (phase 11).
-- One `candidates` shape with a `source` field across sources; today `cache_report`, `toolchain_report` and `docker_report` (`src/output/json.rs:342,402,459`) each have their own key, and Docker issues are plain strings. Changing it bumps `SCHEMA_VERSION`.
-- A JSON schema file in `docs/` (phase 6).
 - `--category` and `--min-size` replace config values instead of intersecting with them (`src/commands/scan.rs:80-86`, `clean.rs:13-18`), so a flag can widen a narrow config.
 - `history` and `restore` skip loading config, so `--config` is ignored for them (`src/commands/mod.rs:136`).
 

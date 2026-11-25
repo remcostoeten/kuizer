@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use gpui::{AnyElement, Div, FontWeight, Pixels, SharedString, div, prelude::*};
-use kuizer::config::ConfigWarning;
+use kuizer::config::{Config, ConfigWarning};
 
 use crate::theme::{self, font, space, unit};
 
@@ -38,10 +38,20 @@ pub fn summary(error: &str) -> String {
 /// @example
 /// let line = notice(&loaded.warnings);
 pub fn notice(warnings: &[ConfigWarning]) -> Option<String> {
-    let first = warnings.first()?;
-    Some(match warnings.len() - 1 {
-        0 => first.to_string(),
-        more => format!("{first} (and {more} more)"),
+    let defaults = serde_json::to_value(Config::default()).ok()?;
+    (!warnings.is_empty()).then(|| {
+        warnings
+            .iter()
+            .map(|warning| {
+                let value = warning
+                    .key
+                    .split('.')
+                    .try_fold(&defaults, |value, part| value.get(part))
+                    .map_or_else(|| "ignored".to_owned(), ToString::to_string);
+                format!("{} (using {value})", warning)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     })
 }
 
@@ -112,7 +122,20 @@ fn banner(problem: &Problem, inset: Option<Pixels>) -> Div {
                 .text_color(theme::review())
                 .child("Config problem, defaults in use"),
         )
-        .child(div().flex_1().min_w_0().child(problem.reason.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(unit(space::XS))
+                .children(
+                    problem
+                        .reason
+                        .lines()
+                        .map(|line| div().child(line.to_owned())),
+                ),
+        )
 }
 
 #[cfg(test)]
@@ -141,6 +164,25 @@ mod tests {
             "invalid config /c.toml: TOML parse error at line 2, column 1: unknown field `mde`"
         );
         assert_eq!(summary("unknown rule `x`"), "unknown rule `x`");
+    }
+
+    #[test]
+    fn notice_lists_every_invalid_key_and_its_default_fallback() {
+        let warnings = [
+            ConfigWarning {
+                key: "delete.mode".to_owned(),
+                message: "invalid value".to_owned(),
+                widens_scope: true,
+            },
+            ConfigWarning {
+                key: "appearance.motion".to_owned(),
+                message: "invalid value".to_owned(),
+                widens_scope: false,
+            },
+        ];
+        let notice = notice(&warnings).unwrap();
+        assert!(notice.contains("`delete.mode`: invalid value (using \"permanent\")"));
+        assert!(notice.contains("`appearance.motion`: invalid value (using true)"));
     }
 
     #[gpui::test]

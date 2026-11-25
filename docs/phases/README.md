@@ -18,6 +18,6 @@ Every phase follows the rules that already hold for the codebase:
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, as in `.github/workflows/ci.yml`.
 - Destructive tests run in a `tempfile::TempDir`, never against the real home directory. Tests that need a home set `HOME` (and `XDG_DATA_HOME` for the trash) on the spawned `kuizer` process, as `tests/clean.rs` does.
-- New JSON fields are additive within `schema_version: 1`. A rename or removal bumps `SCHEMA_VERSION` in `src/output/json.rs`.
+- JSON fields are additive within a schema version. A rename or removal bumps `SCHEMA_VERSION` in `src/output/json.rs` and updates the [report schema](../report.schema.json).
 - New commands get a help example block in `src/cli.rs` and an entry in `COMMAND_GROUPS`.
 - The dashboard (`src/output/report.html`) gains a tab or a column when a phase adds data worth seeing. Each plan names what that is.

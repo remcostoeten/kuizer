@@ -6,34 +6,6 @@ use std::sync::{Arc, OnceLock};
 use crate::platform::{self, MountTable};
 use crate::protect::Protected;
 
-const PROTECTED: &[&str] = &[
-    "/bin",
-    "/boot",
-    "/dev",
-    "/efi",
-    "/etc",
-    "/lib",
-    "/lib32",
-    "/lib64",
-    "/nix",
-    "/opt",
-    "/proc",
-    "/root",
-    "/run",
-    "/sbin",
-    "/snap",
-    "/srv",
-    "/sys",
-    "/usr",
-    "/var/lib",
-    "/var/log",
-    "/Applications",
-    "/Library",
-    "/System",
-    "/private/etc",
-    "/private/var/db",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     #[error("path is not absolute or contains `.` or `..`")]
@@ -86,6 +58,7 @@ pub struct Guard {
     cwd: Option<PathBuf>,
     protected: Protected,
     mounts: Mounts,
+    cross_device: bool,
 }
 
 impl Guard {
@@ -100,12 +73,39 @@ impl Guard {
             cwd: std::env::current_dir().ok(),
             protected: Protected::for_user(),
             mounts: Mounts::default(),
+            cross_device: false,
         }
     }
 
     pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
         self.cwd = cwd;
         self
+    }
+
+    /// @name Guard::with_protected
+    /// @description Adds configured paths to the guard's built-in protected directories.
+    /// Invalid or missing directories are ignored after config validation.
+    ///
+    /// @example
+    /// let guard = Guard::new(&roots).with_protected(&config.delete.protected);
+    pub fn with_protected(mut self, paths: &[PathBuf]) -> Self {
+        self.protected = self.protected.with_paths(paths);
+        self
+    }
+
+    /// @name Guard::with_cross_device
+    /// @description Allows selected directories to cross mounted filesystem boundaries during
+    /// deletion when `enabled` is true.
+    ///
+    /// @example
+    /// let guard = Guard::new(&roots).with_cross_device(config.delete.cross_device);
+    pub fn with_cross_device(mut self, enabled: bool) -> Self {
+        self.cross_device = enabled;
+        self
+    }
+
+    pub(crate) fn cross_device(&self) -> bool {
+        self.cross_device
     }
 
     fn check_path(&self, path: &Path) -> Result<(), Refusal> {
@@ -119,7 +119,7 @@ impl Guard {
         if path.components().count() < 3 {
             return Err(Refusal::TooShallow);
         }
-        if PROTECTED.iter().any(|prefix| path.starts_with(prefix)) {
+        if Protected::protects_system_path(path) {
             return Err(Refusal::Protected);
         }
         if self.anchors.iter().any(|anchor| anchor.starts_with(path)) {
@@ -141,9 +141,6 @@ impl Guard {
 
     pub fn check(&self, path: &Path, identity: Option<(u64, u64)>) -> Result<(), Refusal> {
         self.check_path(path)?;
-        if self.protected.covers(path) {
-            return Err(Refusal::AppData);
-        }
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -157,13 +154,16 @@ impl Guard {
         if identity.is_none() {
             return Err(Refusal::Unverified);
         }
+        if self.protected.covers(path) {
+            return Err(Refusal::AppData);
+        }
         if platform::identity(&metadata) != identity {
             return Err(Refusal::Changed);
         }
-        if self.mounts.is_mount_point(path) {
+        if !self.cross_device && self.mounts.is_mount_point(path) {
             return Err(Refusal::MountPoint);
         }
-        if metadata.is_dir() {
+        if metadata.is_dir() && !self.cross_device {
             let parent = path.parent().ok_or(Refusal::TooShallow)?;
             let parent_meta =
                 fs::symlink_metadata(parent).map_err(|e| Refusal::Inspect(e.to_string()))?;
@@ -198,6 +198,13 @@ mod tests {
         assert_eq!(
             guard.check(&mounted, identity(&mounted)),
             Err(Refusal::MountPoint)
+        );
+        assert_eq!(
+            guard
+                .clone()
+                .with_cross_device(true)
+                .check(&mounted, identity(&mounted)),
+            Ok(())
         );
         assert_eq!(guard.check(&plain, identity(&plain)), Ok(()));
         assert_eq!(guard.check(&plain, None), Err(Refusal::Unverified));
@@ -235,6 +242,23 @@ mod tests {
             guard
                 .check_path(Path::new("/home/me/projects/web/node_modules"))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn refuses_configured_paths_inside_a_scan_root() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let protected = root.join("important");
+        fs::create_dir(&protected).expect("protected directory");
+        let guard = Guard::new(std::slice::from_ref(&root))
+            .with_cwd(None)
+            .with_protected(std::slice::from_ref(&protected));
+        let metadata = fs::symlink_metadata(&protected).expect("metadata");
+
+        assert_eq!(
+            guard.check(&protected, platform::identity(&metadata)),
+            Err(Refusal::AppData)
         );
     }
 

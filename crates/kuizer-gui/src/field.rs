@@ -1,5 +1,8 @@
 use gpui::{CursorStyle, Div, ElementId, Keystroke, SharedString, Stateful, div, prelude::*};
 
+use kuizer::keymap::{Action, Keymap, Scope};
+
+use crate::commands;
 use crate::theme::{self, size, space, unit};
 
 /// Separators Ctrl+Backspace stops at in a path field.
@@ -15,25 +18,26 @@ pub const WORDS: &[char] = &['/', ' ', '-', '_', '.'];
 /// app goes through this.
 ///
 /// @example
-/// if field::edit(&mut query, keystroke, field::WORDS, || clipboard()) { refilter(); }
+/// if field::edit(keymap, &mut query, keystroke, field::WORDS, || clipboard()) { refilter(); }
 pub fn edit(
+    keymap: &Keymap,
     text: &mut String,
     keystroke: &Keystroke,
     separators: &[char],
     paste: impl FnOnce() -> Option<String>,
 ) -> bool {
     let command = keystroke.modifiers.control || keystroke.modifiers.platform;
-    match keystroke.key.as_str() {
-        "backspace" if command || keystroke.modifiers.alt => delete_word(text, separators),
-        "backspace" => {
+    match keymap.lookup(Scope::Field, commands::stroke(keystroke)) {
+        Some(Action::FieldDeleteWord) => delete_word(text, separators),
+        Some(Action::FieldBackspace) => {
             text.pop();
         }
-        "v" if command => {
+        Some(Action::FieldPaste) => {
             if let Some(pasted) = paste() {
                 text.push_str(pasted.lines().next().unwrap_or_default().trim());
             }
         }
-        "u" if command => text.clear(),
+        Some(Action::FieldClear) => text.clear(),
         _ => {
             let Some(typed) = keystroke.key_char.as_deref() else {
                 return false;
@@ -123,12 +127,30 @@ mod tests {
     fn typing_backspace_and_clear() {
         let mut text = String::new();
         for typed in ["a", "shift-b", "space", "c"] {
-            assert!(edit(&mut text, &key(typed), WORDS, || None));
+            assert!(edit(
+                &Keymap::default(),
+                &mut text,
+                &key(typed),
+                WORDS,
+                || None
+            ));
         }
         assert_eq!(text, "aB c");
-        assert!(edit(&mut text, &key("backspace"), WORDS, || None));
+        assert!(edit(
+            &Keymap::default(),
+            &mut text,
+            &key("backspace"),
+            WORDS,
+            || None
+        ));
         assert_eq!(text, "aB ");
-        assert!(edit(&mut text, &key("ctrl-u"), WORDS, || None));
+        assert!(edit(
+            &Keymap::default(),
+            &mut text,
+            &key("ctrl-u"),
+            WORDS,
+            || None
+        ));
         assert!(text.is_empty());
     }
 
@@ -136,33 +158,60 @@ mod tests {
     fn keys_that_are_not_text_are_left_alone() {
         let mut text = "x".to_owned();
         for other in ["down", "escape", "ctrl-k", "ctrl-a", "f10"] {
-            assert!(!edit(&mut text, &key(other), WORDS, || None), "{other}");
+            assert!(
+                !edit(&Keymap::default(), &mut text, &key(other), WORDS, || None),
+                "{other}"
+            );
         }
         let shortcut = Keystroke {
             modifiers: Modifiers::control(),
             key: "j".to_owned(),
             key_char: Some("j".to_owned()),
         };
-        assert!(!edit(&mut text, &shortcut, WORDS, || None));
+        assert!(!edit(
+            &Keymap::default(),
+            &mut text,
+            &shortcut,
+            WORDS,
+            || None
+        ));
         assert_eq!(text, "x");
     }
 
     #[test]
     fn ctrl_backspace_stops_at_a_separator() {
         let mut path = "/home/me/apps".to_owned();
-        edit(&mut path, &key("ctrl-backspace"), PATH, || None);
+        edit(
+            &Keymap::default(),
+            &mut path,
+            &key("ctrl-backspace"),
+            PATH,
+            || None,
+        );
         assert_eq!(path, "/home/me/");
-        edit(&mut path, &key("ctrl-backspace"), PATH, || None);
+        edit(
+            &Keymap::default(),
+            &mut path,
+            &key("ctrl-backspace"),
+            PATH,
+            || None,
+        );
         assert_eq!(path, "/home/");
         let mut words = "node modules".to_owned();
-        edit(&mut words, &key("ctrl-backspace"), WORDS, || None);
+        edit(
+            &Keymap::default(),
+            &mut words,
+            &key("ctrl-backspace"),
+            WORDS,
+            || None,
+        );
         assert_eq!(words, "node ");
     }
 
     #[test]
     fn paste_takes_the_first_line() {
         let mut text = "~/".to_owned();
-        edit(&mut text, &key("ctrl-v"), PATH, || {
+        edit(&Keymap::default(), &mut text, &key("ctrl-v"), PATH, || {
             Some(" apps/site \nmore".to_owned())
         });
         assert_eq!(text, "~/apps/site");

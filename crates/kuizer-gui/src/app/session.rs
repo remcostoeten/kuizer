@@ -18,6 +18,7 @@ impl Kuizer {
         self.pending = Part::expected(&self.options);
         self.early.clear();
         self.streamed = false;
+        self.refreshed.clear();
         self.gone.clear();
         self.history_fresh = false;
         self.progress = Activity::default();
@@ -96,7 +97,10 @@ impl Kuizer {
                 Update::Loaded(mut loaded) => {
                     loaded.without(&self.excluded, &self.gone);
                     let found = matches!(loaded, Loaded::Found(_));
-                    let listed = matches!(loaded, Loaded::Artifacts { .. } | Loaded::Caches(_));
+                    let listed = matches!(
+                        loaded,
+                        Loaded::Artifacts { .. } | Loaded::ArtifactsDone { .. } | Loaded::Caches(_)
+                    );
                     if self.loaded(loaded, &mut dropped) {
                         if found {
                             grown = true;
@@ -145,8 +149,8 @@ impl Kuizer {
             if rows || grown {
                 self.refresh_rows();
             }
-            if map || ((rows || grown) && self.map.shown) {
-                self.refresh_map();
+            if map || rows || grown {
+                self.refresh_map(cx);
             }
             if self
                 .menu
@@ -182,6 +186,7 @@ impl Kuizer {
         self.pending.clear();
         self.early.clear();
         self.streamed = false;
+        self.refreshed.clear();
     }
 
     /// Shows the saved scan of these folders while the fresh one runs. Before anything fresh
@@ -202,11 +207,7 @@ impl Kuizer {
             let Some(kind) = part.part() else {
                 continue;
             };
-            let streaming = kind == Part::Artifacts
-                && self.streamed
-                && self
-                    .report()
-                    .is_some_and(|shown| !shown.candidates.is_empty());
+            let streaming = kind == Part::Artifacts && self.streamed;
             let kept = kind == Part::History && self.history_fresh;
             if !self.pending.contains(&kind) || streaming || kept {
                 dropped.push(part);
@@ -222,9 +223,12 @@ impl Kuizer {
         changed
     }
 
-    pub(super) fn loaded(&mut self, loaded: Loaded, dropped: &mut Vec<Loaded>) -> bool {
+    pub(super) fn loaded(&mut self, mut loaded: Loaded, dropped: &mut Vec<Loaded>) -> bool {
         if matches!(self.phase, Phase::Loading(_)) {
-            if !matches!(loaded, Loaded::Found(_) | Loaded::Artifacts { .. }) {
+            if !matches!(
+                loaded,
+                Loaded::Found(_) | Loaded::Artifacts { .. } | Loaded::ArtifactsDone { .. }
+            ) {
                 self.early.push(loaded);
                 return false;
             }
@@ -236,6 +240,10 @@ impl Kuizer {
                     dropped.push(report.apply(Loaded::Found(batch)));
                     true
                 }
+                (false, Phase::Ready(_)) => {
+                    self.refreshed.extend(batch);
+                    false
+                }
                 _ => {
                     dropped.push(Loaded::Found(batch));
                     false
@@ -245,6 +253,22 @@ impl Kuizer {
         if let Some(part) = loaded.part() {
             self.pending.remove(&part);
             if part == Part::Artifacts {
+                if !self.streamed
+                    && let Loaded::ArtifactsDone {
+                        issues,
+                        summary,
+                        disks,
+                    } = loaded
+                {
+                    let mut candidates = std::mem::take(&mut self.refreshed);
+                    kuizer::scan::sort_candidates(&mut candidates, kuizer::scan::SortKey::Size);
+                    loaded = Loaded::Artifacts {
+                        candidates,
+                        issues,
+                        summary,
+                        disks,
+                    };
+                }
                 self.streamed = false;
             }
             if part == Part::History && self.history_fresh {
@@ -318,6 +342,7 @@ impl Kuizer {
         }
         if !matches!(self.phase, Phase::Ready(_)) {
             self.search = None;
+            self.clear_map_tree(cx);
         }
     }
 
@@ -342,7 +367,6 @@ impl Kuizer {
         self.selection = Selection::pending(selection);
         self.phase = Phase::Ready(Box::new(report));
         self.menu = None;
-        self.prune();
     }
 }
 
@@ -374,30 +398,21 @@ pub(super) fn scan_parts(
     sender: &mpsc::UnboundedSender<Update>,
     shown: bool,
 ) {
-    let saved = (!shown)
-        .then(|| {
-            let (snapshots, roots, options, sender) = (
-                snapshots.clone(),
-                roots.to_vec(),
-                options.clone(),
-                sender.clone(),
-            );
-            std::thread::Builder::new()
-                .name("kuizer-gui-snapshot".to_owned())
-                .spawn(move || {
-                    if let Some(report) = snapshots.load(&roots, &options) {
-                        let _ = sender.unbounded_send(Update::Cached(Box::new(report)));
-                    }
-                })
-                .ok()
-        })
-        .flatten();
-    let saved = Mutex::new(saved);
-    let shown_first = || {
-        if let Some(loading) = saved.lock().ok().and_then(|mut saved| saved.take()) {
-            let _ = loading.join();
-        }
-    };
+    if !shown {
+        let (snapshots, roots, options, sender) = (
+            snapshots.clone(),
+            roots.to_vec(),
+            options.clone(),
+            sender.clone(),
+        );
+        let _ = std::thread::Builder::new()
+            .name("kuizer-gui-snapshot".to_owned())
+            .spawn(move || {
+                if let Some(report) = snapshot::load(&snapshots, &roots, &options) {
+                    let _ = sender.unbounded_send(Update::Cached(Box::new(report)));
+                }
+            });
+    }
     let tracker = {
         let sender = sender.clone();
         Tracker::new(move |activity| {
@@ -407,10 +422,8 @@ pub(super) fn scan_parts(
     let recorder = Recorder::new(roots, options, forgotten);
     let result = model::load(config, roots, options, cancel, &tracker, &|loaded| {
         recorder.record(&loaded);
-        shown_first();
         let _ = sender.unbounded_send(Update::Loaded(loaded));
     });
-    shown_first();
     let scanned = SystemTime::now();
     let finished = result.is_ok();
     let _ = sender.unbounded_send(Update::Done(result.map(|()| scanned)));
