@@ -212,6 +212,35 @@ fn handle_branches(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) {
     }
 }
 
+fn handle_exclude(app: &mut App, key: KeyEvent, held: bool) -> Option<String> {
+    match keys::action(&app.keymap, Scope::TuiConfirm, key) {
+        Some(Action::DialogToggle) => app.toggle_exclude_focus(),
+        Some(Action::Confirm) if !held => {
+            let (path, pattern) = app.answer_exclude()?;
+            let shown = crate::output::display_path(&path);
+            let Some(file) = app.config_path.clone() else {
+                app.message = Some(format!(
+                    "could not exclude {shown}: this system has no config folder"
+                ));
+                return None;
+            };
+            match crate::config::add_exclude(&file, &pattern) {
+                Ok(_) => {
+                    app.apply_exclude(path);
+                    app.message = Some(format!("{shown} is excluded from every scan"));
+                    return Some(pattern);
+                }
+                Err(error) => {
+                    app.message = Some(format!("could not exclude {shown}: {error}"));
+                }
+            }
+        }
+        Some(Action::Cancel) => app.close_overlay(),
+        _ => {}
+    }
+    None
+}
+
 fn handle_repos(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) -> bool {
     match keys::action(&app.keymap, Scope::TuiRepos, key) {
         Some(Action::Gc | Action::GcAll | Action::Branches | Action::BranchesAll) if held => {}
@@ -230,7 +259,7 @@ fn handle_repos(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) -> bo
     true
 }
 
-fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
+fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) -> Option<String> {
     let now = Instant::now();
     let held_enter = key.code == KeyCode::Enter && app.enter_repeats(now);
     let held_key = app.action_key_repeats(key, now);
@@ -245,7 +274,7 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
             _ if !modified && action != Some(Action::Quit) => app.overlay = Overlay::None,
             _ => {}
         }
-        return;
+        return None;
     }
     if action != Some(Action::SelectProject) || app.filtering || app.overlay != Overlay::None {
         app.disarm_widen();
@@ -253,7 +282,7 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
     if action == Some(Action::Quit) && (!app.filtering && app.overlay == Overlay::None || modified)
     {
         app.request_quit();
-        return;
+        return None;
     }
     app.message = None;
     if app.filtering || !matches!(action, Some(Action::ExtendDown | Action::ExtendUp)) {
@@ -261,19 +290,19 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
     }
     if app.filtering {
         handle_filter(app, key);
-        return;
+        return None;
     }
     if app.overlay == Overlay::None
         && let Some(tab) = action.and_then(view_of)
     {
         app.switch(tab);
-        return;
+        return None;
     }
     if app.overlay == Overlay::None
         && app.tab == Tab::Repos
         && handle_repos(app, key, queues, held_key)
     {
-        return;
+        return None;
     }
     if app.overlay == Overlay::None && app.tab.source().is_none() && action.is_some_and(list_only) {
         app.message = Some(match app.tab {
@@ -285,11 +314,12 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
                 tab.label()
             ),
         });
-        return;
+        return None;
     }
     match app.overlay {
         Overlay::Confirm { .. } => handle_confirm(app, key, queues, held),
         Overlay::Branches { .. } => handle_branches(app, key, queues, held),
+        Overlay::Exclude { .. } => return handle_exclude(app, key, held),
         Overlay::Help => {
             if !modified {
                 app.overlay = Overlay::None;
@@ -319,6 +349,7 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
                 let batch = app.delete_selected();
                 dispatch(app, queues, batch);
             }
+            Some(Action::Exclude) if !held_key => app.ask_exclude(),
             Some(Action::CycleSort) => app.cycle_sort(),
             Some(Action::Group) => app.toggle_grouping(),
             Some(Action::SelectProject) if !app.project_key_repeats(now) => app.select_project(),
@@ -330,6 +361,7 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
             _ => {}
         },
     }
+    None
 }
 
 type Pending = (Receiver<Job>, Sender<Outcome>);
@@ -464,10 +496,27 @@ pub fn run_with_notice(
     confirm: bool,
     notice: Option<String>,
 ) -> std::io::Result<()> {
+    run_with_config(
+        config,
+        roots,
+        confirm,
+        notice,
+        crate::config::default_path(),
+    )
+}
+
+pub(crate) fn run_with_config(
+    config: &Config,
+    roots: &[PathBuf],
+    confirm: bool,
+    notice: Option<String>,
+    config_path: Option<PathBuf>,
+) -> std::io::Result<()> {
     let mut app = App::new(config.delete.mode.into(), confirm);
     app.keymap = Keymap::resolve(&config.keys).0;
     app.min_gain = config.git.min_gain.0;
     app.message = notice;
+    app.config_path = config_path;
     let mut terminal = ratatui::try_init()?;
     let started = terminal
         .draw(|frame| view::draw(frame, &app))
@@ -636,13 +685,20 @@ pub fn run_with_notice(
                     if app.changed() && !app.filtering {
                         app.refresh();
                     }
-                    handle_key(&mut app, key, &queues);
+                    if let Some(pattern) = handle_key(&mut app, key, &queues)
+                        && !background.config.scan.exclude.contains(&pattern)
+                    {
+                        background.config.scan.exclude.push(pattern);
+                    }
                     background.start(&mut app);
                 }
                 redraw = true;
                 let confirming = matches!(
                     app.overlay,
-                    Overlay::Confirm { .. } | Overlay::Branches { .. } | Overlay::Quit
+                    Overlay::Confirm { .. }
+                        | Overlay::Branches { .. }
+                        | Overlay::Exclude { .. }
+                        | Overlay::Quit
                 );
                 if app.quit || confirming || !event::poll(Duration::ZERO)? {
                     break;
@@ -1082,5 +1138,82 @@ mod tests {
         press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Issues);
         assert!(!app.quit);
+    }
+
+    #[test]
+    fn x_excludes_after_inline_confirm_and_shift_x_resets_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let (queues, _queued, _git_work) = split_queues();
+        let mut app = app();
+        app.config_path = Some(config_path.clone());
+        let first_path = app.current().unwrap().candidate.path.clone();
+        let expected_pattern = crate::config::exclude_pattern(&first_path);
+
+        // Select the row first to confirm excluding also clears its selection.
+        press(&mut app, &queues, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, &queues, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.selected_count(), 1);
+
+        // x opens inline confirm with focus on Cancel.
+        press(&mut app, &queues, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Exclude {
+                path,
+                pattern,
+                confirm: false
+            } if path == &first_path && pattern == &expected_pattern
+        ));
+
+        // Enter while Cancel is focused closes without touching config.
+        press(&mut app, &queues, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!config_path.exists());
+        assert_eq!(app.selected_count(), 1);
+
+        // Re-open with x, Tab to Exclude, confirm with y.
+        press(&mut app, &queues, KeyCode::Char('x'), KeyModifiers::NONE);
+        press(&mut app, &queues, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Exclude { confirm: true, .. }
+        ));
+        press(&mut app, &queues, KeyCode::Char('y'), KeyModifiers::NONE);
+        app.refresh();
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.selected_count(), 0);
+        assert!(
+            app.view
+                .iter()
+                .all(|&index| app.items[index].candidate.path != first_path),
+            "excluded item leaves the visible list"
+        );
+        let loaded = Config::load(Some(&config_path)).unwrap().config;
+        assert_eq!(loaded.scan.exclude, vec![expected_pattern]);
+
+        // Shift+X resets filters.
+        press(&mut app, &queues, KeyCode::Char('f'), KeyModifiers::NONE);
+        assert!(app.filtered());
+        press(&mut app, &queues, KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert!(!app.filtered());
+
+        // Docker objects cannot be excluded.
+        press(&mut app, &queues, KeyCode::Char('6'), KeyModifiers::NONE);
+        app.push_listed(
+            Source::Docker,
+            candidate(99, "docker://image/sha256:abc"),
+            String::new(),
+            "alpine:latest".to_owned(),
+        );
+        app.refresh();
+        press(&mut app, &queues, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|message| message.contains("not on disk"))
+        );
     }
 }

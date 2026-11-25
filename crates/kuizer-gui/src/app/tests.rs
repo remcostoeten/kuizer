@@ -1456,16 +1456,42 @@ fn always_exclude_writes_the_config_and_hides_the_item(cx: &mut TestAppContext) 
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = scanned(cx, dir.path(), Tab::Artifacts);
     let (id, path) = only_artifact(&view, cx);
+    let file = dir.path().join("config.toml");
     view.update(cx, |app, cx| app.toggle(Source::Artifact, id, cx));
     cx.update(|window, cx| window.draw(cx).clear());
+
+    // Pressing x opens the inline confirmation with Cancel focused; Enter cancels safely.
+    cx.simulate_keystrokes("x");
+    view.read_with(cx, |app, _| {
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Exclude { path: shown, cancel: true, .. }) if shown == &path
+        ));
+    });
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |app, _| {
+        assert!(app.dialog.is_none());
+        assert_eq!(app.rows.len(), 1);
+    });
+    assert!(!file.exists(), "cancelling must not write the config");
+
+    // Choosing Always exclude from the menu opens the inline confirmation; confirming writes it.
     right_click(cx, "artifact-row-0");
     click_item(cx, "menu-Always exclude");
+    view.read_with(cx, |app, _| {
+        assert!(app.menu.is_none());
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Exclude { cancel: true, .. })
+        ));
+    });
+    click_item(cx, "confirm-exclude");
 
-    let file = dir.path().join("config.toml");
     let config = Config::load(Some(&file)).unwrap().config;
     let pattern = kuizer::config::exclude_pattern(&path);
     assert_eq!(config.scan.exclude, std::slice::from_ref(&pattern));
     view.read_with(cx, |app, _| {
+        assert!(app.dialog.is_none());
         assert!(app.menu.is_none());
         assert!(app.report().unwrap().candidates.is_empty());
         assert!(app.rows.is_empty());

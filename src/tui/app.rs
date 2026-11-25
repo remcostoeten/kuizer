@@ -188,6 +188,7 @@ pub enum Status {
     Ready,
     Deleting,
     Deleted,
+    Excluded,
     Failed(String),
 }
 
@@ -228,8 +229,19 @@ struct Span {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    Confirm { ids: Vec<u64>, mode: Mode },
-    Branches { scope: GitScope, delete: bool },
+    Confirm {
+        ids: Vec<u64>,
+        mode: Mode,
+    },
+    Branches {
+        scope: GitScope,
+        delete: bool,
+    },
+    Exclude {
+        path: PathBuf,
+        pattern: String,
+        confirm: bool,
+    },
     Quit,
     Help,
 }
@@ -336,6 +348,8 @@ pub struct App {
     keep: Option<u64>,
     tallies: HashMap<Source, Tally>,
     feeds: HashMap<Source, Feed>,
+    pub config_path: Option<PathBuf>,
+    excluded: Vec<PathBuf>,
     changes_unknown: bool,
     dirty: bool,
     grown: bool,
@@ -399,10 +413,16 @@ impl App {
             keep: None,
             tallies: HashMap::new(),
             feeds: HashMap::new(),
+            config_path: None,
+            excluded: Vec::new(),
             changes_unknown: false,
             dirty: false,
             grown: false,
         }
+    }
+
+    fn is_excluded(&self, path: &Path) -> bool {
+        self.excluded.iter().any(|root| path.starts_with(root))
     }
 
     pub fn push(&mut self, candidate: Candidate) {
@@ -421,6 +441,9 @@ impl App {
     }
 
     fn add(&mut self, source: Source, note: String, label: String, candidate: Candidate) {
+        if source != Source::Docker && self.is_excluded(&candidate.path) {
+            return;
+        }
         self.index.insert(candidate.id, self.items.len());
         let tally = self.tallies.entry(source).or_default();
         tally.items += 1;
@@ -484,6 +507,9 @@ impl App {
     }
 
     fn matches(&self, item: &Item, needle: &str) -> bool {
+        if item.status == Status::Excluded {
+            return false;
+        }
         if self
             .category
             .is_some_and(|only| item.candidate.rule.category != only)
@@ -696,6 +722,9 @@ impl App {
     }
 
     pub fn push_issue(&mut self, issue: Issue) {
+        if self.is_excluded(&issue.path) {
+            return;
+        }
         let needle = self.filter.to_lowercase();
         if issue_matches(&issue, &needle) {
             self.issues.rows.push(self.issues.entries.len());
@@ -705,9 +734,23 @@ impl App {
 
     pub fn set_duplicates(&mut self, found: Duplicates) {
         self.duplicates.found = found;
+        self.prune_duplicates();
         self.duplicates.load = Load::Done;
         self.duplicates.stage = None;
         self.rebuild_duplicates();
+    }
+
+    fn prune_duplicates(&mut self) {
+        if self.excluded.is_empty() {
+            return;
+        }
+        let excluded = &self.excluded;
+        self.duplicates.found.groups.retain_mut(|group| {
+            group
+                .members
+                .retain(|member| !excluded.iter().any(|root| member.path.starts_with(root)));
+            group.members.len() >= 2
+        });
     }
 
     pub fn duplicates_failed(&mut self, problem: String) {
@@ -732,8 +775,13 @@ impl App {
     }
 
     pub fn set_repos(&mut self, inspected: Inspected) {
+        let excluded = &self.excluded;
         let list = &mut self.repos;
-        list.found = inspected.repositories;
+        list.found = inspected
+            .repositories
+            .into_iter()
+            .filter(|repo| !excluded.iter().any(|root| repo.root.starts_with(root)))
+            .collect();
         list.unreadable = inspected.issues.len();
         list.load = Load::Done;
         self.rebuild_repos();
@@ -869,6 +917,104 @@ impl App {
             return None;
         }
         Some(self.start_git(GitTask::Branches, targets))
+    }
+
+    fn current_excludable_path(&self) -> Result<PathBuf, &'static str> {
+        match self.tab {
+            Tab::Docker => Err("docker objects are not on disk and cannot be excluded"),
+            Tab::Artifacts | Tab::Caches | Tab::Toolchains => self
+                .current()
+                .map(|item| item.candidate.path.clone())
+                .ok_or("nothing under the cursor to exclude"),
+            Tab::Duplicates => match self.duplicates.rows.get(self.duplicates.cursor) {
+                Some(&Spot::Member(group, member)) => Ok(self.duplicates.found.groups[group]
+                    .members[member]
+                    .path
+                    .clone()),
+                Some(&Spot::Group(_)) => Err("move to a file to exclude it"),
+                None => Err("nothing under the cursor to exclude"),
+            },
+            Tab::Issues => self
+                .issues
+                .rows
+                .get(self.issues.cursor)
+                .map(|&index| self.issues.entries[index].path.clone())
+                .ok_or("nothing under the cursor to exclude"),
+            Tab::Repos => self
+                .current_repo()
+                .map(|repo| repo.root.clone())
+                .ok_or("nothing under the cursor to exclude"),
+        }
+    }
+
+    pub fn ask_exclude(&mut self) {
+        let path = match self.current_excludable_path() {
+            Ok(path) => path,
+            Err(message) => {
+                self.message = Some(message.to_owned());
+                return;
+            }
+        };
+        if self.config_path.is_none() {
+            self.message = Some(format!(
+                "could not exclude {}: this system has no config folder",
+                crate::output::display_path(&path)
+            ));
+            return;
+        }
+        let pattern = crate::config::exclude_pattern(&path);
+        self.overlay = Overlay::Exclude {
+            path,
+            pattern,
+            confirm: false,
+        };
+    }
+
+    pub fn toggle_exclude_focus(&mut self) {
+        if let Overlay::Exclude { confirm, .. } = &mut self.overlay {
+            *confirm = !*confirm;
+        }
+    }
+
+    pub fn answer_exclude(&mut self) -> Option<(PathBuf, String)> {
+        let Overlay::Exclude {
+            path,
+            pattern,
+            confirm,
+        } = std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return None;
+        };
+        confirm.then_some((path, pattern))
+    }
+
+    pub fn apply_exclude(&mut self, path: PathBuf) {
+        self.excluded.push(path.clone());
+        for index in 0..self.items.len() {
+            let matches = self.items[index].source != Source::Docker
+                && self.items[index].status != Status::Excluded
+                && self.items[index].candidate.path.starts_with(&path);
+            if !matches {
+                continue;
+            }
+            self.mark(index, false);
+            let item = &mut self.items[index];
+            let bytes = item.candidate.usage.allocated;
+            let before = std::mem::replace(&mut item.status, Status::Excluded);
+            let tally = self.tallies.entry(item.source).or_default();
+            tally.items = tally.items.saturating_sub(1);
+            if before != Status::Deleted {
+                tally.bytes = tally.bytes.saturating_sub(bytes);
+            }
+        }
+        self.issues
+            .entries
+            .retain(|issue| !issue.path.starts_with(&path));
+        self.repos
+            .found
+            .retain(|repo| !repo.root.starts_with(&path));
+        self.prune_duplicates();
+        self.dirty = true;
     }
 
     pub fn git_unavailable(&mut self, roots: &[PathBuf]) {

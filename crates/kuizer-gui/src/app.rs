@@ -163,7 +163,15 @@ struct Toast {
 
 enum Dialog {
     Finished(Finished),
-    Branches { scope: GitScope, cancel: bool },
+    Branches {
+        scope: GitScope,
+        cancel: bool,
+    },
+    Exclude {
+        path: PathBuf,
+        pattern: String,
+        cancel: bool,
+    },
 }
 
 /// One row a context menu can act on.
@@ -380,6 +388,7 @@ pub struct Kuizer {
     git: GitJob,
     git_task: Option<Task<()>>,
     branch_leaving: Option<repos::Leaving>,
+    exclude_leaving: Option<menu::Leaving>,
     content: Option<Entity<Pane>>,
     chrome: Option<Entity<Chrome>>,
     cache_content: bool,
@@ -507,6 +516,7 @@ impl Kuizer {
             git: GitJob::default(),
             git_task: None,
             branch_leaving: None,
+            exclude_leaving: None,
             content: None,
             chrome: None,
             cache_content: cfg!(not(test)),
@@ -1544,21 +1554,30 @@ impl Render for Kuizer {
         } else {
             self.render_branch_confirm(cx)
         };
-        let floating = (toast.is_some() || summary.is_some() || branches.is_some()).then(|| {
-            div()
-                .absolute()
-                .bottom(unit(space::L))
-                .left_0()
-                .right_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(unit(space::S))
-                .px(unit(space::XL))
-                .children(toast)
-                .children(branches)
-                .children(summary)
-        });
+        let exclude = if start {
+            None
+        } else {
+            self.render_exclude_confirm(cx)
+        };
+        let floating =
+            (toast.is_some() || summary.is_some() || branches.is_some() || exclude.is_some()).then(
+                || {
+                    div()
+                        .absolute()
+                        .bottom(unit(space::L))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(unit(space::S))
+                        .px(unit(space::XL))
+                        .children(toast)
+                        .children(branches)
+                        .children(exclude)
+                        .children(summary)
+                },
+            );
         let root = div()
             .relative()
             .flex()

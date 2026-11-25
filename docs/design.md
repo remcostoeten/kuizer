@@ -342,7 +342,8 @@ The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI 
 | `/` | Filter by path or rule. Enter applies and Esc clears |
 | `c` | Cycle the category filter |
 | `f` | Toggle the safe-only filter |
-| `x` | Clear all filters |
+| `x` | Always exclude the path under the cursor in config, after an inline confirmation |
+| `X` | Clear all filters |
 | Esc | Back out one level: a dialog, the search, the filters, then the selection. It never quits |
 | `s` | Cycle sort by size, path, or category |
 | `p` | Switch between grouping by rule and grouping by project |

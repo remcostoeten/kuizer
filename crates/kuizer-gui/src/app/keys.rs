@@ -252,7 +252,10 @@ impl Kuizer {
     pub(super) fn mode(&self) -> Mode {
         if self.menu.is_some() {
             Mode::Menu
-        } else if matches!(self.dialog, Some(Dialog::Branches { .. })) {
+        } else if matches!(
+            self.dialog,
+            Some(Dialog::Branches { .. } | Dialog::Exclude { .. })
+        ) {
             Mode::Confirm
         } else if self.settings.is_some() {
             self.settings_mode()
@@ -497,6 +500,18 @@ impl Kuizer {
                 Some(Key::Confirm) => {
                     if !repeat {
                         self.accept_branches(cx);
+                    }
+                    return;
+                }
+                _ => return,
+            },
+            Some(Dialog::Exclude { cancel, .. }) => match action {
+                Some(Key::Back) => self.close_exclude(cx),
+                Some(Key::DialogToggle) => *cancel = !*cancel,
+                Some(Key::Confirm) if *cancel => self.close_exclude(cx),
+                Some(Key::Confirm) => {
+                    if !repeat {
+                        self.accept_exclude(cx);
                     }
                     return;
                 }

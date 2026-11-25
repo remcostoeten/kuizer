@@ -11,12 +11,14 @@ pub fn run(
     paths: Vec<PathBuf>,
     confirm: bool,
     notice: Option<String>,
+    config_path: Option<PathBuf>,
 ) -> Result<(), AppError> {
     let roots = scan::normalize_roots(&resolve_roots(config, paths)?);
-    Ok(tui::run_with_notice(
+    Ok(tui::run_with_config(
         config,
         &roots,
         confirm || config.delete.confirm,
         notice,
+        config_path,
     )?)
 }

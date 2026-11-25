@@ -170,12 +170,14 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         return Err(AppError::ScopeRejected(rejected.join(", ")));
     }
     match cli.command {
-        None if !json && interactive() => ui::run(
-            &loaded.config,
-            cli.paths,
-            cli.confirm,
-            config_notice(&loaded),
-        ),
+        None if !json && interactive() => {
+            let notice = config_notice(&loaded);
+            let config_path = cli
+                .config
+                .or(loaded.source)
+                .or_else(crate::config::default_path);
+            ui::run(&loaded.config, cli.paths, cli.confirm, notice, config_path)
+        }
         None => {
             let args = ScanArgs {
                 paths: cli.paths,

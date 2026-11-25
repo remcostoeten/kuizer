@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -303,12 +304,15 @@ fn item_row(item: &Item, largest: u64, path_width: usize) -> TableRow<'static> {
     let mark = match (&item.status, item.selected) {
         (Status::Deleted, _) => "  ✓",
         (Status::Deleting, _) => "  …",
+        (Status::Excluded, _) => "  ×",
         (Status::Failed(_), _) => "  !",
         (Status::Ready, true) => "[x]",
         (Status::Ready, false) => "[ ]",
     };
     let style = match (&item.status, candidate.rule.safety) {
-        (Status::Deleted, _) => Style::new().fg(FAINT).add_modifier(Modifier::CROSSED_OUT),
+        (Status::Deleted | Status::Excluded, _) => {
+            Style::new().fg(FAINT).add_modifier(Modifier::CROSSED_OUT)
+        }
         (Status::Deleting | Status::Failed(_), _) => Style::new().fg(MUTED),
         (Status::Ready, _) if item.selected => Style::new().bg(SELECTED),
         (Status::Ready, _) => Style::new(),
@@ -802,7 +806,10 @@ fn key_hints(app: &App, scope: Scope, hints: &[(Action, &str)]) -> Vec<Span<'sta
 
 fn mode_chip(app: &App) -> Span<'static> {
     let (label, fill) = match app.overlay {
-        Overlay::Confirm { .. } | Overlay::Branches { .. } | Overlay::Quit => ("Confirm", WARNING),
+        Overlay::Confirm { .. }
+        | Overlay::Branches { .. }
+        | Overlay::Exclude { .. }
+        | Overlay::Quit => ("Confirm", WARNING),
         Overlay::Help => ("Help", MUTED),
         Overlay::None if app.filtering => ("Filter", MUTED),
         Overlay::None => ("Normal", MUTED),
@@ -814,6 +821,47 @@ fn mode_chip(app: &App) -> Span<'static> {
             .bg(fill)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+fn exclude_prompt(app: &App, path: &Path, pattern: &str, confirm: bool) -> Line<'static> {
+    let cancel_style = if !confirm {
+        Style::new()
+            .fg(ON_FILL)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    let exclude_style = if confirm {
+        Style::new()
+            .fg(ON_FILL)
+            .bg(WARNING)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    let shown = display_path(path);
+    let mut spans = vec![
+        mode_chip(app),
+        Span::styled(
+            format!(" Exclude {shown} (adds {pattern} to scan.exclude)? "),
+            Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel ", cancel_style),
+        Span::raw(" "),
+        Span::styled(" Exclude ", exclude_style),
+        Span::raw("  "),
+    ];
+    spans.extend(key_hints(
+        app,
+        Scope::TuiConfirm,
+        &[
+            (Action::DialogToggle, "switch"),
+            (Action::Confirm, "accept"),
+            (Action::Cancel, "cancel"),
+        ],
+    ));
+    Line::from(spans)
 }
 
 fn quit_prompt(app: &App) -> Line<'static> {
@@ -852,6 +900,14 @@ fn quit_prompt(app: &App) -> Line<'static> {
 fn footer(app: &App) -> Line<'static> {
     if app.overlay == Overlay::Quit {
         return quit_prompt(app);
+    }
+    if let Overlay::Exclude {
+        path,
+        pattern,
+        confirm,
+    } = &app.overlay
+    {
+        return exclude_prompt(app, path, pattern, *confirm);
     }
     if app.filtering {
         let mut spans = vec![mode_chip(app), Span::raw(format!(" {}█   ", app.filter))];
@@ -1342,6 +1398,7 @@ const HELP_RIGHT: [HelpSection; 4] = {
             &[
                 (&[DeleteCursor], "delete selection or cursor item"),
                 (&[Delete], "delete selection"),
+                (&[Exclude], "always exclude row in config"),
                 (&[CycleSort], "cycle sort: size, path, category"),
                 (&[Group], "group by rule or project"),
                 (&[Back], "back: search, filter, selection"),
@@ -1476,7 +1533,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Overlay::Branches { scope, delete } => branches(frame, app, scope, *delete),
         Overlay::Help => help(frame, app),
-        Overlay::None | Overlay::Quit => {}
+        Overlay::None | Overlay::Quit | Overlay::Exclude { .. } => {}
     }
 }
 

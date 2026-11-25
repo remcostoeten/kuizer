@@ -421,7 +421,7 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong());
         let body = match dialog {
-            Dialog::Branches { .. } => return None,
+            Dialog::Branches { .. } | Dialog::Exclude { .. } => return None,
             Dialog::Finished(finished) => panel
                 .child(
                     div()

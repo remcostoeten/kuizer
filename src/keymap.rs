@@ -167,7 +167,7 @@ actions! {
     ResetZoom => "zoom.reset", Gui: ["secondary-0"];
     Sidebar => "sidebar.toggle", Gui: ["secondary-b"];
     Restore => "history.restore", Gui: ["r"];
-    Exclude => "file.exclude", Gui: ["x"];
+    Exclude => "file.exclude", Gui: ["x"], Tui: ["x"];
     CopyCommand => "history.copy_command", Gui: ["shift-y"];
     Back => "nav.back", GuiBack: ["escape"], Control: ["escape"], Palette: ["escape"], GuiFilter: ["escape"], Settings: ["escape"], PathEditor: ["escape"], Dialog: ["escape"], Tui: ["escape"], TuiFilter: ["escape"];
     MapIn => "map.open", Map: ["enter"];
@@ -228,7 +228,7 @@ actions! {
     SelectProject => "select.project", Tui: ["P"];
     Category => "filter.category", Tui: ["c"];
     SafeOnly => "filter.safe_only", Tui: ["f"];
-    ResetFilters => "filter.reset", Tui: ["x"];
+    ResetFilters => "filter.reset", Tui: ["X"];
     Cancel => "confirm.cancel", TuiConfirm: ["n", "escape"];
     QuitAccept => "quit.accept", TuiQuit: ["y", "enter"];
     QuitCancel => "quit.cancel", TuiQuit: ["n", "escape"];

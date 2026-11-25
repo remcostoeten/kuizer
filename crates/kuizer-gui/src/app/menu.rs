@@ -1,4 +1,12 @@
+use gpui::{Animation, AnimationExt};
+
 use super::*;
+
+pub(super) struct Leaving {
+    path: PathBuf,
+    pattern: String,
+    at: Instant,
+}
 
 impl Choice {
     fn binding(self) -> Key {
@@ -245,7 +253,7 @@ impl Kuizer {
             }
             (Choice::Exclude, _) => {
                 if let Some(path) = path {
-                    self.exclude(path, cx);
+                    self.ask_exclude(path, cx);
                 }
             }
             (Choice::Toggle, Target::Item(source, id, _)) => self.toggle(source, id, cx),
@@ -282,6 +290,184 @@ impl Kuizer {
             }
         })
         .detach();
+    }
+
+    /// Opens the inline confirmation that shows the pattern to add to `scan.exclude`, with
+    /// focus on Cancel so a held key or immediate Enter changes nothing.
+    pub(super) fn ask_exclude(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let shown = self.shown_path(&path);
+        if self.config_path.is_none() {
+            self.tell(
+                Notice::Failed(format!(
+                    "Could not exclude {shown}: this system has no config folder"
+                )),
+                cx,
+            );
+            return;
+        }
+        if self.excluding.contains(&path) {
+            return;
+        }
+        let pattern = kuizer::config::exclude_pattern(&path);
+        self.menu = None;
+        self.dialog = Some(Dialog::Exclude {
+            path,
+            pattern,
+            cancel: true,
+        });
+        cx.notify();
+    }
+
+    /// Closes the exclude confirmation without changing the config file.
+    pub(super) fn close_exclude(&mut self, cx: &mut Context<Self>) {
+        if let Some(Dialog::Exclude { path, pattern, .. }) = self.dialog.take() {
+            self.leave_exclude(path, pattern, cx);
+        }
+        cx.notify();
+    }
+
+    fn leave_exclude(&mut self, path: PathBuf, pattern: String, cx: &mut Context<Self>) {
+        if motion::reduced() {
+            return;
+        }
+        let at = Instant::now();
+        self.exclude_leaving = Some(Leaving { path, pattern, at });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(motion::STEP).await;
+            let _ = this.update(cx, |app, cx| {
+                if app
+                    .exclude_leaving
+                    .as_ref()
+                    .is_some_and(|leaving| leaving.at == at)
+                {
+                    app.exclude_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn accept_exclude(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::Exclude { path, pattern, .. }) = self.dialog.take() else {
+            return;
+        };
+        self.leave_exclude(path.clone(), pattern, cx);
+        self.exclude(path, cx);
+    }
+
+    /// The inline confirmation before adding a path to `scan.exclude`, floating over the
+    /// bottom of the list like the selection summary.
+    pub(super) fn render_exclude_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (path, pattern, focus) = match (&self.dialog, &self.exclude_leaving) {
+            (
+                Some(Dialog::Exclude {
+                    path,
+                    pattern,
+                    cancel,
+                }),
+                _,
+            ) => (path, pattern, Some(*cancel)),
+            (_, Some(leaving)) => (&leaving.path, &leaving.pattern, None),
+            _ => return None,
+        };
+        let bar = self.exclude_bar(path, pattern, focus, cx);
+        if motion::reduced() {
+            return Some(bar.into_any_element());
+        }
+        let open = focus.is_some();
+        Some(
+            bar.with_animation(
+                if open {
+                    "exclude-confirm-in"
+                } else {
+                    "exclude-confirm-out"
+                },
+                Animation::new(motion::STEP).with_easing(motion::ease_out),
+                move |bar, progress| {
+                    let shown = if open { progress } else { 1.0 - progress };
+                    bar.opacity(shown)
+                        .relative()
+                        .top(unit(space::M * (1.0 - shown)))
+                },
+            )
+            .into_any_element(),
+        )
+    }
+
+    fn exclude_bar(
+        &self,
+        path: &Path,
+        pattern: &str,
+        focus: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let ring = || ring::outline(None, Rc::new(Cell::new(false)));
+        let open = focus.is_some();
+        let shown = self.shown_path(path);
+        clean::floating(div().id("exclude-confirm"))
+            .debug_selector(|| "exclude-confirm".to_owned())
+            .flex()
+            .flex_col()
+            .gap(unit(space::M))
+            .w(unit(size::SUMMARY))
+            .max_w_full()
+            .p(unit(space::L))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(format!("Always exclude {shown}?")),
+            )
+            .child(
+                div()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::muted())
+                    .child(format!(
+                        "Adds {pattern} to scan.exclude in the config file so future scans skip it."
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(unit(space::M))
+                    .child(
+                        ui::button("exclude-cancel", "Cancel", ButtonKind::Secondary, open)
+                            .debug_selector(|| "cancel-exclude".to_owned())
+                            .tip(
+                                Tooltip::new("Keep scanning this path")
+                                    .keys(&[&self.key_hint(Scope::Dialog, Key::Back)])
+                                    .build(),
+                            )
+                            .when(focus == Some(true), |this| this.child(ring()))
+                            .when(open, |this| {
+                                this.on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                    app.close_exclude(cx);
+                                }))
+                            }),
+                    )
+                    .child(
+                        ui::button(
+                            "exclude-accept",
+                            "Always exclude",
+                            ButtonKind::Primary,
+                            open,
+                        )
+                        .debug_selector(|| "confirm-exclude".to_owned())
+                        .tip(
+                            Tooltip::new("Add this pattern to scan.exclude")
+                                .keys(&[&self.key_hint(Scope::Dialog, Key::Confirm)])
+                                .build(),
+                        )
+                        .when(focus == Some(false), |this| this.child(ring()))
+                        .when(open, |this| {
+                            this.on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                app.accept_exclude(cx);
+                            }))
+                        }),
+                    ),
+            )
     }
 
     /// Adds the path to `scan.exclude` in the config file, so no later scan shows it, and
