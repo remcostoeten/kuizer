@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,15 +13,17 @@ use crate::units::ByteSize;
 
 pub mod restore;
 mod state;
+mod store;
 mod stored_path;
 
 pub use state::{
     ItemState, Restored, TrashSnapshot, TrashState, TrashView, freed_bytes, item_state, restorable,
     still_in_trash,
 };
-
-const FILE_NAME: &str = ".kuizer-history.json";
-const LEGACY_FILE_NAME: &str = ".sweep-history.json";
+pub use store::{
+    DEFAULT_MAX_BYTES, PruneOptions, PruneReport, default_path, load, prune, prune_default,
+    readable_path_in, write_path,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -454,162 +455,20 @@ pub fn match_trash(
         .collect()
 }
 
-/// @name default_path
-/// @description Returns the history file to read: `~/.kuizer-history.json`, or the legacy
-/// `~/.sweep-history.json` while only that one exists.
-///
-/// @example
-/// let path = history::default_path()?;
-pub fn default_path() -> Result<PathBuf, HistoryError> {
-    dirs::home_dir()
-        .map(|home| readable_path_in(&home))
-        .ok_or(HistoryError::NoHome)
-}
-
-/// @name readable_path_in
-/// @description Picks the history file to read inside `home`, falling back to the legacy
-/// `.sweep-history.json` when `.kuizer-history.json` does not exist yet.
-///
-/// @example
-/// let path = history::readable_path_in(&home);
-pub fn readable_path_in(home: &Path) -> PathBuf {
-    let current = home.join(FILE_NAME);
-    let legacy = home.join(LEGACY_FILE_NAME);
-    if !current.exists() && legacy.is_file() {
-        legacy
-    } else {
-        current
-    }
-}
-
-/// @name load
-/// @description Reads the history file, returning an empty history when it does not exist yet.
-///
-/// @example
-/// let history = history::load(&history::default_path()?)?;
-pub fn load(path: &Path) -> Result<History, HistoryError> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(History::default()),
-        Err(source) => {
-            return Err(HistoryError::Read {
-                path: path.to_owned(),
-                source,
-            });
-        }
-    };
-    let mut history: History =
-        serde_json::from_str(&text).map_err(|source| HistoryError::Parse {
-            path: path.to_owned(),
-            source,
-        })?;
-    history.assign_ids();
-    Ok(history)
-}
-
 /// @name append
-/// @description Reads the history at `source`, adds a run, recomputes the cumulative totals and
-/// writes the result atomically to `target` through a temporary sibling, holding a lock so two
-/// kuizer processes never drop each other's runs. `source` is never modified when it differs
-/// from `target`.
+/// @description Reads the history at `source` if migrating, allocates the next session id, and
+/// appends one JSONL run record to `path`, holding a lock so two kuizer processes never drop each
+/// other's runs. `source` is never modified when it differs from `path`.
 ///
 /// @example
 /// history::append(&source, &target, Run::new(started_at, &roots, entries))?;
 pub fn append(source: &Path, path: &Path, run: Run) -> Result<u64, HistoryError> {
-    update(source, path, |history| {
-        let mut run = run;
-        run.id = history.next_session;
-        history.next_session += 1;
-        history.runs.push(run);
-        history.next_session - 1
-    })
-}
-
-fn update<T>(
-    source: &Path,
-    path: &Path,
-    change: impl FnOnce(&mut History) -> T,
-) -> Result<T, HistoryError> {
-    let write_error = |source| HistoryError::Write {
-        path: path.to_owned(),
-        source,
-    };
-    let _lock = Lock::acquire(path).map_err(write_error)?;
-    let mut history = load_for_update(source, path)?;
-    history.assign_ids();
-    let result = change(&mut history);
-    history.recompute();
-    write(path, &history).map_err(write_error)?;
-    Ok(result)
-}
-
-fn load_for_update(source: &Path, target: &Path) -> Result<History, HistoryError> {
-    match load(source) {
-        Err(error @ HistoryError::Parse { .. }) => {
-            if source == target && !set_aside(source) {
-                return Err(error);
-            }
-            Ok(History::default())
-        }
-        other => other,
-    }
-}
-
-fn set_aside(path: &Path) -> bool {
-    let seconds = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    fs::rename(path, path.with_extension(format!("json.corrupt-{seconds}"))).is_ok()
-}
-
-fn write(path: &Path, history: &History) -> io::Result<()> {
-    let mut text = serde_json::to_string(history).map_err(io::Error::other)?;
-    text.push('\n');
-    crate::platform::write_atomic(path, text.as_bytes())
-}
-
-struct Lock {
-    _file: fs::File,
-}
-
-impl Lock {
-    fn acquire(path: &Path) -> io::Result<Self> {
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path.with_extension("json.lock"))?;
-        #[cfg(unix)]
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
-        Ok(Self { _file: file })
-    }
+    store::append_with_cap(source, path, run, DEFAULT_MAX_BYTES, false)
 }
 
 const FLUSH_AFTER: Duration = Duration::from_millis(100);
 const FLUSH_AFTER_MAX: Duration = Duration::from_secs(5);
 const WRITE_SHARE: u32 = 20;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    identity: u64,
-    length: u64,
-    modified: Option<SystemTime>,
-}
-
-impl Stamp {
-    fn of(path: &Path) -> Option<Self> {
-        let metadata = fs::metadata(path).ok()?;
-        #[cfg(unix)]
-        let identity = std::os::unix::fs::MetadataExt::ino(&metadata);
-        #[cfg(not(unix))]
-        let identity = 0;
-        Some(Self {
-            identity,
-            length: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
-    }
-}
 
 struct Queue {
     pending: Vec<Entry>,
@@ -628,67 +487,9 @@ impl Queue {
     }
 }
 
-struct Store {
-    source: PathBuf,
-    target: PathBuf,
-    started_at: String,
-    roots: Vec<PathBuf>,
-    written: Option<(History, Stamp)>,
-}
-
-impl Store {
-    fn write(&mut self, entries: &[Entry], session: Option<u64>) -> Result<u64, HistoryError> {
-        let write_error = |source| HistoryError::Write {
-            path: self.target.clone(),
-            source,
-        };
-        let _lock = Lock::acquire(&self.target).map_err(write_error)?;
-        let current = Stamp::of(&self.target);
-        let reusable = self
-            .written
-            .take()
-            .filter(|(_, stamp)| Some(*stamp) == current)
-            .map(|(history, _)| history);
-        let mut history = match reusable {
-            Some(history) => history,
-            None => {
-                let source = if session.is_some() {
-                    &self.target
-                } else {
-                    &self.source
-                };
-                let mut history = load_for_update(source, &self.target)?;
-                history.assign_ids();
-                history
-            }
-        };
-        let open =
-            session.and_then(|session| history.runs.iter_mut().rev().find(|run| run.id == session));
-        let session = match open {
-            Some(run) => {
-                run.deleted.extend_from_slice(entries);
-                run.total = Total::of(&run.deleted);
-                run.finished_at = now();
-                run.id
-            }
-            None => {
-                let mut run = Run::new(self.started_at.clone(), &self.roots, entries.to_vec());
-                run.id = history.next_session;
-                history.next_session += 1;
-                history.runs.push(run);
-                history.next_session - 1
-            }
-        };
-        history.recompute();
-        write(&self.target, &history).map_err(write_error)?;
-        self.written = Stamp::of(&self.target).map(|stamp| (history, stamp));
-        Ok(session)
-    }
-}
-
 struct Shared {
     queue: Mutex<Queue>,
-    store: Mutex<Store>,
+    store: Mutex<store::Store>,
     wake: Condvar,
 }
 
@@ -767,30 +568,40 @@ impl Recorder {
     /// @example
     /// let mut recorder = Recorder::for_user(history::now(), &roots);
     pub fn for_user(started_at: String, roots: &[PathBuf]) -> Self {
-        let home = dirs::home_dir();
-        let recorder = Self::at(
-            home.as_deref().map(readable_path_in).unwrap_or_default(),
-            home.map(|home| home.join(FILE_NAME)).unwrap_or_default(),
+        let paths = store::write_path()
+            .ok()
+            .zip(dirs::home_dir())
+            .map(|(target, home)| (store::readable_path_for(&target, &home), target));
+        let (source, target, has_home) = match paths {
+            Some((source, target)) => (source, target, true),
+            None => (PathBuf::new(), PathBuf::new(), false),
+        };
+        let recorder = Self::with_options(
+            source,
+            target,
             started_at,
             roots,
+            DEFAULT_MAX_BYTES,
+            has_home,
         );
-        {
-            let no_home = recorder
-                .shared
-                .store
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .target
-                .as_os_str()
-                .is_empty();
-            if no_home {
-                recorder.shared.queue().error = Some(HistoryError::NoHome);
-            }
+        if !has_home {
+            recorder.shared.queue().error = Some(HistoryError::NoHome);
         }
         recorder
     }
 
     pub fn at(source: PathBuf, target: PathBuf, started_at: String, roots: &[PathBuf]) -> Self {
+        Self::with_options(source, target, started_at, roots, DEFAULT_MAX_BYTES, false)
+    }
+
+    fn with_options(
+        source: PathBuf,
+        target: PathBuf,
+        started_at: String,
+        roots: &[PathBuf],
+        max_bytes: u64,
+        create_parent: bool,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 queue: Mutex::new(Queue {
@@ -801,12 +612,15 @@ impl Recorder {
                     write_cost: Duration::ZERO,
                     closed: false,
                 }),
-                store: Mutex::new(Store {
+                store: Mutex::new(store::Store {
                     source,
                     target,
                     started_at,
                     roots: roots.to_vec(),
-                    written: None,
+                    max_bytes,
+                    create_parent,
+                    written_stamp: None,
+                    active_run: None,
                 }),
                 wake: Condvar::new(),
             }),
@@ -816,9 +630,9 @@ impl Recorder {
 
     /// @name add
     /// @description Queues one removed entry for the history file. The first entry opens the run
-    /// and is written straight away. Later entries are written together by a background thread
-    /// once the oldest has waited 100 ms, or longer when writing the file is slow so that writing
-    /// takes at most about a twentieth of the time, and always by `flush`, `finish` and drop, so an
+    /// and is written straight away. Later entries are appended by a background thread once the
+    /// oldest has waited 100 ms, or longer when writing the file is slow so that writing takes at
+    /// most about a twentieth of the time, and always by `flush`, `finish` and drop, so an
     /// interrupted run leaves a record that `kuizer restore` can use. Adding never waits for a
     /// write except for the first entry. The first write error is kept for `finish`.
     ///
@@ -882,18 +696,20 @@ impl Recorder {
         let Some(session) = self.shared.queue().session else {
             return Ok(None);
         };
-        let (written, target) = {
+        let (active_run, target) = {
             let mut store = self
                 .shared
                 .store
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            (store.written.take(), store.target.clone())
+            (store.active_run.take(), store.target.clone())
         };
-        let history = match written {
-            Some((history, _)) => history,
-            None => load(&target)?,
-        };
+        if let Some(run) = active_run
+            && run.id == session
+        {
+            return Ok(Some(run));
+        }
+        let history = load(&target)?;
         Ok(history.runs.into_iter().rev().find(|run| run.id == session))
     }
 }
@@ -919,13 +735,19 @@ pub fn record(run: Run) -> Result<(), HistoryError> {
 }
 
 fn record_session(run: Run) -> Result<u64, HistoryError> {
+    let target = store::write_path()?;
     let home = dirs::home_dir().ok_or(HistoryError::NoHome)?;
-    append(&readable_path_in(&home), &home.join(FILE_NAME), run)
+    let source = store::readable_path_for(&target, &home);
+    store::append_with_cap(&source, &target, run, DEFAULT_MAX_BYTES, true)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    const FILE_NAME: &str = store::STATE_FILE_NAME;
 
     fn entry(bytes: u64) -> Entry {
         Entry {
@@ -976,7 +798,11 @@ mod tests {
         assert_eq!(history.cumulative.bytes, (1 << 30) + (2 << 20));
 
         let text = fs::read_to_string(&path).expect("read");
-        assert!(text.find("\"runs\"") < text.find("\"cumulative\""));
+        assert_eq!(text.lines().count(), 2);
+        for line in text.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
+            assert_eq!(value["type"], "run");
+        }
     }
 
     #[test]
@@ -1125,22 +951,38 @@ mod tests {
     #[test]
     fn reads_legacy_history_and_writes_the_new_file() {
         let home = tempfile::tempdir().expect("tempdir");
-        let legacy = home.path().join(LEGACY_FILE_NAME);
-        let current = home.path().join(FILE_NAME);
+        let legacy_sweep = home.path().join(store::LEGACY_SWEEP_FILE);
+        let legacy_kuizer = home.path().join(store::LEGACY_KUIZER_FILE);
+        let current = store::state_path_in(home.path());
         assert_eq!(readable_path_in(home.path()), current);
 
-        append(&legacy, &legacy, Run::new(now(), &[], vec![entry(1)])).expect("legacy");
-        assert_eq!(readable_path_in(home.path()), legacy);
+        append(
+            &legacy_sweep,
+            &legacy_sweep,
+            Run::new(now(), &[], vec![entry(1)]),
+        )
+        .expect("legacy sweep");
+        assert_eq!(readable_path_in(home.path()), legacy_sweep);
 
         append(
+            &legacy_kuizer,
+            &legacy_kuizer,
+            Run::new(now(), &[], vec![entry(2)]),
+        )
+        .expect("legacy kuizer");
+        assert_eq!(readable_path_in(home.path()), legacy_kuizer);
+
+        store::append_with_cap(
             &readable_path_in(home.path()),
             &current,
-            Run::new(now(), &[], vec![entry(2)]),
+            Run::new(now(), &[], vec![entry(3)]),
+            DEFAULT_MAX_BYTES,
+            true,
         )
         .expect("migrate");
         assert_eq!(readable_path_in(home.path()), current);
         assert_eq!(load(&current).expect("current").runs.len(), 2);
-        assert_eq!(load(&legacy).expect("legacy kept").runs.len(), 1);
+        assert_eq!(load(&legacy_kuizer).expect("legacy kept").runs.len(), 1);
     }
 
     #[test]
@@ -1348,5 +1190,124 @@ mod tests {
 
         assert_eq!(record.deleted_at, Some(wall));
         assert_eq!(TrashRecord::new(PathBuf::from("/w/a"), -1).deleted_at, None);
+    }
+
+    #[test]
+    fn append_only_keeps_file_inode_and_appends_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        append(&path, &path, Run::new(now(), &[], vec![entry(1)])).expect("first");
+        #[cfg(unix)]
+        let inode_before = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).expect("meta"));
+        let len_before = fs::metadata(&path).expect("meta").len();
+
+        let mut recorder = Recorder::at(path.clone(), path.clone(), now(), &[]);
+        recorder.add(entry(2));
+        recorder.add(entry(3));
+        recorder.flush();
+        recorder.add(entry(4));
+        recorder.finish().expect("finish");
+
+        #[cfg(unix)]
+        let inode_after = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).expect("meta"));
+        let len_after = fs::metadata(&path).expect("meta").len();
+        #[cfg(unix)]
+        assert_eq!(inode_before, inode_after);
+        assert!(len_after > len_before);
+
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.lines().count() >= 3);
+        let history = load(&path).expect("load");
+        assert_eq!(history.runs.len(), 2);
+        assert_eq!(history.runs[1].deleted.len(), 3);
+        assert_eq!(history.runs[1].total.bytes, 9);
+    }
+
+    #[test]
+    fn automatic_compaction_caps_file_size_and_keeps_newest_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let cap = 900;
+        for idx in 1..=6u64 {
+            let mut item = entry(idx * 10);
+            item.path = PathBuf::from(format!("/tmp/project-{idx}/node_modules"));
+            store::append_with_cap(&path, &path, Run::new(now(), &[], vec![item]), cap, false)
+                .expect("append");
+        }
+        let len = fs::metadata(&path).expect("meta").len();
+        assert!(len <= cap, "expected compacted file <= {cap}, got {len}");
+        let history = load(&path).expect("load");
+        assert!(!history.runs.is_empty());
+        assert!(history.runs.len() < 6);
+        assert_eq!(history.runs.last().expect("newest").id, 6);
+        assert_eq!(history.next_session, 7);
+    }
+
+    #[test]
+    fn prune_trims_by_keep_age_and_size_without_reusing_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        let mut old_run = Run::new(
+            "2020-01-01T00:00:00Z".to_owned(),
+            &[],
+            vec![entry_at("/tmp/old", "2020-01-01T00:00:00Z")],
+        );
+        old_run.finished_at = "2020-01-01T00:00:05Z".to_owned();
+        append(&path, &path, old_run).expect("r1");
+        append(&path, &path, Run::new(now(), &[], vec![entry(20)])).expect("r2");
+        append(&path, &path, Run::new(now(), &[], vec![entry(30)])).expect("r3");
+
+        let dry = prune(
+            &path,
+            &path,
+            &PruneOptions {
+                older_than: Some(Duration::from_secs(30 * 86_400)),
+                dry_run: true,
+                ..PruneOptions::default()
+            },
+        )
+        .expect("dry prune");
+        assert!(dry.dry_run);
+        assert_eq!(dry.pruned_runs, 1);
+        assert_eq!(dry.kept_runs, 2);
+        assert_eq!(load(&path).expect("unchanged").runs.len(), 3);
+
+        let report = prune(
+            &path,
+            &path,
+            &PruneOptions {
+                older_than: Some(Duration::from_secs(30 * 86_400)),
+                keep: Some(1),
+                ..PruneOptions::default()
+            },
+        )
+        .expect("prune");
+        assert_eq!(report.pruned_runs, 2);
+        assert_eq!(report.kept_runs, 1);
+        let kept = load(&path).expect("load");
+        assert_eq!(kept.runs.len(), 1);
+        assert_eq!(kept.runs[0].id, 3);
+        assert_eq!(kept.next_session, 4);
+
+        let empty = prune(
+            &path,
+            &path,
+            &PruneOptions {
+                keep: Some(0),
+                ..PruneOptions::default()
+            },
+        )
+        .expect("prune all");
+        assert_eq!(empty.pruned_runs, 1);
+        assert_eq!(empty.kept_runs, 0);
+        let after = load(&path).expect("load empty");
+        assert!(after.runs.is_empty());
+        assert_eq!(after.next_session, 4);
+
+        append(&path, &path, Run::new(now(), &[], vec![entry(40)])).expect("r4");
+        let resumed = load(&path).expect("resumed");
+        assert_eq!(resumed.runs.len(), 1);
+        assert_eq!(resumed.runs[0].session(), "s4");
     }
 }

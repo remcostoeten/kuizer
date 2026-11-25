@@ -22,6 +22,7 @@ fn scan(home: &Path, root: &Path) -> Vec<(String, String)> {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()

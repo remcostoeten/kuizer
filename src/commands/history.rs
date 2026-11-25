@@ -1,8 +1,10 @@
 use serde::Serialize;
 
 use super::AppError;
-use crate::cli::{HistoryAction, HistoryArgs};
-use crate::history::{self, Action, Entry, History, Run, Total, TrashSnapshot, TrashState};
+use crate::cli::{HistoryAction, HistoryArgs, HistoryPruneArgs};
+use crate::history::{
+    self, Action, Entry, History, PruneOptions, Run, Total, TrashSnapshot, TrashState,
+};
 use crate::output;
 use crate::units::ByteSize;
 
@@ -31,6 +33,9 @@ struct ShowReport<'a> {
 }
 
 pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
+    if let Some(HistoryAction::Prune(prune_args)) = args.command {
+        return prune(prune_args, json);
+    }
     let path = history::default_path()?;
     let history = history::load(&path)?;
     if history.runs.is_empty() && !json && args.command.is_none() {
@@ -172,5 +177,44 @@ fn show(history: &History, trash: &TrashSnapshot, id: &str, json: bool) -> Resul
             output::display_path(&item.entry.path)
         );
     }
+    Ok(())
+}
+
+fn prune(args: HistoryPruneArgs, json: bool) -> Result<(), AppError> {
+    let options = PruneOptions {
+        keep: args.keep,
+        older_than: args.older_than.map(|age| age.0),
+        max_bytes: args.max_size.map(|size| size.0),
+        dry_run: args.dry_run,
+    };
+    let report = history::prune_default(&options)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.dry_run {
+        println!(
+            "would prune {} runs, keeping {} ({} -> {})",
+            report.pruned_runs,
+            report.kept_runs,
+            ByteSize(report.bytes_before),
+            ByteSize(report.bytes_after),
+        );
+    } else if report.pruned_runs == 0 && report.bytes_after == report.bytes_before {
+        println!(
+            "nothing to prune ({} runs, {})",
+            report.kept_runs,
+            ByteSize(report.bytes_after),
+        );
+    } else {
+        println!(
+            "pruned {} runs, kept {} ({} -> {})",
+            report.pruned_runs,
+            report.kept_runs,
+            ByteSize(report.bytes_before),
+            ByteSize(report.bytes_after),
+        );
+    }
+    println!("{}", report.path.display());
     Ok(())
 }

@@ -20,6 +20,7 @@ fn kuizer(home: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()
@@ -37,6 +38,7 @@ fn setup() -> (TempDir, PathBuf, PathBuf) {
     let home = base.join("home");
     let root = base.join("work");
     fs::create_dir_all(home.join(".local/share")).unwrap();
+    fs::create_dir_all(home.join(".local/state/kuizer")).unwrap();
     file(&root, "web/package.json", 2);
     file(&root, "web/node_modules/react/index.js", 100);
     file(&root, "web/dist/app.js", 100);
@@ -49,9 +51,10 @@ fn clean_all(home: &Path, root: &Path) {
     let trash = home.join(".local/share/Trash");
     fs::create_dir_all(trash.join("files")).unwrap();
     fs::create_dir_all(trash.join("info")).unwrap();
+    let history_path = home.join(".local/state/kuizer/history.jsonl");
     let mut recorder = Recorder::at(
-        home.join(".kuizer-history.json"),
-        home.join(".kuizer-history.json"),
+        history_path.clone(),
+        history_path,
         history::now(),
         &[root.to_path_buf()],
     );

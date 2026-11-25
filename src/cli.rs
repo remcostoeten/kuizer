@@ -343,6 +343,11 @@ fn history_examples() -> String {
     examples(&[
         ("kuizer history", "", "List past runs with their ids"),
         ("kuizer history", "show s4", "Every item of run s4"),
+        (
+            "kuizer history",
+            "prune --older-than 90d",
+            "Drop runs older than 90 days and compact the file",
+        ),
         ("kuizer --json history", "", "Print the history as JSON"),
     ])
 }
@@ -1105,8 +1110,30 @@ pub enum HistoryAction {
         #[arg(value_name = "RUN", help = "Run id, e.g. s4")]
         run: String,
     },
+    #[command(about = "Trim older runs and compact the history file")]
+    Prune(HistoryPruneArgs),
     #[command(hide = true)]
     Help,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq, Default)]
+pub struct HistoryPruneArgs {
+    #[arg(long, value_name = "N", help = "Keep at most the N newest runs")]
+    pub keep: Option<usize>,
+    #[arg(
+        long,
+        value_name = "AGE",
+        help = "Remove runs older than AGE, e.g. 90d, 6mo or 1y"
+    )]
+    pub older_than: Option<Idle>,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        help = "Trim oldest runs until the history file is at most SIZE [default: 10 MiB]"
+    )]
+    pub max_size: Option<ByteSize>,
+    #[arg(long, help = "Show what would be pruned without changing the file")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args, Default)]

@@ -39,6 +39,17 @@ fn project(root: &Path) {
     file(root, "web/dist/app.js", 100);
 }
 
+fn history_file(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/kuizer/history.jsonl")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.join(".local/state/kuizer/history.jsonl")
+    }
+}
+
 fn kuizer(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_kuizer"))
         .args(args)
@@ -46,6 +57,7 @@ fn kuizer(home: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env_remove("CARGO_HOME")
         .env_remove("BUN_INSTALL")
         .env_remove("GOPATH")
@@ -88,6 +100,7 @@ fn dry_run_touches_nothing() {
     assert!(stdout.contains("node_modules"), "{stdout}");
     assert!(stdout.contains("Dry run, nothing was removed"), "{stdout}");
     assert_eq!(snapshot(&root), before);
+    assert!(!history_file(&home).exists());
     assert!(!home.join(".kuizer-history.json").exists());
 }
 
@@ -226,9 +239,11 @@ fn removes_only_safe_items_by_default_and_records_history() {
     assert!(!root.join("web/node_modules").exists());
     assert!(root.join("web/dist/app.js").exists());
     assert!(root.join("web/src/index.ts").exists());
-    let history = fs::read_to_string(home.join(".kuizer-history.json")).unwrap();
+    let history = fs::read_to_string(history_file(&home)).unwrap();
     assert!(history.contains("node_modules"));
     assert!(!history.contains("dist"));
+    assert!(!home.join(".kuizer-history.json").exists());
+    assert!(!home.join(".kuizer-history.lock").exists());
 }
 
 #[test]
@@ -242,7 +257,7 @@ fn carries_legacy_sweep_history_into_the_new_file() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_text);
-    let history = fs::read_to_string(home.join(".kuizer-history.json")).unwrap();
+    let history = fs::read_to_string(history_file(&home)).unwrap();
     assert!(history.contains("sweep clean"), "{history}");
     assert!(history.contains("node_modules"), "{history}");
 }
@@ -387,4 +402,63 @@ fn cache_clean_subcommand_removes_only_without_a_dry_run() {
     let output = kuizer(&home, &["cache", "clean", "--select", "npm", "-y"]);
     assert!(output.status.success(), "{output:?}");
     assert!(!home.join(".npm/_cacache").exists());
+}
+
+#[test]
+fn carries_legacy_kuizer_history_into_state_file() {
+    let (_tmp, home, root) = setup();
+    let legacy = home.join(".kuizer-history.json");
+    let legacy_text = r#"{"runs":[{"id":1,"started_at":"2026-01-01T00:00:00+00:00","finished_at":"2026-01-01T00:00:01+00:00","command":"kuizer clean old","roots":[],"deleted":[],"total":{"items":0,"bytes":0,"size":"0 B"}}]}"#;
+    fs::write(&legacy, legacy_text).unwrap();
+
+    let output = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_text);
+    assert!(!home.join(".kuizer-history.lock").exists());
+    let history = fs::read_to_string(history_file(&home)).unwrap();
+    assert!(history.contains("kuizer clean old"), "{history}");
+    assert!(history.contains("node_modules"), "{history}");
+}
+
+#[test]
+fn history_prune_cli_trims_and_reports_json() {
+    let (_tmp, home, root) = setup();
+    let first = kuizer(&home, &["clean", root.to_str().unwrap(), "--yes"]);
+    assert!(first.status.success(), "{first:?}");
+    let second = kuizer(
+        &home,
+        &[
+            "clean",
+            root.to_str().unwrap(),
+            "--select",
+            "js-dist",
+            "--yes",
+        ],
+    );
+    assert!(second.status.success(), "{second:?}");
+
+    let dry = kuizer(
+        &home,
+        &["--json", "history", "prune", "--keep", "1", "--dry-run"],
+    );
+    assert!(dry.status.success(), "{dry:?}");
+    let dry_report: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!(dry_report["dry_run"], true);
+    assert_eq!(dry_report["pruned_runs"], 1);
+    assert_eq!(dry_report["kept_runs"], 1);
+
+    let pruned = kuizer(&home, &["--json", "history", "prune", "--keep", "1"]);
+    assert!(pruned.status.success(), "{pruned:?}");
+    let report: serde_json::Value = serde_json::from_slice(&pruned.stdout).unwrap();
+    assert_eq!(report["dry_run"], false);
+    assert_eq!(report["pruned_runs"], 1);
+    assert_eq!(report["kept_runs"], 1);
+
+    let listed = kuizer(&home, &["--json", "history"]);
+    assert!(listed.status.success(), "{listed:?}");
+    let history: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let runs = history["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"], 2);
 }

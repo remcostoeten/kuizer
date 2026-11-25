@@ -239,6 +239,7 @@ kuizer dashboard [PATHS...]               offline HTML overview (or `--json`); `
 
 kuizer history                            sessions with their ids; `insight` is an alias
 kuizer history show SESSION               every item of one session
+kuizer history prune [OPTIONS]            trim old runs and compact the history file
 kuizer restore ID... | --last [--dry-run] put trashed items back
 
 kuizer policy list | show NAME            (planned)

@@ -965,6 +965,7 @@ fn isolated(name: &str) {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
         .env_remove("RUSTUP_HOME")
         .env_remove("NVM_DIR")
         .env_remove("FNM_DIR")
