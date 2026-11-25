@@ -6,6 +6,7 @@ For each release, record the uncompressed sizes of `kuizer` and `kuizer-gui` for
 
 ## [Unreleased]
 
+- Permanent deletion empties read-only folders the user owns, such as the Go module cache, instead of failing on them. Folders owned by another user are still refused.
 - `delete.mode = "trash"` is back as an opt-in, also as a switch in the GUI settings. Deletion stays permanent by default. In trash mode project artifacts and caches go to the trash; toolchains, Docker objects and git branches are still removed for good.
 - GUI: deleting no longer asks. While anything is selected, a floating bar above the status bar sums up the selection (count, size, `review` items, and whether it is deleted for good or moved to the trash) with Clear and Delete. Enter, Delete, `d`, the Delete button and the row menu delete at once; a held key never does.
 - GUI: the Duplicates, History and Issues lists are virtualized like the others and are no longer capped at 200 groups or 500 issues.

@@ -8,8 +8,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, ResolveFlags, fstat, openat, openat2, statat,
-    unlinkat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, ResolveFlags, fchmod, fstat, openat, openat2,
+    statat, unlinkat,
 };
 use rustix::io::Errno;
 
@@ -173,6 +173,7 @@ impl Run {
     }
 
     fn scan<'scope, 'env>(&'scope self, node: &Arc<Node>, scope: Scope<'scope, 'env>) {
+        unlock(&node.fd);
         let dir = node
             .fd
             .try_clone()
@@ -231,6 +232,19 @@ impl Run {
             };
             node = next;
         }
+    }
+}
+
+/// Gives a read-only folder the user owns its write bit back through the open handle, so its
+/// entries can be unlinked. Go makes its module cache read-only, and `go clean -modcache` does
+/// the same. Folders owned by someone else are left as they are and fail on unlink.
+fn unlock(fd: &OwnedFd) {
+    let Ok(stat) = fstat(fd) else {
+        return;
+    };
+    let mode = stat.st_mode & 0o7777;
+    if stat.st_uid == rustix::process::getuid().as_raw() && mode & 0o200 == 0 {
+        let _ = fchmod(fd, Mode::from_raw_mode(mode | 0o200));
     }
 }
 
@@ -393,6 +407,29 @@ mod tests {
 
         assert!(!tree.exists());
         assert!(base.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn read_only_folders_the_user_owns_are_emptied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = tempfile::tempdir().unwrap();
+        let cache = base.path().join("mod");
+        let module = cache.join("gopkg.in").join("yaml.v3@v3.0.1");
+        fs::create_dir_all(module.join(".github")).unwrap();
+        fs::write(module.join("decode_test.go"), "x").unwrap();
+        for locked in [module.join(".github"), module.clone()] {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        fs::set_permissions(
+            module.join("decode_test.go"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+
+        remove(&cache, None, 2, false).unwrap();
+
+        assert!(!cache.exists());
     }
 
     #[test]
