@@ -1,4 +1,6 @@
+pub mod big;
 pub mod caches;
+pub mod catalog;
 #[cfg(feature = "cli")]
 pub(crate) mod cli;
 #[cfg(feature = "cli")]
@@ -21,7 +23,9 @@ pub mod scan;
 pub mod snapshot;
 pub mod source;
 pub mod stats;
+pub mod system;
 pub mod toolchains;
+pub mod trashcan;
 #[cfg(feature = "cli")]
 pub(crate) mod tui;
 pub mod units;

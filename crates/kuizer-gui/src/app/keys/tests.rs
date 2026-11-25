@@ -57,11 +57,15 @@ fn a_list_is_filtered_again_only_when_its_filter_or_the_report_changes(cx: &mut 
             .zip(1..)
             .map(|((name, path), id)| {
                 let cache = kuizer::caches::KnownCache {
-                    name,
-                    tool: name,
+                    name: name.to_owned(),
+                    tool: name.to_owned(),
+                    group: kuizer::catalog::Group::Developer,
+                    category: kuizer::detect::Category::Cache,
+                    kind: kuizer::detect::Kind::Dir,
                     path: PathBuf::from(path),
                     safety: Safety::Safe,
-                    note: "",
+                    note: String::new(),
+                    processes: Vec::new(),
                 };
                 (cache, artifact(id, Path::new(path)))
             })
@@ -544,11 +548,15 @@ fn a_long_cache_list_scrolls_to_the_cursor(cx: &mut TestAppContext) {
             .map(|id| {
                 let path = PathBuf::from(format!("/c/cache-{id}"));
                 let cache = kuizer::caches::KnownCache {
-                    name: "cache",
-                    tool: "tool",
+                    name: "cache".to_owned(),
+                    tool: "tool".to_owned(),
+                    group: kuizer::catalog::Group::Developer,
+                    category: kuizer::detect::Category::Cache,
+                    kind: kuizer::detect::Kind::Dir,
                     path: path.clone(),
                     safety: Safety::Safe,
-                    note: "",
+                    note: String::new(),
+                    processes: Vec::new(),
                 };
                 (cache, artifact(id, &path))
             })

@@ -13,6 +13,9 @@ pub enum Term {
     Build,
     Cache,
     Temp,
+    Logs,
+    TrashContents,
+    PersonalFiles,
     Rule,
     Changed,
     Size,
@@ -58,6 +61,9 @@ impl Term {
             Category::Build => Self::Build,
             Category::Cache => Self::Cache,
             Category::Temp => Self::Temp,
+            Category::Logs => Self::Logs,
+            Category::Trash => Self::TrashContents,
+            Category::Files => Self::PersonalFiles,
         }
     }
 
@@ -74,6 +80,9 @@ impl Term {
             Self::Build => "build",
             Self::Cache => "cache",
             Self::Temp => "temp",
+            Self::Logs => "Logs",
+            Self::TrashContents => "Trash",
+            Self::PersonalFiles => "Personal files",
             Self::Rule => "Rule",
             Self::Changed => "Changed",
             Self::Size => "Size",
@@ -140,6 +149,15 @@ impl Term {
             }
             Self::Temp => {
                 "Scratch folders a tool recreates while it runs, such as the Temp folder of a Unity project."
+            }
+            Self::Logs => {
+                "Files programs write to record what they did, such as crash reports and session logs. Programs start new ones."
+            }
+            Self::TrashContents => {
+                "Items you already moved to the trash. Emptying the trash removes them for good."
+            }
+            Self::PersonalFiles => {
+                "Large or old files of your own, such as installers and disk images in Downloads. Nothing can bring them back, so they are never selected in bulk."
             }
             Self::Rule => {
                 "The detection rule that matched this item. A rule also checks the project around it, so a dist folder only counts next to a package.json."

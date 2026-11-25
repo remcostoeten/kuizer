@@ -51,6 +51,9 @@ pub struct Config {
     pub keys: Overrides,
     pub toolchains: ToolchainConfig,
     pub docker: DockerConfig,
+    pub catalog: crate::catalog::CatalogConfig,
+    pub system: crate::system::SystemConfig,
+    pub big: crate::big::BigConfig,
     pub policy: BTreeMap<String, Policy>,
 }
 
@@ -478,6 +481,13 @@ pub enum ConfigError {
     UnknownDisabled(String),
     #[error("appearance.zoom must be between {MIN_ZOOM} and {MAX_ZOOM}, not {0}")]
     Zoom(u16),
+    #[error("`{category}` cannot be used in {key}, use dependencies, build, cache or temp")]
+    NotARuleCategory {
+        key: &'static str,
+        category: &'static str,
+    },
+    #[error("invalid {key}: {message}")]
+    Invalid { key: String, message: String },
     #[error("policy.{policy}.{field}: {message}")]
     Policy {
         policy: String,
@@ -600,6 +610,22 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        for category in &self.detect.categories {
+            if !category.is_rule_category() {
+                return Err(ConfigError::NotARuleCategory {
+                    key: "detect.categories",
+                    category: category.as_str(),
+                });
+            }
+        }
+        for rule in &self.rules {
+            if !rule.category.is_rule_category() {
+                return Err(ConfigError::NotARuleCategory {
+                    key: "rules",
+                    category: rule.category.as_str(),
+                });
+            }
+        }
         self.detector()?;
         Excludes::new(&self.scan.exclude, &self.scan.exclude_extensions)?;
         if let Some(error) = Keymap::resolve(&self.keys).1.into_iter().next() {
@@ -608,6 +634,9 @@ impl Config {
         if !(MIN_ZOOM..=MAX_ZOOM).contains(&self.appearance.zoom) {
             return Err(ConfigError::Zoom(self.appearance.zoom));
         }
+        self.catalog.validate()?;
+        self.system.validate()?;
+        self.big.validate()?;
         for (name, policy) in &self.policy {
             policy::validate_policy(self, name, policy)?;
         }
@@ -800,6 +829,22 @@ mod tests {
                 safety: Safety::Review,
                 ecosystem: "custom".to_owned(),
             }],
+            catalog: crate::catalog::CatalogConfig {
+                locations: vec![crate::catalog::Entry {
+                    name: "custom-app-cache".to_owned(),
+                    app: "CustomApp".to_owned(),
+                    group: crate::catalog::Group::Apps,
+                    category: Category::Cache,
+                    kind: Kind::Dir,
+                    base: crate::catalog::Base::Cache,
+                    path: "custom-app".to_owned(),
+                    safety: Safety::Review,
+                    platforms: Vec::new(),
+                    processes: Vec::new(),
+                    note: String::new(),
+                }],
+                ..crate::catalog::CatalogConfig::default()
+            },
             ..Config::default()
         };
         let schema_value = serde_json::to_value(&schema).expect("serializes");
@@ -818,6 +863,14 @@ mod tests {
             missing.is_empty() && extra.is_empty(),
             "docs/config.example.toml does not match Config schema\nmissing: {missing:?}\nextra: {extra:?}"
         );
+    }
+
+    #[test]
+    fn rejects_unknown_disabled_catalog_entry() {
+        assert!(matches!(
+            parse("[catalog]\ndisabled = [\"no-such-cache\"]\n"),
+            Err(ConfigError::Invalid { ref key, .. }) if key == "catalog.disabled"
+        ));
     }
 
     #[test]
@@ -865,5 +918,23 @@ mod tests {
     fn defaults_round_trip() {
         let text = Config::default().to_toml();
         assert_eq!(parse(&text).expect("parses"), Config::default());
+    }
+
+    #[test]
+    fn rejects_non_rule_categories() {
+        assert!(matches!(
+            parse("[detect]\ncategories = [\"trash\"]\n"),
+            Err(ConfigError::NotARuleCategory {
+                key: "detect.categories",
+                category: "trash",
+            })
+        ));
+        assert!(matches!(
+            parse("[[rules]]\nname = \"x\"\npattern = \"out\"\ncategory = \"logs\"\n"),
+            Err(ConfigError::NotARuleCategory {
+                key: "rules",
+                category: "logs",
+            })
+        ));
     }
 }

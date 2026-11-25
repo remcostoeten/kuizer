@@ -92,6 +92,7 @@ fn tagged(source: Source, id: u64) -> u64 {
         Source::Cache => 1 << 62,
         Source::Toolchain => 1 << 61,
         Source::Docker => 1 << 60,
+        Source::Trash => 1 << 59,
     }
 }
 

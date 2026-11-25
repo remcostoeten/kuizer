@@ -1,0 +1,320 @@
+# Linux desktop, system and app caches.
+
+[[entry]]
+name = "thumbnails"
+app = "Desktop"
+group = "system"
+base = "cache"
+path = "thumbnails"
+safety = "safe"
+platforms = ["linux"]
+note = "File previews rebuilt on demand by file managers."
+
+[[entry]]
+name = "fontconfig-cache"
+app = "Fontconfig"
+group = "system"
+base = "cache"
+path = "fontconfig"
+safety = "safe"
+platforms = ["linux"]
+note = "Font metadata caches rebuilt on next use."
+
+[[entry]]
+name = "mesa-shader-cache"
+app = "Mesa"
+group = "system"
+base = "cache"
+path = "mesa_shader_cache"
+safety = "safe"
+platforms = ["linux"]
+note = "Compiled GPU shaders; games may stutter once while it refills."
+
+[[entry]]
+name = "mesa-shader-cache-db"
+app = "Mesa"
+group = "system"
+base = "cache"
+path = "mesa_shader_cache_db"
+safety = "safe"
+platforms = ["linux"]
+note = "Compiled GPU shaders in the single-database layout; games may stutter once while it refills."
+
+[[entry]]
+name = "nvidia-gl-cache"
+app = "NVIDIA driver"
+group = "system"
+base = "cache"
+path = "nvidia/GLCache"
+safety = "safe"
+platforms = ["linux"]
+note = "Compiled shaders of the NVIDIA driver."
+
+[[entry]]
+name = "nvidia-compute-cache"
+app = "NVIDIA driver"
+group = "system"
+base = "home"
+path = ".nv/ComputeCache"
+safety = "safe"
+platforms = ["linux"]
+note = "Compiled CUDA kernels rebuilt on next run."
+
+[[entry]]
+name = "gstreamer-registry"
+app = "GStreamer"
+group = "system"
+base = "cache"
+path = "gstreamer-1.0"
+safety = "safe"
+platforms = ["linux"]
+note = "Plugin registry rebuilt at next start."
+
+[[entry]]
+name = "tracker-index"
+app = "GNOME search"
+group = "system"
+base = "cache"
+path = "tracker3"
+safety = "review"
+platforms = ["linux"]
+processes = ["localsearch-3", "tracker-miner-f"]
+note = "Search index rebuilt by indexing all files again, which takes a while."
+
+[[entry]]
+name = "baloo-index"
+app = "KDE search"
+group = "system"
+base = "data"
+path = "baloo"
+safety = "review"
+platforms = ["linux"]
+processes = ["baloo_file"]
+note = "Search index rebuilt by indexing all files again; turn indexing off first if you do not use it."
+
+[[entry]]
+name = "flatpak-app-caches"
+app = "Flatpak apps"
+group = "apps"
+base = "home"
+path = ".var/app/*/cache"
+safety = "review"
+platforms = ["linux"]
+note = "Cache folder of each Flatpak app; check which app owns it first."
+
+[[entry]]
+name = "spotify-cache"
+app = "Spotify"
+group = "apps"
+base = "cache"
+path = "spotify"
+safety = "review"
+platforms = ["linux"]
+processes = ["spotify"]
+note = "Streaming cache and downloaded songs; downloads must be fetched again."
+
+[[entry]]
+name = "steam-shader-cache"
+app = "Steam"
+group = "apps"
+base = "data"
+path = "Steam/steamapps/shadercache"
+safety = "review"
+platforms = ["linux"]
+processes = ["steam"]
+note = "Compiled shaders per game; games stutter while it refills."
+
+[[entry]]
+name = "steam-html-cache"
+app = "Steam"
+group = "apps"
+base = "data"
+path = "Steam/config/htmlcache"
+safety = "safe"
+platforms = ["linux"]
+processes = ["steam"]
+note = "Store and community page cache rebuilt on next launch."
+
+[[entry]]
+name = "wine-cache"
+app = "Wine"
+group = "apps"
+base = "cache"
+path = "wine"
+safety = "safe"
+platforms = ["linux"]
+note = "Installers Wine downloaded such as Gecko and Mono; fetched again when needed."
+
+[[entry]]
+name = "winetricks-cache"
+app = "Winetricks"
+group = "apps"
+base = "cache"
+path = "winetricks"
+safety = "safe"
+platforms = ["linux"]
+note = "Downloaded installers fetched again when needed."
+
+[[entry]]
+name = "lutris-cache"
+app = "Lutris"
+group = "apps"
+base = "cache"
+path = "lutris"
+safety = "review"
+platforms = ["linux"]
+processes = ["lutris"]
+note = "Installer downloads and runtime files."
+
+[[entry]]
+name = "yay-cache"
+app = "yay"
+group = "system"
+base = "cache"
+path = "yay"
+safety = "safe"
+platforms = ["linux"]
+note = "AUR build folders and built packages."
+
+[[entry]]
+name = "paru-cache"
+app = "paru"
+group = "system"
+base = "cache"
+path = "paru"
+safety = "safe"
+platforms = ["linux"]
+note = "AUR build folders and built packages."
+
+[[entry]]
+name = "xsession-errors"
+app = "X session"
+group = "system"
+category = "logs"
+kind = "file"
+base = "home"
+path = ".xsession-errors"
+safety = "safe"
+platforms = ["linux"]
+note = "Log of the current or last X session."
+
+[[entry]]
+name = "xsession-errors-old"
+app = "X session"
+group = "system"
+category = "logs"
+kind = "file"
+base = "home"
+path = ".xsession-errors.old"
+safety = "safe"
+platforms = ["linux"]
+note = "Log of the previous X session."
+
+[[entry]]
+name = "gimp-babl-cache"
+app = "GIMP"
+group = "apps"
+base = "cache"
+path = "babl"
+safety = "safe"
+platforms = ["linux"]
+processes = ["gimp"]
+note = "Color-space conversion cache rebuilt on next launch."
+
+[[entry]]
+name = "gimp-gegl-cache"
+app = "GIMP"
+group = "apps"
+base = "cache"
+path = "gegl-0.4"
+safety = "safe"
+platforms = ["linux"]
+processes = ["gimp"]
+note = "Image tile swap cache rebuilt while editing."
+
+[[entry]]
+name = "thunderbird-cache"
+app = "Thunderbird"
+group = "apps"
+base = "cache"
+path = "thunderbird"
+safety = "safe"
+platforms = ["linux"]
+processes = ["thunderbird", "thunderbird-bin"]
+note = "Mail client disk cache; messages and accounts live in the profile folder."
+
+[[entry]]
+name = "zoom-cache"
+app = "Zoom"
+group = "apps"
+base = "cache"
+path = "zoom"
+safety = "safe"
+platforms = ["linux"]
+processes = ["zoom"]
+note = "Temporary meeting and UI cache rebuilt on next launch."
+
+[[entry]]
+name = "vlc-art-cache"
+app = "VLC"
+group = "apps"
+base = "cache"
+path = "vlc"
+safety = "safe"
+platforms = ["linux"]
+processes = ["vlc"]
+note = "Album artwork and media preview cache."
+
+[[entry]]
+name = "libreoffice-cache"
+app = "LibreOffice"
+group = "apps"
+base = "cache"
+path = "libreoffice"
+safety = "safe"
+platforms = ["linux"]
+processes = ["soffice.bin"]
+note = "Temporary document and rendering cache rebuilt on next launch."
+
+[[entry]]
+name = "blender-cache"
+app = "Blender"
+group = "apps"
+base = "cache"
+path = "blender"
+safety = "review"
+platforms = ["linux"]
+processes = ["blender"]
+note = "Render and shader caches; may contain baked simulation caches."
+
+[[entry]]
+name = "kicad-cache"
+app = "KiCad"
+group = "apps"
+base = "cache"
+path = "kicad"
+safety = "safe"
+platforms = ["linux"]
+processes = ["kicad"]
+note = "3D model and footprint preview cache rebuilt on next open."
+
+[[entry]]
+name = "mpv-shader-cache"
+app = "mpv"
+group = "apps"
+base = "cache"
+path = "mpv"
+safety = "safe"
+platforms = ["linux"]
+processes = ["mpv"]
+note = "Compiled video shaders and subtitle font cache."
+
+[[entry]]
+name = "pipewire-cache"
+app = "PipeWire"
+group = "system"
+base = "cache"
+path = "pipewire"
+safety = "safe"
+platforms = ["linux"]
+note = "Audio graph cache rebuilt by the session daemon."

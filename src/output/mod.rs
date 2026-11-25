@@ -1,8 +1,11 @@
+pub mod big;
 mod git;
 mod html;
 mod json;
 mod style;
+pub mod system;
 mod text;
+pub mod trash;
 
 pub use git::{GitOutcome, git_report, print_git_outcome, print_repositories};
 pub use html::{Dashboard, dashboard_data, dashboard_html, scan_html};

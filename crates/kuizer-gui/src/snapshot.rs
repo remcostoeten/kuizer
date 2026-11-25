@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use kuizer::caches;
 use kuizer::history::TrashSnapshot;
 use kuizer::snapshot::{self as core, SavedHistory};
 
@@ -59,11 +58,6 @@ impl Recorder {
 
 pub fn load(snapshots: &Snapshots, roots: &[PathBuf], options: &ScanOptions) -> Option<Report> {
     let saved = snapshots.load(roots, options)?;
-    let caches = saved
-        .caches
-        .into_iter()
-        .filter_map(|(name, path, candidate)| Some((caches::known(&name, path)?, candidate)))
-        .collect();
     let history = saved.history.map(|saved| {
         let trash = TrashSnapshot::new(&saved.history, saved.trash_known.then_some(saved.kept));
         HistoryView::new(saved.history, trash)
@@ -79,7 +73,7 @@ pub fn load(snapshots: &Snapshots, roots: &[PathBuf], options: &ScanOptions) -> 
         candidates: saved.candidates,
         issues: saved.issues,
         summary: saved.summary,
-        caches,
+        caches: saved.caches,
         toolchains: saved.toolchains,
         docker: kuizer::docker::entries(saved.docker),
         docker_issues: saved.docker_issues,

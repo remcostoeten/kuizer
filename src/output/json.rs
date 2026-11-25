@@ -43,14 +43,14 @@ fn lossy(path: &Path) -> bool {
 }
 
 #[derive(Serialize)]
-struct IssueJson<'a> {
+pub(crate) struct IssueJson<'a> {
     #[serde(serialize_with = "lossy_path")]
     path: &'a Path,
     kind: IssueKind,
     message: &'a str,
 }
 
-fn issues_json(issues: &[Issue]) -> Vec<IssueJson<'_>> {
+pub(crate) fn issues_json(issues: &[Issue]) -> Vec<IssueJson<'_>> {
     issues
         .iter()
         .map(|issue| IssueJson {
@@ -63,11 +63,13 @@ fn issues_json(issues: &[Issue]) -> Vec<IssueJson<'_>> {
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Source {
+pub(crate) enum Source {
     Projects,
     Cache,
     Toolchain,
     Docker,
+    Trash,
+    Big,
 }
 
 impl Source {
@@ -77,6 +79,8 @@ impl Source {
             Self::Cache => "cache",
             Self::Toolchain => "toolchain",
             Self::Docker => "docker",
+            Self::Trash => "trash",
+            Self::Big => "big",
         }
     }
 
@@ -85,13 +89,15 @@ impl Source {
             "cache" => Self::Cache,
             "toolchain" => Self::Toolchain,
             "docker" => Self::Docker,
+            "trash" => Self::Trash,
+            "big" => Self::Big,
             _ => Self::Projects,
         }
     }
 }
 
 #[derive(Serialize)]
-struct CandidateJson<'a> {
+pub(crate) struct CandidateJson<'a> {
     id: u64,
     source: Source,
     #[serde(serialize_with = "lossy_path")]
@@ -114,7 +120,7 @@ struct CandidateJson<'a> {
 }
 
 impl<'a> CandidateJson<'a> {
-    fn new(source: Source, candidate: &'a Candidate) -> Self {
+    pub(crate) fn new(source: Source, candidate: &'a Candidate) -> Self {
         Self {
             id: candidate.id,
             source,
@@ -594,10 +600,11 @@ fn listing_report<'a, Item, Details: Serialize>(
 }
 
 #[derive(Serialize)]
-struct CacheJson {
-    name: &'static str,
-    tool: &'static str,
-    note: Option<&'static str>,
+struct CacheJson<'a> {
+    name: &'a str,
+    tool: &'a str,
+    group: crate::catalog::Group,
+    note: Option<&'a str>,
 }
 
 /// @name cache_report
@@ -625,11 +632,12 @@ pub fn cache_lines(entries: &[(KnownCache, Candidate)]) -> Result<String, serde_
     listing_report(Source::Cache, entries, Vec::new(), cache_json, Shape::Lines)
 }
 
-fn cache_json(cache: &KnownCache) -> CacheJson {
+fn cache_json(cache: &KnownCache) -> CacheJson<'_> {
     CacheJson {
-        name: cache.name,
-        tool: cache.tool,
-        note: (!cache.note.is_empty()).then_some(cache.note),
+        name: &cache.name,
+        tool: &cache.tool,
+        group: cache.group,
+        note: (!cache.note.is_empty()).then_some(cache.note.as_str()),
     }
 }
 
@@ -900,11 +908,15 @@ mod snapshot_tests {
             project_last_active: Some(UNIX_EPOCH + Duration::from_secs(1_700_010_000)),
         };
         let cache = KnownCache {
-            name: "npm",
-            tool: "npm",
+            name: "npm".to_owned(),
+            tool: "npm".to_owned(),
+            group: crate::catalog::Group::Developer,
+            category: Category::Cache,
+            kind: Kind::Dir,
             path: PathBuf::from("/fixture/.npm/_cacache"),
             safety: Safety::Safe,
-            note: "",
+            note: String::new(),
+            processes: Vec::new(),
         };
         let toolchain = Toolchain {
             tool: Tool::Rustup,

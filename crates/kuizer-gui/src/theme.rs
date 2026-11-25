@@ -478,6 +478,9 @@ pub fn tile(category: Category) -> Rgba {
         Category::Build => pick(0x0027_2727, 0x00d9_d9d9),
         Category::Cache => pick(0x0024_2424, 0x00df_dfdf),
         Category::Temp => pick(0x0021_2121, 0x00e5_e5e5),
+        Category::Logs => pick(0x0020_2020, 0x00e8_e8e8),
+        Category::Trash => pick(0x001e_1e1e, 0x00eb_ebeb),
+        Category::Files => pick(0x001c_1c1c, 0x00ee_eeee),
     }
 }
 
@@ -488,6 +491,9 @@ pub fn tile_edge(category: Category) -> Rgba {
         Category::Build => pick(0x0056_5656, 0x009f_9f9f),
         Category::Cache => pick(0x0044_4444, 0x00b1_b1b1),
         Category::Temp => pick(0x0036_3636, 0x00c2_c2c2),
+        Category::Logs => pick(0x0030_3030, 0x00ca_caca),
+        Category::Trash => pick(0x002a_2a2a, 0x00d2_d2d2),
+        Category::Files => pick(0x0026_2626, 0x00da_dada),
     }
 }
 

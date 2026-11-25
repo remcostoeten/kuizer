@@ -177,6 +177,32 @@ impl Files {
             started: Instant::now(),
         }
     }
+
+    /// @name Files::at_least
+    /// @description Returns the collected files of at least `min_size` bytes, largest first, so a
+    /// caller that walked once for duplicates also gets the large files of that walk.
+    ///
+    /// @example
+    /// let large = files.at_least(500_000_000);
+    pub fn at_least(&self, min_size: u64) -> Vec<crate::big::LargeFile> {
+        let mut found = Vec::new();
+        let mut buffer = PathBuf::new();
+        for (index, stat) in self.paths.stats.iter().enumerate() {
+            if stat.len < min_size {
+                continue;
+            }
+            self.paths.fill(index, &mut buffer);
+            found.push(crate::big::LargeFile {
+                path: buffer.clone(),
+                size: stat.len,
+                allocated: stat.allocated,
+                identity: Some((stat.device, stat.inode)),
+                modified: stat.modified,
+            });
+        }
+        found.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        found
+    }
 }
 
 impl Visitor for Files {

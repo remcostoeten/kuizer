@@ -145,7 +145,7 @@ pub fn known_rules(config: &Config, source: SourceKind) -> Result<Vec<String>, C
             .into_iter()
             .map(|spec| spec.name)
             .collect(),
-        SourceKind::Cache => caches::names().map(String::from).collect(),
+        SourceKind::Cache => caches::names(&[], &config.catalog),
         SourceKind::Toolchain => Tool::ALL
             .iter()
             .map(|tool| tool.name().to_owned())

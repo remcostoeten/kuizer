@@ -542,6 +542,7 @@ impl Kuizer {
                         Source::Cache => "global cache",
                         Source::Toolchain => "toolchain",
                         Source::Docker => "docker object",
+                        Source::Trash => "trash",
                     },
                 ),
             Kind::Rest(count) => details.row("Items", count.to_string()).note(

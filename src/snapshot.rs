@@ -13,7 +13,7 @@ use crate::repos::Repository;
 use crate::scan::{Candidate, Issue, ScanOptions, SortKey, Summary, sort_candidates};
 use crate::toolchains::Toolchain;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 const LIMIT: usize = 12;
 const BUDGET: u64 = 48 << 20;
 const EXTENSION: &str = "json";
@@ -82,7 +82,7 @@ pub struct SavedScan {
     pub candidates: Vec<Candidate>,
     pub issues: Vec<Issue>,
     pub summary: Summary,
-    pub caches: Vec<(String, PathBuf, Candidate)>,
+    pub caches: Vec<(caches::KnownCache, Candidate)>,
     pub toolchains: Vec<(Toolchain, Candidate)>,
     pub docker: Vec<docker::Item>,
     pub docker_issues: Vec<String>,
@@ -175,7 +175,8 @@ impl SavedScan {
             self.candidates.len() + self.caches.len() + self.toolchains.len() + self.docker.len();
         self.candidates
             .retain(|candidate| !paths.contains(&candidate.path));
-        self.caches.retain(|(_, path, _)| !paths.contains(path));
+        self.caches
+            .retain(|(cache, _)| !paths.contains(&cache.path));
         self.toolchains
             .retain(|(_, candidate)| !paths.contains(&candidate.path));
         self.docker.retain(|item| !paths.contains(&item.path()));
@@ -268,12 +269,7 @@ impl Recorder {
     /// recorder.record_caches(&caches);
     pub fn record_caches(&self, found: &[(caches::KnownCache, Candidate)]) {
         if let Ok(mut saved) = self.saved.lock() {
-            saved.caches = found
-                .iter()
-                .map(|(cache, candidate)| {
-                    (cache.name.to_owned(), cache.path.clone(), candidate.clone())
-                })
-                .collect();
+            saved.caches = found.to_vec();
         }
     }
 

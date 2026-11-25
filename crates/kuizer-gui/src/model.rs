@@ -349,6 +349,7 @@ impl Report {
             Source::Cache => Box::new(self.caches.iter().map(|(_, candidate)| candidate)),
             Source::Toolchain => Box::new(self.toolchains.iter().map(|(_, candidate)| candidate)),
             Source::Docker => Box::new(self.docker.iter().map(|(_, candidate)| candidate)),
+            Source::Trash => Box::new(std::iter::empty()),
         }
     }
 
@@ -786,6 +787,7 @@ fn measure_caches(
             caches::find_excluding(
                 &locations,
                 &Protected::for_user(),
+                &config.catalog,
                 &config.usable_excludes(),
             )
         })

@@ -14,17 +14,27 @@ pub(crate) use crate::caches::measure_threaded;
 pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Result<(), AppError> {
     let json = format != Format::Text;
     let plan = args.plan();
-    let names: Vec<&str> = caches::names().collect();
+    let locations = Locations::for_user().ok_or(AppError::NoHome)?;
+    let discovered = caches::find_excluding(
+        &locations,
+        &Protected::for_user(),
+        &config.catalog,
+        &config.excludes()?,
+    );
+    let known = caches::names(&discovered, &config.catalog);
+    let names: Vec<&str> = known.iter().map(String::as_str).collect();
     removal::check_selection(&plan.removal.select, &names)?;
     let filters = Filters::source(config, &args.filters, &names)?;
     let config = filters.config();
-    let locations = Locations::for_user().ok_or(AppError::NoHome)?;
-    let mut entries = measure_threaded(
-        caches::find_excluding(&locations, &Protected::for_user(), &config.excludes()?),
-        &Cancel::new(),
-        scan::size_threads(config),
-        |_| {},
-    );
+    let excludes = config.excludes()?;
+    let mut found: Vec<_> = discovered
+        .into_iter()
+        .filter(|cache| !cache.path.ancestors().any(|dir| excludes.path(dir)))
+        .collect();
+    if !args.group.is_empty() {
+        found.retain(|cache| args.group.contains(&cache.group));
+    }
+    let mut entries = measure_threaded(found, &Cancel::new(), scan::size_threads(config), |_| {});
     filters.keep(&mut entries);
     if !plan.cleaning {
         if format == Format::JsonLines {
@@ -61,7 +71,8 @@ pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Res
 mod tests {
     use super::*;
     use crate::caches::{KnownCache, measure_with};
-    use crate::detect::Safety;
+    use crate::catalog::Group;
+    use crate::detect::{Category, Kind, Safety};
 
     #[test]
     fn measure_with_reports_each_cache_and_drops_empty_ones() {
@@ -72,11 +83,15 @@ mod tests {
         std::fs::create_dir_all(&empty).expect("empty");
         std::fs::write(full.join("blob"), vec![0u8; 8192]).expect("blob");
         let cache = |path: &std::path::Path| KnownCache {
-            name: "test-cache",
-            tool: "test",
+            name: "test-cache".to_owned(),
+            tool: "test".to_owned(),
+            group: Group::Developer,
+            category: Category::Cache,
+            kind: Kind::Dir,
             path: path.to_path_buf(),
             safety: Safety::Safe,
-            note: "",
+            note: String::new(),
+            processes: Vec::new(),
         };
         let seen = std::sync::Mutex::new(Vec::new());
         let entries = measure_with(vec![cache(&full), cache(&empty)], &Cancel::new(), |c| {

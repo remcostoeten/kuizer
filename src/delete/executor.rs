@@ -233,6 +233,7 @@ impl Executor {
             }
             Source::Toolchain => crate::toolchains::remove(guard, candidate, mode),
             Source::Docker => crate::docker::remove(&self.engines, candidate, mode),
+            Source::Trash => crate::trashcan::remove(guard, candidate, mode),
         }
     }
 

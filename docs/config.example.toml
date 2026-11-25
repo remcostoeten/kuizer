@@ -100,6 +100,38 @@ engines = ["docker", "podman"]
 timeout_secs = 10
 recent_hours = 24
 
+# Locations outside your projects that kuizer knows: app, browser and system caches and logs.
+[catalog]
+disabled = []
+unknown_caches = true
+
+[[catalog.locations]]
+name = "custom-app-cache"
+app = "CustomApp"
+group = "apps"
+category = "cache"
+kind = "dir"
+base = "cache"
+path = "custom-app"
+safety = "review"
+platforms = []
+processes = []
+note = "Example custom catalog entry."
+
+# System package caches and logs, inspected read-only through each tool.
+[system]
+managers = ["pacman", "apt", "dnf", "zypper", "flatpak", "snap", "homebrew", "journal"]
+timeout_secs = 10
+
+# Large files anywhere under the scanned folders, and old files in Downloads.
+[big]
+roots = []
+min_size = "500MB"
+limit = 50
+downloads = true
+downloads_age = "90d"
+downloads_min_size = "10MB"
+
 # Override a shortcut with one key or a list of alternatives. Quote action names with dots.
 # Each action replaces all its defaults. Shared actions apply in both interfaces.
 # Use modifier prefixes such as ctrl-, alt-, shift-, and secondary- (Cmd in the macOS GUI,

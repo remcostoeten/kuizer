@@ -191,6 +191,7 @@ impl Target {
             Self::Item(Source::Cache, ..) => Tab::Caches,
             Self::Item(Source::Toolchain, ..) => Tab::Toolchains,
             Self::Item(Source::Docker, ..) => Tab::Docker,
+            Self::Item(Source::Trash, ..) => Tab::Overview,
             Self::Duplicate(_) => Tab::Duplicates,
             Self::Issue(_) => Tab::Issues,
             Self::Run(..) => Tab::History,
@@ -739,6 +740,7 @@ impl Kuizer {
             Source::Cache => Part::Caches,
             Source::Toolchain => Part::Toolchains,
             Source::Docker => Part::Docker,
+            Source::Trash => return false,
         };
         self.session.pending.contains(&part)
             && !(source == Source::Artifact && self.session.streamed)

@@ -298,6 +298,11 @@ mod tests {
         assert!("1.5d".parse::<Idle>().is_err());
         assert!("d".parse::<Idle>().is_err());
         assert!("3h".parse::<Idle>().is_err());
+        let idle: Idle = serde_json::from_str("\"90d\"").expect("deserialize idle");
+        assert_eq!(
+            serde_json::to_string(&idle).expect("serialize idle"),
+            "\"90d\""
+        );
     }
 
     #[test]

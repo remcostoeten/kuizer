@@ -33,12 +33,6 @@ const HOME_DIRS: &[&str] = &[
     ".floorp",
     ".zen",
     ".thunderbird",
-    ".ssh",
-    ".gnupg",
-    ".password-store",
-    ".pki",
-    ".local/share/keyrings",
-    ".local/share/kwalletd",
     ".var/app/com.brave.Browser",
     ".var/app/com.google.Chrome",
     ".var/app/org.chromium.Chromium",
@@ -61,7 +55,41 @@ const HOME_DIRS: &[&str] = &[
     "Library/Caches/BraveSoftware",
     "Library/Caches/Google/Chrome",
     "Library/Caches/Firefox",
+];
+
+const CREDENTIAL_DIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".password-store",
+    ".pki",
+    ".local/share/keyrings",
+    ".local/share/kwalletd",
     "Library/Keychains",
+];
+
+const PROFILE_CACHES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "cache2",
+    "startupCache",
+    "CachedData",
+    "CachedExtensionVSIXs",
+];
+
+const PROFILE_GUARD_FILES: &[&str] = &[
+    "Local State",
+    "Cookies",
+    "Login Data",
+    "cookies.sqlite",
+    "logins.json",
+    "key4.db",
 ];
 
 const VOLTA_TOOLS: &str = ".volta/tools";
@@ -162,6 +190,7 @@ pub struct Protected {
     dirs: HashSet<PathBuf>,
     names: HashSet<OsString>,
     homes: Vec<PathBuf>,
+    never: Vec<PathBuf>,
     exempt: Vec<PathBuf>,
     extra: Vec<PathBuf>,
     marker_cache: Arc<Mutex<HashMap<PathBuf, (MarkerStamp, bool)>>>,
@@ -179,8 +208,21 @@ impl Protected {
             homes.push(resolved);
         }
         let mut dirs: HashSet<PathBuf> = HashSet::new();
+        let mut never: Vec<PathBuf> = Vec::new();
         for home in &homes {
-            dirs.extend(HOME_DIRS.iter().chain(TOOL_DIRS).map(|dir| home.join(dir)));
+            dirs.extend(
+                HOME_DIRS
+                    .iter()
+                    .chain(CREDENTIAL_DIRS)
+                    .chain(TOOL_DIRS)
+                    .map(|dir| home.join(dir)),
+            );
+            never.extend(
+                CREDENTIAL_DIRS
+                    .iter()
+                    .chain(TOOL_DIRS)
+                    .map(|dir| home.join(dir)),
+            );
             for parent in [".config", ".cache", ".local/share"] {
                 dirs.extend(BROWSERS.iter().map(|name| home.join(parent).join(name)));
             }
@@ -193,6 +235,7 @@ impl Protected {
             dirs,
             names,
             homes,
+            never,
             exempt: Vec::new(),
             extra: Vec::new(),
             marker_cache: Arc::default(),
@@ -295,6 +338,58 @@ impl Protected {
             }
         }
         false
+    }
+
+    /// @name refuses
+    /// @description Checks whether kuizer must leave `path` alone because it lies inside protected
+    /// application data. A known disk cache folder directly inside a browser or Electron profile,
+    /// such as `GPUCache` or Firefox's `cache2`, is the one exception; nothing inside credential
+    /// or tool folders is ever allowed.
+    ///
+    /// @example
+    /// if protected.refuses(&found) {
+    ///     continue;
+    /// }
+    pub fn refuses(&self, path: &Path) -> bool {
+        self.covers(path) && !self.is_profile_cache(path)
+    }
+
+    fn is_profile_cache(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if !PROFILE_CACHES.contains(&name) {
+            return false;
+        }
+        if self.never.iter().any(|dir| path.starts_with(dir))
+            || self.extra.iter().any(|dir| path.starts_with(dir))
+        {
+            return false;
+        }
+        if self.dirs.contains(path) {
+            return false;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return false;
+        }
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        let Ok(parent_meta) = std::fs::symlink_metadata(parent) else {
+            return false;
+        };
+        if parent_meta.file_type().is_symlink() || !parent_meta.is_dir() {
+            return false;
+        }
+        if self.marked_on_disk(path, &metadata) {
+            return false;
+        }
+        !PROFILE_GUARD_FILES
+            .iter()
+            .any(|guard_file| std::fs::symlink_metadata(path.join(guard_file)).is_ok())
     }
 
     fn marked_on_disk(&self, dir: &Path, metadata: &std::fs::Metadata) -> bool {
@@ -485,5 +580,97 @@ mod tests {
         assert!(!protected.in_hidden_home_dir(Path::new("/home/me/code/.hidden/node_modules")));
         assert!(!protected.in_hidden_home_dir(Path::new("/srv/.cache/node_modules")));
         assert!(!Protected::default().in_hidden_home_dir(Path::new("/home/me/.config/x")));
+    }
+
+    #[test]
+    fn allows_only_cache_folders_inside_chromium_profiles() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let chrome = home.join(".config/google-chrome");
+        let profile = chrome.join("Default");
+        let network = profile.join("Network");
+        let gpu = profile.join("GPUCache");
+        let code_cache = profile.join("Code Cache");
+        let http_cache = home.join(".cache/google-chrome/Default/Cache");
+        let cache_data = http_cache.join("Cache_Data");
+        fs::create_dir_all(&network).expect("network");
+        fs::create_dir_all(&gpu).expect("gpu");
+        fs::create_dir_all(code_cache.join("js")).expect("code cache");
+        fs::create_dir_all(&cache_data).expect("cache data");
+        fs::write(chrome.join("Local State"), "{}").expect("local state");
+        fs::write(profile.join("Preferences"), "{}").expect("prefs");
+        fs::write(network.join("Cookies"), "cookies").expect("cookies");
+        fs::write(gpu.join("data_0"), "shader").expect("shader");
+        fs::write(code_cache.join("js/index"), "idx").expect("idx");
+        fs::write(cache_data.join("f_000001"), "body").expect("body");
+
+        let protected = Protected::new(Some(home));
+        assert!(!protected.refuses(&gpu));
+        assert!(!protected.refuses(&code_cache));
+        assert!(!protected.refuses(&http_cache));
+
+        assert!(protected.refuses(&chrome));
+        assert!(protected.refuses(&profile));
+        assert!(protected.refuses(&network));
+        assert!(protected.refuses(&network.join("Cookies")));
+        assert!(protected.refuses(&gpu.join("data_0")));
+        assert!(protected.refuses(&cache_data));
+    }
+
+    #[test]
+    fn allows_electron_and_firefox_caches() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let discord = home.join(".config/discord");
+        let discord_cache = discord.join("Cache");
+        fs::create_dir_all(&discord_cache).expect("discord");
+        fs::write(discord.join("Local State"), "{}").expect("local state");
+        fs::write(discord.join("Cookies"), "c").expect("cookies");
+        fs::write(discord.join("Preferences"), "{}").expect("prefs");
+        fs::write(discord_cache.join("x"), "x").expect("x");
+
+        let ff_profile = home.join(".mozilla/firefox/ab.default");
+        fs::create_dir_all(&ff_profile).expect("ff profile");
+        fs::write(ff_profile.join("prefs.js"), "").expect("prefs");
+        fs::write(ff_profile.join("cookies.sqlite"), "").expect("cookies");
+
+        let ff_cache = home.join(".cache/mozilla/firefox/ab.default/cache2");
+        fs::create_dir_all(ff_cache.join("entries")).expect("ff cache");
+        fs::write(ff_cache.join("entries/x"), "x").expect("entry");
+
+        let protected = Protected::new(Some(home));
+        assert!(!protected.refuses(&discord_cache));
+        assert!(protected.refuses(&ff_profile));
+        assert!(!protected.refuses(&ff_cache));
+    }
+
+    #[test]
+    fn never_allows_credentials_tools_or_profile_lookalikes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let ssh_cache = home.join(".ssh/Cache");
+        let keyring_cache = home.join(".local/share/keyrings/Cache");
+        let ext_cache = home.join(".vscode/extensions/x/Cache");
+        let fake_cache = home.join(".config/discord/Cache");
+        let real_target = home.join("outside");
+        let chrome_profile = home.join(".config/google-chrome/Default");
+        let link_gpu = chrome_profile.join("GPUCache");
+
+        fs::create_dir_all(&ssh_cache).expect("ssh");
+        fs::create_dir_all(&keyring_cache).expect("keyring");
+        fs::create_dir_all(&ext_cache).expect("ext");
+        fs::create_dir_all(&fake_cache).expect("fake");
+        fs::write(home.join(".config/discord/Local State"), "{}").expect("discord state");
+        fs::write(fake_cache.join("Local State"), "{}").expect("nested state");
+        fs::create_dir_all(&real_target).expect("outside");
+        fs::create_dir_all(&chrome_profile).expect("chrome");
+        std::os::unix::fs::symlink(&real_target, &link_gpu).expect("link");
+
+        let protected = Protected::new(Some(home));
+        assert!(protected.refuses(&ssh_cache));
+        assert!(protected.refuses(&keyring_cache));
+        assert!(protected.refuses(&ext_cache));
+        assert!(protected.refuses(&fake_cache));
+        assert!(protected.refuses(&link_gpu));
     }
 }

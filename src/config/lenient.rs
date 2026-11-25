@@ -223,8 +223,32 @@ fn settle(
     } else {
         HashSet::new()
     };
+    let mut had_bad_category = false;
+    config.detect.categories.retain(|category| {
+        if category.is_rule_category() {
+            true
+        } else {
+            had_bad_category = true;
+            warnings.push(ConfigWarning::new(
+                "detect.categories",
+                format!(
+                    "`{}` cannot be used in detect.categories, use dependencies, build, cache or temp",
+                    category.as_str()
+                ),
+            ));
+            false
+        }
+    });
+    if had_bad_category && config.detect.categories.is_empty() {
+        config.detect.categories = crate::detect::Category::ALL.to_vec();
+    }
     config.rules.retain(|rule| {
-        let problem = if known.contains(&rule.name) {
+        let problem = if !rule.category.is_rule_category() {
+            Some(format!(
+                "`{}` cannot be used in rules, use dependencies, build, cache or temp",
+                rule.category.as_str()
+            ))
+        } else if known.contains(&rule.name) {
             Some(format!("rule `{}` is defined more than once", rule.name))
         } else {
             Detector::new(std::slice::from_ref(rule))
@@ -297,6 +321,66 @@ fn settle(
             ),
         ));
         config.appearance.zoom = DEFAULT_ZOOM;
+    }
+    let mut catalog_names: HashSet<String> = crate::catalog::embedded()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    config.catalog.locations.retain(|entry| {
+        let problem = if catalog_names.contains(&entry.name) {
+            Some(format!(
+                "catalog entry `{}` is defined more than once",
+                entry.name
+            ))
+        } else {
+            crate::catalog::check_entry(entry)
+                .err()
+                .map(|error| error.to_string())
+        };
+        match problem {
+            Some(message) => {
+                warnings.push(ConfigWarning::new(
+                    format!("catalog.locations.{}", entry.name),
+                    message,
+                ));
+                false
+            }
+            None => {
+                catalog_names.insert(entry.name.clone());
+                true
+            }
+        }
+    });
+    config.catalog.disabled.retain(|name| {
+        let keep = catalog_names.contains(name);
+        if !keep {
+            warnings.push(ConfigWarning::new(
+                "catalog.disabled",
+                format!("unknown catalog entry `{name}`"),
+            ));
+        }
+        keep
+    });
+    if config.system.timeout_secs == 0 {
+        warnings.push(ConfigWarning::new(
+            "system.timeout_secs",
+            "must be at least 1, using 10",
+        ));
+        config.system.timeout_secs = crate::system::SystemConfig::default().timeout_secs;
+    }
+    if config.big.min_size.0 == 0 {
+        warnings.push(ConfigWarning::new(
+            "big.min_size",
+            "must be greater than 0, using 500MB",
+        ));
+        config.big.min_size = crate::big::BigConfig::default().min_size;
+    }
+    if config.big.limit == 0 {
+        warnings.push(ConfigWarning::new(
+            "big.limit",
+            "must be at least 1, using 50",
+        ));
+        config.big.limit = crate::big::BigConfig::default().limit;
     }
     let policies = std::mem::take(&mut config.policy);
     for (name, policy) in policies {

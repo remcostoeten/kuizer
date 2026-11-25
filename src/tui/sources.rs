@@ -74,6 +74,7 @@ pub fn spawn_list(source: Source, work: ListWork) -> io::Result<JoinHandle<Optio
                 Source::Toolchain => list_toolchains(&work),
                 Source::Docker => list_docker(&work),
                 Source::Artifact => Err("artifacts come from the scan".to_owned()),
+                Source::Trash => Err("trash is not listed in the TUI".to_owned()),
             };
             let (guard_roots, issues) = match listed {
                 Ok(listed) => listed,
@@ -99,6 +100,7 @@ fn source_name(source: Source) -> &'static str {
         Source::Cache => "caches",
         Source::Toolchain => "toolchains",
         Source::Docker => "docker",
+        Source::Trash => "trash",
     }
 }
 
@@ -109,17 +111,21 @@ fn list_caches(work: &ListWork) -> Listed {
     let found = caches::find_excluding(
         &locations,
         &Protected::for_user(),
+        &work.config.catalog,
         &work.config.usable_excludes(),
     );
+    let notes: HashMap<PathBuf, String> = found
+        .iter()
+        .map(|cache| (cache.path.clone(), cache.note.clone()))
+        .collect();
     let entries = caches::measure_threaded(
         found,
         &work.cancel,
         scan::size_threads(&work.config),
         |candidate| {
             if candidate.usage.entries > 0 {
-                let note = caches::known(&candidate.rule.name, candidate.path.clone())
-                    .map_or("", |cache| cache.note);
-                work.item(Source::Cache, candidate, note.to_owned(), String::new());
+                let note = notes.get(&candidate.path).cloned().unwrap_or_default();
+                work.item(Source::Cache, candidate, note, String::new());
             }
         },
     );

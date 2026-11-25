@@ -1,0 +1,306 @@
+# Developer tool caches.
+
+[[entry]]
+name = "npm"
+app = "npm"
+group = "developer"
+base = "home"
+path = ".npm/_cacache"
+safety = "safe"
+
+[[entry]]
+name = "npx"
+app = "npm"
+group = "developer"
+base = "home"
+path = ".npm/_npx"
+safety = "safe"
+
+[[entry]]
+name = "pnpm-store"
+app = "pnpm"
+group = "developer"
+base = "data"
+path = "pnpm/store"
+safety = "review"
+note = "node_modules folders hard-link into the store, so only packages no project uses are freed; `pnpm store prune` removes just those"
+
+[[entry]]
+name = "pnpm-metadata"
+app = "pnpm"
+group = "developer"
+base = "cache"
+path = "pnpm"
+safety = "safe"
+
+[[entry]]
+name = "yarn"
+app = "yarn"
+group = "developer"
+base = "cache"
+path = "yarn"
+safety = "safe"
+
+[[entry]]
+name = "yarn-berry"
+app = "yarn"
+group = "developer"
+base = "home"
+path = ".yarn/berry/cache"
+safety = "safe"
+
+[[entry]]
+name = "bun"
+app = "bun"
+group = "developer"
+base = "bun"
+path = "install/cache"
+safety = "safe"
+
+[[entry]]
+name = "deno"
+app = "deno"
+group = "developer"
+base = "cache"
+path = "deno"
+safety = "safe"
+
+[[entry]]
+name = "node-gyp"
+app = "node"
+group = "developer"
+base = "cache"
+path = "node-gyp"
+safety = "safe"
+
+[[entry]]
+name = "typescript"
+app = "typescript"
+group = "developer"
+base = "cache"
+path = "typescript"
+safety = "safe"
+
+[[entry]]
+name = "electron"
+app = "electron"
+group = "developer"
+base = "cache"
+path = "electron"
+safety = "safe"
+
+[[entry]]
+name = "playwright"
+app = "playwright"
+group = "developer"
+base = "cache"
+path = "ms-playwright"
+safety = "review"
+note = "test browser binaries without user profiles; `npx playwright install` restores them"
+
+[[entry]]
+name = "puppeteer"
+app = "puppeteer"
+group = "developer"
+base = "cache"
+path = "puppeteer"
+safety = "review"
+note = "test browser binaries without user profiles; the next install downloads them again"
+
+[[entry]]
+name = "cargo-registry-cache"
+app = "cargo"
+group = "developer"
+base = "cargo"
+path = "registry/cache"
+safety = "safe"
+
+[[entry]]
+name = "cargo-registry-src"
+app = "cargo"
+group = "developer"
+base = "cargo"
+path = "registry/src"
+safety = "safe"
+
+[[entry]]
+name = "cargo-git-checkouts"
+app = "cargo"
+group = "developer"
+base = "cargo"
+path = "git/checkouts"
+safety = "safe"
+
+[[entry]]
+name = "cargo-git-db"
+app = "cargo"
+group = "developer"
+base = "cargo"
+path = "git/db"
+safety = "safe"
+
+[[entry]]
+name = "sccache"
+app = "sccache"
+group = "developer"
+base = "cache"
+path = "sccache"
+safety = "safe"
+
+[[entry]]
+name = "pip"
+app = "python"
+group = "developer"
+base = "cache"
+path = "pip"
+safety = "safe"
+
+[[entry]]
+name = "uv"
+app = "python"
+group = "developer"
+base = "cache"
+path = "uv"
+safety = "safe"
+
+[[entry]]
+name = "poetry"
+app = "python"
+group = "developer"
+base = "cache"
+path = "pypoetry"
+safety = "review"
+note = "also holds the virtualenvs Poetry created for projects"
+
+[[entry]]
+name = "pre-commit"
+app = "pre-commit"
+group = "developer"
+base = "cache"
+path = "pre-commit"
+safety = "safe"
+
+[[entry]]
+name = "go-build"
+app = "go"
+group = "developer"
+base = "cache"
+path = "go-build"
+safety = "safe"
+
+[[entry]]
+name = "go-modules"
+app = "go"
+group = "developer"
+base = "go-modules"
+path = ""
+safety = "review"
+note = "files are read-only, permanent deletion can fail; `go clean -modcache` removes it"
+
+[[entry]]
+name = "gradle"
+app = "gradle"
+group = "developer"
+base = "gradle"
+path = "caches"
+safety = "review"
+
+[[entry]]
+name = "maven"
+app = "maven"
+group = "developer"
+base = "home"
+path = ".m2/repository"
+safety = "review"
+note = "may hold artifacts installed locally with `mvn install`"
+
+[[entry]]
+name = "composer"
+app = "php"
+group = "developer"
+base = "cache"
+path = "composer"
+safety = "safe"
+
+[[entry]]
+name = "jetbrains"
+app = "jetbrains"
+group = "developer"
+base = "cache"
+path = "JetBrains"
+safety = "review"
+note = "IDE indexes and caches; settings and logins live in the config directory"
+
+[[entry]]
+name = "huggingface"
+app = "huggingface"
+group = "developer"
+base = "hugging-face"
+path = ""
+safety = "review"
+note = "downloaded models and datasets"
+
+[[entry]]
+name = "ollama"
+app = "ollama"
+group = "developer"
+base = "ollama"
+path = ""
+safety = "review"
+note = "downloaded Ollama models; `ollama rm <model>` removes individual models"
+
+[[entry]]
+name = "bazel"
+app = "bazel"
+group = "developer"
+base = "cache"
+path = "bazel"
+safety = "review"
+
+[[entry]]
+name = "android-avd"
+app = "android"
+group = "developer"
+base = "android-avd"
+path = ""
+safety = "review"
+note = "Android Virtual Device images; deleting removes emulator state and installed apps"
+
+[[entry]]
+name = "android-build-cache"
+app = "android"
+group = "developer"
+base = "android"
+path = "build-cache"
+safety = "safe"
+note = "Android Gradle build cache"
+
+[[entry]]
+name = "xcode-derived-data"
+app = "xcode"
+group = "developer"
+base = "home"
+path = "Library/Developer/Xcode/DerivedData"
+safety = "safe"
+processes = ["Xcode"]
+note = "Xcode build intermediates and indexes; rebuilt on next build"
+
+[[entry]]
+name = "ios-simulators"
+app = "xcode"
+group = "developer"
+base = "home"
+path = "Library/Developer/CoreSimulator/Devices"
+safety = "review"
+processes = ["Simulator"]
+note = "iOS Simulator devices and app data; `xcrun simctl delete unavailable` removes old runtimes"
+
+[[entry]]
+name = "ios-simulator-caches"
+app = "xcode"
+group = "developer"
+base = "home"
+path = "Library/Developer/CoreSimulator/Caches"
+safety = "safe"
+processes = ["Simulator"]
+note = "iOS Simulator runtime and dyld caches"

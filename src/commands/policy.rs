@@ -390,7 +390,7 @@ fn rule_is_always_safe(config: &Config, source: SourceKind, rule: &str) -> Resul
             }
             Ok(matched)
         }
-        SourceKind::Cache => Ok(caches::safety(rule) == Some(Safety::Safe)),
+        SourceKind::Cache => Ok(caches::safety(rule, &config.catalog) == Some(Safety::Safe)),
         SourceKind::Docker => Ok(matches!(rule, "image" | "build-cache")),
         SourceKind::Toolchain => {
             // Any toolchain manager can have default or project-pinned versions marked `review`.
@@ -616,6 +616,7 @@ pub fn execute(
                 caches::find_excluding(
                     &locations,
                     &Protected::for_user(),
+                    &filters.config.catalog,
                     &filters.config.excludes()?,
                 ),
                 &Cancel::new(),

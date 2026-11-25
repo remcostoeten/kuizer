@@ -1,3 +1,4 @@
+mod big;
 mod cache;
 mod clean;
 mod config;
@@ -15,7 +16,9 @@ mod removal;
 mod restore;
 mod rules;
 mod scan;
+mod system;
 mod toolchain;
+mod trash;
 mod ui;
 mod watch;
 
@@ -115,8 +118,11 @@ fn nested_help(command: &Command) -> Option<&'static str> {
         Command::Duplicates(args) if args.wants_help() => Some("duplicates"),
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.wants_help() => Some("cache"),
+        Command::Trash(args) if args.command == Some(NestedCommand::Help) => Some("trash"),
         Command::Toolchain(args) if args.wants_help() => Some("toolchain"),
         Command::Docker(args) if args.wants_help() => Some("docker"),
+        Command::System(args) if args.command == Some(NestedCommand::Help) => Some("system"),
+        Command::Big(args) if args.command == Some(NestedCommand::Help) => Some("big"),
         Command::Git(args) if args.command == Some(NestedCommand::Help) => Some("git"),
         Command::Policy(args) if args.command == Some(PolicyAction::Help) => Some("policy"),
         Command::Rules(args) if args.command == Some(NestedCommand::Help) => Some("rules"),
@@ -142,6 +148,7 @@ fn removes_unattended(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Clean(args)) => args.removal.yes && !args.removal.dry_run,
         Some(Command::Cache(args)) => args.plan().unattended(),
+        Some(Command::Trash(args)) => args.clean && args.removal.yes && !args.removal.dry_run,
         Some(Command::Toolchain(args)) => args.plan().unattended(),
         Some(Command::Docker(args)) => args.plan().unattended(),
         Some(Command::Duplicates(args)) => args.link_unattended(),
@@ -230,7 +237,10 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Cache(args)) => cache::run(&loaded.config, args, format, cli.quiet),
+        Some(Command::Trash(args)) => trash::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Docker(args)) => docker::run(&loaded.config, args, format, cli.quiet),
+        Some(Command::System(args)) => system::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Big(args)) => big::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Git(args)) => git::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),

@@ -61,7 +61,12 @@ pub fn run(config: &Config, args: DashboardArgs, json: bool, quiet: bool) -> Res
     }
     let locations = Locations::for_user().ok_or(AppError::NoHome)?;
     let cache_entries = cache::measure_threaded(
-        caches::find_excluding(&locations, &Protected::for_user(), &config.excludes()?),
+        caches::find_excluding(
+            &locations,
+            &Protected::for_user(),
+            &config.catalog,
+            &config.excludes()?,
+        ),
         &Cancel::new(),
         scan::size_threads(config),
         |_| {},

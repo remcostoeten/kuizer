@@ -84,6 +84,15 @@ fn explain(item: &Item) -> &'static str {
         }
         (_, Category::Cache, Safety::Safe) => "Cache. Deleting is safe, it is rebuilt when needed.",
         (_, Category::Temp, Safety::Safe) => "Temporary files. Deleting is safe.",
+        (_, Category::Logs, Safety::Safe) => {
+            "Log files. Deleting is safe, programs start new ones."
+        }
+        (_, Category::Trash, Safety::Safe) => {
+            "Items already in the trash. Emptying it cannot be undone."
+        }
+        (_, Category::Files, Safety::Safe) => {
+            "Large file. Look before deleting, it cannot be regenerated."
+        }
         (_, _, Safety::Review) => {
             "Check first: this may hold data that cannot be regenerated. Look inside before deleting."
         }
@@ -1479,6 +1488,7 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: Mode) {
     {
         let what = match source {
             Source::Docker => "Docker objects",
+            Source::Trash => "Trash items",
             _ => "Toolchains",
         };
         lines.push(muted(format!(

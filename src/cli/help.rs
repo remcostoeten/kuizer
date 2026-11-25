@@ -18,8 +18,10 @@ pub(super) const RESET: &str = "\x1b[0m";
 pub(super) const ABOUT_SCAN: &str = "List generated artifacts and caches in projects";
 pub(super) const ABOUT_CLEAN: &str = "Remove generated artifacts and caches from projects";
 pub(super) const ABOUT_CACHE: &str = "List and remove global tool caches";
+pub(super) const ABOUT_TRASH: &str = "Show and empty the trash";
 pub(super) const ABOUT_TOOLCHAIN: &str = "List and remove installed toolchain versions";
 pub(super) const ABOUT_DOCKER: &str = "List and remove unused Docker and Podman objects";
+pub(super) const ABOUT_SYSTEM: &str = "List system package caches, journals and unused runtimes";
 pub(super) const ABOUT_CACHE_CLEAN: &str = "Remove the selected caches after a preview";
 pub(super) const ABOUT_TOOLCHAIN_CLEAN: &str =
     "Remove the selected versions after a preview, always permanently";
@@ -27,6 +29,7 @@ pub(super) const ABOUT_DOCKER_CLEAN: &str =
     "Remove the selected objects after a preview, always permanently";
 pub(super) const ABOUT_GIT: &str = "Pack loose git objects and delete merged branches";
 pub(super) const ABOUT_DUPLICATES: &str = "Find files with identical contents";
+pub(super) const ABOUT_BIG: &str = "List large files and old downloads";
 pub(super) const ABOUT_DUPLICATES_LINK: &str =
     "Replace duplicate copies with reflinks or hard links without deleting content";
 pub(super) const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
@@ -47,8 +50,10 @@ pub(super) const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
             ("scan", ABOUT_SCAN),
             ("clean", ABOUT_CLEAN),
             ("cache", ABOUT_CACHE),
+            ("trash", ABOUT_TRASH),
             ("toolchain", ABOUT_TOOLCHAIN),
             ("docker", ABOUT_DOCKER),
+            ("system", ABOUT_SYSTEM),
             ("git", ABOUT_GIT),
             ("restore", ABOUT_RESTORE),
         ],
@@ -58,6 +63,7 @@ pub(super) const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
         &[
             ("dashboard", ABOUT_DASHBOARD),
             ("duplicates", ABOUT_DUPLICATES),
+            ("big", ABOUT_BIG),
             ("explain", ABOUT_EXPLAIN),
             ("history", ABOUT_HISTORY),
             ("watch", ABOUT_WATCH),
@@ -472,6 +478,48 @@ pub(super) fn watch_examples() -> String {
             ),
         ])
     )
+}
+
+pub(super) fn trash_help() -> String {
+    examples(&[
+        ("kuizer trash", "", "List trash folders and their size"),
+        (
+            "kuizer trash",
+            "--clean --dry-run",
+            "Show what emptying would remove",
+        ),
+        (
+            "kuizer trash",
+            "--clean",
+            "Empty the trash, after a confirmation",
+        ),
+    ])
+}
+
+pub(super) fn system_help() -> String {
+    examples(&[
+        (
+            "kuizer system",
+            "",
+            "List package caches, journals and unused runtimes",
+        ),
+        ("kuizer system", "--json", "The same as JSON"),
+    ])
+}
+
+pub(super) fn big_help() -> String {
+    examples(&[
+        (
+            "kuizer big",
+            "",
+            "List files of 500 MB and more under your home folder",
+        ),
+        (
+            "kuizer big",
+            "~/Videos --min-size 2GB",
+            "Only files of 2 GB and more in ~/Videos",
+        ),
+    ])
 }
 
 pub(super) fn config_examples() -> String {

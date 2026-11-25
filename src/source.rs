@@ -9,20 +9,27 @@ pub enum Source {
     Cache,
     Toolchain,
     Docker,
+    Trash,
 }
 
 impl Source {
-    pub const ALL: [Source; 4] = [Self::Artifact, Self::Cache, Self::Toolchain, Self::Docker];
+    pub const ALL: [Source; 5] = [
+        Self::Artifact,
+        Self::Cache,
+        Self::Toolchain,
+        Self::Docker,
+        Self::Trash,
+    ];
 
     /// @name Source::permanent
     /// @description Whether items of this source are always deleted for good, whatever
-    /// `delete.mode` says. Toolchains are removed through their own uninstaller and Docker
-    /// objects through the engine, so neither can go to the trash.
+    /// `delete.mode` says. Toolchains are removed through their own uninstaller, Docker
+    /// objects through the engine, and the trash itself cannot go to the trash.
     ///
     /// @example
     /// assert!(Source::Docker.permanent());
     pub fn permanent(self) -> bool {
-        matches!(self, Self::Toolchain | Self::Docker)
+        matches!(self, Self::Toolchain | Self::Docker | Self::Trash)
     }
 
     /// @name Source::trashed

@@ -55,8 +55,8 @@ pub(super) fn cache_matches(
         needle,
         &[
             candidate.path.to_string_lossy().as_ref(),
-            cache.name,
-            cache.tool,
+            &cache.name,
+            &cache.tool,
         ],
     )
 }
@@ -414,8 +414,12 @@ impl Kuizer {
                     .flex()
                     .child(ui::safety_label(("cache-safety", id), review)),
             )
-            .child(column(col::M).text_color(theme::muted()).child(cache.tool))
-            .child(column(col::XXL).truncate().child(cache.name))
+            .child(
+                column(col::M)
+                    .text_color(theme::muted())
+                    .child(cache.tool.clone()),
+            )
+            .child(column(col::XXL).truncate().child(cache.name.clone()))
             .child(
                 column(col::XS)
                     .text_right()
@@ -443,7 +447,7 @@ impl Kuizer {
                                 .truncate()
                                 .text_size(unit(font::SMALL))
                                 .text_color(theme::faint())
-                                .child(cache.note),
+                                .child(cache.note.clone()),
                         )
                     }),
             )
@@ -711,11 +715,15 @@ mod tests {
             app.session.roots = vec![PathBuf::from("/p")];
             let mut report = Report::empty(&app.session.roots, &app.session.options);
             let cache = KnownCache {
-                name: "npm",
-                tool: "npm",
+                name: "npm".to_owned(),
+                tool: "npm".to_owned(),
+                group: kuizer::catalog::Group::Developer,
+                category: kuizer::detect::Category::Cache,
+                kind: kuizer::detect::Kind::Dir,
                 path: PathBuf::from("/c/npm"),
                 safety: Safety::Safe,
-                note: "",
+                note: String::new(),
+                processes: Vec::new(),
             };
             report.caches = vec![(cache, artifact(1, Path::new("/c/npm")))];
             app.session.phase = Phase::Ready(Box::new(report));

@@ -171,7 +171,7 @@ impl Guard {
         if identity.is_none() {
             return Err(Refusal::Unverified);
         }
-        if self.protected.covers(path) {
+        if self.protected.refuses(path) {
             return Err(Refusal::AppData);
         }
         if platform::identity(&metadata) != identity {
@@ -308,5 +308,28 @@ mod tests {
             guard.check_path(Path::new("/home/me/projects/web/node_modules")),
             Err(Refusal::ContainsCwd)
         );
+    }
+
+    #[test]
+    fn guard_allows_profile_cache_and_refuses_profile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = fs::canonicalize(tmp.path()).expect("canonical");
+        let chrome = home.join(".config/google-chrome");
+        let profile = chrome.join("Default");
+        let network = profile.join("Network");
+        let gpu_cache = profile.join("GPUCache");
+        fs::create_dir_all(&network).expect("network");
+        fs::create_dir_all(&gpu_cache).expect("gpu");
+        fs::write(chrome.join("Local State"), "{}").expect("local state");
+        fs::write(profile.join("Preferences"), "{}").expect("prefs");
+        fs::write(network.join("Cookies"), "cookie").expect("cookies");
+        fs::write(gpu_cache.join("data_0"), "shader").expect("shader");
+
+        let mut guard = Guard::new(std::slice::from_ref(&profile)).with_cwd(None);
+        guard.protected = Protected::new(Some(&home));
+
+        let id = |p: &Path| platform::identity(&fs::symlink_metadata(p).expect("meta"));
+        assert_eq!(guard.check(&gpu_cache, id(&gpu_cache)), Ok(()));
+        assert_eq!(guard.check(&network, id(&network)), Err(Refusal::AppData));
     }
 }

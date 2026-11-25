@@ -114,6 +114,7 @@ impl Kuizer {
                 Source::Cache => caches.push(candidate.clone()),
                 Source::Toolchain => toolchains.push(candidate.clone()),
                 Source::Docker => docker.push(candidate.clone()),
+                Source::Trash => {}
             }
         }
         let mut batches = Vec::new();

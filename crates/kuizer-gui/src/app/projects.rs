@@ -17,8 +17,8 @@ pub(super) struct ProjectArtifact {
 #[derive(Debug, Clone)]
 pub(super) struct ProjectCache {
     pub id: u64,
-    pub name: &'static str,
-    pub tool: &'static str,
+    pub name: String,
+    pub tool: String,
     pub safety: Safety,
     pub bytes: u64,
     pub path: PathBuf,
@@ -150,18 +150,18 @@ pub(super) fn build_projects(
                 .caches
                 .iter()
                 .filter(|(cache, candidate)| {
-                    tools.contains(cache.tool) && seen_caches.insert(candidate.id)
+                    tools.contains(cache.tool.as_str()) && seen_caches.insert(candidate.id)
                 })
                 .map(|(cache, candidate)| ProjectCache {
                     id: candidate.id,
-                    name: cache.name,
-                    tool: cache.tool,
+                    name: cache.name.clone(),
+                    tool: cache.tool.clone(),
                     safety: candidate.rule.safety,
                     bytes: candidate.usage.allocated,
                     path: candidate.path.clone(),
                 })
                 .collect();
-            caches.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(b.name)));
+            caches.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
 
             let growth_bytes = growth
                 .and_then(|diff| diff.growth_for(&root))
@@ -649,11 +649,15 @@ mod tests {
         report.caches = vec![
             (
                 KnownCache {
-                    name: "cargo-registry",
-                    tool: "cargo",
+                    name: "cargo-registry".to_owned(),
+                    tool: "cargo".to_owned(),
+                    group: kuizer::catalog::Group::Developer,
+                    category: Category::Cache,
+                    kind: Kind::Dir,
                     path: PathBuf::from("/home/u/.cargo/registry"),
                     safety: Safety::Safe,
-                    note: "",
+                    note: String::new(),
+                    processes: Vec::new(),
                 },
                 candidate(
                     10,
@@ -666,11 +670,15 @@ mod tests {
             ),
             (
                 KnownCache {
-                    name: "npm",
-                    tool: "npm",
+                    name: "npm".to_owned(),
+                    tool: "npm".to_owned(),
+                    group: kuizer::catalog::Group::Developer,
+                    category: Category::Cache,
+                    kind: Kind::Dir,
                     path: PathBuf::from("/home/u/.npm/_cacache"),
                     safety: Safety::Safe,
-                    note: "",
+                    note: String::new(),
+                    processes: Vec::new(),
                 },
                 candidate(
                     11,

@@ -526,7 +526,7 @@ pub fn print_duplicates_link(mode: LinkMode, dry_run: bool, report: &LinkReport,
 
 pub fn print_caches(entries: &[(KnownCache, Candidate)], quiet: bool) {
     if entries.is_empty() {
-        println!("No known tool caches found");
+        println!("No known caches found");
         return;
     }
     let mut out = BufWriter::new(io::stdout().lock());
@@ -534,20 +534,21 @@ pub fn print_caches(entries: &[(KnownCache, Candidate)], quiet: bool) {
         out,
         "{}",
         dim(&format!(
-            "{:>10}  {:<6}  {:<20}  {:<11}  PATH",
-            "SIZE", "SAFETY", "NAME", "TOOL"
+            "{:>10}  {:<6}  {:<28}  {:<10}  {:<11}  PATH",
+            "SIZE", "SAFETY", "NAME", "GROUP", "TOOL"
         ))
     );
     for (cache, candidate) in entries {
         let safety = cache.safety.as_str();
         let _ = writeln!(
             out,
-            "{}  {safety:<6}  {:<20}  {:<11}  {}",
+            "{}  {safety:<6}  {:<28}  {:<10}  {:<11}  {}",
             bold(&format!(
                 "{:>10}",
                 ByteSize(candidate.usage.allocated).to_string()
             )),
             cache.name,
+            cache.group.as_str(),
             cache.tool,
             display_path(&cache.path),
         );

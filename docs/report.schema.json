@@ -51,7 +51,7 @@
         "path": {"type": "string", "description": "Filesystem path or an engine object locator."},
         "kind": {"enum": ["dir", "file", "symlink", "external"]},
         "rule": {"type": "string"},
-        "category": {"enum": ["dependencies", "build", "cache", "temp"]},
+        "category": {"enum": ["dependencies", "build", "cache", "temp", "logs", "trash", "files"]},
         "safety": {"enum": ["safe", "review"]},
         "ecosystem": {"type": "string"},
         "project": {"type": ["string", "null"], "description": "Containing project path when known."},
@@ -164,11 +164,12 @@
               {"$ref": "#/$defs/candidate"},
               {
                 "type": "object",
-                "required": ["source", "name", "tool", "note"],
+                "required": ["source", "name", "tool", "group", "note"],
                 "properties": {
                   "source": {"const": "cache"},
                   "name": {"type": "string"},
                   "tool": {"type": "string"},
+                  "group": {"enum": ["developer", "apps", "browsers", "system"]},
                   "note": {"type": ["string", "null"]}
                 }
               }

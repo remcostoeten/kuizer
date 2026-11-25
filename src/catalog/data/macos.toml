@@ -1,0 +1,152 @@
+# macOS app, system and Xcode caches.
+
+[[entry]]
+name = "xcode-device-support"
+app = "Xcode"
+group = "developer"
+base = "library"
+path = "Developer/Xcode/iOS DeviceSupport"
+safety = "review"
+platforms = ["macos"]
+processes = ["Xcode"]
+note = "Debug symbols per iOS version; copied again when that device connects."
+
+[[entry]]
+name = "xcode-archives"
+app = "Xcode"
+group = "developer"
+base = "library"
+path = "Developer/Xcode/Archives"
+safety = "review"
+platforms = ["macos"]
+processes = ["Xcode"]
+note = "App archives with debug symbols needed to read crash reports of shipped builds."
+
+[[entry]]
+name = "xcode-cache"
+app = "Xcode"
+group = "developer"
+base = "cache"
+path = "com.apple.dt.Xcode"
+safety = "safe"
+platforms = ["macos"]
+processes = ["Xcode"]
+note = "Xcode application cache rebuilt on next launch."
+
+[[entry]]
+name = "cocoapods-cache"
+app = "CocoaPods"
+group = "developer"
+base = "cache"
+path = "CocoaPods"
+safety = "safe"
+platforms = ["macos"]
+note = "Downloaded pod archives fetched again on next pod install."
+
+[[entry]]
+name = "diagnostic-reports"
+app = "macOS"
+group = "system"
+category = "logs"
+base = "library"
+path = "Logs/DiagnosticReports"
+safety = "safe"
+platforms = ["macos"]
+note = "Crash and hang reports already sent or no longer needed."
+
+[[entry]]
+name = "simulator-logs"
+app = "iOS Simulator"
+group = "developer"
+category = "logs"
+base = "library"
+path = "Logs/CoreSimulator"
+safety = "safe"
+platforms = ["macos"]
+processes = ["Simulator"]
+note = "iOS Simulator runtime logs rebuilt when simulators run."
+
+[[entry]]
+name = "sandboxed-app-caches"
+app = "Sandboxed apps"
+group = "apps"
+base = "library"
+path = "Containers/*/Data/Library/Caches"
+safety = "review"
+platforms = ["macos"]
+note = "Cache folder of each sandboxed app; check which app owns it first."
+
+[[entry]]
+name = "spotify-cache-macos"
+app = "Spotify"
+group = "apps"
+base = "cache"
+path = "com.spotify.client"
+safety = "review"
+platforms = ["macos"]
+processes = ["Spotify"]
+note = "Streaming cache and downloaded songs; downloads must be fetched again."
+
+[[entry]]
+name = "steam-shader-cache-macos"
+app = "Steam"
+group = "apps"
+base = "data"
+path = "Steam/steamapps/shadercache"
+safety = "review"
+platforms = ["macos"]
+processes = ["steam_osx"]
+note = "Compiled shaders per game; games stutter while it refills."
+
+[[entry]]
+name = "adobe-media-cache"
+app = "Adobe"
+group = "apps"
+base = "data"
+path = "Adobe/Common/Media Cache Files"
+safety = "review"
+platforms = ["macos"]
+note = "Conformed audio and video previews rebuilt when projects reopen."
+
+[[entry]]
+name = "zoom-cache-macos"
+app = "Zoom"
+group = "apps"
+base = "cache"
+path = "us.zoom.xos"
+safety = "safe"
+platforms = ["macos"]
+processes = ["zoom.us"]
+note = "Temporary meeting and UI cache rebuilt on next launch."
+
+[[entry]]
+name = "docker-desktop-logs-macos"
+app = "Docker Desktop"
+group = "developer"
+category = "logs"
+base = "library"
+path = "Containers/com.docker.docker/Data/log"
+safety = "safe"
+platforms = ["macos"]
+processes = ["Docker"]
+note = "Docker Desktop VM and daemon logs."
+
+[[entry]]
+name = "swift-package-cache-macos"
+app = "SwiftPM"
+group = "developer"
+base = "cache"
+path = "org.swift.swiftpm"
+safety = "safe"
+platforms = ["macos"]
+note = "Downloaded Swift package repositories rebuilt on next resolve."
+
+[[entry]]
+name = "carthage-cache-macos"
+app = "Carthage"
+group = "developer"
+base = "cache"
+path = "org.carthage.CarthageKit"
+safety = "safe"
+platforms = ["macos"]
+note = "Downloaded Carthage build caches fetched again on next bootstrap."

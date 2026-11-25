@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use self::help::*;
+use crate::catalog::Group;
 use crate::detect::Category;
 pub use crate::scan::SortKey;
 use crate::units::{ByteSize, Idle, WatchInterval};
@@ -106,10 +107,16 @@ pub enum Command {
     },
     #[command(about = ABOUT_CACHE, after_help = cache_examples())]
     Cache(CacheArgs),
+    #[command(about = ABOUT_TRASH, after_help = trash_help())]
+    Trash(TrashArgs),
     #[command(about = ABOUT_TOOLCHAIN, visible_alias = "toolchains", after_help = toolchain_help())]
     Toolchain(ToolchainArgs),
     #[command(about = ABOUT_DOCKER, visible_alias = "podman", after_help = docker_help())]
     Docker(DockerArgs),
+    #[command(about = ABOUT_SYSTEM, after_help = system_help())]
+    System(SystemArgs),
+    #[command(about = ABOUT_BIG, after_help = big_help())]
+    Big(BigArgs),
     #[command(about = ABOUT_GIT, visible_alias = "repos", after_help = git_help())]
     Git(GitArgs),
     #[command(about = ABOUT_POLICY, visible_alias = "policies", after_help = policy_examples())]
@@ -603,12 +610,65 @@ pub struct DashboardArgs {
 pub struct CacheArgs {
     #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
+    #[arg(
+        long,
+        global = true,
+        value_name = "GROUP",
+        help = "Only this group, repeatable: developer, apps, browsers, system",
+        help_heading = "Filters"
+    )]
+    pub group: Vec<Group>,
     #[command(flatten)]
     pub filters: SourceFilterArgs,
     #[command(flatten)]
     pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
     pub command: Option<CacheAction>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct TrashArgs {
+    #[arg(
+        long,
+        help = "Empty the selected trash folders after a preview, always permanently"
+    )]
+    pub clean: bool,
+    #[command(flatten)]
+    pub removal: RemovalArgs,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct SystemArgs {
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct BigArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to search [default: big.roots, or the home folder]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        help = "Smallest file to list [config: big.min_size]"
+    )]
+    pub min_size: Option<ByteSize>,
+    #[arg(
+        long,
+        value_name = "N",
+        help = "List at most this many files [config: big.limit]"
+    )]
+    pub limit: Option<usize>,
+    #[command(subcommand)]
+    pub command: Option<NestedCommand>,
 }
 
 impl CacheArgs {

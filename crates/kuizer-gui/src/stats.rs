@@ -24,6 +24,7 @@ fn slot(source: Source) -> usize {
         Source::Cache => 1,
         Source::Toolchain => 2,
         Source::Docker => 3,
+        Source::Trash => 4,
     }
 }
 
@@ -97,7 +98,7 @@ impl Totals {
 /// Totals of a set of selected items, per list.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionStats {
-    sources: [Totals; 4],
+    sources: [Totals; Source::ALL.len()],
 }
 
 impl SelectionStats {
@@ -302,6 +303,7 @@ fn count(report: &Report, source: Source) -> usize {
         Source::Cache => report.caches.len(),
         Source::Toolchain => report.toolchains.len(),
         Source::Docker => report.docker.len(),
+        Source::Trash => 0,
     }
 }
 
@@ -328,6 +330,7 @@ fn at(report: &Report, source: Source, position: usize) -> Option<&Candidate> {
             .get(position)
             .map(|(_, candidate)| candidate),
         Source::Docker => report.docker.get(position).map(|(_, candidate)| candidate),
+        Source::Trash => None,
     }
 }
 

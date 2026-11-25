@@ -21,6 +21,9 @@ pub fn category(category: Category) -> Color {
         Category::Build => Color::Blue,
         Category::Cache => Color::Magenta,
         Category::Temp => Color::Indexed(180),
+        Category::Logs => Color::Indexed(144),
+        Category::Trash => Color::Indexed(103),
+        Category::Files => Color::Indexed(109),
     }
 }
 

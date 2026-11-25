@@ -22,6 +22,9 @@ pub enum Category {
     Build,
     Cache,
     Temp,
+    Logs,
+    Trash,
+    Files,
 }
 
 impl Category {
@@ -33,7 +36,20 @@ impl Category {
             Self::Build => "build",
             Self::Cache => "cache",
             Self::Temp => "temp",
+            Self::Logs => "logs",
+            Self::Trash => "trash",
+            Self::Files => "files",
         }
+    }
+
+    /// @name Category::is_rule_category
+    /// @description Whether a project detection rule may use this category. Logs, trash and
+    /// files only come from the location catalog and the trash and big-file sources.
+    ///
+    /// @example
+    /// assert!(!Category::Trash.is_rule_category());
+    pub fn is_rule_category(self) -> bool {
+        Self::ALL.contains(&self)
     }
 }
 
