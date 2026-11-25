@@ -2085,3 +2085,70 @@ fn rescanning_saved_folder_from_start_shows_project_growth(cx: &mut TestAppConte
     });
     assert!(cx.debug_bounds("overview-growth").is_some());
 }
+
+#[gpui::test]
+fn project_view_cleans_only_safe_items_of_that_project(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+
+    // Project alpha has one Safe artifact (node_modules) and one Review artifact (.venv).
+    let alpha = root.join("alpha");
+    let alpha_modules = alpha.join("node_modules").join("pkg");
+    let alpha_venv = alpha.join(".venv");
+    std::fs::create_dir_all(&alpha_modules).unwrap();
+    std::fs::create_dir_all(&alpha_venv).unwrap();
+    std::fs::write(alpha.join("package.json"), "{}").unwrap();
+    std::fs::write(alpha_modules.join("index.js"), vec![b'a'; 64 * 1024]).unwrap();
+    std::fs::write(alpha_venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    std::fs::write(alpha_venv.join("lib.bin"), vec![b'r'; 64 * 1024]).unwrap();
+
+    // Project beta has its own Safe artifact (node_modules) that must remain untouched.
+    let beta = root.join("beta");
+    let beta_modules = beta.join("node_modules").join("other");
+    std::fs::create_dir_all(&beta_modules).unwrap();
+    std::fs::write(beta.join("package.json"), "{}").unwrap();
+    std::fs::write(beta_modules.join("index.js"), vec![b'b'; 64 * 1024]).unwrap();
+
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    type_text(cx, &root.display().to_string());
+    cx.simulate_keystrokes("enter");
+    wait_for_scan(&view, cx);
+
+    // Switch Overview to the Projects view and draw it.
+    view.update(cx, |app, cx| {
+        app.list.projects_view = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(cx.debug_bounds("projects-view").is_some());
+    assert!(cx.debug_bounds("project-card-0").is_some());
+    assert!(cx.debug_bounds("project-card-1").is_some());
+    assert!(cx.debug_bounds("clean-project-0").is_some());
+
+    // Clean only alpha's safe items.
+    let canonical_alpha = std::fs::canonicalize(&alpha).unwrap();
+    view.update(cx, |app, cx| {
+        app.clean_project_safe(&canonical_alpha, cx);
+    });
+    for _ in 0..1000 {
+        cx.executor().advance_clock(POLL);
+        cx.run_until_parked();
+        if view.read_with(cx, |app, _| app.session.cleaning.is_none()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert!(
+        !alpha.join("node_modules").exists(),
+        "alpha's safe artifact should be removed"
+    );
+    assert!(
+        alpha.join(".venv").exists(),
+        "alpha's needs-review artifact must NOT be removed by clean safe"
+    );
+    assert!(
+        beta.join("node_modules").exists(),
+        "beta's safe artifact must NOT be touched when cleaning alpha"
+    );
+}

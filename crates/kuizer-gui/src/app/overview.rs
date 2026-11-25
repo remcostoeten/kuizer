@@ -8,6 +8,9 @@ impl Kuizer {
         if self.list.map.shown {
             return self.render_map(cx);
         }
+        if self.list.projects_view {
+            return self.render_projects(cx);
+        }
         let figures = &self.session.report_stats;
         let caches = figures.caches.all.bytes;
         let toolchains = figures.toolchains.all.bytes;

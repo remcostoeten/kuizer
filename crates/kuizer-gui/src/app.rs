@@ -66,6 +66,7 @@ mod menu;
 mod overlay;
 mod overview;
 mod pane;
+mod projects;
 mod repos;
 mod ring;
 mod session;
@@ -384,6 +385,7 @@ struct ListView {
     list_scrolls: HashMap<Tab, UniformListScrollHandle>,
     lists: Lists,
     map: SpaceMap,
+    projects_view: bool,
 }
 
 /// Modal dialogs, toasts, context menu, command palette, shortcuts sheet, and settings popover.
@@ -541,6 +543,7 @@ impl Kuizer {
                 .collect(),
                 lists: Lists::default(),
                 map: SpaceMap::default(),
+                projects_view: false,
             },
             overlays: Overlays {
                 dialog: None,

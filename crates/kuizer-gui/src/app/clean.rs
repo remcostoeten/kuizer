@@ -70,13 +70,26 @@ impl Kuizer {
     /// Starts deleting the selection, or one item when `only` is set, unless something stands
     /// in the way.
     pub(super) fn delete(&mut self, only: Option<(Source, u64)>, cx: &mut Context<Self>) {
+        match only {
+            Some(key) => self.delete_keys(&[key], cx),
+            None => {
+                let keys: Vec<(Source, u64)> = self
+                    .selected()
+                    .into_iter()
+                    .map(|(source, candidate)| (source, candidate.id))
+                    .collect();
+                self.delete_keys(&keys, cx);
+            }
+        }
+    }
+
+    /// Starts deleting the specified `(Source, id)` items unless something stands in the way.
+    pub(super) fn delete_keys(&mut self, keys: &[(Source, u64)], cx: &mut Context<Self>) {
         let Some(report) = self.report() else {
             return;
         };
-        let items = match only {
-            Some(key) => self.item(key).into_iter().collect(),
-            None => self.selected(),
-        };
+        let items: Vec<(Source, &Candidate)> =
+            keys.iter().filter_map(|&key| self.item(key)).collect();
         let locked = self
             .locked(items.iter().map(|(source, _)| *source))
             .is_some();

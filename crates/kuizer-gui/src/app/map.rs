@@ -256,17 +256,33 @@ impl Kuizer {
         );
     }
 
-    /// The Summary and Space map switch at the top of the Overview.
+    /// The Summary, Projects, and Space map switch at the top of the Overview.
     pub(super) fn overview_switch(&self, cx: &mut Context<Self>) -> Div {
         let key = self.hint(&Command::SpaceMap);
+        let summary_active = !self.list.map.shown && !self.list.projects_view;
+        let projects_active = !self.list.map.shown && self.list.projects_view;
         ui::segments()
             .child(self.control(
-                ui::segment("view-summary", "Summary", !self.list.map.shown)
+                ui::segment("view-summary", "Summary", summary_active)
                     .debug_selector(|| "view-summary".to_owned())
                     .tip(tooltip::plain("Totals and charts of the scan")),
                 cx,
                 |app, _, cx| {
                     app.list.map.shown = false;
+                    app.list.projects_view = false;
+                    cx.notify();
+                },
+            ))
+            .child(self.control(
+                ui::segment("view-projects", "Projects", projects_active)
+                    .debug_selector(|| "view-projects".to_owned())
+                    .tip(tooltip::plain(
+                        "Group every artifact, related global cache and git repository under its project, with one action to clean its safe items",
+                    )),
+                cx,
+                |app, _, cx| {
+                    app.list.map.shown = false;
+                    app.list.projects_view = true;
                     cx.notify();
                 },
             ))
@@ -282,6 +298,7 @@ impl Kuizer {
                 cx,
                 |app, _, cx| {
                     app.list.map.shown = true;
+                    app.list.projects_view = false;
                     app.ensure_map(cx);
                     cx.notify();
                 },
