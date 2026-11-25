@@ -85,6 +85,8 @@ pub enum AppError {
     RestoreFailed(usize),
     #[error("{0} git actions failed")]
     GitFailed(usize),
+    #[error("{0} duplicate files could not be linked")]
+    LinkFailed(usize),
 }
 
 impl AppError {
@@ -109,9 +111,7 @@ fn interactive() -> bool {
 fn nested_help(command: &Command) -> Option<&'static str> {
     match command {
         Command::Scan(args) if args.command == Some(NestedCommand::Help) => Some("scan"),
-        Command::Duplicates(args) if args.command == Some(NestedCommand::Help) => {
-            Some("duplicates")
-        }
+        Command::Duplicates(args) if args.wants_help() => Some("duplicates"),
         Command::Clean(args) if args.command == Some(NestedCommand::Help) => Some("clean"),
         Command::Cache(args) if args.wants_help() => Some("cache"),
         Command::Toolchain(args) if args.wants_help() => Some("toolchain"),
@@ -142,6 +142,7 @@ fn removes_unattended(command: Option<&Command>) -> bool {
         Some(Command::Cache(args)) => args.plan().unattended(),
         Some(Command::Toolchain(args)) => args.plan().unattended(),
         Some(Command::Docker(args)) => args.plan().unattended(),
+        Some(Command::Duplicates(args)) => args.link_unattended(),
         Some(Command::Git(args)) => args.yes && !args.dry_run && (args.gc || args.branches),
         _ => false,
     }

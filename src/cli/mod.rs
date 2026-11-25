@@ -451,6 +451,61 @@ pub struct DuplicatesArgs {
     #[arg(long, value_name = "N", help = "Show at most N groups")]
     pub limit: Option<usize>,
     #[command(subcommand)]
+    pub command: Option<DuplicatesAction>,
+}
+
+impl DuplicatesArgs {
+    pub fn wants_help(&self) -> bool {
+        match &self.command {
+            Some(DuplicatesAction::Help) => true,
+            Some(DuplicatesAction::Link(link)) => link.command == Some(NestedCommand::Help),
+            None => false,
+        }
+    }
+
+    pub fn link_unattended(&self) -> bool {
+        matches!(
+            &self.command,
+            Some(DuplicatesAction::Link(link)) if link.yes && !link.dry_run
+        )
+    }
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+#[command(disable_help_subcommand = true)]
+pub enum DuplicatesAction {
+    #[command(about = ABOUT_DUPLICATES_LINK)]
+    Link(DuplicatesLinkArgs),
+    #[command(hide = true)]
+    Help,
+}
+
+#[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
+#[command(subcommand_precedence_over_arg = true)]
+pub struct DuplicatesLinkArgs {
+    #[arg(
+        value_name = "PATH",
+        help = "Directories to search [default: current directory]"
+    )]
+    pub paths: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Use hard links instead of reflinks (same filesystem only; edits change every copy)"
+    )]
+    pub hardlink: bool,
+    #[arg(long, help = "Show what would be linked without changing any files")]
+    pub dry_run: bool,
+    #[arg(short, long, help = "Link without asking for confirmation")]
+    pub yes: bool,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        help = "Skip files smaller than this [default: duplicates.min_size]"
+    )]
+    pub min_size: Option<ByteSize>,
+    #[arg(long, value_name = "N", help = "Process at most N groups")]
+    pub limit: Option<usize>,
+    #[command(subcommand)]
     pub command: Option<NestedCommand>,
 }
 
@@ -977,6 +1032,27 @@ mod tests {
         let Some(Command::Duplicates(args)) = cli.command else {
             panic!("expected duplicates");
         };
-        assert_eq!(args.command, Some(NestedCommand::Help));
+        assert_eq!(args.command, Some(DuplicatesAction::Help));
+
+        let cli = Cli::try_parse_from([
+            "kuizer",
+            "duplicates",
+            "link",
+            "/tmp/a",
+            "--hardlink",
+            "--dry-run",
+            "-y",
+        ])
+        .expect("parses");
+        let Some(Command::Duplicates(args)) = cli.command else {
+            panic!("expected duplicates");
+        };
+        let Some(DuplicatesAction::Link(link)) = args.command else {
+            panic!("expected duplicates link");
+        };
+        assert_eq!(link.paths, [PathBuf::from("/tmp/a")]);
+        assert!(link.hardlink);
+        assert!(link.dry_run);
+        assert!(link.yes);
     }
 }

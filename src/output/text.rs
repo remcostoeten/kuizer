@@ -7,7 +7,7 @@ use crate::caches::KnownCache;
 use crate::delete::{Mode, Removal, Status};
 use crate::detect::{Category, Safety};
 use crate::docker::Item;
-use crate::dupes::{Duplicates, Group};
+use crate::dupes::{Duplicates, Group, LinkMode, LinkReport, LinkStatus};
 use crate::platform;
 use crate::scan::{Candidate, Issue, Progress, Summary};
 use crate::toolchains::Toolchain;
@@ -416,7 +416,9 @@ pub fn print_duplicates(found: &Duplicates, groups: &[Group], quiet: bool) {
         }
         println!(
             "{}",
-            dim("kuizer only reports duplicates. Choose which copy to keep yourself.")
+            dim(
+                "kuizer never deletes duplicates. Use `kuizer duplicates link` to replace copies with reflinks or hard links."
+            )
         );
     }
     println!(
@@ -428,6 +430,63 @@ pub fn print_duplicates(found: &Duplicates, groups: &[Group], quiet: bool) {
         ))
     );
     print_issues(&found.issues);
+}
+
+pub fn print_duplicates_link(mode: LinkMode, dry_run: bool, report: &LinkReport, quiet: bool) {
+    let mut out = BufWriter::new(io::stdout().lock());
+    for outcome in &report.outcomes {
+        let label = match outcome.status {
+            LinkStatus::Linked => mode.as_str(),
+            LinkStatus::DryRun => "would link",
+            LinkStatus::Skipped => "skipped",
+            LinkStatus::Unsupported => "unsupported",
+            LinkStatus::Failed => "failed",
+        };
+        let detail = outcome
+            .reason
+            .as_deref()
+            .map(|reason| format!(" ({})", sanitize(reason)))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:>11}  {:>10}  {} -> {}{detail}",
+            label,
+            ByteSize(outcome.bytes).to_string(),
+            display_path(&outcome.target),
+            display_path(&outcome.source),
+        );
+    }
+    drop(out);
+    if quiet {
+        return;
+    }
+    if dry_run {
+        println!(
+            "\nWould {} {} files, saving {} ({} skipped)",
+            mode.as_str(),
+            report.dry_run,
+            bold(&ByteSize(report.saved_bytes).to_string()),
+            report.skipped,
+        );
+    } else {
+        println!(
+            "\nLinked {} files via {}, saving {} ({} skipped, {} unsupported, {} failed)",
+            report.linked,
+            mode.as_str(),
+            bold(&ByteSize(report.saved_bytes).to_string()),
+            report.skipped,
+            report.unsupported,
+            report.failed,
+        );
+        if report.unsupported > 0 && mode == LinkMode::Reflink {
+            println!(
+                "{}",
+                dim(
+                    "This filesystem does not support reflinks. Pass --hardlink for same-filesystem hard links (note: linked copies share one inode and edits affect every copy)."
+                )
+            );
+        }
+    }
 }
 
 pub fn print_caches(entries: &[(KnownCache, Candidate)], quiet: bool) {

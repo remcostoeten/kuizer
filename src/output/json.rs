@@ -7,7 +7,7 @@ use crate::caches::KnownCache;
 use crate::delete::{Mode, Removal, Status};
 use crate::detect::{Category, Kind, Safety};
 use crate::docker::{Item, Object};
-use crate::dupes::{Duplicates, Group};
+use crate::dupes::{Duplicates, Group, LinkMode, LinkReport, LinkStatus};
 use crate::scan::{Candidate, Issue, IssueKind, Summary};
 use crate::toolchains::Toolchain;
 
@@ -444,6 +444,78 @@ pub fn duplicates_report(
         },
     };
     serde_json::to_string_pretty(&report)
+}
+
+#[derive(Serialize)]
+struct DuplicateLinkOutcomeJson<'a> {
+    #[serde(serialize_with = "lossy_path")]
+    source: &'a Path,
+    #[serde(serialize_with = "lossy_path")]
+    target: &'a Path,
+    bytes: u64,
+    status: LinkStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct DuplicateLinkSummary {
+    linked: usize,
+    dry_run: usize,
+    skipped: usize,
+    unsupported: usize,
+    failed: usize,
+    saved_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct DuplicateLinkReport<'a> {
+    schema_version: u32,
+    command: &'static str,
+    mode: LinkMode,
+    dry_run: bool,
+    #[serde(serialize_with = "lossy_paths")]
+    roots: &'a [PathBuf],
+    outcomes: Vec<DuplicateLinkOutcomeJson<'a>>,
+    issues: Vec<IssueJson<'a>>,
+    summary: DuplicateLinkSummary,
+}
+
+pub fn duplicates_link_report(
+    roots: &[PathBuf],
+    mode: LinkMode,
+    dry_run: bool,
+    report: &LinkReport,
+    issues: &[Issue],
+) -> Result<String, serde_json::Error> {
+    let payload = DuplicateLinkReport {
+        schema_version: SCHEMA_VERSION,
+        command: "duplicates link",
+        mode,
+        dry_run,
+        roots,
+        outcomes: report
+            .outcomes
+            .iter()
+            .map(|o| DuplicateLinkOutcomeJson {
+                source: &o.source,
+                target: &o.target,
+                bytes: o.bytes,
+                status: o.status,
+                reason: o.reason.as_deref(),
+            })
+            .collect(),
+        issues: issues_json(issues),
+        summary: DuplicateLinkSummary {
+            linked: report.linked,
+            dry_run: report.dry_run,
+            skipped: report.skipped,
+            unsupported: report.unsupported,
+            failed: report.failed,
+            saved_bytes: report.saved_bytes,
+        },
+    };
+    serde_json::to_string_pretty(&payload)
 }
 
 #[derive(Serialize)]

@@ -27,6 +27,8 @@ pub(super) const ABOUT_DOCKER_CLEAN: &str =
     "Remove the selected objects after a preview, always permanently";
 pub(super) const ABOUT_GIT: &str = "Pack loose git objects and delete merged branches";
 pub(super) const ABOUT_DUPLICATES: &str = "Find files with identical contents";
+pub(super) const ABOUT_DUPLICATES_LINK: &str =
+    "Replace duplicate copies with reflinks or hard links without deleting content";
 pub(super) const ABOUT_HISTORY: &str = "Show what kuizer deleted and the space it freed";
 pub(super) const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
 pub(super) const ABOUT_DASHBOARD: &str =
@@ -322,7 +324,7 @@ pub(super) fn git_help() -> String {
 
 pub(super) fn duplicates_help() -> String {
     format!(
-        "Reports only; kuizer never deletes duplicates.\n\n{}",
+        "Reports duplicate files without deleting content. Use `duplicates link` to replace copies with copy-on-write reflinks (Btrfs, XFS, APFS) or opt-in hard links (`--hardlink`, same filesystem only; linked copies share one inode and edits affect every copy).\n\n{}",
         examples(&[
             (
                 "kuizer duplicates",
@@ -338,6 +340,16 @@ pub(super) fn duplicates_help() -> String {
                 "kuizer duplicates",
                 "~/Pictures --verify",
                 "Compare matches byte by byte"
+            ),
+            (
+                "kuizer duplicates link",
+                "~/Pictures --dry-run",
+                "Preview reflink deduplication"
+            ),
+            (
+                "kuizer duplicates link",
+                "~/Pictures --hardlink",
+                "Hard-link copies on the same filesystem"
             ),
         ])
     )

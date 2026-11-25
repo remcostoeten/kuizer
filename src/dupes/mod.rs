@@ -1,4 +1,5 @@
 mod hash;
+mod link;
 #[cfg(test)]
 mod tests;
 mod walk;
@@ -10,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use self::hash::{Pass, SAMPLED, same_size_candidates, verified};
+pub use self::link::{LinkMode, LinkOutcome, LinkReport, LinkStatus, link_groups};
 pub use self::walk::Files;
 use self::walk::{Reporting, seen};
 
