@@ -10,8 +10,8 @@ use ratatui::widgets::{
 };
 
 use super::app::{
-    App, ConfirmStats, GitScope, GitTask, Group, Grouping, Item, Load, Overlay, Row, Spot, Status,
-    Tab, counted, project_of,
+    App, ConfirmStats, GitScope, GitTask, Group, Grouping, HistorySpot, Item, Load, Overlay, Row,
+    Spot, Status, Tab, counted, project_of,
 };
 use super::palette::{
     self, ACCENT, CURSOR, DANGER, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL,
@@ -21,6 +21,7 @@ use crate::cli::SortKey;
 use crate::delete::{Confirmation, Mode};
 use crate::detect::{Category, Safety};
 use crate::dupes::Stage;
+use crate::history::{self, Action as HistoryAction, ItemState, TrashState};
 use crate::keymap::{Action, Scope};
 use crate::output::display_path;
 use crate::scan::IssueKind;
@@ -217,6 +218,23 @@ fn summary(app: &App) -> Vec<Span<'static>> {
             " reading repositories ",
             Style::new().fg(MUTED),
         )],
+        Tab::History if app.history.load == Load::Done => {
+            let history = &app.history.history;
+            let trash = &app.history.trash;
+            let mut text = format!(
+                " {}  {} removed ",
+                counted(history.runs.len(), "run", "runs"),
+                ByteSize(history.cumulative.bytes),
+            );
+            if trash.known {
+                let kept = trash.in_trash(history);
+                if kept.items > 0 {
+                    text.push_str(&format!(" {} in trash ", ByteSize(kept.bytes)));
+                }
+            }
+            vec![Span::raw(text)]
+        }
+        Tab::History => vec![Span::styled(" loading history ", Style::new().fg(MUTED))],
     }
 }
 
@@ -458,11 +476,115 @@ fn repos_table(frame: &mut Frame, app: &App, area: Rect) {
     report_table(frame, rows, list.cursor - start, area);
 }
 
+fn short_timestamp(ts: &str) -> String {
+    ts.get(..19).unwrap_or(ts).replace('T', " ")
+}
+
+fn history_run_state(
+    history: &history::History,
+    trash: &history::TrashSnapshot,
+    run_index: usize,
+) -> (String, Color) {
+    if history.runs[run_index].action == HistoryAction::Restore {
+        return ("restore".to_owned(), ACCENT);
+    }
+    match trash.state(history, run_index) {
+        TrashState::Restorable { items, .. } => (format!("{items} in trash"), SAFE),
+        TrashState::Restored => ("restored".to_owned(), MUTED),
+        TrashState::Emptied => ("emptied".to_owned(), MUTED),
+        TrashState::Unknown => ("unknown".to_owned(), MUTED),
+        TrashState::NotTrashed => ("permanent".to_owned(), MUTED),
+    }
+}
+
+fn history_item_color(state: ItemState) -> Color {
+    match state {
+        ItemState::InTrash => SAFE,
+        ItemState::RestoredHere => ACCENT,
+        ItemState::Restored
+        | ItemState::Deleted
+        | ItemState::DryRun
+        | ItemState::Trashed
+        | ItemState::LeftTrash => MUTED,
+    }
+}
+
+fn history_table(frame: &mut Frame, app: &App, area: Rect) {
+    let list = &app.history;
+    let height = usize::from(area.height.saturating_sub(1));
+    let info_width = usize::from(area.width.saturating_sub(10 + 10 + 14 + 3));
+    let (start, stop) = window(list.cursor, list.rows.len(), height);
+    let rows: Vec<TableRow<'static>> = list.rows[start.min(stop)..stop]
+        .iter()
+        .map(|spot| match *spot {
+            HistorySpot::Run(run_index) => {
+                let run = &list.history.runs[run_index];
+                let expanded = list.expanded.contains(&run.id) || !app.filter.is_empty();
+                let marker = if run.deleted.is_empty() {
+                    " "
+                } else if expanded {
+                    "▾"
+                } else {
+                    "▸"
+                };
+                let (state_text, state_color) =
+                    history_run_state(&list.history, &list.trash, run_index);
+                let detail = format!(
+                    "{}  · {}  · {}",
+                    short_timestamp(&run.started_at),
+                    counted(run.total.items, "item", "items"),
+                    run.command
+                );
+                TableRow::new(vec![
+                    Cell::from(format!("{marker} {}", run.session())),
+                    Cell::from(format!("{:>10}", ByteSize(run.total.bytes).to_string()))
+                        .style(Style::new().fg(palette::size(run.total.bytes))),
+                    Cell::from(state_text).style(Style::new().fg(state_color)),
+                    Cell::from(shorten(&detail, info_width)),
+                ])
+                .style(Style::new().add_modifier(Modifier::BOLD))
+            }
+            HistorySpot::Item(run_index, entry_index) => {
+                let entry = &list.history.runs[run_index].deleted[entry_index];
+                let id = list.history.item_id(run_index, entry_index);
+                let state = history::item_state(&list.history, &list.trash, run_index, entry_index);
+                let color = history_item_color(state);
+                let label = format!("{}  {}", entry.rule, display_path(&entry.path));
+                TableRow::new(vec![
+                    Cell::from(format!("  {id}")).style(Style::new().fg(MUTED)),
+                    Cell::from(format!("{:>10}", ByteSize(entry.bytes).to_string()))
+                        .style(Style::new().fg(palette::size(entry.bytes))),
+                    Cell::from(state.as_str()).style(Style::new().fg(color)),
+                    Cell::from(shorten(&label, info_width)),
+                ])
+            }
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(14),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(
+        TableRow::new(["SESSION", "      SIZE", "STATE", "DETAILS"]).style(Style::new().fg(MUTED)),
+    )
+    .row_highlight_style(Style::new().bg(CURSOR))
+    .column_spacing(1);
+    let mut state =
+        TableState::default().with_selected((!list.rows.is_empty()).then(|| list.cursor - start));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
 fn table(frame: &mut Frame, app: &App, area: Rect) {
     match app.tab {
         Tab::Duplicates => return duplicates_table(frame, app, area),
         Tab::Issues => return issues_table(frame, app, area),
         Tab::Repos => return repos_table(frame, app, area),
+        Tab::History => return history_table(frame, app, area),
         Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {}
     }
     let path_width = usize::from(area.width.saturating_sub(FIXED_COLUMNS + 8));
@@ -565,6 +687,14 @@ fn empty_text(app: &App) -> String {
         },
         Tab::Issues if app.finished.is_some() => "Every folder was read.".to_owned(),
         Tab::Issues => "Scanning, unreadable folders appear here.".to_owned(),
+        Tab::History => match (&app.history.problem, app.history.load) {
+            (Some(problem), _) => problem.clone(),
+            (None, Load::Done) if app.history.history.runs.is_empty() => {
+                "Nothing deleted yet. Past runs appear here.".to_owned()
+            }
+            (None, Load::Done) => "No history entry matches the search.".to_owned(),
+            (None, _) => "Reading deletion history and trash.".to_owned(),
+        },
     }
 }
 
@@ -661,11 +791,106 @@ fn repo_detail(app: &App) -> Option<Vec<Line<'static>>> {
     Some(vec![Line::from(first), second, third])
 }
 
+fn history_detail(app: &App) -> Option<Vec<Line<'static>>> {
+    let list = &app.history;
+    let spot = *list.rows.get(list.cursor)?;
+    match spot {
+        HistorySpot::Run(run_index) => {
+            let run = list.history.runs.get(run_index)?;
+            let (state_text, state_color) =
+                history_run_state(&list.history, &list.trash, run_index);
+            let first = Line::from(vec![
+                Span::raw(format!(
+                    " {}  · {}  · {}  · {}",
+                    run.session(),
+                    short_timestamp(&run.started_at),
+                    counted(run.total.items, "item", "items"),
+                    ByteSize(run.total.bytes)
+                )),
+                Span::styled(format!("  {state_text}"), Style::new().fg(state_color)),
+            ]);
+            let second = muted(run.command.clone());
+            let third = if run.action == HistoryAction::Restore {
+                muted("Restore session. Press Enter to expand or collapse items.")
+            } else if !list.trash.known {
+                muted(
+                    "Trash cannot be read on this platform; on macOS use Put Back in Finder. Enter expands.",
+                )
+            } else {
+                match list.trash.state(&list.history, run_index) {
+                    TrashState::Restorable { items, bytes } => Line::styled(
+                        format!(
+                            " Press r to restore {} ({}) from trash · Enter expands or collapses",
+                            counted(items, "item", "items"),
+                            ByteSize(bytes)
+                        ),
+                        Style::new().fg(SAFE),
+                    ),
+                    TrashState::Restored => {
+                        muted("Everything trashed in this session was already restored.")
+                    }
+                    TrashState::Emptied => {
+                        muted("Items from this session are no longer in the trash.")
+                    }
+                    TrashState::NotTrashed => {
+                        muted("Deleted permanently; nothing in this session can be restored.")
+                    }
+                    TrashState::Unknown => {
+                        muted("Trash status is unknown on this platform. Enter expands.")
+                    }
+                }
+            };
+            Some(vec![first, second, third])
+        }
+        HistorySpot::Item(run_index, entry_index) => {
+            let entry = list.history.runs.get(run_index)?.deleted.get(entry_index)?;
+            let id = list.history.item_id(run_index, entry_index);
+            let state = history::item_state(&list.history, &list.trash, run_index, entry_index);
+            let first = Line::raw(format!(" {id}  {}", display_path(&entry.path)));
+            let second = Line::from(vec![
+                Span::styled(
+                    format!(" {}", state.as_str()),
+                    Style::new().fg(history_item_color(state)),
+                ),
+                Span::styled(
+                    format!(
+                        "  · {}  · {}  · {}  · {}",
+                        entry.rule,
+                        entry.category,
+                        ByteSize(entry.bytes),
+                        short_timestamp(&entry.deleted_at)
+                    ),
+                    Style::new().fg(MUTED),
+                ),
+            ]);
+            let third = match state {
+                ItemState::InTrash => Line::styled(
+                    " Still in trash. Press r to restore to its original path.",
+                    Style::new().fg(SAFE),
+                ),
+                ItemState::RestoredHere => match entry.restores.as_deref() {
+                    Some(origin) => muted(format!("Restored from {origin}.")),
+                    None => muted("Restored in this session."),
+                },
+                ItemState::Restored => muted("Already restored by a later session."),
+                ItemState::Deleted => muted("Deleted permanently; cannot be restored."),
+                ItemState::DryRun => muted("Dry run; nothing was removed."),
+                ItemState::LeftTrash => muted("No longer in the trash; cannot be restored."),
+                ItemState::Trashed => {
+                    muted("Trash cannot be read on this platform; on macOS use Put Back in Finder.")
+                }
+            };
+            Some(vec![first, second, third])
+        }
+    }
+}
+
 fn detail(app: &App) -> Vec<Line<'static>> {
     let shown = match app.tab {
         Tab::Duplicates => duplicate_detail(app),
         Tab::Issues => issue_detail(app),
         Tab::Repos => repo_detail(app),
+        Tab::History => history_detail(app),
         Tab::Artifacts | Tab::Caches | Tab::Toolchains | Tab::Docker => {
             app.current().map(|item| item_detail(app, item))
         }
@@ -809,6 +1034,7 @@ fn mode_chip(app: &App) -> Span<'static> {
         Overlay::Confirm { .. }
         | Overlay::Branches { .. }
         | Overlay::Exclude { .. }
+        | Overlay::Restore { .. }
         | Overlay::Quit => ("Confirm", WARNING),
         Overlay::Help => ("Help", MUTED),
         Overlay::None if app.filtering => ("Filter", MUTED),
@@ -864,20 +1090,80 @@ fn exclude_prompt(app: &App, path: &Path, pattern: &str, confirm: bool) -> Line<
     Line::from(spans)
 }
 
+fn restore_prompt(
+    app: &App,
+    label: &str,
+    count: usize,
+    bytes: u64,
+    confirm: bool,
+) -> Line<'static> {
+    let cancel_style = if !confirm {
+        Style::new()
+            .fg(ON_FILL)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    let restore_style = if confirm {
+        Style::new()
+            .fg(ON_FILL)
+            .bg(SAFE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    let mut spans = vec![
+        mode_chip(app),
+        Span::styled(
+            format!(
+                " Restore {} ({}) from {label}? ",
+                counted(count, "item", "items"),
+                ByteSize(bytes)
+            ),
+            Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel ", cancel_style),
+        Span::raw(" "),
+        Span::styled(" Restore ", restore_style),
+        Span::raw("  "),
+    ];
+    spans.extend(key_hints(
+        app,
+        Scope::TuiConfirm,
+        &[
+            (Action::DialogToggle, "switch"),
+            (Action::Confirm, "accept"),
+            (Action::Cancel, "cancel"),
+        ],
+    ));
+    Line::from(spans)
+}
+
 fn quit_prompt(app: &App) -> Line<'static> {
     let deleting = app.deleting();
     let running = app.repos.running.len();
-    let unfinished = match (deleting, running) {
-        (_, 0) => counted(deleting, "unfinished deletion", "unfinished deletions"),
-        (0, _) => format!(
+    let mut parts = Vec::new();
+    if deleting > 0 {
+        parts.push(counted(
+            deleting,
+            "unfinished deletion",
+            "unfinished deletions",
+        ));
+    }
+    if running > 0 {
+        parts.push(format!(
             "git running in {}",
             counted(running, "repository", "repositories")
-        ),
-        _ => format!(
-            "{} and git running in {}",
-            counted(deleting, "unfinished deletion", "unfinished deletions"),
-            counted(running, "repository", "repositories")
-        ),
+        ));
+    }
+    if app.history.restoring {
+        parts.push("a restore running".to_owned());
+    }
+    let unfinished = if parts.is_empty() {
+        "unfinished work".to_owned()
+    } else {
+        parts.join(" and ")
     };
     let mut spans = vec![
         mode_chip(app),
@@ -909,6 +1195,15 @@ fn footer(app: &App) -> Line<'static> {
     {
         return exclude_prompt(app, path, pattern, *confirm);
     }
+    if let Overlay::Restore {
+        label,
+        targets,
+        bytes,
+        confirm,
+    } = &app.overlay
+    {
+        return restore_prompt(app, label, targets.len(), *bytes, *confirm);
+    }
     if app.filtering {
         let mut spans = vec![mode_chip(app), Span::raw(format!(" {}█   ", app.filter))];
         spans.extend(key_hints(
@@ -920,6 +1215,9 @@ fn footer(app: &App) -> Line<'static> {
     }
     if app.tab == Tab::Repos {
         return repos_footer(app);
+    }
+    if app.tab == Tab::History {
+        return history_footer(app);
     }
     if app.tab.source().is_none() {
         return report_footer(app);
@@ -1064,6 +1362,40 @@ fn repos_footer(app: &App) -> Line<'static> {
             ),
             Style::new().fg(MUTED),
         ));
+    }
+    Line::from(spans)
+}
+
+fn history_footer(app: &App) -> Line<'static> {
+    let mut spans = vec![mode_chip(app), Span::raw(" ")];
+    if let Some(message) = &app.message {
+        spans.push(Span::raw(format!(" {message}  ")));
+    }
+    spans.push(key_chip("enter"));
+    spans.push(Span::styled(" expand  ", Style::new().fg(MUTED)));
+    spans.extend(key_hints(
+        app,
+        Scope::TuiHistory,
+        &[(Action::Restore, "restore")],
+    ));
+    spans.extend(key_hints(
+        app,
+        Scope::Tui,
+        &[
+            (Action::FilterFocus, "search"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
+        ],
+    ));
+    if !app.filter.is_empty() {
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[(Action::Back, "clear search")],
+        ));
+    }
+    if app.history.restoring {
+        spans.push(Span::styled(" restoring… ", Style::new().fg(MUTED)));
     }
     Line::from(spans)
 }
@@ -1352,6 +1684,7 @@ const HELP_LEFT: [HelpSection; 3] = {
                 (&[Toolchains], "toolchains, deleted for good"),
                 (&[Docker], "Docker/Podman, deleted for good"),
                 (&[Repos], "git repos: gc & merged branches"),
+                (&[History], "history and restore"),
             ],
         ),
         (
@@ -1379,7 +1712,7 @@ const HELP_LEFT: [HelpSection; 3] = {
     ]
 };
 
-const HELP_RIGHT: [HelpSection; 4] = {
+const HELP_RIGHT: [HelpSection; 5] = {
     use Action::*;
     [
         (
@@ -1414,6 +1747,11 @@ const HELP_RIGHT: [HelpSection; 4] = {
                 (&[Branches], "delete merged branches here"),
                 (&[BranchesAll], "delete all merged branches"),
             ],
+        ),
+        (
+            "History",
+            Scope::TuiHistory,
+            &[(&[Restore], "restore trashed session or item")],
         ),
         (
             "Confirm",
@@ -1533,7 +1871,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Overlay::Branches { scope, delete } => branches(frame, app, scope, *delete),
         Overlay::Help => help(frame, app),
-        Overlay::None | Overlay::Quit | Overlay::Exclude { .. } => {}
+        Overlay::None | Overlay::Quit | Overlay::Exclude { .. } | Overlay::Restore { .. } => {}
     }
 }
 
@@ -1591,7 +1929,10 @@ mod tests {
             "FILTER",
             "ACT",
             "GIT",
+            "HISTORY",
             "CONFIRM",
+            "history and restore",
+            "restore trashed session or item",
             "cycle sort: size, path, category",
             "switch Cancel / Delete",
             "erase typed count digit",
@@ -1602,6 +1943,54 @@ mod tests {
                 "expected {expected:?} in 120x36 help overlay:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn history_tab_and_restore_prompt_render() {
+        use crate::history::{Entry, History, Run, Total, TrashSnapshot};
+        use std::collections::HashSet;
+
+        let mut app = App::new(Mode::Trash, true);
+        app.switch(Tab::History);
+        let history = History {
+            next_session: 2,
+            runs: vec![Run {
+                id: 1,
+                action: HistoryAction::Delete,
+                started_at: "2026-04-01T10:00:00+00:00".to_owned(),
+                finished_at: "2026-04-01T10:00:02+00:00".to_owned(),
+                command: "kuizer clean /p/web".to_owned(),
+                roots: vec![std::path::PathBuf::from("/p/web")],
+                total: Total {
+                    items: 1,
+                    bytes: 4096,
+                    size: "4.0 KB".to_owned(),
+                },
+                deleted: vec![Entry {
+                    deleted_at: "2026-04-01T10:00:00+00:00".to_owned(),
+                    path: std::path::PathBuf::from("/p/web/node_modules"),
+                    rule: "node-modules".to_owned(),
+                    category: "dependencies".to_owned(),
+                    mode: Mode::Trash,
+                    bytes: 4096,
+                    size: "4.0 KB".to_owned(),
+                    restores: None,
+                }],
+            }],
+            ..History::default()
+        };
+        let trash = TrashSnapshot::new(&history, Some(HashSet::from([(0usize, 0usize)])));
+        app.set_history(history, trash);
+
+        let rendered = render_lines(&app, 120, 24).join("\n");
+        assert!(rendered.contains("s1"));
+        assert!(rendered.contains("1 in trash"));
+        assert!(rendered.contains("restore"));
+
+        app.ask_restore();
+        let prompt = render_lines(&app, 120, 24).pop().unwrap();
+        assert!(prompt.contains("Restore 1 item"));
+        assert!(prompt.contains("Cancel"));
     }
 
     #[test]

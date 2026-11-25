@@ -9,6 +9,7 @@ use crate::cli::SortKey;
 use crate::delete::{Confirmation, Mode, Risk};
 use crate::detect::{Category, Safety};
 use crate::dupes::{Duplicates, Stage};
+use crate::history::{self, Action as HistoryAction, History, ItemState, TrashSnapshot};
 use crate::keymap::{Action as Key, Keymap, Scope};
 use crate::repos::{Collected, Inspected, Pruned, RepoError, Repository};
 use crate::scan::{Candidate, Issue, Progress, Summary};
@@ -30,10 +31,11 @@ pub enum Tab {
     Toolchains,
     Docker,
     Repos,
+    History,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 8] = [
         Self::Artifacts,
         Self::Caches,
         Self::Duplicates,
@@ -41,6 +43,7 @@ impl Tab {
         Self::Toolchains,
         Self::Docker,
         Self::Repos,
+        Self::History,
     ];
 
     pub fn source(self) -> Option<Source> {
@@ -49,7 +52,7 @@ impl Tab {
             Self::Caches => Some(Source::Cache),
             Self::Toolchains => Some(Source::Toolchain),
             Self::Docker => Some(Source::Docker),
-            Self::Duplicates | Self::Issues | Self::Repos => None,
+            Self::Duplicates | Self::Issues | Self::Repos | Self::History => None,
         }
     }
 
@@ -62,6 +65,7 @@ impl Tab {
             Self::Toolchains => Key::Toolchains,
             Self::Docker => Key::Docker,
             Self::Repos => Key::Repos,
+            Self::History => Key::History,
         }
     }
 
@@ -74,6 +78,7 @@ impl Tab {
             Self::Toolchains => "toolchains",
             Self::Docker => "docker",
             Self::Repos => "git",
+            Self::History => "history",
         }
     }
 }
@@ -173,6 +178,49 @@ pub struct IssueList {
     pub cursor: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySpot {
+    Run(usize),
+    Item(usize, usize),
+}
+
+#[derive(Debug)]
+pub struct RestoreWork {
+    pub label: String,
+    pub history: History,
+    pub targets: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreSummary {
+    pub restored: usize,
+    pub bytes: u64,
+    pub skipped: usize,
+    pub failed: usize,
+    pub problem: Option<String>,
+    pub history_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RestoreDone {
+    pub label: String,
+    pub result: Result<RestoreSummary, String>,
+    pub updated: Option<(History, TrashSnapshot)>,
+}
+
+#[derive(Debug, Default)]
+pub struct HistoryList {
+    pub load: Load,
+    pub stale: bool,
+    pub restoring: bool,
+    pub history: History,
+    pub trash: TrashSnapshot,
+    pub problem: Option<String>,
+    pub expanded: HashSet<u64>,
+    pub rows: Vec<HistorySpot>,
+    pub cursor: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Tally {
     items: usize,
@@ -240,6 +288,12 @@ pub enum Overlay {
     Exclude {
         path: PathBuf,
         pattern: String,
+        confirm: bool,
+    },
+    Restore {
+        label: String,
+        targets: Vec<(usize, usize)>,
+        bytes: u64,
         confirm: bool,
     },
     Quit,
@@ -319,6 +373,7 @@ pub struct App {
     pub duplicates: DuplicateList,
     pub issues: IssueList,
     pub repos: RepoList,
+    pub history: HistoryList,
     pub min_gain: u64,
     pub overlay: Overlay,
     pub confirm_stats: Option<ConfirmStats>,
@@ -384,6 +439,7 @@ impl App {
             duplicates: DuplicateList::default(),
             issues: IssueList::default(),
             repos: RepoList::default(),
+            history: HistoryList::default(),
             min_gain: 0,
             overlay: Overlay::None,
             confirm_stats: None,
@@ -585,6 +641,7 @@ impl App {
             self.rebuild_duplicates();
             self.rebuild_issues();
             self.rebuild_repos();
+            self.rebuild_history();
         }
         let keep = self.keep.take().or_else(|| self.current_id());
         self.order_items();
@@ -721,6 +778,295 @@ impl App {
         list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
     }
 
+    fn rebuild_history(&mut self) {
+        let needle = self.filter.to_lowercase();
+        let list = &mut self.history;
+        let current = list.rows.get(list.cursor).copied();
+        list.rows.clear();
+        for (run_index, run) in list.history.runs.iter().enumerate().rev() {
+            let run_hits = needle.is_empty() || history_run_matches(run, &needle);
+            let matching_items: Vec<usize> = run
+                .deleted
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| needle.is_empty() || history_entry_matches(entry, &needle))
+                .map(|(entry_index, _)| entry_index)
+                .collect();
+            if !run_hits && matching_items.is_empty() {
+                continue;
+            }
+            list.rows.push(HistorySpot::Run(run_index));
+            if !needle.is_empty() {
+                if run_hits && !list.expanded.contains(&run.id) {
+                    if matching_items.len() < run.deleted.len() {
+                        for entry_index in matching_items {
+                            list.rows.push(HistorySpot::Item(run_index, entry_index));
+                        }
+                    }
+                } else {
+                    for entry_index in matching_items {
+                        list.rows.push(HistorySpot::Item(run_index, entry_index));
+                    }
+                }
+            } else if list.expanded.contains(&run.id) {
+                for entry_index in 0..run.deleted.len() {
+                    list.rows.push(HistorySpot::Item(run_index, entry_index));
+                }
+            }
+        }
+        if let Some(spot) = current
+            && let Some(pos) = list.rows.iter().position(|&row| row == spot)
+        {
+            list.cursor = pos;
+        } else {
+            list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
+        }
+    }
+
+    pub fn set_history(&mut self, history: History, trash: TrashSnapshot) {
+        self.history.history = history;
+        self.history.trash = trash;
+        self.history.load = Load::Done;
+        self.history.stale = false;
+        self.history.problem = None;
+        self.rebuild_history();
+    }
+
+    pub fn history_failed(&mut self, problem: String) {
+        self.history.load = Load::Done;
+        self.history.stale = false;
+        self.history.problem = Some(problem);
+    }
+
+    pub fn current_history_spot(&self) -> Option<HistorySpot> {
+        self.history.rows.get(self.history.cursor).copied()
+    }
+
+    pub fn toggle_history_run(&mut self) {
+        let Some(spot) = self.current_history_spot() else {
+            return;
+        };
+        let run_index = match spot {
+            HistorySpot::Run(run_index) => run_index,
+            HistorySpot::Item(run_index, _) => run_index,
+        };
+        let Some(run) = self.history.history.runs.get(run_index) else {
+            return;
+        };
+        if run.deleted.is_empty() {
+            self.message = Some(format!("{} has no recorded items", run.session()));
+            return;
+        }
+        let id = run.id;
+        if !self.history.expanded.remove(&id) {
+            self.history.expanded.insert(id);
+        }
+        self.rebuild_history();
+        if !self.history.expanded.contains(&id)
+            && let Some(pos) = self
+                .history
+                .rows
+                .iter()
+                .position(|&row| row == HistorySpot::Run(run_index))
+        {
+            self.history.cursor = pos;
+        }
+    }
+
+    pub fn expand_history_run(&mut self) {
+        let Some(HistorySpot::Run(run_index)) = self.current_history_spot() else {
+            return;
+        };
+        let Some(run) = self.history.history.runs.get(run_index) else {
+            return;
+        };
+        if run.deleted.is_empty() {
+            return;
+        }
+        if self.history.expanded.insert(run.id) {
+            self.rebuild_history();
+        }
+    }
+
+    pub fn collapse_history_run(&mut self) {
+        let Some(spot) = self.current_history_spot() else {
+            return;
+        };
+        let run_index = match spot {
+            HistorySpot::Run(run_index) | HistorySpot::Item(run_index, _) => run_index,
+        };
+        let Some(run) = self.history.history.runs.get(run_index) else {
+            return;
+        };
+        let changed = self.history.expanded.remove(&run.id);
+        if changed {
+            self.rebuild_history();
+        }
+        if let Some(pos) = self
+            .history
+            .rows
+            .iter()
+            .position(|&row| row == HistorySpot::Run(run_index))
+        {
+            self.history.cursor = pos;
+        }
+    }
+
+    pub fn ask_restore(&mut self) {
+        if self.history.restoring {
+            self.message = Some("a restore is already running".to_owned());
+            return;
+        }
+        let Some(spot) = self.current_history_spot() else {
+            self.message = Some("nothing to restore".to_owned());
+            return;
+        };
+        if !self.history.trash.known {
+            self.message = Some(
+                "restore needs a trash kuizer can read; on macOS use Put Back in Finder".to_owned(),
+            );
+            return;
+        }
+        let history = &self.history.history;
+        let trash = &self.history.trash;
+        match spot {
+            HistorySpot::Run(run_index) => {
+                let run = &history.runs[run_index];
+                if run.action == HistoryAction::Restore {
+                    self.message = Some(format!(
+                        "{} is a restore run, not a deletion",
+                        run.session()
+                    ));
+                    return;
+                }
+                let targets = history::restorable(history, trash, run_index);
+                if targets.is_empty() {
+                    self.message = Some(format!(
+                        "nothing from {} is still in the trash",
+                        run.session()
+                    ));
+                    return;
+                }
+                let bytes: u64 = targets
+                    .iter()
+                    .map(|&(r, e)| history.runs[r].deleted[e].bytes)
+                    .sum();
+                self.overlay = Overlay::Restore {
+                    label: run.session(),
+                    targets,
+                    bytes,
+                    confirm: false,
+                };
+            }
+            HistorySpot::Item(run_index, entry_index) => {
+                let id = history.item_id(run_index, entry_index);
+                let state = history::item_state(history, trash, run_index, entry_index);
+                if state != ItemState::InTrash {
+                    let reason = match state {
+                        ItemState::RestoredHere => "is a restore, not a deletion",
+                        ItemState::Restored => "was already restored",
+                        ItemState::Deleted => "was deleted permanently",
+                        ItemState::DryRun => "was a dry run, nothing was removed",
+                        ItemState::LeftTrash => "is no longer in the trash",
+                        ItemState::Trashed => "cannot be verified in the trash on this platform",
+                        ItemState::InTrash => unreachable!(),
+                    };
+                    self.message = Some(format!("{id} {reason}"));
+                    return;
+                }
+                let bytes = history.runs[run_index].deleted[entry_index].bytes;
+                self.overlay = Overlay::Restore {
+                    label: id,
+                    targets: vec![(run_index, entry_index)],
+                    bytes,
+                    confirm: false,
+                };
+            }
+        }
+    }
+
+    pub fn toggle_restore_focus(&mut self) {
+        if let Overlay::Restore { confirm, .. } = &mut self.overlay {
+            *confirm = !*confirm;
+        }
+    }
+
+    pub fn answer_restore(&mut self) -> Option<RestoreWork> {
+        let Overlay::Restore {
+            label,
+            targets,
+            confirm,
+            ..
+        } = std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return None;
+        };
+        if !confirm || targets.is_empty() {
+            return None;
+        }
+        self.history.restoring = true;
+        self.message = Some(format!("restoring {label}…"));
+        Some(RestoreWork {
+            label,
+            history: self.history.history.clone(),
+            targets,
+        })
+    }
+
+    pub fn restore_done(&mut self, done: RestoreDone) {
+        self.history.restoring = false;
+        if let Some((history, trash)) = done.updated {
+            self.history.history = history;
+            self.history.trash = trash;
+            self.history.load = Load::Done;
+            self.history.stale = false;
+            self.rebuild_history();
+        }
+        self.message = Some(match done.result {
+            Ok(summary) => {
+                let mut parts = Vec::new();
+                if summary.restored > 0 {
+                    parts.push(format!(
+                        "restored {} ({}) from {}",
+                        counted(summary.restored, "item", "items"),
+                        ByteSize(summary.bytes),
+                        done.label,
+                    ));
+                }
+                if summary.skipped > 0 {
+                    parts.push(format!("{} skipped", summary.skipped));
+                }
+                if summary.failed > 0 {
+                    parts.push(format!("{} failed", summary.failed));
+                }
+                if let Some(problem) = summary.problem {
+                    parts.push(problem);
+                }
+                if let Some(error) = summary.history_error {
+                    parts.push(format!("history: {error}"));
+                }
+                if parts.is_empty() {
+                    format!("nothing restored from {}", done.label)
+                } else {
+                    parts.join(", ")
+                }
+            }
+            Err(error) => format!("could not restore {}: {error}", done.label),
+        });
+        if self.overlay == Overlay::Quit && self.unfinished() == 0 {
+            self.overlay = Overlay::None;
+            self.message = Some(format!("restore finished, {} quits", self.quit_key()));
+        }
+    }
+
+    pub fn restore_unavailable(&mut self) {
+        self.history.restoring = false;
+        if self.overlay == Overlay::Quit && self.unfinished() == 0 {
+            self.overlay = Overlay::None;
+        }
+        self.message = Some("restore worker unavailable".to_owned());
+    }
+
     pub fn push_issue(&mut self, issue: Issue) {
         if self.is_excluded(&issue.path) {
             return;
@@ -764,6 +1110,8 @@ impl App {
             || self.duplicates.load == Load::Loading
             || self.repos.load == Load::Loading
             || !self.repos.running.is_empty()
+            || self.history.load == Load::Loading
+            || self.history.restoring
     }
 
     pub fn feed(&self, source: Source) -> &Feed {
@@ -944,6 +1292,7 @@ impl App {
                 .current_repo()
                 .map(|repo| repo.root.clone())
                 .ok_or("nothing under the cursor to exclude"),
+            Tab::History => Err("history entries cannot be excluded"),
         }
     }
 
@@ -1107,6 +1456,9 @@ impl App {
         self.end_range();
         self.disarm_widen();
         self.tab = tab;
+        if tab == Tab::History && self.history.stale && self.history.load == Load::Done {
+            self.history.load = Load::Idle;
+        }
         if let Some(source) = tab.source()
             && source != self.listed
         {
@@ -1127,6 +1479,7 @@ impl App {
             Tab::Duplicates => (&mut self.duplicates.cursor, self.duplicates.rows.len()),
             Tab::Issues => (&mut self.issues.cursor, self.issues.rows.len()),
             Tab::Repos => (&mut self.repos.cursor, self.repos.rows.len()),
+            Tab::History => (&mut self.history.cursor, self.history.rows.len()),
         }
     }
 
@@ -1668,6 +2021,9 @@ impl App {
             }
             if now_deleted {
                 removed = bytes;
+                if mode != Mode::DryRun {
+                    self.history.stale = true;
+                }
             }
         }
         match mode {
@@ -1712,7 +2068,7 @@ impl App {
     }
 
     pub fn unfinished(&self) -> usize {
-        self.deleting() + self.repos.running.len()
+        self.deleting() + self.repos.running.len() + usize::from(self.history.restoring)
     }
 
     pub fn deleting_in(&self, source: Source) -> usize {
@@ -1737,6 +2093,20 @@ fn issue_matches(issue: &Issue, needle: &str) -> bool {
     needle.is_empty()
         || contains(&issue.path, needle)
         || issue.message.to_lowercase().contains(needle)
+}
+
+fn history_run_matches(run: &history::Run, needle: &str) -> bool {
+    needle.is_empty()
+        || run.session().to_lowercase().contains(needle)
+        || run.command.to_lowercase().contains(needle)
+        || run.started_at.to_lowercase().contains(needle)
+}
+
+fn history_entry_matches(entry: &history::Entry, needle: &str) -> bool {
+    needle.is_empty()
+        || contains(&entry.path, needle)
+        || entry.rule.to_lowercase().contains(needle)
+        || entry.category.to_lowercase().contains(needle)
 }
 
 #[cfg(test)]

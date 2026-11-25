@@ -323,20 +323,22 @@ Fields are only added within a schema version; renames or removals bump it. `--j
 
 The TUI shows project artifacts, scan progress, the focused item's details, and selection totals. It draws on input or at most every 50 ms while scanning. A worker streams results and the UI processes a bounded number of events per frame.
 
-Seven views sit on `1` to `7`: artifacts, caches, duplicates, issues, toolchains, Docker and git. Caches, toolchains and Docker objects are listed and duplicates searched the first time their view opens, on their own threads: each cache and toolchain appears once it is sized, Docker objects appear once Docker and Podman answer, and duplicates appear when the search finishes, with its progress in the header. Toolchains wait for the pin search under the scan roots when `toolchains.pins` is on, so a pinned version is never shown as safe. Artifacts, caches, toolchains and Docker objects are lists you select from and delete; each keeps its own selection and cursor, and a delete removes only what the open view selected, through the same core executor as the CLI. Caches are revalidated against their parent folders, as `kuizer cache clean` does. Toolchains and Docker objects are always removed for good, whatever `delete.mode` says, and the confirmation says so. Duplicates and issues are reports: selection and deletion keys say so and do nothing, and `/` searches their paths.
+Eight views sit on `1` to `8`: artifacts, caches, duplicates, issues, toolchains, Docker, git and history. Caches, toolchains and Docker objects are listed, duplicates searched, and deletion history read the first time their view opens, on their own threads: each cache and toolchain appears once it is sized, Docker objects appear once Docker and Podman answer, and duplicates appear when the search finishes, with its progress in the header. Toolchains wait for the pin search under the scan roots when `toolchains.pins` is on, so a pinned version is never shown as safe. Artifacts, caches, toolchains and Docker objects are lists you select from and delete; each keeps its own selection and cursor, and a delete removes only what the open view selected, through the same core executor as the CLI. Caches are revalidated against their parent folders, as `kuizer cache clean` does. Toolchains and Docker objects are always removed for good, whatever `delete.mode` says, and the confirmation says so. Duplicates and issues are reports: selection and deletion keys say so and do nothing, and `/` searches their paths.
 
 The git view lists the repositories the scan walked through that are worth cleaning: what `git gc` would free and the local branches already merged into the default branch. They are read once the scan finishes and the view is open. `c` runs `git gc` in the repository under the cursor and `C` in every repository shown, without asking, since gc only packs what git would pack on its own. `b` and `B` delete merged branches after a confirmation that lists them, opens with the focus on Cancel and takes Tab, Left, Right, `h` and `l` to move it, so an Enter right after asking deletes nothing. Each branch is checked again before it goes, through the same core functions as the GUI and `kuizer git`. Busy repositories and repositories still running git are skipped.
+
+The history view shows past deletion and restore sessions newest first alongside how much is still in the system trash. Enter, Space, Right (`l`) and Left (`h`) expand or collapse a session's items, `/` searches sessions and item paths or rules, and `r` restores the focused session or item after an inline confirmation focused on Cancel, through the same restore path as `kuizer restore`.
 
 The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI help overlay shows the effective bindings. These are the TUI defaults.
 
 | Key | Action |
 | --- | --- |
-| `1` to `7` | Switch view: artifacts, caches, duplicates, issues, toolchains, Docker, git |
+| `1` to `8` | Switch view: artifacts, caches, duplicates, issues, toolchains, Docker, git, history |
 | `j`, `k`, up, down | Move one row |
 | `g`, `G`, Home, End | Jump to the first or last row |
 | `J`, `K`, Shift+Up, Shift+Down | Move and extend selection |
 | Page Up, Page Down, Ctrl+U, Ctrl+D | Move a full or half page |
-| Space | Toggle selection and advance |
+| Space | Toggle selection and advance (or expand/collapse in history) |
 | `a` | Select the safe items in the current view |
 | `P` | Select safe items in the current project. Press again to add review items, then again to clear |
 | `u` | Clear selection |
@@ -349,10 +351,11 @@ The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI 
 | `s` | Cycle sort by size, path, or category |
 | `p` | Switch between grouping by rule and grouping by project |
 | `d`, Delete | Delete the selection, or the item under the cursor |
-| Enter | Delete the selection when it is non-empty |
+| Enter | Delete the selection when it is non-empty (or expand/collapse in history) |
 | `c`, `C` | In the git view: `git gc` in this repository, or in every repository shown |
 | `b`, `B` | In the git view: delete merged branches here, or in every repository shown, after a confirmation |
-| `q`, Ctrl+Q, Ctrl+C | Quit, asking first if a deletion is running |
+| `r` | In the history view: restore the focused session or item from trash, after an inline confirmation |
+| `q`, Ctrl+Q, Ctrl+C | Quit, asking first if a deletion or restore is running |
 | `?` | Show shortcut help |
 
 Deleting uses the mode set by `delete.mode`. By default, deletion asks for confirmation and lists the selected items with size and safety. Press `y` or Enter to confirm. A selection with review items asks for its item count instead: only the exact number followed by `y` or Enter deletes, a wrong number clears the field and keeps the dialog open, Backspace erases a digit and Esc cancels. A held key never confirms any dialog. With `delete.confirm = false`, the TUI still asks for review items and projects with uncommitted changes or unknown Git status. `kuizer --confirm` forces a confirmation. The TUI starts with an empty selection.

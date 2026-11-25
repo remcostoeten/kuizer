@@ -33,6 +33,7 @@ pub enum Scope {
     TuiConfirm,
     TuiQuit,
     TuiRepos,
+    TuiHistory,
 }
 
 impl Scope {
@@ -43,7 +44,12 @@ impl Scope {
     pub fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Tui | Self::TuiFilter | Self::TuiConfirm | Self::TuiQuit | Self::TuiRepos
+            Self::Tui
+                | Self::TuiFilter
+                | Self::TuiConfirm
+                | Self::TuiQuit
+                | Self::TuiRepos
+                | Self::TuiHistory
         )
     }
 
@@ -135,7 +141,7 @@ actions! {
     Docker => "view.docker", Gui: ["shift-5"], Tui: ["6"];
     Repos => "view.repos", Gui: ["shift-6"], Tui: ["7"];
     Duplicates => "view.duplicates", Gui: ["shift-7"], Tui: ["3"];
-    History => "view.history", Gui: ["shift-8"];
+    History => "view.history", Gui: ["shift-8"], Tui: ["8"];
     Issues => "view.issues", Gui: ["shift-9"], Tui: ["4"];
     SpaceMap => "map.toggle", Gui: ["m"];
     NextTab => "view.next", Gui: ["ctrl-tab"];
@@ -166,7 +172,7 @@ actions! {
     ZoomOut => "zoom.out", Gui: ["secondary--"];
     ResetZoom => "zoom.reset", Gui: ["secondary-0"];
     Sidebar => "sidebar.toggle", Gui: ["secondary-b"];
-    Restore => "history.restore", Gui: ["r"];
+    Restore => "history.restore", Gui: ["r"], TuiHistory: ["r"];
     Exclude => "file.exclude", Gui: ["x"], Tui: ["x"];
     CopyCommand => "history.copy_command", Gui: ["shift-y"];
     Back => "nav.back", GuiBack: ["escape"], Control: ["escape"], Palette: ["escape"], GuiFilter: ["escape"], Settings: ["escape"], PathEditor: ["escape"], Dialog: ["escape"], Tui: ["escape"], TuiFilter: ["escape"];

@@ -8,14 +8,15 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 
-use super::app::{GitDone, GitTask, GitWork};
+use super::app::{GitDone, GitTask, GitWork, RestoreDone, RestoreSummary, RestoreWork};
 use super::jobs::{self, Job, Outcome};
 use crate::caches;
 use crate::config::{Config, GitConfig};
 use crate::delete::Executor;
 use crate::docker;
 use crate::dupes::{self, Duplicates, Options, Stage};
-use crate::history::HistoryError;
+use crate::history::restore::Status as RestoreStatus;
+use crate::history::{self, History, HistoryError, TrashSnapshot, TrashView};
 use crate::protect::Protected;
 use crate::repos::{self, Inspected};
 use crate::scan::{self, Cancel, Candidate};
@@ -38,6 +39,9 @@ pub enum Found {
     DuplicatesFailed(String),
     Repos(Inspected),
     Git(GitDone),
+    History(History, TrashSnapshot),
+    HistoryFailed(String),
+    Restored(RestoreDone),
 }
 
 pub struct ListWork {
@@ -242,4 +246,78 @@ pub fn spawn_git(
                 }
             }
         })
+}
+
+pub fn spawn_history(found: Sender<Found>) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("kuizer-history".to_owned())
+        .spawn(move || {
+            let loaded = history::default_path().and_then(|path| history::load(&path));
+            let message = match loaded {
+                Ok(history) => {
+                    let trash = TrashSnapshot::read(&history);
+                    Found::History(history, trash)
+                }
+                Err(error) => Found::HistoryFailed(error.to_string()),
+            };
+            let _ = found.send(message);
+        })
+}
+
+pub fn spawn_restore(
+    work: Receiver<RestoreWork>,
+    stop: Arc<AtomicBool>,
+    found: Sender<Found>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("kuizer-restore".to_owned())
+        .spawn(move || {
+            for request in work {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let done = run_restore(request);
+                if found.send(Found::Restored(done)).is_err() {
+                    return;
+                }
+            }
+        })
+}
+
+fn run_restore(mut request: RestoreWork) -> RestoreDone {
+    let mut listing = match TrashView::list() {
+        Ok(listing) => listing,
+        Err(error) => {
+            return RestoreDone {
+                label: request.label,
+                result: Err(error.to_string()),
+                updated: None,
+            };
+        }
+    };
+    let restored =
+        history::restore::restore_listed(&request.history, &request.targets, false, &mut listing);
+    let history_error = restored
+        .record_into(&mut request.history)
+        .err()
+        .map(|error| error.to_string());
+    let problem = restored
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.status != RestoreStatus::Restored)
+        .and_then(|outcome| outcome.reason.clone());
+    let summary = RestoreSummary {
+        restored: restored.count(RestoreStatus::Restored),
+        bytes: restored.bytes(RestoreStatus::Restored),
+        skipped: restored.count(RestoreStatus::Skipped),
+        failed: restored.count(RestoreStatus::Failed),
+        problem,
+        history_error,
+    };
+    let trash = listing.snapshot(&request.history);
+    RestoreDone {
+        label: request.label,
+        result: Ok(summary),
+        updated: Some((request.history, trash)),
+    }
 }

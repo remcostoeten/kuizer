@@ -23,7 +23,7 @@ use crate::keymap::{Action, Keymap, Scope};
 use crate::repos::{self, Walked};
 use crate::scan::{Cancel, Event};
 use crate::source::Source;
-use app::{App, GitWork, Load, Overlay, Tab, project_of};
+use app::{App, GitWork, Load, Overlay, RestoreWork, Tab, project_of};
 use jobs::{Changes, Job, Outcome};
 use sources::{Found, ListWork};
 pub use watch::watch;
@@ -39,6 +39,7 @@ const LISTED: [Source; 3] = [Source::Cache, Source::Toolchain, Source::Docker];
 struct Queues {
     jobs: HashMap<Source, Sender<Job>>,
     git: Sender<GitWork>,
+    restore: Sender<RestoreWork>,
 }
 
 fn dispatch(app: &mut App, queues: &Queues, batch: Vec<(u64, Mode)>) {
@@ -70,6 +71,15 @@ fn dispatch_git(app: &mut App, queues: &Queues, work: Option<GitWork>) {
     let roots: Vec<PathBuf> = work.1.iter().map(|found| found.root.clone()).collect();
     if queues.git.send(work).is_err() {
         app.git_unavailable(&roots);
+    }
+}
+
+fn dispatch_restore(app: &mut App, queues: &Queues, work: Option<RestoreWork>) {
+    let Some(work) = work else {
+        return;
+    };
+    if queues.restore.send(work).is_err() {
+        app.restore_unavailable();
     }
 }
 
@@ -123,6 +133,12 @@ fn receive(app: &mut App, found: Found) {
         Found::DuplicatesFailed(problem) => app.duplicates_failed(problem),
         Found::Repos(inspected) => app.set_repos(inspected),
         Found::Git(done) => app.git_done(done),
+        Found::History(history, trash) => app.set_history(history, trash),
+        Found::HistoryFailed(problem) => {
+            app.history_failed(problem.clone());
+            notify(app, problem);
+        }
+        Found::Restored(done) => app.restore_done(done),
     }
 }
 
@@ -241,6 +257,18 @@ fn handle_exclude(app: &mut App, key: KeyEvent, held: bool) -> Option<String> {
     None
 }
 
+fn handle_restore(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) {
+    match keys::action(&app.keymap, Scope::TuiConfirm, key) {
+        Some(Action::DialogToggle) => app.toggle_restore_focus(),
+        Some(Action::Confirm) if !held => {
+            let work = app.answer_restore();
+            dispatch_restore(app, queues, work);
+        }
+        Some(Action::Cancel) => app.close_overlay(),
+        _ => {}
+    }
+}
+
 fn handle_repos(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) -> bool {
     match keys::action(&app.keymap, Scope::TuiRepos, key) {
         Some(Action::Gc | Action::GcAll | Action::Branches | Action::BranchesAll) if held => {}
@@ -257,6 +285,35 @@ fn handle_repos(app: &mut App, key: KeyEvent, queues: &Queues, held: bool) -> bo
         _ => return false,
     }
     true
+}
+
+fn handle_history(app: &mut App, key: KeyEvent, held: bool) -> bool {
+    match keys::action(&app.keymap, Scope::TuiHistory, key) {
+        Some(Action::Restore) if held => return true,
+        Some(Action::Restore) => {
+            app.ask_restore();
+            return true;
+        }
+        _ => {}
+    }
+    if let Some(Action::Toggle | Action::Delete) = keys::action(&app.keymap, Scope::Tui, key) {
+        app.toggle_history_run();
+        return true;
+    }
+    if !keys::modifiers(key).modified() {
+        match key.code {
+            KeyCode::Right | KeyCode::Char('l') => {
+                app.expand_history_run();
+                return true;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                app.collapse_history_run();
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) -> Option<String> {
@@ -304,10 +361,17 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) -> Option<String> {
     {
         return None;
     }
+    if app.overlay == Overlay::None && app.tab == Tab::History && handle_history(app, key, held_key)
+    {
+        return None;
+    }
     if app.overlay == Overlay::None && app.tab.source().is_none() && action.is_some_and(list_only) {
         app.message = Some(match app.tab {
             Tab::Repos => {
                 "git: pack with git gc or remove merged branches, see ? for keys".to_owned()
+            }
+            Tab::History => {
+                "history: press Enter to inspect a session or r to restore from trash".to_owned()
             }
             tab => format!(
                 "{} are a report, nothing here is selected or deleted",
@@ -320,6 +384,7 @@ fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) -> Option<String> {
         Overlay::Confirm { .. } => handle_confirm(app, key, queues, held),
         Overlay::Branches { .. } => handle_branches(app, key, queues, held),
         Overlay::Exclude { .. } => return handle_exclude(app, key, held),
+        Overlay::Restore { .. } => handle_restore(app, key, queues, held),
         Overlay::Help => {
             if !modified {
                 app.overlay = Overlay::None;
@@ -377,6 +442,7 @@ struct Background {
     duplicates: Option<JoinHandle<()>>,
     repositories: Option<Vec<PathBuf>>,
     repos: Option<JoinHandle<()>>,
+    history: Option<JoinHandle<()>>,
 }
 
 impl Background {
@@ -438,6 +504,18 @@ impl Background {
                 }
             }
         }
+        if app.tab == Tab::History && app.history.load == Load::Idle {
+            app.history.load = Load::Loading;
+            if let Some(previous) = self.history.take() {
+                let _ = previous.join();
+            }
+            match sources::spawn_history(self.found.clone()) {
+                Ok(handle) => self.history = Some(handle),
+                Err(error) => {
+                    app.history_failed(format!("could not read history: {error}"));
+                }
+            }
+        }
     }
 
     fn walked(&mut self, app: &mut App, walked: Result<Walked, TryRecvError>) -> bool {
@@ -464,6 +542,9 @@ impl Background {
             let _ = handle.join();
         }
         if let Some(handle) = self.repos {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.history {
             let _ = handle.join();
         }
         for handle in self.lists {
@@ -545,9 +626,11 @@ pub(crate) fn run_with_config(
         pending.insert(source, (jobs_rx, outcome_tx));
     }
     let (git_tx, git_rx) = unbounded::<GitWork>();
+    let (restore_tx, restore_rx) = unbounded::<RestoreWork>();
     let queues = Queues {
         jobs: job_queues,
         git: git_tx,
+        restore: restore_tx,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let (found_tx, found_rx) = unbounded::<Found>();
@@ -563,6 +646,13 @@ pub(crate) fn run_with_config(
             None
         }
     };
+    let restore = match sources::spawn_restore(restore_rx, Arc::clone(&stop), found_tx.clone()) {
+        Ok(restore) => Some(restore),
+        Err(error) => {
+            notify(&mut app, format!("could not start restore: {error}"));
+            None
+        }
+    };
     let mut background = Background {
         config: config.clone(),
         roots: roots.to_vec(),
@@ -574,6 +664,7 @@ pub(crate) fn run_with_config(
         duplicates: None,
         repositories: None,
         repos: None,
+        history: None,
     };
     let deleter = match jobs::spawn_deleters(
         roots.to_vec(),
@@ -698,6 +789,7 @@ pub(crate) fn run_with_config(
                     Overlay::Confirm { .. }
                         | Overlay::Branches { .. }
                         | Overlay::Exclude { .. }
+                        | Overlay::Restore { .. }
                         | Overlay::Quit
                 );
                 if app.quit || confirming || !event::poll(Duration::ZERO)? {
@@ -722,6 +814,9 @@ pub(crate) fn run_with_config(
     background.finish();
     if let Some(git) = git {
         let _ = git.join();
+    }
+    if let Some(restore) = restore {
+        let _ = restore.join();
     }
     outcome
 }
@@ -771,6 +866,7 @@ mod tests {
     fn queues() -> (Queues, Receiver<Job>) {
         let (jobs, queued) = unbounded::<Job>();
         let (git, _) = unbounded::<GitWork>();
+        let (restore, _) = unbounded::<RestoreWork>();
         (
             Queues {
                 jobs: Source::ALL
@@ -778,6 +874,7 @@ mod tests {
                     .map(|source| (source, jobs.clone()))
                     .collect(),
                 git,
+                restore,
             },
             queued,
         )
@@ -792,7 +889,33 @@ mod tests {
             receivers.insert(source, queued);
         }
         let (git, git_work) = unbounded::<GitWork>();
-        (Queues { jobs: senders, git }, receivers, git_work)
+        let (restore, _) = unbounded::<RestoreWork>();
+        (
+            Queues {
+                jobs: senders,
+                git,
+                restore,
+            },
+            receivers,
+            git_work,
+        )
+    }
+
+    fn history_queues() -> (Queues, Receiver<RestoreWork>) {
+        let (jobs, _) = unbounded::<Job>();
+        let (git, _) = unbounded::<GitWork>();
+        let (restore, restore_work) = unbounded::<RestoreWork>();
+        (
+            Queues {
+                jobs: Source::ALL
+                    .into_iter()
+                    .map(|source| (source, jobs.clone()))
+                    .collect(),
+                git,
+                restore,
+            },
+            restore_work,
+        )
     }
 
     fn press(app: &mut App, jobs: &Queues, code: KeyCode, modifiers: KeyModifiers) {
@@ -1214,6 +1337,163 @@ mod tests {
             app.message
                 .as_deref()
                 .is_some_and(|message| message.contains("not on disk"))
+        );
+    }
+
+    fn sample_history() -> (crate::history::History, crate::history::TrashSnapshot) {
+        use crate::history::{Action as HistoryAction, Entry, History, Run, Total, TrashSnapshot};
+        use std::collections::HashSet;
+
+        let entry_a = Entry {
+            deleted_at: "2026-04-01T10:00:00+00:00".to_owned(),
+            path: PathBuf::from("/p/alpha/node_modules"),
+            rule: "node-modules".to_owned(),
+            category: "dependencies".to_owned(),
+            mode: Mode::Trash,
+            bytes: 2048,
+            size: "2.0 KB".to_owned(),
+            restores: None,
+        };
+        let entry_b = Entry {
+            deleted_at: "2026-04-01T10:00:01+00:00".to_owned(),
+            path: PathBuf::from("/p/alpha/target"),
+            rule: "rust-target".to_owned(),
+            category: "build".to_owned(),
+            mode: Mode::Permanent,
+            bytes: 4096,
+            size: "4.0 KB".to_owned(),
+            restores: None,
+        };
+        let run1 = Run {
+            id: 1,
+            action: HistoryAction::Delete,
+            started_at: "2026-04-01T10:00:00+00:00".to_owned(),
+            finished_at: "2026-04-01T10:00:02+00:00".to_owned(),
+            command: "kuizer clean /p/alpha".to_owned(),
+            roots: vec![PathBuf::from("/p/alpha")],
+            total: Total {
+                items: 2,
+                bytes: 6144,
+                size: "6.0 KB".to_owned(),
+            },
+            deleted: vec![entry_a, entry_b],
+        };
+        let history = History {
+            next_session: 2,
+            runs: vec![run1],
+            ..History::default()
+        };
+        let kept = HashSet::from([(0usize, 0usize)]);
+        let trash = TrashSnapshot::new(&history, Some(kept));
+        (history, trash)
+    }
+
+    #[test]
+    fn history_tab_expands_filters_and_confirms_restore_inline() {
+        let (queues, restore_work) = history_queues();
+        let mut app = app();
+        let (history, trash) = sample_history();
+
+        press(&mut app, &queues, KeyCode::Char('8'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::History);
+        app.set_history(history.clone(), trash.clone());
+        assert_eq!(app.history.rows, [app::HistorySpot::Run(0)]);
+
+        // Expand session with Space.
+        press(&mut app, &queues, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(
+            app.history.rows,
+            [
+                app::HistorySpot::Run(0),
+                app::HistorySpot::Item(0, 0),
+                app::HistorySpot::Item(0, 1),
+            ]
+        );
+
+        // Move to permanent item (0, 1): r refuses with a clear message.
+        press(&mut app, &queues, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut app, &queues, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(
+            app.current_history_spot(),
+            Some(app::HistorySpot::Item(0, 1))
+        );
+        press(&mut app, &queues, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|message| message.contains("deleted permanently"))
+        );
+
+        // Move back up to trashed item (0, 0): r opens inline confirm focused on Cancel.
+        press(&mut app, &queues, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(
+            app.current_history_spot(),
+            Some(app::HistorySpot::Item(0, 0))
+        );
+        press(&mut app, &queues, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Restore {
+                label,
+                targets,
+                bytes: 2048,
+                confirm: false,
+            } if label == "s1.1" && targets == &[(0, 0)]
+        ));
+
+        // Enter while Cancel is focused closes without dispatching.
+        press(&mut app, &queues, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(restore_work.is_empty());
+
+        // Re-open with r, Tab to Restore: a held Enter never restores; y confirms.
+        press(&mut app, &queues, KeyCode::Char('r'), KeyModifiers::NONE);
+        press(&mut app, &queues, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Restore { confirm: true, .. }
+        ));
+        press(&mut app, &queues, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            restore_work.is_empty(),
+            "held Enter must not trigger restore"
+        );
+        press(&mut app, &queues, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.history.restoring);
+        let work = restore_work.try_recv().expect("restore job dispatched");
+        assert_eq!(work.label, "s1.1");
+        assert_eq!(work.targets, vec![(0, 0)]);
+
+        // Completing restore clears restoring flag and updates message.
+        app.restore_done(app::RestoreDone {
+            label: work.label,
+            result: Ok(app::RestoreSummary {
+                restored: 1,
+                bytes: 2048,
+                ..app::RestoreSummary::default()
+            }),
+            updated: Some((history, trash)),
+        });
+        assert!(!app.history.restoring);
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|message| message.contains("restored 1 item"))
+        );
+
+        // Collapse with h returns cursor to the run row.
+        press(&mut app, &queues, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(app.history.rows, [app::HistorySpot::Run(0)]);
+        assert_eq!(app.current_history_spot(), Some(app::HistorySpot::Run(0)));
+
+        // Filtering reveals matching items automatically.
+        app.set_filter("rust-target".to_owned());
+        app.refresh();
+        assert_eq!(
+            app.history.rows,
+            [app::HistorySpot::Run(0), app::HistorySpot::Item(0, 1)]
         );
     }
 }
