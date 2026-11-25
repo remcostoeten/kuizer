@@ -4,6 +4,8 @@ mod config;
 mod dashboard;
 mod docker;
 mod duplicates;
+mod filter;
+mod generate;
 mod git;
 mod history;
 mod interrupt;
@@ -16,9 +18,10 @@ mod ui;
 
 use std::path::PathBuf;
 
-use crate::cli::{Cli, Command, HistoryAction, NestedCommand, ScanArgs};
+use crate::cli::{Cli, Command, Format, HistoryAction, NestedCommand, ScanArgs};
 use crate::config::{Config, ConfigError, Loaded, rejected_scope};
 use crate::history::HistoryError;
+use crate::scan::ScopeError;
 use clap::CommandFactory;
 
 pub use crate::scan::sort_candidates;
@@ -40,6 +43,14 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("unknown selection `{name}`, expected safe, all or one of: {known}")]
     UnknownSelection { name: String, known: String },
+    #[error("unknown rule `{name}`, expected one of: {known}")]
+    UnknownRule { name: String, known: String },
+    #[error(transparent)]
+    Scope(#[from] ScopeError),
+    #[error(
+        "--json-lines works with scan and the cache, toolchain and docker listings; use --json"
+    )]
+    JsonLinesUnsupported,
     #[error("refusing to remove without confirmation: no terminal to ask on, pass --yes")]
     NeedsConfirmation,
     #[error(
@@ -117,6 +128,16 @@ fn removes_unattended(command: Option<&Command>) -> bool {
     }
 }
 
+fn streams_lines(command: Option<&Command>) -> bool {
+    match command {
+        None | Some(Command::Scan(_)) => true,
+        Some(Command::Cache(args)) => !args.plan().cleaning,
+        Some(Command::Toolchain(args)) => !args.plan().cleaning,
+        Some(Command::Docker(args)) => !args.plan().cleaning,
+        _ => false,
+    }
+}
+
 fn config_notice(loaded: &Loaded) -> Option<String> {
     let first = loaded.warnings.first()?;
     let more = loaded.warnings.len() - 1;
@@ -131,6 +152,14 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     if let Some(name) = cli.command.as_ref().and_then(nested_help) {
         return print_subcommand_help(name);
     }
+    if let Some(Command::Generate { target }) = &cli.command {
+        return generate::run(target);
+    }
+    let format = cli.format();
+    if format == Format::JsonLines && !streams_lines(cli.command.as_ref()) {
+        return Err(AppError::JsonLinesUnsupported);
+    }
+    let json = format != Format::Text;
     let loaded = Config::load(cli.config.as_deref())?;
     for warning in &loaded.warnings {
         eprintln!("kuizer: config: {warning}");
@@ -140,7 +169,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         return Err(AppError::ScopeRejected(rejected.join(", ")));
     }
     match cli.command {
-        None if !cli.json && interactive() => ui::run(
+        None if !json && interactive() => ui::run(
             &loaded.config,
             cli.paths,
             cli.confirm,
@@ -151,9 +180,9 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
                 paths: cli.paths,
                 ..ScanArgs::default()
             };
-            scan::run(&loaded.config, args, cli.json, cli.quiet)
+            scan::run(&loaded.config, args, format, cli.quiet)
         }
-        Some(Command::Scan(args)) => scan::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Scan(args)) => scan::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
         Some(Command::History(args)) => history::run(args, cli.json),
@@ -162,10 +191,11 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
             duplicates::run(&loaded.config, args, cli.json, cli.quiet)
         }
         Some(Command::Clean(args)) => clean::run(&loaded.config, args, cli.json, cli.quiet),
-        Some(Command::Cache(args)) => cache::run(&loaded.config, args, cli.json, cli.quiet),
-        Some(Command::Docker(args)) => docker::run(&loaded.config, args, cli.json, cli.quiet),
-        Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Cache(args)) => cache::run(&loaded.config, args, format, cli.quiet),
+        Some(Command::Docker(args)) => docker::run(&loaded.config, args, format, cli.quiet),
+        Some(Command::Toolchain(args)) => toolchain::run(&loaded.config, args, format, cli.quiet),
         Some(Command::Git(args)) => git::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
+        Some(Command::Generate { target }) => generate::run(&target),
     }
 }

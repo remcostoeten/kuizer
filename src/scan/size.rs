@@ -4,13 +4,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::cancel::Cancel;
 use super::pool::{Local, Queue};
-use super::types::Usage;
+use super::types::{Candidate, Usage};
 use crate::config::MAX_SIZE_THREADS;
 use crate::platform::dir::{Buffer, Dir, Stat, stat_path};
 
@@ -431,6 +431,48 @@ pub fn measure_many<T: Send>(
             on_done(item, total.measured());
         }
     });
+}
+
+/// @name measure_candidates
+/// @description Sizes every candidate on one shared pool of `threads` threads through
+/// [`measure_many`] and fills in its usage, newest change and identity. `on_measured` sees each
+/// candidate as it completes, possibly from several threads at once. Returns the pairs largest
+/// first, ties by path. This is the one measuring pool for caches, toolchains and other lists
+/// of single folders, so no caller spawns a thread per item.
+///
+/// @example
+/// let entries = scan::measure_candidates(found, &cancel, scan::size_threads(&config), |_| {});
+pub fn measure_candidates<T: Send>(
+    items: Vec<(T, Candidate)>,
+    cancel: &Cancel,
+    threads: usize,
+    on_measured: impl Fn(&Candidate) + Sync,
+) -> Vec<(T, Candidate)> {
+    let done = Mutex::new(Vec::with_capacity(items.len()));
+    let jobs = items
+        .into_iter()
+        .map(|(item, candidate)| {
+            let path = candidate.path.clone();
+            ((item, candidate), path)
+        })
+        .collect();
+    measure_many(jobs, cancel, threads, |(item, mut candidate), measured| {
+        candidate.usage = measured.usage;
+        candidate.newest = measured.newest;
+        candidate.identity = measured.identity;
+        on_measured(&candidate);
+        done.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((item, candidate));
+    });
+    let mut entries = done.into_inner().unwrap_or_else(PoisonError::into_inner);
+    entries.sort_by(|(_, a), (_, b)| {
+        b.usage
+            .allocated
+            .cmp(&a.usage.allocated)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    entries
 }
 
 struct Slot<T>(Mutex<Option<T>>);

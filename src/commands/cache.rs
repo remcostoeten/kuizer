@@ -1,38 +1,35 @@
-use std::path::PathBuf;
-
 use super::AppError;
+use super::filter::Filters;
 use super::removal::{self, Request};
 use crate::caches::{self, Locations};
-use crate::cli::CacheArgs;
+use crate::cli::{CacheArgs, Format};
 use crate::config::Config;
 use crate::output;
 use crate::protect::Protected;
 use crate::scan::{self, Cancel, Candidate};
+use crate::source::Source;
 
 pub use crate::caches::{measure, measure_threaded, measure_with};
 
-fn parents(candidates: &[Candidate]) -> Vec<PathBuf> {
-    let mut parents: Vec<PathBuf> = candidates
-        .iter()
-        .filter_map(|candidate| candidate.path.parent().map(PathBuf::from))
-        .collect();
-    parents.sort();
-    parents.dedup();
-    parents
-}
-
-pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<(), AppError> {
+pub fn run(config: &Config, args: CacheArgs, format: Format, quiet: bool) -> Result<(), AppError> {
+    let json = format != Format::Text;
     let plan = args.plan();
-    removal::check_selection(&plan.removal.select, &caches::names().collect::<Vec<_>>())?;
+    let names: Vec<&str> = caches::names().collect();
+    removal::check_selection(&plan.removal.select, &names)?;
+    let filters = Filters::source(config, &args.filters, &names)?;
+    let config = filters.config();
     let locations = Locations::for_user().ok_or(AppError::NoHome)?;
-    let entries = measure_threaded(
-        caches::find(&locations, &Protected::for_user()),
+    let mut entries = measure_threaded(
+        caches::find_excluding(&locations, &Protected::for_user(), &config.excludes()?),
         &Cancel::new(),
         scan::size_threads(config),
         |_| {},
     );
+    filters.keep(&mut entries);
     if !plan.cleaning {
-        if json {
+        if format == Format::JsonLines {
+            println!("{}", output::cache_lines(&entries)?);
+        } else if json {
             println!("{}", output::cache_report(&entries)?);
         } else {
             output::print_caches(&entries, quiet);
@@ -44,7 +41,7 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         .map(|(_, candidate)| candidate)
         .collect();
     let selected = removal::select(candidates, &plan.removal.select);
-    let roots = parents(&selected);
+    let roots = caches::guard_roots(&selected);
     let request = Request {
         command: "cache",
         roots: &roots,
@@ -52,7 +49,8 @@ pub fn run(config: &Config, args: CacheArgs, json: bool, quiet: bool) -> Result<
         yes: plan.removal.yes,
         confirm: config.delete.confirm,
         json,
-        remove: &removal::files,
+        source: Source::Cache,
+        engines: &config.docker.engines,
         delete: &config.delete,
     };
     removal::run(&request, selected, &[])

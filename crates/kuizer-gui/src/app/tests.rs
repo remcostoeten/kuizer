@@ -14,7 +14,6 @@ pub(super) fn open(
             Vec::new(),
             Recent::load(Some(recent.clone())),
             Snapshots::new(recent.parent().map(|dir| dir.join("scans"))),
-            Zoom::load(None),
             "Noto Sans".into(),
             window,
             cx,
@@ -494,11 +493,13 @@ fn parts_fill_the_shown_scan_and_its_rows_can_be_deleted(cx: &mut TestAppContext
 
         let mut saved = Report::empty(&app.roots, &app.options);
         saved.candidates = vec![artifact(9, Path::new("/p/old/node_modules"))];
-        saved.history = Ok(HistoryView {
-            history: kuizer::history::History::default(),
-            kept: HashSet::new(),
-            trash_known: true,
-        });
+        saved.history = Ok(HistoryView::new(
+            kuizer::history::History::default(),
+            kuizer::history::TrashSnapshot {
+                known: true,
+                ..Default::default()
+            },
+        ));
         app.take(vec![Update::Cached(Box::new(saved))], cx);
         let report = app.report().unwrap();
         assert_eq!(report.candidates.len(), 2, "streamed artifacts win");
@@ -555,11 +556,13 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
     });
     view.update(cx, |app, cx| {
         let history = || {
-            Ok(HistoryView {
-                history: kuizer::history::History::default(),
-                kept: HashSet::new(),
-                trash_known: true,
-            })
+            Ok(HistoryView::new(
+                kuizer::history::History::default(),
+                kuizer::history::TrashSnapshot {
+                    known: true,
+                    ..Default::default()
+                },
+            ))
         };
         let outcome = Outcome {
             removals: vec![(
@@ -723,7 +726,6 @@ fn the_sidebar_opens_collapsed_when_configured(cx: &mut TestAppContext) {
             Vec::new(),
             Recent::load(None),
             Snapshots::new(None),
-            Zoom::load(None),
             "Noto Sans".into(),
             window,
             cx,
@@ -791,15 +793,18 @@ fn ctrl_plus_minus_and_zero_change_the_zoom(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, cx) = open(cx, dir.path().join("recent"));
     cx.simulate_keystrokes("ctrl-= ctrl-shift-=");
-    view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 120));
+    view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 120));
     cx.update(|window, _| assert_eq!(window.rem_size(), px(19.2)));
     cx.simulate_keystrokes("ctrl-- ctrl-- ctrl-- ctrl--");
     view.read_with(cx, |app, _| {
-        assert_eq!(app.zoom.percent, 80);
+        assert_eq!(app.config.appearance.zoom, 80);
         assert!(app.folder.is_empty());
     });
+    cx.run_until_parked();
+    let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(written.contains("zoom = 80"), "{written}");
     cx.simulate_keystrokes("ctrl-0");
-    view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 100));
+    view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 100));
 }
 
 #[gpui::test]
@@ -808,11 +813,11 @@ fn ctrl_scroll_zooms_and_plain_scroll_does_not(cx: &mut TestAppContext) {
     let (view, cx) = open(cx, dir.path().join("recent"));
     scroll(cx, 1., Modifiers::control());
     scroll(cx, 1., Modifiers::control());
-    view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 120));
+    view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 120));
     scroll(cx, -1., Modifiers::control());
-    view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 110));
+    view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 110));
     scroll(cx, 1., Modifiers::default());
-    view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 110));
+    view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 110));
 }
 
 #[gpui::test]
@@ -1795,4 +1800,67 @@ fn delete_keys_without_a_selection_remove_nothing(cx: &mut TestAppContext) {
         cx.run_until_parked();
     }
     assert!(root.join("site").join("node_modules").exists());
+}
+
+#[gpui::test]
+fn paths_excluded_while_saved_results_load_stay_out(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = open(cx, dir.path().join("recent"));
+    let (kept, late) = (
+        Path::new("/p/a/node_modules"),
+        Path::new("/p/b/node_modules"),
+    );
+    let member = |path: &Path| dupes::Member {
+        path: path.join("file"),
+        links: Vec::new(),
+        modified: None,
+    };
+    view.update(cx, |app, cx| {
+        app.roots = vec![PathBuf::from("/p")];
+        app.cancel = Some(Cancel::new());
+        app.pending = Part::expected(&app.options);
+        app.phase = Phase::Loading(Box::default());
+        app.excluded = vec![PathBuf::from("/p/old")];
+        app.cached_excluded = app.excluded.len();
+        app.excluded.push(late.to_path_buf());
+
+        let mut saved = Report::empty(&app.roots, &app.options);
+        saved.candidates = vec![artifact(1, kept), artifact(2, late)];
+        app.take(vec![Update::Cached(Box::new(saved))], cx);
+        let ids: Vec<u64> = app
+            .report()
+            .unwrap()
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [1],
+            "a path excluded after the scan started is dropped"
+        );
+
+        let found = Duplicates {
+            groups: vec![dupes::Group {
+                size: 1,
+                allocated: 4096,
+                hash: String::new(),
+                verified: true,
+                members: vec![member(kept), member(late), member(Path::new("/p/c"))],
+            }],
+            issues: Vec::new(),
+            files: 3,
+            duration: Duration::ZERO,
+        };
+        let roots = app.roots.clone();
+        app.show_duplicates(&roots, found, 1, cx);
+        let groups = &app.report().unwrap().duplicates.as_ref().unwrap().groups;
+        assert_eq!(groups[0].members.len(), 2);
+        assert!(
+            groups[0]
+                .members
+                .iter()
+                .all(|member| !member.path.starts_with(late))
+        );
+    });
 }

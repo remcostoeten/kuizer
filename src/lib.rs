@@ -18,6 +18,7 @@ pub mod protect;
 pub mod repos;
 pub mod scan;
 pub mod snapshot;
+pub mod source;
 pub mod stats;
 pub mod toolchains;
 #[cfg(feature = "cli")]

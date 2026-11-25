@@ -1,6 +1,9 @@
+use crate::config::Excludes;
 use crate::detect::{Category, Safety};
 use crate::scan::Candidate;
+use globset::GlobBuilder;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Shared candidate ordering used by the CLI, TUI and GUI.
 ///
@@ -84,6 +87,139 @@ impl CandidateFilter<'_> {
                 candidate.rule.name.as_str(),
             ])
     }
+}
+
+/// A glob given to `--project` or `--exclude` that does not compile.
+///
+/// @name ScopeError
+/// @description Names the flag and the pattern so the CLI can report which value to fix.
+///
+/// @example
+/// let error = Scope::new(&[], &["[".to_owned()], &[]).unwrap_err();
+#[derive(Debug, thiserror::Error)]
+#[error("invalid --{flag} pattern `{pattern}`: {message}")]
+pub struct ScopeError {
+    flag: &'static str,
+    pattern: String,
+    message: String,
+}
+
+/// The `--category`, `--min-size`, `--rule`, `--project` and `--exclude` filters, shared by
+/// every source so `scan` lists exactly what `clean` considers.
+///
+/// @name Scope
+/// @description Keeps a candidate only when it passes every filter that was given. Values of one
+/// filter are a union, different filters intersect, and an empty filter keeps everything. A
+/// candidate without a project never matches `--project`.
+///
+/// @example
+/// let scope = Scope::new(&["node-modules".to_owned()], &[], &[])?;
+/// candidates.retain(|candidate| scope.matches(candidate));
+pub struct Scope {
+    categories: Vec<Category>,
+    min_size: u64,
+    rules: Vec<String>,
+    projects: Option<Excludes>,
+    excludes: Option<Excludes>,
+}
+
+impl Scope {
+    /// @name Scope::new
+    /// @description Compiles the rule, project and exclude filters. Globs use the `scan.exclude`
+    /// syntax: a pattern with a `/` matches a whole path, one without matches a folder name, and
+    /// `~` expands to the home directory.
+    ///
+    /// @example
+    /// let scope = Scope::new(&[], &["~/apps/*".to_owned()], &["vendor".to_owned()])?;
+    pub fn new(
+        rules: &[String],
+        projects: &[String],
+        excludes: &[String],
+    ) -> Result<Self, ScopeError> {
+        Ok(Self {
+            categories: Vec::new(),
+            min_size: 0,
+            rules: rules.to_vec(),
+            projects: globs("project", projects)?,
+            excludes: globs("exclude", excludes)?,
+        })
+    }
+
+    /// @name Scope::within
+    /// @description Adds the `--category` and `--min-size` filters, for sources whose lister
+    /// does not read them from the config.
+    ///
+    /// @example
+    /// let scope = Scope::new(&rules, &projects, &excludes)?.within(&[Category::Cache], 1 << 20);
+    pub fn within(mut self, categories: &[Category], min_size: u64) -> Self {
+        self.categories = categories.to_vec();
+        self.min_size = min_size;
+        self
+    }
+
+    /// @name Scope::is_empty
+    /// @description Returns whether no filter was given, so every candidate matches.
+    ///
+    /// @example
+    /// let live = scope.is_empty() && !json;
+    pub fn is_empty(&self) -> bool {
+        self.categories.is_empty()
+            && self.min_size == 0
+            && self.rules.is_empty()
+            && self.projects.is_none()
+            && self.excludes.is_none()
+    }
+
+    /// @name Scope::matches
+    /// @description Applies every given filter to one candidate. `--project` matches the
+    /// candidate's project folder or a folder above it; `--exclude` drops a candidate whose path
+    /// or a folder above it matches.
+    ///
+    /// @example
+    /// entries.retain(|(_, candidate)| scope.matches(candidate));
+    pub fn matches(&self, candidate: &Candidate) -> bool {
+        (self.categories.is_empty() || self.categories.contains(&candidate.rule.category))
+            && candidate.usage.allocated >= self.min_size
+            && (self.rules.is_empty() || self.rules.contains(&candidate.rule.name))
+            && self.projects.as_ref().is_none_or(|projects| {
+                candidate
+                    .project
+                    .as_deref()
+                    .is_some_and(|project| within_any(projects, project))
+            })
+            && self
+                .excludes
+                .as_ref()
+                .is_none_or(|excludes| !within_any(excludes, &candidate.path))
+    }
+}
+
+fn within_any(globs: &Excludes, path: &Path) -> bool {
+    path.ancestors().any(|dir| globs.path(dir))
+}
+
+fn globs(flag: &'static str, patterns: &[String]) -> Result<Option<Excludes>, ScopeError> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    for pattern in patterns {
+        GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .backslash_escape(true)
+            .build()
+            .map_err(|error| ScopeError {
+                flag,
+                pattern: pattern.clone(),
+                message: error.kind().to_string(),
+            })?;
+    }
+    Excludes::new(patterns, &[])
+        .map(Some)
+        .map_err(|error| ScopeError {
+            flag,
+            pattern: patterns.join(", "),
+            message: error.to_string(),
+        })
 }
 
 /// Positions belonging to one ordered group key.
@@ -205,6 +341,42 @@ mod tests {
         assert!(!query.matches(&["/work/target", "npm"]));
         assert!(Query::default().matches(&[]));
         assert!(!Query::new("absent").matches(&[]));
+    }
+
+    #[test]
+    fn scope_filters_intersect_and_never_match_a_missing_project() {
+        let mut web = candidate(2, "/work/web/node_modules", 10, Category::Dependencies);
+        web.project = Some(PathBuf::from("/work/web"));
+        let mut vendored = candidate(4, "/work/api/vendor/dist", 10, Category::Build);
+        vendored.project = Some(PathBuf::from("/work/api"));
+        let global = candidate(6, "/home/me/.npm", 10, Category::Cache);
+        let all = [&web, &vendored, &global];
+        let kept = |scope: &Scope| {
+            all.iter()
+                .filter(|item| scope.matches(item))
+                .map(|item| item.id)
+                .collect::<Vec<_>>()
+        };
+        let strings = |values: &[&str]| -> Vec<String> {
+            values.iter().map(|value| (*value).to_owned()).collect()
+        };
+
+        assert_eq!(kept(&Scope::new(&[], &[], &[]).unwrap()), [2, 4, 6]);
+        assert_eq!(
+            kept(&Scope::new(&[], &strings(&["/work/*"]), &[]).unwrap()),
+            [2, 4]
+        );
+        assert_eq!(
+            kept(&Scope::new(&[], &[], &strings(&["vendor"])).unwrap()),
+            [2, 6]
+        );
+        let narrow = Scope::new(&strings(&["rule-2", "rule-6"]), &strings(&["web"]), &[]).unwrap();
+        assert_eq!(kept(&narrow), [2]);
+        let sized = Scope::new(&[], &[], &[])
+            .unwrap()
+            .within(&[Category::Cache], 11);
+        assert_eq!(kept(&sized), Vec::<u64>::new());
+        assert!(Scope::new(&[], &strings(&["["]), &[]).is_err());
     }
 
     #[test]

@@ -22,11 +22,12 @@ impl Kuizer {
         let roots = self.roots.clone();
         let options = self.options.clone();
         let snapshots = self.snapshots.clone();
+        let excluded = self.excluded.clone();
         let cancel = Cancel::new();
         let worker_cancel = cancel.clone();
         let spawned = spawn_worker("kuizer-gui-duplicates", move || {
             let mut told: Option<Instant> = None;
-            let found =
+            let mut found =
                 model::find_duplicates(&config, &roots, &options, &worker_cancel, |stage| {
                     let quiet = matches!(stage, dupes::Stage::Walking { .. })
                         && told.is_some_and(|told| told.elapsed() < POLL);
@@ -42,11 +43,15 @@ impl Kuizer {
                 let duplicate_options = dupes::Options::from_config(&options.apply(&config));
                 snapshots.stage_duplicates(&roots, duplicate_options, found)
             });
+            if let Ok(found) = &mut found {
+                model::drop_duplicate_paths(found, &excluded);
+            }
             let _ = sender.unbounded_send(Searched::Done(found));
             if let Some(staged) = staged {
                 staged.save();
             }
         });
+        let excluded_count = self.excluded.len();
         if let Err(error) = spawned {
             self.search_error = Some(error);
             cx.notify();
@@ -73,6 +78,7 @@ impl Kuizer {
         });
         self.search = Some(Search {
             roots: self.roots.clone(),
+            excluded: excluded_count,
             stage: None,
             cancel,
             _task: task,
@@ -100,9 +106,10 @@ impl Kuizer {
             Searched::Stage(stage) => search.stage = Some(stage),
             Searched::Done(found) => {
                 let roots = std::mem::take(&mut search.roots);
+                let excluded = search.excluded;
                 self.search = None;
                 match found {
-                    Ok(found) => self.show_duplicates(&roots, found, cx),
+                    Ok(found) => self.show_duplicates(&roots, found, excluded, cx),
                     Err(error) => self.search_error = Some(error),
                 }
             }
@@ -110,19 +117,23 @@ impl Kuizer {
         cx.notify();
     }
 
+    /// Puts a duplicate search result into the report on screen. The worker already left out
+    /// the paths excluded before it started, the first `excluded` of them, so only paths
+    /// excluded since are filtered here.
     pub(super) fn show_duplicates(
         &mut self,
         roots: &[PathBuf],
-        found: Duplicates,
+        mut found: Duplicates,
+        excluded: usize,
         cx: &mut Context<Self>,
     ) {
         if let Phase::Ready(report) = &mut self.phase
             && report.roots == roots
         {
+            model::drop_duplicate_paths(&mut found, self.excluded.get(excluded..).unwrap_or(&[]));
             if let Some(old) = report.duplicates.replace(found) {
                 cx.background_spawn(async move { drop(old) }).detach();
             }
-            report.drop_paths(&self.excluded);
             self.report_generation += 1;
         }
     }
@@ -139,8 +150,14 @@ impl Kuizer {
         let roots = report.roots.clone();
         let snapshots = self.snapshots.clone();
         let options = dupes::Options::from_config(&self.options.apply(&self.config));
+        let excluded = self.excluded.clone();
+        let excluded_count = excluded.len();
         let spawned = spawn_worker("kuizer-gui-saved-duplicates", move || {
-            snapshots.load_duplicates(&roots, options)
+            let mut found = snapshots.load_duplicates(&roots, options);
+            if let Some(found) = &mut found {
+                model::drop_duplicate_paths(found, &excluded);
+            }
+            found
         });
         let receiver = match spawned {
             Ok(receiver) => receiver,
@@ -161,7 +178,7 @@ impl Kuizer {
                             .report()
                             .is_some_and(|report| report.duplicates.is_none())
                     {
-                        app.show_duplicates(&roots, found, cx);
+                        app.show_duplicates(&roots, found, excluded_count, cx);
                         cx.notify();
                     }
                 });
@@ -293,11 +310,6 @@ impl Kuizer {
                 cx,
             )
             .debug_selector(|| "duplicate-list".to_owned());
-        let empty = if found.groups.is_empty() {
-            "No duplicate files found"
-        } else {
-            "No duplicates match this filter"
-        };
         let body = div()
             .flex()
             .flex_col()
@@ -306,7 +318,12 @@ impl Kuizer {
             .child(table(
                 header,
                 if count == 0 {
-                    ui::empty(empty).into_any_element()
+                    empty_list(
+                        Tab::Duplicates,
+                        found.groups.len(),
+                        "No duplicate files found",
+                        "No duplicates match this filter",
+                    )
                 } else {
                     list.into_any_element()
                 },

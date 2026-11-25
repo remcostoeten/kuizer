@@ -3,7 +3,9 @@ use std::fmt;
 
 use toml::{Table, Value};
 
-use super::{Config, DeleteConfig, DeleteMode, Excludes, MAX_SIZE_THREADS};
+use super::{
+    Config, DEFAULT_ZOOM, DeleteConfig, DeleteMode, Excludes, MAX_SIZE_THREADS, MAX_ZOOM, MIN_ZOOM,
+};
 use crate::detect::{Detector, builtin_rules};
 use crate::keymap::Keymap;
 
@@ -278,6 +280,16 @@ fn settle(config: &mut Config, warnings: &mut Vec<ConfigWarning>) {
         ));
         config.scan.size_threads = MAX_SIZE_THREADS;
     }
+    if !(MIN_ZOOM..=MAX_ZOOM).contains(&config.appearance.zoom) {
+        warnings.push(ConfigWarning::new(
+            "appearance.zoom",
+            format!(
+                "{} is outside {MIN_ZOOM} to {MAX_ZOOM}, using {DEFAULT_ZOOM}",
+                config.appearance.zoom
+            ),
+        ));
+        config.appearance.zoom = DEFAULT_ZOOM;
+    }
 }
 
 fn syntax_warning(text: &str, error: &toml::de::Error) -> ConfigWarning {
@@ -511,6 +523,22 @@ mod tests {
             Config::parse_lenient(&format!("[scan]\nsize_threads = {MAX_SIZE_THREADS}\n"));
         assert_eq!(at_cap.scan.size_threads, MAX_SIZE_THREADS);
         assert!(at_cap_warnings.is_empty(), "{at_cap_warnings:?}");
+    }
+
+    #[test]
+    fn a_zoom_out_of_range_falls_back_without_touching_deletion() {
+        let (config, warnings) =
+            Config::parse_lenient("[delete]\nconfirm = false\n[appearance]\nzoom = 400\n");
+        assert_eq!(config.appearance.zoom, DEFAULT_ZOOM);
+        assert_eq!(keys(&warnings), ["appearance.zoom"]);
+        assert!(!config.delete.confirm);
+        assert_eq!(
+            Config::parse_lenient("[appearance]\nzoom = 120\n")
+                .0
+                .appearance
+                .zoom,
+            120
+        );
     }
 
     #[test]

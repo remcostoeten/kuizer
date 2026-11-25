@@ -1,3 +1,5 @@
+pub mod confirm;
+mod executor;
 mod guard;
 #[cfg(target_os = "linux")]
 mod tree;
@@ -11,6 +13,8 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+pub use confirm::{Confirmation, Risk};
+pub use executor::{Batch, Executor, Job, Report};
 pub use guard::{Guard, Refusal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

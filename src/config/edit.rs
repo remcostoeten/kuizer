@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use super::{Config, ConfigError, Excludes};
+use super::{Config, ConfigError, Excludes, MAX_SIZE_THREADS};
 use crate::platform;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,18 +33,29 @@ pub enum EditError {
 /// @example
 /// assert_eq!(exclude_pattern(Path::new("/p/a[1]")), "/p/a\\[1\\]");
 pub fn exclude_pattern(path: &Path) -> String {
-    let shown = match platform::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) if !rest.as_os_str().is_empty() => Path::new("~").join(rest),
-        _ => path.to_path_buf(),
-    };
     let mut pattern = String::new();
-    for ch in shown.to_string_lossy().chars() {
+    for ch in home_relative(path).chars() {
         if matches!(ch, '\\' | '*' | '?' | '[' | ']' | '{' | '}') {
             pattern.push('\\');
         }
         pattern.push(ch);
     }
     pattern
+}
+
+/// @name home_relative
+/// @description Writes a path the way a person would type it in the config file: a path under
+/// the home folder becomes `~/...`, any other path stays as it is.
+///
+/// @example
+/// assert_eq!(home_relative(&home.join("projects")), "~/projects");
+pub fn home_relative(path: &Path) -> String {
+    match platform::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if !rest.as_os_str().is_empty() => {
+            Path::new("~").join(rest).to_string_lossy().into_owned()
+        }
+        _ => path.to_string_lossy().into_owned(),
+    }
 }
 
 /// @name add_exclude
@@ -84,10 +95,59 @@ pub fn add_exclude(file: &Path, pattern: &str) -> Result<bool, EditError> {
 }
 
 /// A value the settings view writes to the config file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingValue {
     Bool(bool),
-    Text(&'static str),
+    Text(String),
+    Integer(i64),
+    List(Vec<String>),
+}
+
+impl SettingValue {
+    fn toml(&self) -> Value {
+        match self {
+            Self::Bool(on) => Value::from(*on),
+            Self::Text(text) => Value::from(text.as_str()),
+            Self::Integer(number) => Value::from(*number),
+            Self::List(items) => Value::Array(items.iter().map(String::as_str).collect()),
+        }
+    }
+}
+
+/// @name check_setting
+/// @description Reads one setting the way the config file would, without touching any file, and
+/// returns a config that holds it with every other setting at its default. The error is a short
+/// reason meant to be shown next to the field that was edited.
+///
+/// @example
+/// let parsed = check_setting("duplicates", "min_size", &SettingValue::Text("8KiB".into()))?;
+/// assert_eq!(parsed.duplicates.min_size, ByteSize(8192));
+pub fn check_setting(table: &str, key: &str, value: &SettingValue) -> Result<Config, String> {
+    let snippet = format!("[{table}]\n{key} = {}\n", value.toml());
+    let config = Config::parse(&snippet, Path::new(table)).map_err(|error| match error {
+        ConfigError::Parse { source, .. } => source.message().to_owned(),
+        other => other.to_string(),
+    })?;
+    if config.scan.size_threads > MAX_SIZE_THREADS {
+        return Err(format!("use at most {MAX_SIZE_THREADS} threads"));
+    }
+    Ok(config)
+}
+
+/// @name has_setting
+/// @description Returns whether the config file at `file` sets `table.key` itself, as opposed
+/// to leaving it at its default. A missing file sets nothing.
+///
+/// @example
+/// if !has_setting(&config_path, "appearance", "zoom")? {
+///     set_setting(&config_path, "appearance", "zoom", SettingValue::Integer(120))?;
+/// }
+pub fn has_setting(file: &Path, table: &str, key: &str) -> Result<bool, EditError> {
+    let document = read_document(file)?;
+    Ok(document
+        .get(table)
+        .and_then(Item::as_table_like)
+        .is_some_and(|section| section.contains_key(key)))
 }
 
 /// @name set_setting
@@ -104,10 +164,7 @@ pub fn set_setting(
     key: &str,
     value: SettingValue,
 ) -> Result<(), EditError> {
-    let value = match value {
-        SettingValue::Bool(on) => Value::from(on),
-        SettingValue::Text(text) => Value::from(text),
-    };
+    let value = value.toml();
     let snippet = format!("[{table}]\n{key} = {value}\n");
     Config::parse(&snippet, file).map_err(|source| EditError::Invalid {
         path: file.to_path_buf(),
@@ -280,7 +337,7 @@ mod tests {
             &file,
             "appearance",
             "sidebar",
-            SettingValue::Text("collapsed"),
+            SettingValue::Text("collapsed".to_owned()),
         )
         .expect("sets");
         set_setting(&file, "appearance", "motion", SettingValue::Bool(false)).expect("sets");
@@ -290,10 +347,42 @@ mod tests {
         assert!(!config.appearance.motion);
         assert_eq!(config.appearance.sidebar, crate::config::Sidebar::Collapsed);
         assert!(matches!(
-            set_setting(&file, "appearance", "sidebar", SettingValue::Text("wide")),
+            set_setting(
+                &file,
+                "appearance",
+                "sidebar",
+                SettingValue::Text("wide".to_owned())
+            ),
             Err(EditError::Invalid { .. })
         ));
         assert_eq!(fs::read_to_string(&file).expect("read"), written);
+    }
+
+    #[test]
+    fn lists_sizes_and_numbers_are_checked_before_they_are_written() {
+        let parsed = check_setting(
+            "duplicates",
+            "min_size",
+            &SettingValue::Text("8KiB".to_owned()),
+        )
+        .expect("a size");
+        assert_eq!(parsed.duplicates.min_size, crate::units::ByteSize(8192));
+        let bad_size = SettingValue::Text("lots".to_owned());
+        assert!(check_setting("git", "min_gain", &bad_size).is_err());
+        let bad_glob = SettingValue::List(vec!["[".to_owned()]);
+        assert!(check_setting("scan", "exclude", &bad_glob).is_err());
+        let zoom = check_setting("appearance", "zoom", &SettingValue::Integer(300));
+        assert!(zoom.expect_err("out of range").contains("zoom"));
+        assert!(check_setting("scan", "size_threads", &SettingValue::Integer(65)).is_err());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.toml");
+        assert!(!has_setting(&file, "docker", "engines").expect("no file yet"));
+        let engines = SettingValue::List(vec!["podman".to_owned(), "nerdctl".to_owned()]);
+        set_setting(&file, "docker", "engines", engines).expect("sets");
+        assert!(has_setting(&file, "docker", "engines").expect("reads"));
+        let loaded = Config::load(Some(&file)).expect("loads").config;
+        assert_eq!(loaded.docker.engines, ["podman", "nerdctl"]);
     }
 
     #[test]

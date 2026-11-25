@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -9,21 +9,15 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use crate::config::DeleteConfig;
-use crate::delete::{self, Guard, Lanes, Mode, Target};
+use crate::delete::{self, Executor, Mode, Status};
 use crate::git;
-use crate::history::{self, Entry, HistoryError, Recorder};
+use crate::history::HistoryError;
 use crate::platform;
-use crate::scan::Candidate;
+
+pub use crate::delete::Job;
 
 const STATUS_WORKERS: usize = 3;
 const DISK_REFRESH: Duration = Duration::from_secs(2);
-
-pub struct Job {
-    pub id: u64,
-    pub target: Target,
-    pub mode: Mode,
-    pub candidate: Candidate,
-}
 
 pub type Outcome = (u64, Mode, Result<(), String>);
 pub type Changes = (PathBuf, Option<usize>);
@@ -38,45 +32,16 @@ pub fn spawn_deleters(
     thread::Builder::new()
         .name("kuizer-delete".to_owned())
         .spawn(move || {
-            let guard = Guard::new(&roots)
-                .with_protected(&delete_config.protected)
-                .with_cross_device(delete_config.cross_device);
-            let recorder = Mutex::new(Recorder::for_user(history::now(), &roots));
-            let lanes = Lanes::default();
-            let work = || {
-                for job in &jobs {
-                    let result = if stop.load(Ordering::Relaxed) {
-                        Err("cancelled".to_owned())
-                    } else {
-                        let _lane = lanes.claim(&job.target.path);
-                        delete::delete(&guard, &job.target, job.mode)
-                            .map_err(|error| error.to_string())
-                    };
-                    if result.is_ok() && job.mode != Mode::DryRun {
-                        let mut recorder = recorder.lock().unwrap_or_else(PoisonError::into_inner);
-                        recorder.add(Entry::new(&job.candidate, job.mode));
-                        if jobs.is_empty() {
-                            recorder.flush();
-                        }
-                    }
-                    if results.send((job.id, job.mode, result)).is_err() {
-                        break;
-                    }
-                }
-            };
-            thread::scope(|scope| {
-                for _ in 1..delete::workers() {
-                    if thread::Builder::new().spawn_scoped(scope, work).is_err() {
-                        break;
-                    }
-                }
-                work();
+            let executor = Executor::new(&roots, &delete_config).with_stop(stop);
+            let guard = executor.guard(&roots);
+            executor.serve(&guard, &jobs, delete::workers(), |mode, removal| {
+                let result = match removal.status {
+                    Status::Failed => Err(removal.error.unwrap_or_default()),
+                    Status::Removed | Status::WouldRemove => Ok(()),
+                };
+                results.send((removal.candidate.id, mode, result)).is_ok()
             });
-            recorder
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner)
-                .finish()
-                .err()
+            executor.finish().err()
         })
 }
 

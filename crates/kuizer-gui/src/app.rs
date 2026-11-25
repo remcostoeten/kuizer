@@ -45,7 +45,7 @@ use crate::tab::Tab;
 use crate::theme::{self, col, font, size, space, unit};
 use crate::tooltip::{self, Tip, Tooltip};
 use crate::ui::{self, ButtonKind};
-use crate::zoom::Zoom;
+use crate::zoom;
 
 const POLL: Duration = Duration::from_millis(100);
 const LIST_LIMIT: usize = 6;
@@ -117,6 +117,7 @@ enum Searched {
 /// from it. Dropping it stops listening and cancels the search.
 struct Search {
     roots: Vec<PathBuf>,
+    excluded: usize,
     stage: Option<dupes::Stage>,
     cancel: Cancel,
     _task: Task<()>,
@@ -315,7 +316,6 @@ pub struct Kuizer {
     progress: Activity,
     search: Option<Search>,
     search_error: Option<String>,
-    zoom: Zoom,
     wheel: Pixels,
     moving: bool,
     cancel: Option<Cancel>,
@@ -333,7 +333,7 @@ pub struct Kuizer {
     rows_filter: Option<RowsFilter>,
     rows_generation: u64,
     all_checked: Cell<Option<(u64, u64, bool)>>,
-    artifact_row: Cell<usize>,
+    row_hints: [Cell<usize>; Tab::ALL.len()],
     selection: Selection,
     index: Index,
     report_stats: ReportStats,
@@ -355,6 +355,7 @@ pub struct Kuizer {
     restore_task: Option<Task<()>>,
     menu: Option<Menu>,
     palette: Option<Palette>,
+    palette_cache: RefCell<Option<(keys::PaletteKey, Rc<[keys::Entry]>)>>,
     shortcuts: bool,
     settings: Option<settings::Settings>,
     filtering: bool,
@@ -372,11 +373,13 @@ pub struct Kuizer {
     shortcuts_scroll: ScrollHandle,
     config_path: Option<PathBuf>,
     excluded: Vec<PathBuf>,
+    cached_excluded: usize,
     excluding: HashSet<PathBuf>,
     reveal: Reveal,
     map: SpaceMap,
     git: GitJob,
     git_task: Option<Task<()>>,
+    branch_leaving: Option<repos::Leaving>,
     content: Option<Entity<Pane>>,
     chrome: Option<Entity<Chrome>>,
     cache_content: bool,
@@ -393,7 +396,6 @@ impl Kuizer {
         roots: Vec<PathBuf>,
         recent: Recent,
         snapshots: Snapshots,
-        zoom: Zoom,
         font: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -430,7 +432,6 @@ impl Kuizer {
             progress: Activity::default(),
             search: None,
             search_error: None,
-            zoom,
             wheel: px(0.),
             moving: false,
             cancel: None,
@@ -448,7 +449,7 @@ impl Kuizer {
             rows_filter: None,
             rows_generation: 0,
             all_checked: Cell::new(None),
-            artifact_row: Cell::new(0),
+            row_hints: Default::default(),
             selection: Selection::default(),
             index: Index::default(),
             report_stats: ReportStats::default(),
@@ -470,6 +471,7 @@ impl Kuizer {
             restore_task: None,
             menu: None,
             palette: None,
+            palette_cache: RefCell::default(),
             shortcuts: false,
             settings: None,
             filtering: false,
@@ -498,11 +500,13 @@ impl Kuizer {
             shortcuts_scroll: ScrollHandle::new(),
             config_path: kuizer::config::default_path(),
             excluded: Vec::new(),
+            cached_excluded: 0,
             excluding: HashSet::new(),
             reveal: reveal::reveal,
             map: SpaceMap::default(),
             git: GitJob::default(),
             git_task: None,
+            branch_leaving: None,
             content: None,
             chrome: None,
             cache_content: cfg!(not(test)),
@@ -825,21 +829,15 @@ impl Kuizer {
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.zoom.zoom_in() {
-            cx.notify();
-        }
+        self.set_zoom(zoom::zoomed_in(self.config.appearance.zoom), cx);
     }
 
     fn zoom_out(&mut self, _: &ZoomOut, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.zoom.zoom_out() {
-            cx.notify();
-        }
+        self.set_zoom(zoom::zoomed_out(self.config.appearance.zoom), cx);
     }
 
     fn reset_zoom(&mut self, _: &ResetZoom, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.zoom.reset() {
-            cx.notify();
-        }
+        self.set_zoom(kuizer::config::DEFAULT_ZOOM, cx);
     }
 
     fn wheel_zoom(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -847,15 +845,13 @@ impl Kuizer {
         if self.wheel.abs() < WHEEL_NOTCH {
             return;
         }
-        let changed = if self.wheel > px(0.) {
-            self.zoom.zoom_in()
+        let percent = if self.wheel > px(0.) {
+            zoom::zoomed_in(self.config.appearance.zoom)
         } else {
-            self.zoom.zoom_out()
+            zoom::zoomed_out(self.config.appearance.zoom)
         };
         self.wheel = px(0.);
-        if changed {
-            cx.notify();
-        }
+        self.set_zoom(percent, cx);
     }
 
     /// Shows a message unless the restore message is up, which tracks a running restore.
@@ -884,19 +880,7 @@ impl Kuizer {
         match &self.phase {
             Phase::Start => self.render_start(cx),
             Phase::Loading(activity) => self.render_loading(activity),
-            Phase::Failed(error) => centered(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(unit(space::S))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("The scan failed"),
-                    )
-                    .child(div().text_color(theme::danger()).child(error.clone())),
-            ),
+            Phase::Failed(error) => self.render_failed(error, cx),
             Phase::Ready(_) => {
                 let pending = self
                     .tab
@@ -941,6 +925,79 @@ impl Kuizer {
                     .into_any_element()
             }
         }
+    }
+
+    /// The failed scan: what went wrong, and the two ways on from it with their keys.
+    fn render_failed(&self, error: &str, cx: &Context<Self>) -> AnyElement {
+        let action = |id: &'static str,
+                      label: &'static str,
+                      kind: ButtonKind,
+                      command: Command,
+                      tip: &'static str| {
+            let key = self.hint(&command);
+            let reason = self.blocked(&command);
+            self.button(
+                id,
+                label,
+                kind,
+                reason.is_none(),
+                cx,
+                move |app, window, cx| {
+                    app.run(command.clone(), window, cx);
+                },
+            )
+            .debug_selector(move || id.to_owned())
+            .when(!key.is_empty(), |this| this.child(ui::kbd(key.clone())))
+            .tip(
+                match reason {
+                    Some(reason) => Tooltip::new(reason),
+                    None => Tooltip::new(tip).keys(&[&key]),
+                }
+                .build(),
+            )
+        };
+        centered(ui::appear(
+            "scan-failed",
+            div()
+                .debug_selector(|| "scan-failed".to_owned())
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(unit(space::L))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(unit(space::S))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("The scan failed"),
+                        )
+                        .child(div().text_color(theme::danger()).child(error.to_owned())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(unit(space::S))
+                        .child(action(
+                            "failed-rescan",
+                            "Rescan",
+                            ButtonKind::Secondary,
+                            Command::Rescan,
+                            "Scan the same folders again with the same options",
+                        ))
+                        .child(action(
+                            "failed-new-scan",
+                            "New scan",
+                            ButtonKind::Ghost,
+                            Command::NewScan,
+                            "Choose another folder or change the scan options",
+                        )),
+                ),
+        ))
     }
 
     /// A tooltip about an item that is built from the report only when it shows, so a row on
@@ -1150,7 +1207,11 @@ impl Kuizer {
                         let path = model::short_path(&candidate.path, &report.roots);
                         let cut = path.rfind('/').map_or(0, |at| at + 1);
                         let (folder, leaf) = path.split_at(cut);
-                        let advance = f32::from(mono_width(window, "0", app.zoom.rem_size()));
+                        let advance = f32::from(mono_width(
+                            window,
+                            "0",
+                            zoom::rem_size(app.config.appearance.zoom),
+                        ));
                         let (folder, leaf) = fit_path(folder, leaf, app.path_room.get(), advance);
                         let row = table_row(("artifact", id), checked)
                             .debug_selector(move || format!("artifact-row-{row}"));
@@ -1308,7 +1369,12 @@ impl Kuizer {
             .child(table(
                 header,
                 if self.rows.is_empty() {
-                    ui::empty("No items match these filters").into_any_element()
+                    empty_list(
+                        Tab::Artifacts,
+                        self.report().map_or(0, |report| report.candidates.len()),
+                        "No project artifacts found",
+                        "No project artifacts match these filters",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -1325,7 +1391,15 @@ impl Kuizer {
             .child(div().flex_1())
             .child(self.tally(Tab::Issues, None));
         if report.issues.is_empty() {
-            return framed(toolbar, centered(ui::empty("The scan reported no issues")));
+            return framed(
+                toolbar,
+                empty_list(
+                    Tab::Issues,
+                    0,
+                    "The scan reported no issues",
+                    "No issues match this filter",
+                ),
+            );
         }
         let count = self.listed(Tab::Issues).slots.len();
         let header = table_header().child(
@@ -1350,7 +1424,12 @@ impl Kuizer {
             .child(table(
                 header,
                 if count == 0 {
-                    ui::empty("No issues match this filter").into_any_element()
+                    empty_list(
+                        Tab::Issues,
+                        report.issues.len(),
+                        "The scan reported no issues",
+                        "No issues match this filter",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -1409,7 +1488,7 @@ impl Kuizer {
 
 impl Render for Kuizer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_rem_size(self.zoom.rem_size());
+        window.set_rem_size(zoom::rem_size(self.config.appearance.zoom));
         self.animate_rows(window);
         tooltip::focus(self.ring.clone().filter(|_| !self.typing()), cx);
         let view = cx.entity().downgrade();
@@ -1444,7 +1523,12 @@ impl Render for Kuizer {
         self.region(Region::Statusbar);
         let statusbar = (!start).then(|| self.render_statusbar());
         let summary = if start { None } else { self.render_summary(cx) };
-        let floating = (toast.is_some() || summary.is_some()).then(|| {
+        let branches = if start {
+            None
+        } else {
+            self.render_branch_confirm(cx)
+        };
+        let floating = (toast.is_some() || summary.is_some() || branches.is_some()).then(|| {
             div()
                 .absolute()
                 .bottom(unit(space::L))
@@ -1456,6 +1540,7 @@ impl Render for Kuizer {
                 .gap(unit(space::S))
                 .px(unit(space::XL))
                 .children(toast)
+                .children(branches)
                 .children(summary)
         });
         let root = div()
@@ -1562,6 +1647,30 @@ fn centered(child: impl IntoElement) -> AnyElement {
         .justify_center()
         .child(child)
         .into_any_element()
+}
+
+/// What a list shows in place of rows: `none` when the scan found nothing for it, `hidden`
+/// when it found `total` rows and the filters hide every one of them.
+fn empty_list(
+    tab: Tab,
+    total: usize,
+    none: impl Into<SharedString>,
+    hidden: &'static str,
+) -> AnyElement {
+    let (kind, text) = if total == 0 {
+        ("none", none.into())
+    } else {
+        ("filtered", SharedString::from(hidden))
+    };
+    let name = format!("empty-{tab:?}-{kind}");
+    let selector = name.clone();
+    ui::appear(
+        SharedString::from(name),
+        div()
+            .flex_1()
+            .debug_selector(move || selector)
+            .child(ui::empty(text)),
+    )
 }
 
 /// A section with its toolbar on top and the rest filling what is left below it.
@@ -1743,10 +1852,7 @@ fn size_tooltip(candidate: &Candidate, roots: &[PathBuf]) -> Tooltip {
         .row("File sizes", theme::bytes(usage.apparent))
         .row("Entries", usage.entries.to_string());
     if candidate.newest.is_some() {
-        details = details.row(
-            "Last change",
-            format!("{} ago", theme::age(candidate.newest)),
-        );
+        details = details.row("Last change", kuizer::units::since(candidate.newest));
     }
     if let Some(project) = &candidate.project {
         details = details.row("Project", model::short_path(project, roots));
@@ -1754,7 +1860,7 @@ fn size_tooltip(candidate: &Candidate, roots: &[PathBuf]) -> Tooltip {
     if candidate.project_last_active.is_some() {
         details = details.row(
             "Project active",
-            format!("{} ago", theme::age(candidate.project_last_active)),
+            kuizer::units::since(candidate.project_last_active),
         );
     }
     if usage.partial {

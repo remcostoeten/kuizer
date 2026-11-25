@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::config::{Config, Excludes};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::protect::Protected;
-use crate::scan::{self, Cancel, Candidate};
+use crate::scan::{self, Cancel, Candidate, Usage};
 
 #[derive(Debug, Clone, Copy)]
 enum Base {
@@ -439,7 +439,8 @@ pub fn measure_with(
 }
 
 /// @name measure_threaded
-/// @description Like [`measure_with`], using an explicit thread count for each cache walk.
+/// @description Like [`measure_with`], sizing every cache on one shared pool of `threads`
+/// threads, so a huge cache gets help from every thread once the small ones are done.
 ///
 /// @example
 /// let entries = caches::measure_threaded(found, &cancel, scan::size_threads(&config), |_| {});
@@ -449,11 +450,10 @@ pub fn measure_threaded(
     threads: usize,
     on_measured: impl Fn(&Candidate) + Sync,
 ) -> Vec<(KnownCache, Candidate)> {
-    let mut entries: Vec<(KnownCache, Candidate)> = found
+    let items = found
         .into_iter()
         .enumerate()
         .map(|(index, cache)| {
-            let measured = scan::measure_parallel(&cache.path, cancel, threads);
             let candidate = Candidate {
                 id: index as u64 + 1,
                 path: cache.path.clone(),
@@ -465,18 +465,33 @@ pub fn measure_threaded(
                     ecosystem: cache.tool.to_owned(),
                 }),
                 project: None,
-                usage: measured.usage,
-                newest: measured.newest,
-                identity: measured.identity,
+                usage: Usage::default(),
+                newest: None,
+                identity: None,
                 project_last_active: None,
             };
-            on_measured(&candidate);
             (cache, candidate)
         })
         .collect();
+    let mut entries = scan::measure_candidates(items, cancel, threads, on_measured);
     entries.retain(|(_, candidate)| candidate.usage.entries > 0);
-    entries.sort_by_key(|(_, candidate)| std::cmp::Reverse(candidate.usage.allocated));
     entries
+}
+
+/// @name guard_roots
+/// @description The guard roots for removing caches or toolchains: the unique parent folder of
+/// each candidate, because they live outside the scanned folders.
+///
+/// @example
+/// let guard = Guard::new(&caches::guard_roots(&selected));
+pub fn guard_roots(candidates: &[Candidate]) -> Vec<PathBuf> {
+    let mut parents: Vec<PathBuf> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.path.parent().map(Path::to_path_buf))
+        .collect();
+    parents.sort();
+    parents.dedup();
+    parents
 }
 
 fn candidates(locations: &Locations, protected: &Protected) -> impl Iterator<Item = KnownCache> {

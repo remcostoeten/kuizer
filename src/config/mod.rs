@@ -14,13 +14,17 @@ use crate::toolchains::Tool;
 use crate::units::ByteSize;
 
 pub use edit::{
-    EditError, SettingValue, add_exclude, exclude_pattern, set_protected_paths, set_setting,
+    EditError, SettingValue, add_exclude, check_setting, exclude_pattern, has_setting,
+    home_relative, set_protected_paths, set_setting,
 };
 pub use exclude::{ExcludeError, Excludes};
 pub use lenient::{ConfigWarning, rejected_scope};
 
 pub const LEGACY_IGNORE_FILE: &str = ".sweepignore";
 pub const MAX_SIZE_THREADS: usize = 64;
+pub const MIN_ZOOM: u16 = 50;
+pub const MAX_ZOOM: u16 = 200;
+pub const DEFAULT_ZOOM: u16 = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -230,6 +234,7 @@ pub struct AppearanceConfig {
     pub theme: Theme,
     pub accent: Accent,
     pub density: Density,
+    pub zoom: u16,
 }
 
 impl Default for AppearanceConfig {
@@ -240,6 +245,7 @@ impl Default for AppearanceConfig {
             theme: Theme::default(),
             accent: Accent::default(),
             density: Density::default(),
+            zoom: DEFAULT_ZOOM,
         }
     }
 }
@@ -378,6 +384,8 @@ pub enum ConfigError {
     Key(#[from] KeyError),
     #[error("unknown rule `{0}` in detect.disabled_rules")]
     UnknownDisabled(String),
+    #[error("appearance.zoom must be between {MIN_ZOOM} and {MAX_ZOOM}, not {0}")]
+    Zoom(u16),
 }
 
 #[derive(Default)]
@@ -476,6 +484,9 @@ impl Config {
         Excludes::new(&self.scan.exclude, &self.scan.exclude_extensions)?;
         if let Some(error) = Keymap::resolve(&self.keys).1.into_iter().next() {
             return Err(error.into());
+        }
+        if !(MIN_ZOOM..=MAX_ZOOM).contains(&self.appearance.zoom) {
+            return Err(ConfigError::Zoom(self.appearance.zoom));
         }
         Ok(())
     }

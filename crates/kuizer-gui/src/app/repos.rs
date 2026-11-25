@@ -1,9 +1,9 @@
 //! The Git repositories section: what `git gc` would free and which local branches are already
-//! merged, with one click to pack a repository and a confirmation before branches go.
+//! merged, with one click to pack a repository and an inline confirmation before branches go.
 
 use kuizer::repos::{self, Collected, Pruned, RepoError, Repository};
 
-use gpui::AnyView;
+use gpui::{Animation, AnimationExt, AnyView};
 
 use super::keys::contains;
 use super::*;
@@ -25,6 +25,12 @@ struct Done {
 #[derive(Default)]
 pub(super) struct GitJob {
     pub roots: HashSet<PathBuf>,
+}
+
+/// A branch confirmation that was just answered, sinking away over one motion step.
+pub(super) struct Leaving {
+    scope: GitScope,
+    at: Instant,
 }
 
 /// Which repositories a git command acts on.
@@ -189,7 +195,8 @@ impl Kuizer {
         });
     }
 
-    /// Opens the confirmation that lists the merged branches of the scope.
+    /// Opens the inline confirmation that lists the merged branches of the scope, with the
+    /// focus on Cancel so an Enter that follows at once deletes nothing.
     pub(super) fn ask_branches(&mut self, scope: GitScope, cx: &mut Context<Self>) {
         if self.branches_blocked(Some(&scope)).is_some() {
             return;
@@ -197,15 +204,46 @@ impl Kuizer {
         self.menu = None;
         self.dialog = Some(Dialog::Branches {
             scope,
-            cancel: false,
+            cancel: true,
         });
         cx.notify();
+    }
+
+    /// Closes the branch confirmation and keeps every branch.
+    pub(super) fn close_branches(&mut self, cx: &mut Context<Self>) {
+        if let Some(Dialog::Branches { scope, .. }) = self.dialog.take() {
+            self.leave_branches(scope, cx);
+        }
+        cx.notify();
+    }
+
+    fn leave_branches(&mut self, scope: GitScope, cx: &mut Context<Self>) {
+        if motion::reduced() {
+            return;
+        }
+        let at = Instant::now();
+        self.branch_leaving = Some(Leaving { scope, at });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(motion::STEP).await;
+            let _ = this.update(cx, |app, cx| {
+                if app
+                    .branch_leaving
+                    .as_ref()
+                    .is_some_and(|leaving| leaving.at == at)
+                {
+                    app.branch_leaving = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn accept_branches(&mut self, cx: &mut Context<Self>) {
         let Some(Dialog::Branches { scope, .. }) = self.dialog.take() else {
             return;
         };
+        self.leave_branches(scope.clone(), cx);
         if self.branches_blocked(Some(&scope)).is_some() {
             cx.notify();
             return;
@@ -375,17 +413,17 @@ impl Kuizer {
             )
             .child(table(
                 header,
-                if report.repos.is_empty() {
-                    div()
-                        .flex_1()
-                        .child(ui::empty(if report.options.repos {
+                if rows == 0 {
+                    empty_list(
+                        Tab::Repos,
+                        report.repos.len(),
+                        if report.options.repos {
                             "No git repositories worth cleaning"
                         } else {
                             "Git repositories were skipped for this scan"
-                        }))
-                        .into_any_element()
-                } else if rows == 0 {
-                    div().flex_1().into_any_element()
+                        },
+                        "No repositories match this filter",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -550,14 +588,48 @@ impl Kuizer {
             )
     }
 
-    pub(super) fn render_branch_dialog(
+    /// The confirmation before merged branches go, floating over the bottom of the list like
+    /// the selection summary: it rises in when asked and sinks away once answered.
+    pub(super) fn render_branch_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (scope, focus) = match (&self.dialog, &self.branch_leaving) {
+            (Some(Dialog::Branches { scope, cancel }), _) => (scope, Some(*cancel)),
+            (_, Some(leaving)) => (&leaving.scope, None),
+            _ => return None,
+        };
+        let bar = self.branch_bar(scope, focus, cx);
+        if motion::reduced() {
+            return Some(bar.into_any_element());
+        }
+        let open = focus.is_some();
+        Some(
+            bar.with_animation(
+                if open {
+                    "branch-confirm-in"
+                } else {
+                    "branch-confirm-out"
+                },
+                Animation::new(motion::STEP).with_easing(motion::ease_out),
+                move |bar, progress| {
+                    let shown = if open { progress } else { 1.0 - progress };
+                    bar.opacity(shown)
+                        .relative()
+                        .top(unit(space::M * (1.0 - shown)))
+                },
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The confirmation itself. `focus` says whether Cancel has the keyboard, and is `None`
+    /// while the bar sinks away and takes no clicks.
+    fn branch_bar(
         &self,
         scope: &GitScope,
-        cancel: bool,
-        panel: Div,
+        focus: Option<bool>,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let ring = || ring::outline(None, Rc::new(Cell::new(false)));
+        let open = focus.is_some();
         let targets = self.prunable(scope);
         let total: usize = targets
             .iter()
@@ -573,10 +645,16 @@ impl Kuizer {
                     .map(move |branch| (shown.clone(), branch.name.clone()))
             })
             .collect();
-        panel
+        clean::floating(div().id("branch-confirm"))
+            .debug_selector(|| "branch-confirm".to_owned())
+            .flex()
+            .flex_col()
+            .gap(unit(space::M))
+            .w(unit(size::SUMMARY))
+            .max_w_full()
+            .p(unit(space::L))
             .child(
                 div()
-                    .text_size(unit(font::TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!(
                         "Delete {} for good?",
@@ -586,13 +664,14 @@ impl Kuizer {
             .child(
                 div()
                     .debug_selector(|| "permanent-warning".to_owned())
+                    .text_size(unit(font::SMALL))
                     .text_color(theme::danger())
                     .child(format!(
                         "{} deleted permanently. They cannot be restored.",
                         count(total, "merged branch is", "merged branches are")
                     )),
             )
-            .child(div().text_color(theme::muted()).child(
+            .child(div().text_size(unit(font::SMALL)).text_color(theme::muted()).child(
                 "Their commits stay in the default branch, so git branch NAME COMMIT recreates one. Remote branches are not touched.",
             ))
             .child(
@@ -600,9 +679,6 @@ impl Kuizer {
                     .flex()
                     .flex_col()
                     .gap(unit(space::XS))
-                    .p(unit(space::L))
-                    .rounded(theme::radius_panel())
-                    .bg(theme::elevated())
                     .children(lines.iter().take(LIST_LIMIT).map(|(repository, branch)| {
                         div()
                             .flex()
@@ -632,26 +708,39 @@ impl Kuizer {
                     .justify_end()
                     .gap(unit(space::M))
                     .child(
-                        ui::button("cancel", "Cancel", ButtonKind::Secondary, true)
-                            .tip(Tooltip::new("Keep every branch").keys(&[&self.key_hint(Scope::Dialog, Key::Back)]).build())
-                            .when(cancel, |this| this.child(ring()))
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                                app.dialog = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        ui::button("confirm", "Delete for good", ButtonKind::Primary, total > 0)
-                            .debug_selector(|| "confirm-branches".to_owned())
+                        ui::button("branch-cancel", "Cancel", ButtonKind::Secondary, open)
+                            .debug_selector(|| "cancel-branches".to_owned())
                             .tip(
-                                Tooltip::new("Delete these local branches")
-                                    .keys(&[&self.key_hint(Scope::Dialog, Key::Confirm)])
+                                Tooltip::new("Keep every branch")
+                                    .keys(&[&self.key_hint(Scope::Dialog, Key::Back)])
                                     .build(),
                             )
-                            .when(!cancel, |this| this.child(ring()))
-                            .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                            .when(focus == Some(true), |this| this.child(ring()))
+                            .when(open, |this| {
+                                this.on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
+                                    app.close_branches(cx);
+                                }))
+                            }),
+                    )
+                    .child(
+                        ui::button(
+                            "branch-delete",
+                            "Delete for good",
+                            ButtonKind::Danger,
+                            open && total > 0,
+                        )
+                        .debug_selector(|| "confirm-branches".to_owned())
+                        .tip(
+                            Tooltip::new("Delete these local branches")
+                                .keys(&[&self.key_hint(Scope::Dialog, Key::Confirm)])
+                                .build(),
+                        )
+                        .when(focus == Some(false), |this| this.child(ring()))
+                        .when(open, |this| {
+                            this.on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
                                 app.accept_branches(cx);
-                            })),
+                            }))
+                        }),
                     ),
             )
     }
@@ -903,11 +992,6 @@ mod tests {
         )));
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(cx, |app, _| app.dialog.is_none()));
-        cx.simulate_keystrokes("b tab enter");
-        assert!(
-            view.read_with(cx, |app, _| app.dialog.is_none()),
-            "Enter on Cancel closes"
-        );
         assert!(git(
             &root,
             &["show-ref", "--verify", "--quiet", "refs/heads/done"]
@@ -935,6 +1019,31 @@ mod tests {
                     .is_some_and(|toast| toast.notice.lingers())
             );
         });
+    }
+
+    #[gpui::test]
+    fn enter_right_after_asking_keeps_every_branch(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((view, cx, root)) = scanned(cx, dir.path()) else {
+            return;
+        };
+        cx.simulate_keystrokes("b");
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("branch-confirm").is_some());
+        assert!(view.read_with(cx, |app, _| matches!(
+            app.dialog,
+            Some(Dialog::Branches { cancel: true, .. })
+        )));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(app.dialog.is_none(), "Enter on Cancel closes");
+            assert!(!app.git_running());
+        });
+        assert!(git(
+            &root,
+            &["show-ref", "--verify", "--quiet", "refs/heads/done"]
+        ));
     }
 
     #[gpui::test]

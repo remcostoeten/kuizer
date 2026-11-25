@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::AppError;
 use crate::cli::RestoreArgs;
 use crate::history::restore::{self, RestoreError, Status};
-use crate::history::{self, History};
+use crate::history::{self, History, Restored};
 use crate::output::{self, SCHEMA_VERSION};
 use crate::units::ByteSize;
 
@@ -39,7 +39,7 @@ struct Report<'a> {
 fn resolve(
     history: &History,
     args: &RestoreArgs,
-    restored: &HashSet<String>,
+    restored: &Restored,
 ) -> Result<Vec<(usize, usize)>, AppError> {
     if args.last {
         return restore::latest_run(history, restored).ok_or(AppError::NothingToRestore);
@@ -61,11 +61,7 @@ fn resolve(
 
 pub fn run(args: RestoreArgs, json: bool) -> Result<(), AppError> {
     let history = history::load(&history::default_path()?)?;
-    let restored: HashSet<String> = history
-        .restored_ids()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let restored = Restored::of(&history);
     let targets = resolve(&history, &args, &restored)?;
     let result =
         restore::restore(&history, &targets, args.dry_run).map_err(|error| match error {

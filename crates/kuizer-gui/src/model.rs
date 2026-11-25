@@ -1,19 +1,22 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use kuizer::caches::{self, KnownCache, Locations, measure_with as measure_caches_with};
+pub use kuizer::caches::guard_roots as cache_roots;
+pub use kuizer::delete::Batch;
+pub use kuizer::source::Source;
+
+use kuizer::caches::{self, KnownCache, Locations};
 use kuizer::config::{Config, DeleteConfig, DeleteMode};
-use kuizer::delete::{self, Guard, Mode, Removal, Status, Target};
-use kuizer::detect::{Category, RuleInfo};
+use kuizer::delete::{self, Executor, Removal, Status};
+use kuizer::detect::Category;
 use kuizer::docker;
 use kuizer::dupes::{self, Duplicates, Options};
-use kuizer::history::restore::{RestoreError, Status as RestoreStatus};
-use kuizer::history::{self, Action, Entry, History, ItemState, Recorder};
+use kuizer::history::restore::Status as RestoreStatus;
+use kuizer::history::{self, Action, History, TrashSnapshot, TrashView};
 use kuizer::output::display_path;
 use kuizer::platform;
 use kuizer::protect::Protected;
@@ -23,6 +26,7 @@ use kuizer::toolchains::{self, Toolchain};
 
 use crate::activity::{self, Found, Step, Tracker, grouped, plural};
 use crate::start::ScanOptions;
+use crate::stats::HistoryStats;
 use crate::theme;
 
 pub const CANCELLED: &str = "cancelled";
@@ -161,38 +165,44 @@ pub struct Disk {
     pub total: Option<u64>,
 }
 
+pub use kuizer::history::TrashState;
+
 pub struct HistoryView {
-    pub history: History,
-    pub kept: HashSet<(usize, usize)>,
-    pub trash_known: bool,
+    pub history: std::sync::Arc<History>,
+    pub trash: TrashSnapshot,
+    pub stats: HistoryStats,
 }
 
 impl HistoryView {
+    /// @name HistoryView::new
+    /// @description Holds a history with its trash snapshot and works out the trash states and
+    /// totals the history tab shows right away, so a view built on the history thread leaves
+    /// nothing for render to compute.
+    ///
+    /// @example
+    /// let view = HistoryView::new(history, TrashSnapshot::read(&history));
+    pub fn new(history: History, trash: TrashSnapshot) -> Self {
+        let stats = HistoryStats::of(&history, &trash);
+        Self {
+            history: std::sync::Arc::new(history),
+            trash,
+            stats,
+        }
+    }
+
     pub fn load() -> Result<Self, String> {
         let path = history::default_path().map_err(|error| error.to_string())?;
         let history = history::load(&path).map_err(|error| error.to_string())?;
-        let trashed = history::trashed_paths();
-        let kept = trashed
-            .as_deref()
-            .map(|paths| history::still_in_trash(&history, paths))
-            .unwrap_or_default();
-        Ok(Self {
-            history,
-            kept,
-            trash_known: trashed.is_some(),
-        })
+        let trash = TrashSnapshot::read(&history);
+        Ok(Self::new(history, trash))
     }
 
-    pub fn freed(&self) -> u64 {
-        history::freed_bytes(&self.history, self.trash_known.then_some(&self.kept))
-    }
-
-    pub fn in_trash(&self) -> u64 {
-        self.kept
-            .iter()
-            .filter_map(|&(run, entry)| self.history.runs.get(run)?.deleted.get(entry))
-            .map(|entry| entry.bytes)
-            .sum()
+    pub fn trash_state(&self, run: usize) -> TrashState {
+        self.stats
+            .trash
+            .get(run)
+            .copied()
+            .unwrap_or(TrashState::NotTrashed)
     }
 
     pub fn delete_runs(&self) -> impl DoubleEndedIterator<Item = &history::Run> {
@@ -201,77 +211,6 @@ impl HistoryView {
             .iter()
             .filter(|run| run.action == Action::Delete)
     }
-
-    #[cfg(test)]
-    pub fn trash_state(&self, run: usize) -> TrashState {
-        self.state_of(&self.history.restored_ids(), run)
-    }
-
-    /// @name HistoryView::trash_states
-    /// @description Says for every run, in run order, whether it can still be restored from the
-    /// trash, using the library's per item state: what is left in the trash, all of it restored,
-    /// gone from the trash, unknown because the trash cannot be read, or never trashed at all.
-    /// Reads the restore runs once for all of them.
-    ///
-    /// @example
-    /// if let TrashState::Restorable { items, bytes } = view.trash_states()[run] { .. }
-    pub fn trash_states(&self) -> Vec<TrashState> {
-        let restored = self.history.restored_ids();
-        (0..self.history.runs.len())
-            .map(|run| self.state_of(&restored, run))
-            .collect()
-    }
-
-    fn state_of(&self, restored: &HashSet<&str>, run: usize) -> TrashState {
-        let Some(entries) = self.history.runs.get(run).map(|run| run.deleted.len()) else {
-            return TrashState::NotTrashed;
-        };
-        let kept = self.trash_known.then_some(&self.kept);
-        let states: Vec<(usize, ItemState)> = (0..entries)
-            .map(|entry| {
-                let state = history::item_state(&self.history, restored, kept, run, entry);
-                (entry, state)
-            })
-            .filter(|(_, state)| !matches!(state, ItemState::Deleted | ItemState::DryRun))
-            .collect();
-        if states.is_empty() {
-            return TrashState::NotTrashed;
-        }
-        if !self.trash_known {
-            return TrashState::Unknown;
-        }
-        let left: Vec<usize> = states
-            .iter()
-            .filter(|(_, state)| *state == ItemState::InTrash)
-            .map(|&(entry, _)| entry)
-            .collect();
-        if !left.is_empty() {
-            return TrashState::Restorable {
-                items: left.len(),
-                bytes: left
-                    .iter()
-                    .map(|&entry| self.history.runs[run].deleted[entry].bytes)
-                    .sum(),
-            };
-        }
-        if states
-            .iter()
-            .all(|(_, state)| *state == ItemState::Restored)
-        {
-            TrashState::Restored
-        } else {
-            TrashState::Emptied
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrashState {
-    Restorable { items: usize, bytes: u64 },
-    Restored,
-    Emptied,
-    Unknown,
-    NotTrashed,
 }
 
 pub struct Report {
@@ -464,13 +403,7 @@ impl Report {
         self.repos.retain(|repository| !gone(&repository.root));
         self.issues.retain(|issue| !gone(&issue.path));
         if let Some(duplicates) = &mut self.duplicates {
-            for group in &mut duplicates.groups {
-                group.members.retain(|member| !gone(&member.path));
-            }
-            duplicates.groups.retain(|group| group.members.len() > 1);
-            duplicates
-                .groups
-                .sort_by_key(|group| std::cmp::Reverse(group.reclaimable()));
+            drop_duplicate_paths(duplicates, paths);
         }
     }
 
@@ -518,6 +451,27 @@ impl Report {
         buckets.sort_by_key(|bucket| std::cmp::Reverse(bucket.bytes));
         buckets
     }
+}
+
+/// @name drop_duplicate_paths
+/// @description Removes the copies at or below any of `paths` from a duplicate search result,
+/// drops groups left with a single copy and orders the rest by what they free, largest first.
+/// Cheap to call with no paths, so a result can be filtered on a worker thread first.
+///
+/// @example
+/// drop_duplicate_paths(&mut found, &[PathBuf::from("/p/site/node_modules")]);
+pub fn drop_duplicate_paths(duplicates: &mut Duplicates, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let gone = |path: &Path| paths.iter().any(|excluded| path.starts_with(excluded));
+    for group in &mut duplicates.groups {
+        group.members.retain(|member| !gone(&member.path));
+    }
+    duplicates.groups.retain(|group| group.members.len() > 1);
+    duplicates
+        .groups
+        .sort_by_key(|group| std::cmp::Reverse(group.reclaimable()));
 }
 
 /// @name short_path
@@ -701,7 +655,7 @@ pub fn load(
         if let Some(measured) = toolchains {
             let mut toolchains = measured.join().unwrap_or_default();
             if let Some(pins) = &pins {
-                repin(&mut toolchains, &pins.pins);
+                toolchains::apply_pins_measured(&mut toolchains, &pins.pins);
             }
             let bytes = toolchains.iter().map(|(_, c)| c.usage.allocated).sum();
             tracker.update_now(|activity| {
@@ -825,17 +779,17 @@ fn measure_caches(
     cancel: &Cancel,
     tracker: &Tracker,
 ) -> Vec<(KnownCache, Candidate)> {
-    let excludes = config.usable_excludes();
     let found: Vec<KnownCache> = Locations::for_user()
         .map(|locations| {
-            caches::find(&locations, &Protected::for_user())
-                .into_iter()
-                .filter(|cache| !excludes.path(&cache.path))
-                .collect()
+            caches::find_excluding(
+                &locations,
+                &Protected::for_user(),
+                &config.usable_excludes(),
+            )
         })
         .unwrap_or_default();
     tracker.update_now(|activity| activity.begin(Step::Caches, Some(found.len())));
-    measure_caches_with(found, cancel, |candidate| {
+    caches::measure_threaded(found, cancel, scan::size_threads(config), |candidate| {
         tracker.update(|activity| {
             activity.advance(Step::Caches, &candidate.path);
             if candidate.usage.entries > 0 {
@@ -854,17 +808,17 @@ fn measure_toolchains(
     cancel: &Cancel,
     tracker: &Tracker,
 ) -> Vec<(Toolchain, Candidate)> {
-    let excludes = config.usable_excludes();
     let found: Vec<Toolchain> = toolchains::Locations::for_user()
         .map(|locations| {
-            toolchains::find(&locations, &config.toolchains.tools)
-                .into_iter()
-                .filter(|toolchain| !excludes.path(&toolchain.path))
-                .collect()
+            toolchains::find_excluding(
+                &locations,
+                &config.toolchains.tools,
+                &config.usable_excludes(),
+            )
         })
         .unwrap_or_default();
     tracker.update_now(|activity| activity.begin(Step::Toolchains, Some(found.len())));
-    toolchains::measure_with(found, cancel, |candidate| {
+    toolchains::measure_with_threads(found, cancel, scan::size_threads(config), |candidate| {
         tracker.update(|activity| {
             activity.advance(Step::Toolchains, &candidate.path);
             activity.record(
@@ -874,24 +828,6 @@ fn measure_toolchains(
             );
         });
     })
-}
-
-fn repin(entries: &mut [(Toolchain, Candidate)], pins: &[toolchains::Pin]) {
-    let mut found: Vec<Toolchain> = entries
-        .iter()
-        .map(|(toolchain, _)| toolchain.clone())
-        .collect();
-    toolchains::apply_pins(&mut found, pins);
-    for ((toolchain, candidate), pinned) in entries.iter_mut().zip(found) {
-        let safety = pinned.safety();
-        if candidate.rule.safety != safety {
-            candidate.rule = Arc::new(RuleInfo {
-                safety,
-                ..RuleInfo::clone(&candidate.rule)
-            });
-        }
-        *toolchain = pinned;
-    }
 }
 
 /// @name find_duplicates
@@ -920,44 +856,6 @@ pub fn find_duplicates(
     .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Source {
-    Artifact,
-    Cache,
-    Toolchain,
-    Docker,
-}
-
-impl Source {
-    pub const ALL: [Source; 4] = [Self::Artifact, Self::Cache, Self::Toolchain, Self::Docker];
-
-    pub fn permanent(self) -> bool {
-        matches!(self, Self::Toolchain | Self::Docker)
-    }
-}
-
-pub struct Batch {
-    pub source: Source,
-    pub roots: Vec<PathBuf>,
-    pub candidates: Vec<Candidate>,
-}
-
-/// @name cache_roots
-/// @description Uses the parent folder of each cache as a guard root, the same way `kuizer cache
-/// --clean` does, because global caches live outside the scanned folders.
-///
-/// @example
-/// let roots = cache_roots(&selected_caches);
-pub fn cache_roots(candidates: &[Candidate]) -> Vec<PathBuf> {
-    let mut parents: Vec<PathBuf> = candidates
-        .iter()
-        .filter_map(|candidate| candidate.path.parent().map(Path::to_path_buf))
-        .collect();
-    parents.sort();
-    parents.dedup();
-    parents
-}
-
 pub struct Outcome {
     pub removals: Vec<(Source, Removal)>,
     pub mode: DeleteMode,
@@ -982,83 +880,28 @@ impl Outcome {
     }
 }
 
-fn run_batches(
-    batches: Vec<Batch>,
-    mode: Mode,
-    delete: &DeleteConfig,
-    engines: &[String],
-    removals: &mut Vec<(Source, Removal)>,
-) -> Option<String> {
+/// @name clean
+/// @description Removes every selected item through the shared executor the way `delete.mode`
+/// asks: for good, or with artifacts and caches moved to the trash. Toolchains and Docker objects
+/// are always deleted for good. Each batch is checked against its own guard right before acting,
+/// exactly like the CLI. Trashed items are recorded as their own run in the history file, so a
+/// restore of that run never lists items that cannot come back.
+///
+/// @example
+/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], &config.delete, &config.docker.engines);
+pub fn clean(batches: Vec<Batch>, delete: &DeleteConfig, engines: &[String]) -> Outcome {
     let mut roots: Vec<PathBuf> = batches
         .iter()
         .flat_map(|batch| batch.roots.iter().cloned())
         .collect();
     roots.sort();
     roots.dedup();
-    let mut recorder = Recorder::for_user(history::now(), &roots);
-    for batch in batches {
-        let guard = Guard::new(&batch.roots)
-            .with_protected(&delete.protected)
-            .with_cross_device(delete.cross_device);
-        for candidate in batch.candidates {
-            let result = match batch.source {
-                Source::Toolchain => toolchains::remove(&guard, &candidate, mode),
-                Source::Docker => docker::remove(engines, &candidate, mode),
-                Source::Artifact | Source::Cache => {
-                    let target = Target {
-                        path: candidate.path.clone(),
-                        identity: candidate.identity,
-                    };
-                    delete::delete(&guard, &target, mode)
-                }
-            };
-            let removal = match result {
-                Ok(()) => {
-                    recorder.add(Entry::new(&candidate, mode));
-                    Removal {
-                        candidate,
-                        status: Status::Removed,
-                        error: None,
-                    }
-                }
-                Err(error) => Removal {
-                    candidate,
-                    status: Status::Failed,
-                    error: Some(error.to_string()),
-                },
-            };
-            removals.push((batch.source, removal));
-        }
-    }
-    recorder.finish().err().map(|error| error.to_string())
-}
-
-/// @name clean
-/// @description Removes every selected item the way `delete.mode` asks: for good, or with
-/// artifacts and caches moved to the trash. Toolchains and Docker objects are always deleted for
-/// good. Each batch is checked against its own guard right before acting, exactly like the CLI.
-/// Trashed items are recorded as their own run in the history file, so a restore of that run
-/// never lists items that cannot come back.
-///
-/// @example
-/// let outcome = clean(vec![Batch { source: Source::Artifact, roots, candidates }], &config.delete, &config.docker.engines);
-pub fn clean(batches: Vec<Batch>, delete: &DeleteConfig, engines: &[String]) -> Outcome {
-    let mode = delete.mode;
-    let (trashed, permanent): (Vec<Batch>, Vec<Batch>) = batches
-        .into_iter()
-        .partition(|batch| mode == DeleteMode::Trash && !batch.source.permanent());
-    let mut removals = Vec::new();
-    let mut history_error = None;
-    for (batches, mode) in [(trashed, Mode::Trash), (permanent, Mode::Permanent)] {
-        if !batches.is_empty() {
-            let error = run_batches(batches, mode, delete, engines, &mut removals);
-            history_error = history_error.or(error);
-        }
-    }
+    let executor = Executor::new(&roots, delete).with_engines(engines);
+    let report = executor.run(batches, delete.mode.into(), delete::workers(), |_, _| {});
     Outcome {
-        removals,
-        mode,
-        history_error,
+        removals: report.removals,
+        mode: delete.mode,
+        history_error: executor.finish().err().map(|error| error.to_string()),
     }
 }
 
@@ -1071,30 +914,37 @@ pub struct Restored {
 }
 
 /// @name restore
-/// @description Puts one cleanup run back from the trash with the library's restore, exactly like
-/// `kuizer restore s4`, for the items that are still in the trash and not restored yet, and
-/// records the restore in the history.
+/// @description Puts one cleanup run back from the trash, exactly like `kuizer restore s4`, for the
+/// items that are still in the trash and not restored yet, and records the restore. Lists the
+/// trash once and updates `history` in memory, so the view it returns is current without reading
+/// the history file again. The view is `None` when the run or the trash cannot be found.
 ///
 /// @example
-/// let restored = restore(4)?;
-pub fn restore(session: u64) -> Result<Restored, String> {
-    let path = history::default_path().map_err(|error| error.to_string())?;
-    let history = history::load(&path).map_err(|error| error.to_string())?;
+/// let (restored, view) = restore(Arc::clone(&view.history), 4);
+pub fn restore(
+    history: std::sync::Arc<History>,
+    session: u64,
+) -> (Result<Restored, String>, Option<HistoryView>) {
     let id = format!("s{session}");
-    let run = history
-        .runs
-        .iter()
-        .position(|run| run.id == session)
-        .ok_or_else(|| format!("the history has no cleanup {id}"))?;
-    let trashed = history::trashed_paths().ok_or_else(|| RestoreError::Unsupported.to_string())?;
-    let kept = history::still_in_trash(&history, &trashed);
-    let targets = history::restorable(&history, &kept, run);
+    let Some(run) = history.runs.iter().position(|run| run.id == session) else {
+        return (Err(format!("the history has no cleanup {id}")), None);
+    };
+    let mut listing = match TrashView::list() {
+        Ok(listing) => listing,
+        Err(error) => return (Err(error.to_string()), None),
+    };
+    let mut history = std::sync::Arc::unwrap_or_clone(history);
+    let trash = listing.snapshot(&history);
+    let targets = history::restorable(&history, &trash, run);
     if targets.is_empty() {
-        return Err(format!("nothing from {id} is still in the trash"));
+        let view = HistoryView::new(history, trash);
+        return (
+            Err(format!("nothing from {id} is still in the trash")),
+            Some(view),
+        );
     }
-    let restore =
-        history::restore::restore(&history, &targets, false).map_err(|error| error.to_string())?;
-    Ok(Restored {
+    let restore = history::restore::restore_listed(&history, &targets, false, &mut listing);
+    let restored = Restored {
         items: restore.count(RestoreStatus::Restored),
         bytes: restore.bytes(RestoreStatus::Restored),
         problems: restore
@@ -1108,8 +958,13 @@ pub fn restore(session: u64) -> Result<Restored, String> {
                 )
             })
             .collect(),
-        history_error: restore.record().err().map(|error| error.to_string()),
-    })
+        history_error: restore
+            .record_into(&mut history)
+            .err()
+            .map(|error| error.to_string()),
+    };
+    let trash = listing.snapshot(&history);
+    (Ok(restored), Some(HistoryView::new(history, trash)))
 }
 
 #[cfg(test)]
@@ -1141,65 +996,6 @@ mod tests {
             identity: None,
             project_last_active: None,
         }
-    }
-
-    fn trashed(path: &str, mode: Mode) -> Entry {
-        Entry {
-            deleted_at: history::now(),
-            path: PathBuf::from(path),
-            rule: "node_modules".to_owned(),
-            category: "dependencies".to_owned(),
-            mode,
-            bytes: 10,
-            size: "10 B".to_owned(),
-            restores: None,
-        }
-    }
-
-    #[test]
-    fn each_run_says_what_can_still_be_restored() {
-        let run = |entries| history::Run::new(history::now(), &[], entries);
-        let mut runs = vec![
-            run(vec![
-                trashed("/p/a", Mode::Trash),
-                trashed("/p/b", Mode::Trash),
-            ]),
-            run(vec![trashed("/p/c", Mode::Trash)]),
-            run(vec![trashed("/p/d", Mode::Trash)]),
-            run(vec![trashed("/p/e", Mode::Permanent)]),
-        ];
-        runs.push(history::Run::restore(
-            history::now(),
-            vec![Entry::restored(&runs[1].deleted[0], "s2.1".to_owned())],
-        ));
-        for (index, run) in runs.iter_mut().enumerate() {
-            run.id = index as u64 + 1;
-        }
-        let view = HistoryView {
-            history: History {
-                next_session: 6,
-                runs,
-                ..History::default()
-            },
-            kept: HashSet::from([(0, 1)]),
-            trash_known: true,
-        };
-        assert_eq!(
-            view.trash_state(0),
-            TrashState::Restorable {
-                items: 1,
-                bytes: 10
-            }
-        );
-        assert_eq!(view.trash_state(1), TrashState::Restored);
-        assert_eq!(view.trash_state(2), TrashState::Emptied);
-        assert_eq!(view.trash_state(3), TrashState::NotTrashed);
-        assert_eq!(view.trash_state(9), TrashState::NotTrashed);
-        let unknown = HistoryView {
-            trash_known: false,
-            ..view
-        };
-        assert_eq!(unknown.trash_state(0), TrashState::Unknown);
     }
 
     #[test]
@@ -1356,22 +1152,6 @@ mod tests {
         let groups = &report.duplicates.as_ref().unwrap().groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].members.len(), 2);
-    }
-
-    #[test]
-    fn cache_roots_are_the_unique_parents() {
-        let items = [
-            candidate(1, "/home/u/.cache/pip", Safety::Safe),
-            candidate(2, "/home/u/.cache/yarn", Safety::Safe),
-            candidate(3, "/home/u/.cargo/registry", Safety::Review),
-        ];
-        assert_eq!(
-            cache_roots(&items),
-            vec![
-                PathBuf::from("/home/u/.cache"),
-                PathBuf::from("/home/u/.cargo")
-            ]
-        );
     }
 
     #[test]

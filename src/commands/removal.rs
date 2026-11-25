@@ -1,20 +1,16 @@
-use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::AppError;
 use super::interrupt::Interrupt;
 use super::sort_candidates;
 use crate::cli::{RemovalArgs, Selection, SortKey};
 use crate::config::{Config, DeleteConfig};
-use crate::delete::{self, DeleteError, Guard, Mode, Removal, Status, Target};
+use crate::delete::{self, Batch, Confirmation, Executor, Mode, Removal, Risk, Status, confirm};
 use crate::detect::Safety;
-use crate::git;
-use crate::history::{self, Entry, Recorder};
 use crate::output;
 use crate::scan::{Candidate, Issue};
-
-pub type Remove<'a> = &'a dyn Fn(&Guard, &Candidate, Mode) -> Result<(), DeleteError>;
+use crate::source::Source;
 
 pub struct Request<'a> {
     pub command: &'static str,
@@ -23,18 +19,9 @@ pub struct Request<'a> {
     pub yes: bool,
     pub confirm: bool,
     pub json: bool,
-    pub remove: Remove<'a>,
+    pub source: Source,
+    pub engines: &'a [String],
     pub delete: &'a DeleteConfig,
-}
-
-/// @name files
-/// @description Removes a candidate that is a path on disk through the delete guard, the way
-/// projects and caches are removed.
-///
-/// @example
-/// let request = Request { remove: &removal::files, ..request };
-pub fn files(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), DeleteError> {
-    delete::delete(guard, &target(candidate), mode)
 }
 
 pub fn mode(args: &RemovalArgs, config: &Config) -> Mode {
@@ -76,67 +63,24 @@ pub fn select(mut candidates: Vec<Candidate>, selections: &[Selection]) -> Vec<C
     candidates
 }
 
-fn is_review(candidate: &Candidate) -> bool {
-    candidate.rule.safety == Safety::Review
-}
-
-fn repository_of(project: &Path) -> io::Result<Option<&Path>> {
-    for dir in project.ancestors() {
-        match dir.join(".git").symlink_metadata() {
-            Ok(_) => return Ok(Some(dir)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
-}
-
-fn git_is_redirected() -> bool {
-    ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]
-        .iter()
-        .any(|name| std::env::var_os(name).is_some())
-}
-
-fn has_changes(repository: &Path) -> bool {
-    git_is_redirected() || git::uncommitted_changes(repository) != Some(0)
-}
-
-fn dirty_projects(candidates: &[Candidate]) -> usize {
-    let projects: HashSet<&Path> = candidates
-        .iter()
-        .filter_map(|candidate| candidate.project.as_deref())
-        .collect();
-    let mut repositories: HashMap<&Path, bool> = HashMap::new();
-    let mut dirty = 0;
-    for project in projects {
-        let changed = match repository_of(project) {
-            Ok(Some(repository)) => *repositories
-                .entry(repository)
-                .or_insert_with(|| has_changes(repository)),
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        dirty += usize::from(changed);
-    }
-    dirty
-}
-
-fn confirm(candidates: &[Candidate], dirty: usize) -> Result<bool, AppError> {
+fn ask(
+    candidates: &[Candidate],
+    confirmation: Confirmation,
+    dirty: usize,
+) -> Result<bool, AppError> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err(AppError::NeedsConfirmation);
     }
     let count = candidates.len();
-    let review = candidates
-        .iter()
-        .filter(|candidate| is_review(candidate))
-        .count();
-    let prompt = match (review, dirty) {
-        (0, 0) => format!("Remove {count} items? [y/N] "),
-        (0, dirty) => format!(
+    let prompt = match confirmation {
+        Confirmation::Skip => return Ok(true),
+        Confirmation::YesNo if dirty == 0 => format!("Remove {count} items? [y/N] "),
+        Confirmation::YesNo => format!(
             "Uncommitted changes or unknown state in {dirty} projects. Remove {count} items? [y/N] "
         ),
-        (review, _) => format!(
-            "{review} of these are marked review. Type {count} to remove all {count} items: "
+        Confirmation::TypeCount => format!(
+            "{} of these are marked review. Type {count} to remove all {count} items: ",
+            confirm::review_items(candidates)
         ),
     };
     let mut err = io::stderr().lock();
@@ -146,21 +90,14 @@ fn confirm(candidates: &[Candidate], dirty: usize) -> Result<bool, AppError> {
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer)?;
     let answer = answer.trim();
-    Ok(match review {
-        0 => matches!(answer, "y" | "Y" | "yes"),
-        _ => answer == count.to_string(),
+    Ok(match confirmation {
+        Confirmation::TypeCount => answer == count.to_string(),
+        Confirmation::Skip | Confirmation::YesNo => matches!(answer, "y" | "Y" | "yes"),
     })
 }
 
-fn target(candidate: &Candidate) -> Target {
-    Target {
-        path: candidate.path.clone(),
-        identity: candidate.identity,
-    }
-}
-
 /// @name run
-/// @description Previews the selected candidates and removes each one through the delete guard,
+/// @description Previews the selected candidates and removes them through the shared executor,
 /// recording what was removed in the history file. Asks first unless `yes` is set. With `confirm`
 /// off it still asks for `review` items and for projects with uncommitted changes or whose state
 /// cannot be read. A dry run prints the preview and touches nothing.
@@ -207,13 +144,23 @@ pub fn run(
         }
         return Ok(());
     }
-    let dirty = if request.yes || request.confirm {
+    let review = confirm::review_items(&candidates);
+    let dirty = if request.yes || request.confirm || review > 0 {
         0
     } else {
-        dirty_projects(&candidates)
+        confirm::dirty_projects(&candidates)
     };
-    let asks = !request.yes && (request.confirm || dirty > 0 || candidates.iter().any(is_review));
-    if asks && !confirm(&candidates, dirty)? {
+    let confirmation = if request.yes {
+        Confirmation::Skip
+    } else {
+        Risk {
+            review,
+            dirty,
+            unknown: false,
+        }
+        .confirmation(request.confirm)
+    };
+    if confirmation != Confirmation::Skip && !ask(&candidates, confirmation, dirty)? {
         if request.json {
             println!(
                 "{}",
@@ -231,42 +178,30 @@ pub fn run(
         return Ok(());
     }
 
-    let started_at = history::now();
-    let guard = Guard::new(request.roots)
-        .with_protected(&request.delete.protected)
-        .with_cross_device(request.delete.cross_device);
-    let mut removals = Vec::with_capacity(candidates.len());
-    let mut recorder = Recorder::for_user(started_at, request.roots);
+    let executor = Executor::new(request.roots, request.delete).with_engines(request.engines);
     let interrupt = Interrupt::catch();
-    let mut left = 0;
-    for candidate in candidates {
-        if interrupt.requested() {
-            left += 1;
-            continue;
-        }
-        let removal = match (request.remove)(&guard, &candidate, mode) {
-            Ok(()) => {
-                recorder.add(Entry::new(&candidate, mode));
-                Removal {
-                    candidate,
-                    status: Status::Removed,
-                    error: None,
-                }
-            }
-            Err(error) => Removal {
-                candidate,
-                status: Status::Failed,
-                error: Some(error.to_string()),
-            },
-        };
+    let batch = Batch {
+        source: request.source,
+        roots: request.roots.to_vec(),
+        candidates,
+    };
+    let report = executor.run(vec![batch], mode, delete::workers(), |_, removal| {
         if !request.json {
-            output::print_removal(&removal);
+            output::print_removal(removal);
         }
-        removals.push(removal);
-    }
-    if let Err(error) = recorder.finish() {
+        if interrupt.requested() {
+            executor.stop();
+        }
+    });
+    if let Err(error) = executor.finish() {
         eprintln!("kuizer: {error}");
     }
+    let failed = report.failed();
+    let removals: Vec<Removal> = report
+        .removals
+        .into_iter()
+        .map(|(_, removal)| removal)
+        .collect();
     if request.json {
         println!(
             "{}",
@@ -275,14 +210,10 @@ pub fn run(
     } else {
         output::print_removal_summary(&removals, mode);
     }
-    if left > 0 {
-        return Err(AppError::Interrupted(left));
+    if report.left > 0 {
+        return Err(AppError::Interrupted(report.left));
     }
-    match removals
-        .iter()
-        .filter(|removal| removal.status == Status::Failed)
-        .count()
-    {
+    match failed {
         0 => Ok(()),
         failed => Err(AppError::RemovalFailed(failed)),
     }

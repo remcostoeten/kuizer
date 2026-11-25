@@ -454,6 +454,14 @@ pub struct Cli {
     )]
     pub json: bool,
     #[arg(
+        long,
+        global = true,
+        conflicts_with = "json",
+        help = "Print one JSON object per item as it is found, then a summary line",
+        help_heading = "Global options"
+    )]
+    pub json_lines: bool,
+    #[arg(
         short,
         long,
         global = true,
@@ -463,6 +471,31 @@ pub struct Cli {
     pub quiet: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Text,
+    Json,
+    JsonLines,
+}
+
+impl Cli {
+    /// @name Cli::format
+    /// @description Returns the output format the global `--json` and `--json-lines` flags ask
+    /// for. Clap rejects both at once.
+    ///
+    /// @example
+    /// let json = cli.format() != Format::Text;
+    pub fn format(&self) -> Format {
+        if self.json_lines {
+            Format::JsonLines
+        } else if self.json {
+            Format::Json
+        } else {
+            Format::Text
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -494,6 +527,28 @@ pub enum Command {
     Restore(RestoreArgs),
     #[command(about = ABOUT_DASHBOARD, visible_alias = "web", after_help = dashboard_help())]
     Dashboard(DashboardArgs),
+    #[command(
+        about = "Print shell completions or man pages for packagers",
+        hide = true
+    )]
+    Generate {
+        #[command(subcommand)]
+        target: GenerateTarget,
+    },
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum GenerateTarget {
+    #[command(about = "Print the completion script for SHELL")]
+    Completions {
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
+    #[command(about = "Print the kuizer(1) man page, or write one page per command to DIR")]
+    Man {
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Args, Default)]
@@ -533,6 +588,8 @@ pub struct ScanArgs {
         help_heading = "Filters"
     )]
     pub safe_only: bool,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
     #[arg(long, value_enum, default_value_t = SortKey::Size, hide_possible_values = true,
         help = "Sort by size, path, category or idle", help_heading = "Output")]
     pub sort: SortKey,
@@ -608,9 +665,62 @@ pub struct CleanArgs {
     )]
     pub idle: Option<Idle>,
     #[command(flatten)]
+    pub scope: ScopeArgs,
+    #[command(flatten)]
     pub removal: RemovalArgs,
     #[command(subcommand)]
     pub command: Option<NestedCommand>,
+}
+
+#[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
+pub struct ScopeArgs {
+    #[arg(
+        long = "rule",
+        value_name = "NAME",
+        global = true,
+        help = "Only include items of this rule, repeatable: a name --select takes",
+        help_heading = "Filters"
+    )]
+    pub rules: Vec<String>,
+    #[arg(
+        long = "project",
+        value_name = "GLOB",
+        global = true,
+        help = "Only include items in a project matching GLOB, repeatable",
+        help_heading = "Filters"
+    )]
+    pub projects: Vec<String>,
+    #[arg(
+        long = "exclude",
+        value_name = "GLOB",
+        global = true,
+        help = "Skip paths matching GLOB, repeatable, on top of scan.exclude",
+        help_heading = "Filters"
+    )]
+    pub excludes: Vec<String>,
+}
+
+#[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
+pub struct SourceFilterArgs {
+    #[arg(
+        long = "category",
+        value_name = "NAME",
+        value_parser = parse_category,
+        global = true,
+        help = "Only include this category, repeatable: dependencies, build, cache, temp",
+        help_heading = "Filters"
+    )]
+    pub categories: Vec<Category>,
+    #[arg(
+        long,
+        value_name = "SIZE",
+        global = true,
+        help = "Skip entries smaller than this, e.g. 50MB",
+        help_heading = "Filters"
+    )]
+    pub min_size: Option<ByteSize>,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
 }
 
 #[derive(Debug, Args, Default, Clone, PartialEq, Eq)]
@@ -780,6 +890,8 @@ pub struct CacheArgs {
     #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
     #[command(flatten)]
+    pub filters: SourceFilterArgs,
+    #[command(flatten)]
     pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
     pub command: Option<CacheAction>,
@@ -824,6 +936,8 @@ pub struct ToolchainArgs {
     pub paths: Vec<PathBuf>,
     #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
+    #[command(flatten)]
+    pub filters: SourceFilterArgs,
     #[command(flatten)]
     pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
@@ -896,6 +1010,8 @@ pub struct ToolchainCleanArgs {
 pub struct DockerArgs {
     #[arg(long, hide = true, help = "Same as the clean subcommand")]
     pub clean: bool,
+    #[command(flatten)]
+    pub filters: SourceFilterArgs,
     #[command(flatten)]
     pub removal: HiddenRemovalArgs,
     #[command(subcommand)]
@@ -1200,10 +1316,56 @@ mod tests {
             .filter(|name| *name != "help")
             .collect();
         let command = Cli::command();
-        let mut actual: Vec<&str> = command.get_subcommands().map(|c| c.get_name()).collect();
+        let mut actual: Vec<&str> = command
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name())
+            .collect();
         grouped.sort_unstable();
         actual.sort_unstable();
         assert_eq!(grouped, actual);
+    }
+
+    #[test]
+    fn source_filters_read_the_same_before_and_after_clean() {
+        for argv in [
+            &[
+                "kuizer",
+                "cache",
+                "--rule",
+                "npm",
+                "clean",
+                "--exclude",
+                "x",
+            ][..],
+            &[
+                "kuizer",
+                "cache",
+                "clean",
+                "--rule",
+                "npm",
+                "--exclude",
+                "x",
+            ][..],
+            &[
+                "kuizer",
+                "cache",
+                "--exclude",
+                "x",
+                "--rule",
+                "npm",
+                "--clean",
+            ][..],
+        ] {
+            let Some(Command::Cache(args)) = Cli::try_parse_from(argv).expect("parses").command
+            else {
+                panic!("expected cache");
+            };
+            assert_eq!(args.filters.scope.rules, ["npm"], "{argv:?}");
+            assert_eq!(args.filters.scope.excludes, ["x"], "{argv:?}");
+            assert!(args.plan().cleaning, "{argv:?}");
+        }
+        assert!(Cli::try_parse_from(["kuizer", "--json", "--json-lines", "scan"]).is_err());
     }
 
     #[test]

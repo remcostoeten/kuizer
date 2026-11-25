@@ -4,15 +4,104 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::caches;
 use crate::cli::SortKey;
-use crate::delete::{Mode, Target};
+use crate::delete::{Confirmation, Mode, Risk};
 use crate::detect::{Category, Safety};
+use crate::dupes::{Duplicates, Stage};
 use crate::keymap::{Action as Key, Keymap, Scope};
-use crate::scan::{Candidate, Progress, Summary};
+use crate::scan::{Candidate, Issue, Progress, Summary};
+use crate::source::Source;
 use ratatui::crossterm::event::KeyEvent;
 
 const SHOWN: usize = 8;
 const KEY_HOLD: Duration = Duration::from_millis(600);
+const CACHE_IDS: u64 = 1 << 62;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tab {
+    #[default]
+    Artifacts,
+    Caches,
+    Duplicates,
+    Issues,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [
+        Self::Artifacts,
+        Self::Caches,
+        Self::Duplicates,
+        Self::Issues,
+    ];
+
+    pub fn source(self) -> Option<Source> {
+        match self {
+            Self::Artifacts => Some(Source::Artifact),
+            Self::Caches => Some(Source::Cache),
+            Self::Duplicates | Self::Issues => None,
+        }
+    }
+
+    pub fn action(self) -> Key {
+        match self {
+            Self::Artifacts => Key::Artifacts,
+            Self::Caches => Key::Caches,
+            Self::Duplicates => Key::Duplicates,
+            Self::Issues => Key::Issues,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Artifacts => "artifacts",
+            Self::Caches => "caches",
+            Self::Duplicates => "duplicates",
+            Self::Issues => "issues",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Load {
+    #[default]
+    Idle,
+    Loading,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    Group(usize),
+    Member(usize, usize),
+}
+
+#[derive(Debug, Default)]
+pub struct DuplicateList {
+    pub load: Load,
+    pub stage: Option<Stage>,
+    pub found: Duplicates,
+    pub problem: Option<String>,
+    pub rows: Vec<Spot>,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct IssueList {
+    pub entries: Vec<Issue>,
+    pub rows: Vec<usize>,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    items: usize,
+    bytes: u64,
+    selected: usize,
+    selected_bytes: u64,
+    review: usize,
+    deleting: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -39,6 +128,8 @@ pub fn project_of(candidate: &Candidate) -> &Path {
 
 pub struct Item {
     pub candidate: Candidate,
+    pub source: Source,
+    pub note: &'static str,
     pub selected: bool,
     pub status: Status,
     lower_path: String,
@@ -84,9 +175,10 @@ pub struct ConfirmStats {
     pub shown: Vec<usize>,
     pub dirty: Vec<(PathBuf, usize)>,
     pub checking: usize,
+    pub unknown: bool,
 }
 
-type Job = (u64, Target, Mode);
+type Job = (u64, Mode);
 
 fn repeats(last: &mut Option<Instant>, now: Instant) -> bool {
     let repeat = last.is_some_and(|at| now.duration_since(at) < KEY_HOLD);
@@ -121,7 +213,11 @@ pub struct App {
     pub progress: Progress,
     pub current: Option<PathBuf>,
     pub finished: Option<Summary>,
-    pub issues: usize,
+    pub tab: Tab,
+    pub caches: Load,
+    pub cache_problem: Option<String>,
+    pub duplicates: DuplicateList,
+    pub issues: IssueList,
     pub overlay: Overlay,
     pub confirm_stats: Option<ConfirmStats>,
     pub mode: Mode,
@@ -142,11 +238,10 @@ pub struct App {
     project_ids: HashMap<PathBuf, u32>,
     project_groups: Vec<PathBuf>,
     unchecked: HashSet<PathBuf>,
-    total_bytes: u64,
-    selected_count: usize,
-    selected_bytes: u64,
-    selected_review: usize,
-    deleting_count: usize,
+    listed: Source,
+    remembered: HashMap<Source, u64>,
+    keep: Option<u64>,
+    tallies: HashMap<Source, Tally>,
     changes_unknown: bool,
     dirty: bool,
     grown: bool,
@@ -177,7 +272,11 @@ impl App {
             progress: Progress::default(),
             current: None,
             finished: None,
-            issues: 0,
+            tab: Tab::Artifacts,
+            caches: Load::Idle,
+            cache_problem: None,
+            duplicates: DuplicateList::default(),
+            issues: IssueList::default(),
             overlay: Overlay::None,
             confirm_stats: None,
             mode,
@@ -198,11 +297,10 @@ impl App {
             project_ids: HashMap::new(),
             project_groups: Vec::new(),
             unchecked: HashSet::new(),
-            total_bytes: 0,
-            selected_count: 0,
-            selected_bytes: 0,
-            selected_review: 0,
-            deleting_count: 0,
+            listed: Source::Artifact,
+            remembered: HashMap::new(),
+            keep: None,
+            tallies: HashMap::new(),
             changes_unknown: false,
             dirty: false,
             grown: false,
@@ -210,13 +308,28 @@ impl App {
     }
 
     pub fn push(&mut self, candidate: Candidate) {
+        self.add(Source::Artifact, "", candidate);
+    }
+
+    pub fn push_cache(&mut self, mut candidate: Candidate) {
+        candidate.id |= CACHE_IDS;
+        let note = caches::known(&candidate.rule.name, candidate.path.clone())
+            .map_or("", |cache| cache.note);
+        self.add(Source::Cache, note, candidate);
+    }
+
+    fn add(&mut self, source: Source, note: &'static str, candidate: Candidate) {
         self.index.insert(candidate.id, self.items.len());
-        self.total_bytes += candidate.usage.allocated;
+        let tally = self.tallies.entry(source).or_default();
+        tally.items += 1;
+        tally.bytes += candidate.usage.allocated;
         let lower_path = candidate.path.to_string_lossy().to_lowercase();
         let rule_group = self.rule_group_of(&candidate);
         let project_group = self.project_group_of(&candidate);
         self.items.push(Item {
             candidate,
+            source,
+            note,
             selected: false,
             status: Status::Ready,
             lower_path,
@@ -335,12 +448,20 @@ impl App {
         if !self.dirty && !self.grown {
             return;
         }
-        let keep = self.current_id();
+        if self.dirty {
+            self.rebuild_duplicates();
+            self.rebuild_issues();
+        }
+        let keep = self.keep.take().or_else(|| self.current_id());
         self.order_items();
         let needle = self.filter.to_lowercase();
         let items = &self.items;
-        let by_project = self.grouping == Grouping::Project;
-        let slots = if by_project {
+        let source = self.listed;
+        let flat = source != Source::Artifact;
+        let by_project = !flat && self.grouping == Grouping::Project;
+        let slots = if flat {
+            1
+        } else if by_project {
             self.project_groups.len()
         } else {
             self.rule_groups.len()
@@ -351,14 +472,16 @@ impl App {
         for &index in &self.sorted {
             let position = index as usize;
             let item = &items[position];
-            if !self.matches(item, &needle) {
+            if item.source != source || !self.matches(item, &needle) {
                 continue;
             }
-            let slot = if by_project {
-                item.project_group
+            let slot = if flat {
+                0
+            } else if by_project {
+                item.project_group as usize
             } else {
-                item.rule_group
-            } as usize;
+                item.rule_group as usize
+            };
             buckets[slot].push(index);
             bytes[slot] += item.candidate.usage.allocated;
             first[slot] = first[slot].min(position);
@@ -391,7 +514,9 @@ impl App {
         let mut largest = 0;
         let mut groups = Vec::with_capacity(order.len());
         for (rank, &slot) in order.iter().enumerate() {
-            rows.push(Row::Group(rank));
+            if !flat {
+                rows.push(Row::Group(rank));
+            }
             for &index in &buckets[slot] {
                 view_row.push(rows.len());
                 rows.push(Row::Item(view.len()));
@@ -399,13 +524,15 @@ impl App {
                 view.push(index as usize);
                 largest = largest.max(items[index as usize].candidate.usage.allocated);
             }
-            groups.push(Group {
-                category: category_of(slot),
-                name: name_of(slot).into_owned(),
-                count: buckets[slot].len(),
-                bytes: bytes[slot],
-                first: first[slot],
-            });
+            if !flat {
+                groups.push(Group {
+                    category: category_of(slot),
+                    name: name_of(slot).into_owned(),
+                    count: buckets[slot].len(),
+                    bytes: bytes[slot],
+                    first: first[slot],
+                });
+            }
         }
         self.cursor = keep
             .and_then(|id| self.index.get(&id))
@@ -423,12 +550,92 @@ impl App {
         self.grown = false;
     }
 
-    pub fn move_by(&mut self, delta: isize) {
-        if self.view.is_empty() {
+    fn rebuild_duplicates(&mut self) {
+        let needle = self.filter.to_lowercase();
+        let list = &mut self.duplicates;
+        list.rows.clear();
+        for (index, group) in list.found.groups.iter().enumerate() {
+            let shown = needle.is_empty()
+                || group
+                    .members
+                    .iter()
+                    .any(|member| contains(&member.path, &needle));
+            if shown {
+                list.rows.push(Spot::Group(index));
+                list.rows
+                    .extend((0..group.members.len()).map(|member| Spot::Member(index, member)));
+            }
+        }
+        list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
+    }
+
+    fn rebuild_issues(&mut self) {
+        let needle = self.filter.to_lowercase();
+        let list = &mut self.issues;
+        list.rows = (0..list.entries.len())
+            .filter(|&index| issue_matches(&list.entries[index], &needle))
+            .collect();
+        list.cursor = list.cursor.min(list.rows.len().saturating_sub(1));
+    }
+
+    pub fn push_issue(&mut self, issue: Issue) {
+        let needle = self.filter.to_lowercase();
+        if issue_matches(&issue, &needle) {
+            self.issues.rows.push(self.issues.entries.len());
+        }
+        self.issues.entries.push(issue);
+    }
+
+    pub fn set_duplicates(&mut self, found: Duplicates) {
+        self.duplicates.found = found;
+        self.duplicates.load = Load::Done;
+        self.duplicates.stage = None;
+        self.rebuild_duplicates();
+    }
+
+    pub fn duplicates_failed(&mut self, problem: String) {
+        self.duplicates.load = Load::Done;
+        self.duplicates.stage = None;
+        self.duplicates.problem = Some(problem);
+    }
+
+    pub fn loading(&self) -> bool {
+        self.caches == Load::Loading || self.duplicates.load == Load::Loading
+    }
+
+    pub fn switch(&mut self, tab: Tab) {
+        if tab == self.tab {
             return;
         }
-        let last = self.view.len() - 1;
-        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+        self.end_range();
+        self.disarm_widen();
+        self.tab = tab;
+        if let Some(source) = tab.source()
+            && source != self.listed
+        {
+            if let Some(id) = self.current_id() {
+                self.remembered.insert(self.listed, id);
+            }
+            self.keep = self.remembered.get(&source).copied();
+            self.listed = source;
+            self.dirty = true;
+        }
+    }
+
+    fn cursor_and_len(&mut self) -> (&mut usize, usize) {
+        match self.tab {
+            Tab::Artifacts | Tab::Caches => (&mut self.cursor, self.view.len()),
+            Tab::Duplicates => (&mut self.duplicates.cursor, self.duplicates.rows.len()),
+            Tab::Issues => (&mut self.issues.cursor, self.issues.rows.len()),
+        }
+    }
+
+    pub fn move_by(&mut self, delta: isize) {
+        let (cursor, len) = self.cursor_and_len();
+        if len == 0 {
+            return;
+        }
+        *cursor = cursor.saturating_add_signed(delta).min(len - 1);
     }
 
     /// Moves the cursor and grows or shrinks the Shift selection to span the anchor and the
@@ -484,7 +691,8 @@ impl App {
     }
 
     pub fn move_to(&mut self, index: usize) {
-        self.cursor = index.min(self.view.len().saturating_sub(1));
+        let (cursor, len) = self.cursor_and_len();
+        *cursor = index.min(len.saturating_sub(1));
     }
 
     fn mark(&mut self, index: usize, on: bool) {
@@ -495,15 +703,20 @@ impl App {
         item.selected = on;
         let bytes = item.candidate.usage.allocated;
         let review = usize::from(item.candidate.rule.safety == Safety::Review);
+        let tally = self.tallies.entry(item.source).or_default();
         if on {
-            self.selected_count += 1;
-            self.selected_bytes += bytes;
-            self.selected_review += review;
+            tally.selected += 1;
+            tally.selected_bytes += bytes;
+            tally.review += review;
         } else {
-            self.selected_count -= 1;
-            self.selected_bytes -= bytes;
-            self.selected_review -= review;
+            tally.selected -= 1;
+            tally.selected_bytes -= bytes;
+            tally.review -= review;
         }
+    }
+
+    fn tally(&self) -> Tally {
+        self.tallies.get(&self.listed).copied().unwrap_or_default()
     }
 
     pub fn toggle(&mut self) {
@@ -597,13 +810,19 @@ impl App {
     }
 
     pub fn selected_review(&self) -> usize {
-        self.selected_review
+        self.tally().review
     }
 
     pub fn back_out(&mut self) {
-        if self.filtered() {
+        if self.tab.source().is_none() {
+            if self.filter.is_empty() {
+                self.message = Some(format!("nothing to back out of, {} quits", self.quit_key()));
+            } else {
+                self.set_filter(String::new());
+            }
+        } else if self.filtered() {
             self.reset_filters();
-        } else if self.selected_count > 0 {
+        } else if self.selected_count() > 0 {
             self.clear_selection();
         } else {
             self.message = Some(format!("nothing to back out of, {} quits", self.quit_key()));
@@ -618,7 +837,7 @@ impl App {
     }
 
     pub fn request_quit(&mut self) {
-        if self.deleting_count == 0 {
+        if self.deleting() == 0 {
             self.quit = true;
         } else {
             self.overlay = Overlay::Quit;
@@ -652,10 +871,6 @@ impl App {
         self.unchecked.clear();
     }
 
-    pub fn changes_unknown(&self) -> bool {
-        self.changes_unknown
-    }
-
     pub fn set_statuses(&mut self, updates: impl IntoIterator<Item = (PathBuf, Option<usize>)>) {
         for (project, count) in updates {
             self.unchecked.remove(&project);
@@ -673,12 +888,11 @@ impl App {
     }
 
     pub fn clear_selection(&mut self) {
-        for item in &mut self.items {
-            item.selected = false;
+        for index in 0..self.items.len() {
+            if self.items[index].source == self.listed {
+                self.mark(index, false);
+            }
         }
-        self.selected_count = 0;
-        self.selected_bytes = 0;
-        self.selected_review = 0;
     }
 
     pub fn cycle_sort(&mut self) {
@@ -724,21 +938,25 @@ impl App {
     }
 
     pub fn selected(&self) -> impl Iterator<Item = &Item> {
-        self.items
-            .iter()
-            .filter(|item| item.selected && item.status == Status::Ready)
+        self.items.iter().filter(|item| {
+            item.selected && item.status == Status::Ready && item.source == self.listed
+        })
     }
 
     pub fn selected_bytes(&self) -> u64 {
-        self.selected_bytes
+        self.tally().selected_bytes
     }
 
     pub fn selected_count(&self) -> usize {
-        self.selected_count
+        self.tally().selected
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.total_bytes
+        self.tally().bytes
+    }
+
+    pub fn total_items(&self) -> usize {
+        self.tally().items
     }
 
     pub fn open_confirm(&mut self) {
@@ -755,7 +973,7 @@ impl App {
         }
         self.overlay = Overlay::Confirm {
             ids,
-            mode: self.mode,
+            mode: self.listed.mode(self.mode),
         };
         self.confirm_stats = self.compute_confirm_stats();
     }
@@ -768,7 +986,8 @@ impl App {
         let mut dirty_seen = HashSet::new();
         let mut checking = HashSet::new();
         for index in ids.iter().filter_map(|id| self.index.get(id).copied()) {
-            let candidate = &self.items[index].candidate;
+            let item = &self.items[index];
+            let candidate = &item.candidate;
             stats.count += 1;
             stats.bytes += candidate.usage.allocated;
             if candidate.rule.safety == Safety::Review {
@@ -777,6 +996,10 @@ impl App {
             if stats.shown.len() < SHOWN {
                 stats.shown.push(index);
             }
+            if item.source != Source::Artifact {
+                continue;
+            }
+            stats.unknown = self.changes_unknown;
             let project = project_of(candidate);
             if let Some(changes) = self.changes_in(candidate)
                 && dirty_seen.insert(project)
@@ -793,26 +1016,30 @@ impl App {
 
     pub fn delete(&mut self) -> Vec<Job> {
         self.open_confirm();
-        if self.confirm_before_delete || self.pending_needs_review() {
+        if self.pending_confirmation() != Confirmation::Skip {
             return Vec::new();
         }
         self.confirm()
     }
 
-    fn pending_needs_review(&self) -> bool {
+    pub fn pending_confirmation(&self) -> Confirmation {
         let Overlay::Confirm { ids, .. } = &self.overlay else {
-            return false;
+            return Confirmation::Skip;
         };
-        self.changes_unknown
-            || ids.iter().filter_map(|&id| self.item(id)).any(|item| {
-                item.candidate.rule.safety == Safety::Review
-                    || self.changes_in(&item.candidate).is_some()
-                    || self.unchecked.contains(project_of(&item.candidate))
-            })
+        let mut risk = Risk::default();
+        for item in ids.iter().filter_map(|&id| self.item(id)) {
+            risk.review += usize::from(item.candidate.rule.safety == Safety::Review);
+            if item.source == Source::Artifact {
+                risk.dirty += usize::from(self.changes_in(&item.candidate).is_some());
+                risk.unknown |=
+                    self.changes_unknown || self.unchecked.contains(project_of(&item.candidate));
+            }
+        }
+        risk.confirmation(self.confirm_before_delete)
     }
 
     pub fn delete_selected(&mut self) -> Vec<Job> {
-        if self.selected_count == 0 {
+        if self.selected_count() == 0 {
             return Vec::new();
         }
         self.delete()
@@ -852,15 +1079,8 @@ impl App {
             self.mark(index, false);
             let item = &mut self.items[index];
             item.status = Status::Deleting;
-            self.deleting_count += 1;
-            jobs.push((
-                id,
-                Target {
-                    path: item.candidate.path.clone(),
-                    identity: item.candidate.identity,
-                },
-                mode,
-            ));
+            self.tallies.entry(item.source).or_default().deleting += 1;
+            jobs.push((id, mode));
         }
         jobs
     }
@@ -879,17 +1099,18 @@ impl App {
                     Err(error) => Status::Failed(error),
                 },
             );
+            let tally = self.tallies.entry(item.source).or_default();
             if before == Status::Deleting {
-                self.deleting_count -= 1;
-                if self.deleting_count == 0 && self.overlay == Overlay::Quit {
-                    self.overlay = Overlay::None;
-                    self.message = Some(format!("deletions finished, {} quits", self.quit_key()));
-                }
+                tally.deleting -= 1;
             }
             match (before == Status::Deleted, now_deleted) {
-                (false, true) => self.total_bytes -= bytes,
-                (true, false) => self.total_bytes += bytes,
+                (false, true) => tally.bytes -= bytes,
+                (true, false) => tally.bytes += bytes,
                 _ => {}
+            }
+            if before == Status::Deleting && self.deleting() == 0 && self.overlay == Overlay::Quit {
+                self.overlay = Overlay::None;
+                self.message = Some(format!("deletions finished, {} quits", self.quit_key()));
             }
             if now_deleted {
                 removed = bytes;
@@ -902,17 +1123,18 @@ impl App {
         }
     }
 
-    pub fn restore_deleting(&mut self) {
+    pub fn restore_deleting(&mut self, source: Source) {
         let mut restored = 0;
         for index in 0..self.items.len() {
-            if self.items[index].status == Status::Deleting {
-                self.items[index].status = Status::Ready;
+            let item = &mut self.items[index];
+            if item.source == source && item.status == Status::Deleting {
+                item.status = Status::Ready;
                 self.mark(index, true);
                 restored += 1;
             }
         }
-        self.deleting_count = 0;
-        if self.overlay == Overlay::Quit {
+        self.tallies.entry(source).or_default().deleting = 0;
+        if self.overlay == Overlay::Quit && self.deleting() == 0 {
             self.overlay = Overlay::None;
         }
         if restored > 0 {
@@ -932,8 +1154,22 @@ impl App {
     }
 
     pub fn deleting(&self) -> usize {
-        self.deleting_count
+        self.tallies.values().map(|tally| tally.deleting).sum()
     }
+
+    pub fn deleting_in(&self, source: Source) -> usize {
+        self.tallies.get(&source).map_or(0, |tally| tally.deleting)
+    }
+}
+
+fn contains(path: &Path, needle: &str) -> bool {
+    path.to_string_lossy().to_lowercase().contains(needle)
+}
+
+fn issue_matches(issue: &Issue, needle: &str) -> bool {
+    needle.is_empty()
+        || contains(&issue.path, needle)
+        || issue.message.to_lowercase().contains(needle)
 }
 
 #[cfg(test)]
@@ -1052,7 +1288,7 @@ mod tests {
         app.toggle();
         let jobs = app.delete_selected();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].2, Mode::Permanent);
+        assert_eq!(jobs[0].1, Mode::Permanent);
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.item(2).unwrap().status, Status::Deleting);
     }
@@ -1167,7 +1403,7 @@ mod tests {
         );
         let jobs = app.confirm();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].2, Mode::Permanent);
+        assert_eq!(jobs[0].1, Mode::Permanent);
         assert_eq!(app.item(2).unwrap().status, Status::Deleting);
         app.finish(2, Mode::Permanent, Ok(()));
         assert_eq!(app.freed, 30);
@@ -1182,7 +1418,7 @@ mod tests {
         assert_eq!(app.free_after(10, Mode::Trash), Some(100));
         app.open_confirm();
         let jobs = app.confirm();
-        assert_eq!(jobs[0].2, Mode::Trash);
+        assert_eq!(jobs[0].1, Mode::Trash);
         app.finish(2, Mode::Trash, Ok(()));
         assert_eq!(app.trashed, 30);
         assert_eq!(app.freed, 0);
@@ -1384,5 +1620,38 @@ mod tests {
         assert_eq!(app.view.len(), 1);
         app.select_safe();
         assert_eq!(app.selected().count(), 0);
+    }
+
+    #[test]
+    fn duplicate_rows_follow_the_search_and_keep_the_cursor_in_range() {
+        let group = |paths: [&str; 2]| crate::dupes::Group {
+            size: 10,
+            allocated: 10,
+            hash: String::new(),
+            verified: false,
+            members: paths
+                .iter()
+                .map(|path| crate::dupes::Member {
+                    path: PathBuf::from(path),
+                    links: Vec::new(),
+                    modified: None,
+                })
+                .collect(),
+        };
+        let mut app = app();
+        app.switch(Tab::Duplicates);
+        app.set_duplicates(Duplicates {
+            groups: vec![group(["/a/x", "/a/y"]), group(["/b/x", "/b/Photo"])],
+            ..Duplicates::default()
+        });
+        app.move_to(usize::MAX);
+        assert_eq!(app.duplicates.cursor, 5);
+        app.set_filter("photo".to_owned());
+        app.refresh();
+        assert_eq!(
+            app.duplicates.rows,
+            [Spot::Group(1), Spot::Member(1, 0), Spot::Member(1, 1)]
+        );
+        assert_eq!(app.duplicates.cursor, 2);
     }
 }

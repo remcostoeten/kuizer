@@ -103,11 +103,7 @@ impl Kuizer {
                     .child(
                         ui::stat(
                             "Freed",
-                            theme::bytes(
-                                self.report_stats
-                                    .history(report)
-                                    .map_or(0, |history| history.freed),
-                            ),
+                            theme::bytes(view.stats.freed),
                             "removed or emptied from the trash",
                         )
                         .id("stat-freed")
@@ -116,12 +112,8 @@ impl Kuizer {
                     .child(
                         ui::stat(
                             "Still in the trash",
-                            if view.trash_known {
-                                theme::bytes(
-                                    self.report_stats
-                                        .history(report)
-                                        .map_or(0, |history| history.in_trash),
-                                )
+                            if view.trash.known {
+                                theme::bytes(view.stats.in_trash)
                             } else {
                                 "unknown".to_owned()
                             },
@@ -168,7 +160,12 @@ impl Kuizer {
             .child(table(
                 header,
                 if count == 0 {
-                    div().flex_1().into_any_element()
+                    empty_list(
+                        Tab::History,
+                        recent.len(),
+                        "Cleanups show up here once you delete something",
+                        "No cleanups match this filter",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -231,7 +228,7 @@ impl Kuizer {
                         )
                         .child(column(col::M).text_color(theme::muted()).child(mode))
                         .child(column(col::L).flex().child(self.restore_cell(
-                            self.report_stats.trash_state(report, index),
+                            view.trash_state(index),
                             run,
                             can_restore,
                             refreshing,

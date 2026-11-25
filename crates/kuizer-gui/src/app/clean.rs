@@ -7,10 +7,15 @@ impl Kuizer {
         if !self.can_restore() {
             return;
         }
+        let Some(history) = self
+            .report()
+            .and_then(|report| report.history.as_ref().ok())
+            .map(|view| view.history.clone())
+        else {
+            return;
+        };
         let spawned = spawn_worker("kuizer-gui-restore", move || {
-            let restored = model::restore(session);
-            let history = HistoryView::load();
-            (restored, history)
+            model::restore(history, session)
         });
         let receiver = match spawned {
             Ok(receiver) => receiver,
@@ -28,7 +33,7 @@ impl Kuizer {
 
     pub(super) fn restored(
         &mut self,
-        message: Option<(Result<Restored, String>, Result<HistoryView, String>)>,
+        message: Option<(Result<Restored, String>, Option<HistoryView>)>,
         cx: &mut Context<Self>,
     ) {
         let Some((restored, history)) = message else {
@@ -38,8 +43,10 @@ impl Kuizer {
             );
             return;
         };
-        if let Phase::Ready(report) = &mut self.phase {
-            report.history = history;
+        if let Phase::Ready(report) = &mut self.phase
+            && let Some(history) = history
+        {
+            report.history = Ok(history);
         }
         self.refresh_stats();
         let notice = match restored {
@@ -411,9 +418,7 @@ impl Kuizer {
             .border_1()
             .border_color(theme::border_strong());
         let body = match dialog {
-            Dialog::Branches { scope, cancel } => {
-                self.render_branch_dialog(scope, *cancel, panel, cx)
-            }
+            Dialog::Branches { .. } => return None,
             Dialog::Finished(finished) => panel
                 .child(
                     div()
@@ -704,9 +709,9 @@ fn selection_details(
     }
 }
 
-/// The look shared by the bars that float over the bottom of the list: the selection summary
-/// and the toast.
-fn floating(bar: Stateful<Div>) -> Stateful<Div> {
+/// The look shared by the bars that float over the bottom of the list: the selection summary,
+/// the toast and the branch confirmation.
+pub(super) fn floating(bar: Stateful<Div>) -> Stateful<Div> {
     bar.rounded(theme::radius_dialog())
         .bg(theme::elevated())
         .border_1()

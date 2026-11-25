@@ -260,10 +260,9 @@ impl Kuizer {
                 ),
             ),
             Phase::Ready(report) => {
-                let age = theme::age(Some(report.scanned));
-                let text = match age.as_str() {
-                    "" | "now" => "Scanned just now".to_owned(),
-                    age => format!("Scanned {age} ago"),
+                let text = match kuizer::units::since(Some(report.scanned)).as_str() {
+                    "-" => "Scanned just now".to_owned(),
+                    since => format!("Scanned {since}"),
                 };
                 (theme::ok(), text, None)
             }
@@ -795,7 +794,7 @@ impl Kuizer {
             return None;
         }
         let cursor = self.cursor_target()?;
-        let row = self.listed_row(None, &cursor, &self.artifact_row)?;
+        let row = self.listed_row(None, &cursor, self.row_hint(Tab::Artifacts))?;
         Some(
             ui::tabular(theme::mono(div()))
                 .flex_none()

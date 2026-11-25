@@ -314,17 +314,17 @@ impl Kuizer {
             )
             .child(table(
                 header,
-                if report.caches.is_empty() {
-                    div()
-                        .flex_1()
-                        .child(ui::empty(if report.options.caches {
+                if count == 0 {
+                    empty_list(
+                        Tab::Caches,
+                        report.caches.len(),
+                        if report.options.caches {
                             "No global caches found"
                         } else {
                             "Global caches were skipped for this scan"
-                        }))
-                        .into_any_element()
-                } else if count == 0 {
-                    div().flex_1().into_any_element()
+                        },
+                        "No caches match these filters",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -448,17 +448,17 @@ impl Kuizer {
             )
             .child(table(
                 header,
-                if report.toolchains.is_empty() {
-                    div()
-                        .flex_1()
-                        .child(ui::empty(if report.options.toolchains {
+                if count == 0 {
+                    empty_list(
+                        Tab::Toolchains,
+                        report.toolchains.len(),
+                        if report.options.toolchains {
                             "No installed toolchain versions found"
                         } else {
                             "Toolchains were skipped for this scan"
-                        }))
-                        .into_any_element()
-                } else if count == 0 {
-                    div().flex_1().into_any_element()
+                        },
+                        "No toolchain versions match these filters",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -606,10 +606,13 @@ impl Kuizer {
             )
             .child(table(
                 header,
-                if report.docker.is_empty() {
-                    div().flex_1().child(ui::empty(empty)).into_any_element()
-                } else if count == 0 {
-                    div().flex_1().into_any_element()
+                if count == 0 {
+                    empty_list(
+                        Tab::Docker,
+                        report.docker.len(),
+                        empty,
+                        "No Docker or Podman objects match these filters",
+                    )
                 } else {
                     list.into_any_element()
                 },
@@ -697,5 +700,107 @@ impl Kuizer {
             .on_click(cx.listener(move |app, event: &ClickEvent, _, cx| {
                 app.click_row(Source::Docker, id, event, cx);
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::app::tests::{artifact, open, project, wait_for_refresh};
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    #[gpui::test]
+    fn an_empty_list_says_whether_the_scan_or_the_filter_emptied_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        view.update(cx, |app, cx| {
+            app.roots = vec![PathBuf::from("/p")];
+            let mut report = Report::empty(&app.roots, &app.options);
+            let cache = KnownCache {
+                name: "npm",
+                tool: "npm",
+                path: PathBuf::from("/c/npm"),
+                safety: Safety::Safe,
+                note: "",
+            };
+            report.caches = vec![(cache, artifact(1, Path::new("/c/npm")))];
+            app.phase = Phase::Ready(Box::new(report));
+            app.refresh_stats();
+            app.tab = Tab::Caches;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("cache-row-0").is_some());
+
+        view.update(cx, |app, cx| {
+            app.filters
+                .insert(Tab::Caches, "nothing-like-this".to_owned());
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds("empty-Caches-filtered").is_some(),
+            "a filter that hides every cache says so instead of a blank table"
+        );
+
+        view.update(cx, |app, cx| {
+            app.tab = Tab::Toolchains;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("empty-Toolchains-none").is_some());
+        assert!(
+            cx.debug_bounds("empty-Toolchains-filtered").is_none(),
+            "a list the scan left empty does not blame the filter"
+        );
+    }
+
+    #[gpui::test]
+    fn a_failed_scan_offers_rescan_and_new_scan(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        let fail = |view: &Entity<Kuizer>, cx: &mut VisualTestContext| {
+            view.update(cx, |app, cx| {
+                app.roots = vec![root.clone()];
+                app.set_phase(Phase::Failed("Permission denied".to_owned()), cx);
+                cx.notify();
+            });
+            draw(cx);
+        };
+
+        fail(&view, cx);
+        assert!(cx.debug_bounds("scan-failed").is_some());
+        assert!(cx.debug_bounds("failed-rescan").is_some());
+        cx.simulate_keystrokes("ctrl-r");
+        view.read_with(cx, |app, _| {
+            assert!(
+                !matches!(app.phase, Phase::Failed(_)),
+                "the Rescan key scans again"
+            );
+        });
+        wait_for_refresh(&view, cx);
+        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Ready(_))));
+
+        fail(&view, cx);
+        let new_scan = cx
+            .debug_bounds("failed-new-scan")
+            .expect("a New scan button");
+        cx.simulate_click(new_scan.center(), Modifiers::default());
+        view.read_with(cx, |app, _| assert!(matches!(app.phase, Phase::Start)));
+
+        fail(&view, cx);
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| {
+            assert!(
+                matches!(app.phase, Phase::Start),
+                "Esc backs out of a failed scan to the start screen"
+            );
+        });
     }
 }

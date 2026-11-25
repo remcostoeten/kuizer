@@ -172,6 +172,21 @@ pub(super) struct Entry {
     pub blocked: Option<&'static str>,
 }
 
+/// Everything the palette rows depend on: the query and the state the reasons for a blocked
+/// command read. The rows are ranked and checked again only when one of these changes, so a
+/// highlight move or a redraw reuses them.
+#[derive(PartialEq)]
+pub(super) struct PaletteKey {
+    query: String,
+    tab: Tab,
+    phase: std::mem::Discriminant<Phase>,
+    generations: [u64; 3],
+    flags: [bool; 9],
+    counts: [usize; 4],
+    map: (usize, usize, Option<String>),
+    cursor: Option<Target>,
+}
+
 /// How long a key counts as still down without a release. Longer than any key-repeat delay.
 const HELD_FOR: Duration = Duration::from_millis(1200);
 
@@ -316,6 +331,14 @@ impl Kuizer {
                 self.escape(cx);
                 return;
             }
+            Phase::Failed(_) if escape => {
+                if self.toast.is_some() {
+                    self.dismiss_toast(cx);
+                } else {
+                    self.new_scan(cx);
+                }
+                return;
+            }
             _ => {}
         }
         if self.count_key(keystroke) {
@@ -412,7 +435,7 @@ impl Kuizer {
         let Some(cursor) = self.cursor_target() else {
             return;
         };
-        let Some(row) = self.listed_row(listed, &cursor, &self.artifact_row) else {
+        let Some(row) = self.listed_row(listed, &cursor, self.row_hint(self.tab)) else {
             return;
         };
         let mut added = HashSet::new();
@@ -466,9 +489,9 @@ impl Kuizer {
                 self.dialog = None;
             }
             Some(Dialog::Branches { cancel, .. }) => match action {
-                Some(Key::Back) => self.dialog = None,
+                Some(Key::Back) => self.close_branches(cx),
                 Some(Key::DialogToggle) => *cancel = !*cancel,
-                Some(Key::Confirm) if *cancel => self.dialog = None,
+                Some(Key::Confirm) if *cancel => self.close_branches(cx),
                 Some(Key::Confirm) => {
                     if !repeat {
                         self.accept_branches(cx);
@@ -503,16 +526,20 @@ impl Kuizer {
         self.shortcuts = false;
         self.filtering = false;
         self.palette = Some(Palette::default());
+        self.palette_cache.take();
         Self::probe_recent(self.recent.paths.clone(), cx);
         cx.notify();
     }
 
     /// The palette's rows for what is typed: matching commands and recent folders, best first.
-    pub(super) fn palette_entries(&self) -> Vec<Entry> {
-        let query = self
-            .palette
-            .as_ref()
-            .map_or("", |palette| palette.query.as_str());
+    /// Cached until the query or the state behind a blocked reason changes.
+    pub(super) fn palette_entries(&self) -> Rc<[Entry]> {
+        let key = self.palette_state();
+        if let Some((cached, entries)) = &*self.palette_cache.borrow()
+            && *cached == key
+        {
+            return Rc::clone(entries);
+        }
         let specs = commands::table()
             .iter()
             .filter(|spec| spec.palette)
@@ -520,13 +547,55 @@ impl Kuizer {
             .chain(commands::scans(&self.recent.paths))
             .collect();
         let cursor = OnceCell::new();
-        palette::rank(query, specs)
+        let entries: Rc<[Entry]> = palette::rank(&key.query, specs)
             .into_iter()
             .map(|spec| Entry {
                 blocked: self.blocked_with(&spec.command, &cursor),
                 spec,
             })
-            .collect()
+            .collect();
+        *self.palette_cache.borrow_mut() = Some((key, Rc::clone(&entries)));
+        entries
+    }
+
+    fn palette_state(&self) -> PaletteKey {
+        let query = self
+            .palette
+            .as_ref()
+            .map_or_else(String::new, |palette| palette.query.clone());
+        PaletteKey {
+            query,
+            tab: self.tab,
+            phase: std::mem::discriminant(&self.phase),
+            generations: [
+                self.report_generation,
+                self.rows_generation,
+                self.selection.generation(),
+            ],
+            flags: [
+                self.streamed,
+                self.cancel.is_some(),
+                self.stale.is_some(),
+                self.cleaning.is_some(),
+                self.search.is_some(),
+                self.restoring(),
+                self.dialog.is_some(),
+                self.map.shown,
+                self.roots.is_empty(),
+            ],
+            counts: [
+                self.pending.len(),
+                self.git.roots.len(),
+                self.recent.paths.len(),
+                self.recent
+                    .paths
+                    .iter()
+                    .filter(|path| self.recent.is_gone(path))
+                    .count(),
+            ],
+            map: (self.map.built, self.map.path.len(), self.map.focus.clone()),
+            cursor: self.cursors.get(&self.tab).cloned(),
+        }
     }
 
     fn palette_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
@@ -541,12 +610,13 @@ impl Kuizer {
         match action {
             Some(Key::Back) => self.palette = None,
             Some(Key::PaletteRun) => {
-                let chosen = entries.into_iter().nth(palette.active);
-                if let Some(entry) = chosen
-                    && entry.blocked.is_none()
-                {
+                let chosen = entries
+                    .get(palette.active)
+                    .filter(|entry| entry.blocked.is_none())
+                    .map(|entry| entry.spec.command.clone());
+                if let Some(command) = chosen {
                     self.palette = None;
-                    self.run(entry.spec.command, window, cx);
+                    self.run(command, window, cx);
                 }
                 return;
             }
@@ -579,12 +649,14 @@ impl Kuizer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.palette_entries().into_iter().nth(index) else {
-            return;
-        };
-        if entry.blocked.is_none() {
+        let chosen = self
+            .palette_entries()
+            .get(index)
+            .filter(|entry| entry.blocked.is_none())
+            .map(|entry| entry.spec.command.clone());
+        if let Some(command) = chosen {
             self.palette = None;
-            self.run(entry.spec.command, window, cx);
+            self.run(command, window, cx);
         }
     }
 
@@ -916,15 +988,9 @@ impl Kuizer {
             }
             Command::OpenMenu => self.open_menu_at_cursor(window, cx),
             Command::FocusFilter => self.focus_filter(window, cx),
-            Command::ZoomIn => {
-                self.zoom.zoom_in();
-            }
-            Command::ZoomOut => {
-                self.zoom.zoom_out();
-            }
-            Command::ResetZoom => {
-                self.zoom.reset();
-            }
+            Command::ZoomIn => self.set_zoom(zoom::zoomed_in(self.config.appearance.zoom), cx),
+            Command::ZoomOut => self.set_zoom(zoom::zoomed_out(self.config.appearance.zoom), cx),
+            Command::ResetZoom => self.set_zoom(kuizer::config::DEFAULT_ZOOM, cx),
             Command::Sidebar => {
                 self.collapsed = !self.collapsed;
             }
@@ -980,12 +1046,20 @@ impl Kuizer {
         if self.report().is_none() {
             return false;
         }
+        let tab = target.tab();
+        let hint = self.row_hint(tab);
         match target {
-            Target::Item(Source::Artifact, id, _) => {
-                self.artifact_row(*id, &self.artifact_row).is_some()
-            }
-            _ => self.targets(target.tab()).contains(target),
+            Target::Item(Source::Artifact, id, _) => self.artifact_row(*id, hint).is_some(),
+            _ => self
+                .listed_row(Some(&*self.targets(tab)), target, hint)
+                .is_some(),
         }
+    }
+
+    /// The row the cursor of a list was last found at, checked first the next time it is
+    /// looked up, so a cursor that has not moved is found in constant time in any list.
+    pub(super) fn row_hint(&self, tab: Tab) -> &Cell<usize> {
+        &self.row_hints[tab as usize]
     }
 
     /// Where an artifact sits in the rows on screen. `hint` is checked first and remembers the
@@ -1022,7 +1096,14 @@ impl Kuizer {
         hint: &Cell<usize>,
     ) -> Option<usize> {
         match (listed, target) {
-            (Some(listed), _) => listed.iter().position(|row| row == target),
+            (Some(listed), _) => {
+                if listed.get(hint.get()) == Some(target) {
+                    return Some(hint.get());
+                }
+                let row = listed.iter().position(|row| row == target)?;
+                hint.set(row);
+                Some(row)
+            }
             (None, Target::Item(Source::Artifact, id, _)) => self.artifact_row(*id, hint),
             (None, _) => None,
         }
@@ -1099,7 +1180,7 @@ impl Kuizer {
         let listed = listed.as_deref();
         let rows = (
             self.cursor_target()
-                .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row)),
+                .and_then(|cursor| self.listed_row(listed, &cursor, self.row_hint(self.tab))),
             self.listed_row(listed, target, &Cell::new(0)),
         );
         let (Some(from), Some(to)) = rows else {
@@ -1122,7 +1203,7 @@ impl Kuizer {
         }
         let current = self
             .cursor_target()
-            .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row))
+            .and_then(|cursor| self.listed_row(listed, &cursor, self.row_hint(self.tab)))
             .unwrap_or(0);
         let next = step(motion, current, count, self.page_size());
         self.place_cursor(listed, current, next);
@@ -1134,7 +1215,7 @@ impl Kuizer {
         let count = self.listed_count(listed);
         let Some(current) = self
             .cursor_target()
-            .and_then(|cursor| self.listed_row(listed, &cursor, &self.artifact_row))
+            .and_then(|cursor| self.listed_row(listed, &cursor, self.row_hint(self.tab)))
         else {
             return;
         };
@@ -1155,9 +1236,7 @@ impl Kuizer {
             return;
         };
         self.cursors.insert(self.tab, target);
-        if self.tab == Tab::Artifacts {
-            self.artifact_row.set(next);
-        }
+        self.row_hint(self.tab).set(next);
         if let Some(scroll) = self.list_scroll(self.tab) {
             let (line, strategy) = if next < current {
                 (self.heading_line(next), ScrollStrategy::Top)
@@ -1180,7 +1259,7 @@ impl Kuizer {
             return;
         };
         let current = self
-            .listed_row(listed, &cursor, &self.artifact_row)
+            .listed_row(listed, &cursor, self.row_hint(tab))
             .unwrap_or(0);
         let mut range = self
             .range
@@ -1612,7 +1691,7 @@ mod tests {
             );
         });
         cx.simulate_keystrokes("enter");
-        view.read_with(cx, |app, _| assert_eq!(app.zoom.percent, 90));
+        view.read_with(cx, |app, _| assert_eq!(app.config.appearance.zoom, 90));
     }
 
     #[gpui::test]
@@ -1639,6 +1718,14 @@ mod tests {
         view.read_with(cx, |app, _| {
             assert!(app.cleaning.is_none(), "a blocked command does not run");
             assert!(app.palette.is_some(), "the palette stays open");
+        });
+        view.update(cx, |app, _| app.stale = None);
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.palette_entries()[0].blocked,
+                None,
+                "the same query is checked again once the state changes"
+            );
         });
     }
 

@@ -13,7 +13,13 @@ use crate::scan::Candidate;
 use crate::units::ByteSize;
 
 pub mod restore;
+mod state;
 mod stored_path;
+
+pub use state::{
+    ItemState, Restored, TrashSnapshot, TrashState, TrashView, freed_bytes, item_state, restorable,
+    still_in_trash,
+};
 
 const FILE_NAME: &str = ".kuizer-history.json";
 const LEGACY_FILE_NAME: &str = ".sweep-history.json";
@@ -296,48 +302,6 @@ fn parse_id(id: &str) -> Option<(u64, Option<usize>)> {
     }
 }
 
-/// @name freed_bytes
-/// @description Sums the space that past runs actually freed: everything deleted permanently, plus
-/// trashed entries that are no longer in the trash. Restored entries never count. With `kept`
-/// unknown, because the trash cannot be read, trashed entries are left out.
-///
-/// @example
-/// let kept = history::still_in_trash(&history, &trashed);
-/// let freed = history::freed_bytes(&history, Some(&kept));
-pub fn freed_bytes(history: &History, kept: Option<&HashSet<(usize, usize)>>) -> u64 {
-    let restored = restored_items(history);
-    history
-        .runs
-        .iter()
-        .enumerate()
-        .filter(|(_, run)| run.action == Action::Delete)
-        .flat_map(|(run_index, run)| {
-            run.deleted
-                .iter()
-                .enumerate()
-                .map(move |(entry_index, entry)| (run_index, run.id, entry_index, entry))
-        })
-        .filter(|&(_, session, entry, _)| !restored.contains(&(session, entry + 1)))
-        .filter(|&(run, _, entry, item)| match item.mode {
-            Mode::Permanent => true,
-            Mode::Trash => kept.is_some_and(|kept| !kept.contains(&(run, entry))),
-            Mode::DryRun => false,
-        })
-        .map(|(_, _, _, entry)| entry.bytes)
-        .sum()
-}
-
-fn restored_items(history: &History) -> HashSet<(u64, usize)> {
-    history
-        .restored_ids()
-        .into_iter()
-        .filter_map(|id| match parse_id(id)? {
-            (session, Some(item)) => Some((session, item)),
-            (_, None) => None,
-        })
-        .collect()
-}
-
 /// @name trashed_paths
 /// @description Lists the original locations of everything currently in the system trash, or
 /// `None` where the platform cannot list the trash.
@@ -396,131 +360,6 @@ impl TrashListing {
             None => trashed_paths(),
         }
     }
-}
-
-/// @name still_in_trash
-/// @description Returns the `(run, entry)` indexes of trashed entries whose path is still in the
-/// trash. Each trashed path is matched once, newest entries first, so a folder trashed twice and
-/// emptied once counts once.
-///
-/// @example
-/// let kept = history::still_in_trash(&history, &history::trashed_paths().unwrap_or_default());
-pub fn still_in_trash(history: &History, trashed: &[PathBuf]) -> HashSet<(usize, usize)> {
-    let mut remaining: HashMap<&Path, usize> = HashMap::new();
-    for path in trashed {
-        *remaining.entry(path.as_path()).or_default() += 1;
-    }
-    let mut found = HashSet::new();
-    for (run_index, run) in history
-        .runs
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, run)| run.action == Action::Delete)
-    {
-        for (entry_index, entry) in run.deleted.iter().enumerate().rev() {
-            if entry.mode != Mode::Trash {
-                continue;
-            }
-            if let Some(count) = remaining.get_mut(entry.path.as_path())
-                && *count > 0
-            {
-                *count -= 1;
-                found.insert((run_index, entry_index));
-            }
-        }
-    }
-    found
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ItemState {
-    RestoredHere,
-    Restored,
-    Deleted,
-    DryRun,
-    Trashed,
-    InTrash,
-    LeftTrash,
-}
-
-impl ItemState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RestoredHere => "restored here",
-            Self::Restored => "restored",
-            Self::Deleted => "deleted",
-            Self::DryRun => "dry run",
-            Self::Trashed => "trashed",
-            Self::InTrash => "in trash",
-            Self::LeftTrash => "left trash",
-        }
-    }
-}
-
-/// @name item_state
-/// @description Says what became of one history entry: restored, deleted permanently, a dry run,
-/// still in the trash or gone from it. With `kept` unknown, because the trash cannot be read,
-/// trashed entries are just `Trashed`.
-///
-/// @example
-/// let state = history::item_state(&history, &history.restored_ids(), Some(&kept), 0, 2);
-pub fn item_state(
-    history: &History,
-    restored: &HashSet<&str>,
-    kept: Option<&HashSet<(usize, usize)>>,
-    run: usize,
-    entry: usize,
-) -> ItemState {
-    let is_restored = history.runs[run].action != Action::Restore
-        && restored.contains(history.item_id(run, entry).as_str());
-    state_of(history, is_restored, kept, run, entry)
-}
-
-fn state_of(
-    history: &History,
-    is_restored: bool,
-    kept: Option<&HashSet<(usize, usize)>>,
-    run: usize,
-    entry: usize,
-) -> ItemState {
-    let item = &history.runs[run].deleted[entry];
-    if history.runs[run].action == Action::Restore {
-        return ItemState::RestoredHere;
-    }
-    if is_restored {
-        return ItemState::Restored;
-    }
-    match (item.mode, kept) {
-        (Mode::Permanent, _) => ItemState::Deleted,
-        (Mode::DryRun, _) => ItemState::DryRun,
-        (Mode::Trash, None) => ItemState::Trashed,
-        (Mode::Trash, Some(kept)) if kept.contains(&(run, entry)) => ItemState::InTrash,
-        (Mode::Trash, Some(_)) => ItemState::LeftTrash,
-    }
-}
-
-/// @name restorable
-/// @description Lists the entries of one run that can still be restored: trashed, not restored
-/// yet and still in the trash according to `kept` from `still_in_trash`.
-///
-/// @example
-/// let targets = history::restorable(&history, &kept, run_index);
-/// let restore = history::restore::restore(&history, &targets, false)?;
-pub fn restorable(
-    history: &History,
-    kept: &HashSet<(usize, usize)>,
-    run: usize,
-) -> Vec<(usize, usize)> {
-    let restored = restored_items(history);
-    let session = history.runs.get(run).map_or(0, |run| run.id);
-    (0..history.runs.get(run).map_or(0, |run| run.deleted.len()))
-        .filter(|&entry| {
-            let is_restored = restored.contains(&(session, entry + 1));
-            state_of(history, is_restored, Some(kept), run, entry) == ItemState::InTrash
-        })
-        .map(|entry| (run, entry))
-        .collect()
 }
 
 const RESTORE_WINDOW_SECONDS: i64 = 300;
@@ -1045,8 +884,12 @@ impl Drop for Recorder {
 /// @example
 /// history::record(Run::restore(started_at, restored))?;
 pub fn record(run: Run) -> Result<(), HistoryError> {
+    record_session(run).map(drop)
+}
+
+fn record_session(run: Run) -> Result<u64, HistoryError> {
     let home = dirs::home_dir().ok_or(HistoryError::NoHome)?;
-    append(&readable_path_in(&home), &home.join(FILE_NAME), run).map(drop)
+    append(&readable_path_in(&home), &home.join(FILE_NAME), run)
 }
 
 #[cfg(test)]
@@ -1215,51 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn only_trashed_entries_still_in_the_trash_are_restorable() {
-        let mut permanent = entry(5);
-        permanent.mode = Mode::Permanent;
-        let mut history = History {
-            next_session: 0,
-            runs: vec![Run::new(
-                now(),
-                &[],
-                vec![entry(1), entry(2), entry(3), permanent],
-            )],
-            cumulative: Cumulative::default(),
-        };
-        history.assign_ids();
-        let back = Entry::restored(&history.runs[0].deleted[1], "s1.2".to_owned());
-        history.runs.push(Run::restore(now(), vec![back]));
-        history.assign_ids();
-        let kept = HashSet::from([(0, 0), (0, 1)]);
-        let restored = history.restored_ids();
-
-        assert_eq!(restorable(&history, &kept, 0), vec![(0, 0)]);
-        assert!(restorable(&history, &kept, 1).is_empty());
-        assert!(restorable(&history, &kept, 9).is_empty());
-        let states: Vec<ItemState> = (0..4)
-            .map(|entry| item_state(&history, &restored, Some(&kept), 0, entry))
-            .collect();
-        assert_eq!(
-            states,
-            vec![
-                ItemState::InTrash,
-                ItemState::Restored,
-                ItemState::LeftTrash,
-                ItemState::Deleted
-            ]
-        );
-        assert_eq!(
-            item_state(&history, &restored, None, 0, 2),
-            ItemState::Trashed
-        );
-        assert_eq!(
-            item_state(&history, &restored, Some(&kept), 1, 0).as_str(),
-            "restored here"
-        );
-    }
-
-    #[test]
     fn concurrent_appends_keep_every_run() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
@@ -1282,24 +1080,6 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
-    }
-
-    #[test]
-    fn matches_each_trashed_path_once_newest_first() {
-        let mut permanent = entry(5);
-        permanent.mode = Mode::Permanent;
-        let history = History {
-            next_session: 0,
-            runs: vec![
-                Run::new(now(), &[], vec![entry(1)]),
-                Run::new(now(), &[], vec![entry(2), permanent]),
-            ],
-            cumulative: Cumulative::default(),
-        };
-        let trashed = [PathBuf::from("/tmp/a/node_modules")];
-        let kept = still_in_trash(&history, &trashed);
-        assert_eq!(kept, HashSet::from([(1, 0)]));
-        assert!(still_in_trash(&history, &[]).is_empty());
     }
 
     #[test]
@@ -1465,9 +1245,13 @@ mod tests {
         assert_eq!(history.cumulative.bytes, 1100);
         assert_eq!(history.cumulative.permanent_bytes, 1000);
         assert_eq!(history.cumulative.trashed_bytes, 100);
-        assert_eq!(freed_bytes(&history, None), 1000);
-        assert_eq!(freed_bytes(&history, Some(&HashSet::from([(0, 0)]))), 1000);
-        assert_eq!(freed_bytes(&history, Some(&HashSet::new())), 1100);
+        let trash = |kept| TrashSnapshot::new(&history, kept);
+        assert_eq!(freed_bytes(&history, &trash(None)), 1000);
+        assert_eq!(
+            freed_bytes(&history, &trash(Some(HashSet::from([(0, 0)])))),
+            1000
+        );
+        assert_eq!(freed_bytes(&history, &trash(Some(HashSet::new()))), 1100);
     }
 
     #[test]

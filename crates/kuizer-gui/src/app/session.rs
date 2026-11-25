@@ -32,9 +32,11 @@ impl Kuizer {
         let snapshots = self.snapshots.clone();
         self.forgotten = Forgotten::default();
         let forgotten = self.forgotten.clone();
+        let excluded = self.excluded.clone();
+        self.cached_excluded = excluded.len();
         let spawned = spawn_worker("kuizer-gui-scan", move || {
             scan_parts(
-                &config, &roots, &options, &cancel, &snapshots, forgotten, &sender, shown,
+                &config, &roots, &options, &cancel, &snapshots, forgotten, &sender, shown, excluded,
             );
         });
         if let Err(error) = spawned {
@@ -87,8 +89,10 @@ impl Kuizer {
                     _ => self.progress = *activity,
                 },
                 Update::Cached(mut report) => {
-                    report.drop_paths(&self.excluded);
-                    report.remove(&self.gone);
+                    report.drop_paths(self.excluded.get(self.cached_excluded..).unwrap_or(&[]));
+                    if !self.gone.is_empty() {
+                        report.remove(&self.gone);
+                    }
                     if self.cancel.is_some() && self.cached(*report, &mut dropped) {
                         rows = true;
                         map = true;
@@ -353,16 +357,22 @@ impl Kuizer {
                 .into_iter()
                 .map(|(source, candidate)| (source, candidate.path.as_path()))
                 .collect();
-            Source::ALL
-                .into_iter()
-                .flat_map(|source| {
-                    report
-                        .section(source)
-                        .map(move |candidate| (source, candidate))
-                })
-                .filter(|(source, candidate)| kept.contains(&(*source, candidate.path.as_path())))
-                .map(|(source, candidate)| (source, candidate.id))
-                .collect()
+            if kept.is_empty() {
+                HashSet::new()
+            } else {
+                Source::ALL
+                    .into_iter()
+                    .flat_map(|source| {
+                        report
+                            .section(source)
+                            .map(move |candidate| (source, candidate))
+                    })
+                    .filter(|(source, candidate)| {
+                        kept.contains(&(*source, candidate.path.as_path()))
+                    })
+                    .map(|(source, candidate)| (source, candidate.id))
+                    .collect()
+            }
         };
         self.selection = Selection::pending(selection);
         self.phase = Phase::Ready(Box::new(report));
@@ -397,6 +407,7 @@ pub(super) fn scan_parts(
     forgotten: Forgotten,
     sender: &mpsc::UnboundedSender<Update>,
     shown: bool,
+    excluded: Vec<PathBuf>,
 ) {
     if !shown {
         let (snapshots, roots, options, sender) = (
@@ -408,7 +419,8 @@ pub(super) fn scan_parts(
         let _ = std::thread::Builder::new()
             .name("kuizer-gui-snapshot".to_owned())
             .spawn(move || {
-                if let Some(report) = snapshot::load(&snapshots, &roots, &options) {
+                if let Some(mut report) = snapshot::load(&snapshots, &roots, &options) {
+                    report.drop_paths(&excluded);
                     let _ = sender.unbounded_send(Update::Cached(Box::new(report)));
                 }
             });

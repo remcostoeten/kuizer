@@ -5,11 +5,12 @@ members = ["cargo:."]
 cargo-dist-version = "0.33.0"
 allow-dirty = ["ci"]
 ci = "github"
-installers = ["shell", "npm"]
+installers = ["shell", "npm", "homebrew"]
+tap = "remcostoeten/homebrew-tap"
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 install-path = "CARGO_HOME"
 install-updater = false
-publish-jobs = ["npm", "./publish-crates"]
+publish-jobs = ["homebrew", "npm", "./publish-crates"]
 
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::AppError;
-use crate::cli::ScanArgs;
+use super::filter::{self, Filters};
+use crate::cli::{Format, ScanArgs};
 use crate::config::Config;
 use crate::detect::{Category, Safety};
 use crate::output;
@@ -74,43 +75,65 @@ pub fn narrow(config: &mut Config, categories: &[Category], min_size: Option<Byt
     }
 }
 
-pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(), AppError> {
-    let mut config = config.clone();
-    narrow(&mut config, &args.categories, args.min_size);
+pub fn run(config: &Config, args: ScanArgs, format: Format, quiet: bool) -> Result<(), AppError> {
+    let rules = filter::project_rules(config);
+    let names: Vec<&str> = rules.iter().map(String::as_str).collect();
+    let filters = Filters::new(config, &args.categories, args.min_size, &args.scope, &names)?;
+    let config = filters.config();
+    let json = format != Format::Text;
     if let Some(Some(target)) = &args.report {
         refuse_overwrite(target, args.force)?;
     }
-    let roots = scan::normalize_roots(&resolve_roots(&config, args.paths)?);
-    let handle = scan::start(&config, &roots, Cancel::new())?;
+    let roots = scan::normalize_roots(&resolve_roots(config, args.paths)?);
+    let handle = scan::start(config, &roots, Cancel::new())?;
     let terminal = std::io::stdout().is_terminal()
         && std::io::stderr().is_terminal()
         && std::io::stdin().is_terminal();
     let annotate = args.sort == SortKey::Idle;
-    let live = !json && !args.no_live && terminal && args.idle.is_none() && !annotate;
+    let unfiltered = args.scope.rules.is_empty() && args.scope.projects.is_empty();
+    let live = !json && !args.no_live && terminal && args.idle.is_none() && !annotate && unfiltered;
+    let stream =
+        format == Format::JsonLines && args.idle.is_none() && !annotate && args.limit.is_none();
     let show_progress = !json && !quiet && std::io::stderr().is_terminal();
     let safe_only = args.safe_only;
+    let keep = |candidate: &Candidate| {
+        (!safe_only || candidate.rule.safety == Safety::Safe) && filters.matches(candidate)
+    };
     let report = args.report;
     let force = args.force;
     let open = !args.no_open && std::io::stderr().is_terminal();
     let collected = if live {
         tui::watch(&handle, safe_only)?
     } else {
-        let collected = scan::collect(&handle, |progress| {
-            if show_progress {
-                output::print_progress(progress);
-            }
-        });
+        let mut failed = None;
+        let collected = scan::collect_with(
+            &handle,
+            |progress| {
+                if show_progress {
+                    output::print_progress(progress);
+                }
+            },
+            |candidate| {
+                if stream && failed.is_none() && keep(candidate) {
+                    match output::scan_line(candidate) {
+                        Ok(line) => println!("{line}"),
+                        Err(error) => failed = Some(error),
+                    }
+                }
+            },
+        );
         if show_progress {
             output::clear_progress();
+        }
+        if let Some(error) = failed {
+            return Err(error.into());
         }
         collected
     };
 
     let mut candidates = collected.candidates;
-    if safe_only {
-        candidates.retain(|candidate| candidate.rule.safety == Safety::Safe);
-    }
-    keep_idle(&config, &mut candidates, args.idle, annotate)?;
+    candidates.retain(keep);
+    keep_idle(filters.evidence(), &mut candidates, args.idle, annotate)?;
 
     scan::sort_candidates(&mut candidates, args.sort);
     let written = report
@@ -140,13 +163,25 @@ pub fn run(config: &Config, args: ScanArgs, json: bool, quiet: bool) -> Result<(
     if let Some(limit) = args.limit {
         candidates.truncate(limit);
     }
-    if json {
-        println!(
+    match format {
+        Format::Json => println!(
             "{}",
             output::scan_report(&roots, &candidates, &collected.issues, &collected.summary)?
-        );
-    } else {
-        output::print_scan(&candidates, &collected.issues, &collected.summary, quiet);
+        ),
+        Format::JsonLines => {
+            if !stream {
+                for candidate in &candidates {
+                    println!("{}", output::scan_line(candidate)?);
+                }
+            }
+            println!(
+                "{}",
+                output::scan_summary_line(&roots, &collected.issues, &collected.summary)?
+            );
+        }
+        Format::Text => {
+            output::print_scan(&candidates, &collected.issues, &collected.summary, quiet)
+        }
     }
     announce_report(written.as_deref(), open);
     Ok(())

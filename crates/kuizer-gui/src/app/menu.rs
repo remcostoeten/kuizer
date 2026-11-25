@@ -30,7 +30,7 @@ impl Kuizer {
                 let external = *source == Source::Docker;
                 let remove = MenuItem::new(
                     Choice::Trash,
-                    if self.config.delete.mode == DeleteMode::Trash && !source.permanent() {
+                    if source.trashed(self.config.delete.mode) {
                         "Move to trash"
                     } else {
                         "Delete"
@@ -71,10 +71,7 @@ impl Kuizer {
                             .iter()
                             .position(|run| run.id == *session)
                             .is_some_and(|index| {
-                                matches!(
-                                    self.report_stats.trash_state(report, index),
-                                    TrashState::Restorable { .. }
-                                )
+                                matches!(view.trash_state(index), TrashState::Restorable { .. })
                             })
                     })
                 });

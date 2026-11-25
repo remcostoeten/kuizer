@@ -19,8 +19,10 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 pub use activity::{ActivityScope, annotate, annotate_in};
 pub use cancel::Cancel;
 pub use options::ScanOptions;
-pub use query::{CandidateFilter, Group, Query, SortKey, group_indices, sort_candidates};
-pub use size::{Measured, measure, measure_many, measure_parallel};
+pub use query::{
+    CandidateFilter, Group, Query, Scope, ScopeError, SortKey, group_indices, sort_candidates,
+};
+pub use size::{Measured, measure, measure_candidates, measure_many, measure_parallel};
 pub use types::{Candidate, Counters, Event, Issue, IssueKind, Progress, Summary, Usage};
 
 use crate::config::{Config, ConfigError, Excludes, ScanConfig};

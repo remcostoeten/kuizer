@@ -129,17 +129,43 @@ impl fmt::Display for Idle {
 
 /// @name age
 /// @description Formats the time elapsed since `time` as a short age such as `today`, `5d`,
-/// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future.
+/// `3w`, `4mo` or `2y`, or `-` when the time is unknown or in the future. Every frontend shows
+/// item ages through this, so the same item reads the same everywhere.
 ///
 /// @example
 /// let label = units::age(candidate.newest);
 pub fn age(time: Option<SystemTime>) -> String {
-    let Some(days) = time
-        .and_then(|time| SystemTime::now().duration_since(time).ok())
-        .map(|elapsed| elapsed.as_secs() / 86_400)
-    else {
+    match elapsed(time) {
+        Some(seconds) => days(seconds / 86_400),
+        None => "-".to_owned(),
+    }
+}
+
+/// @name since
+/// @description Says how long ago `time` was, for a recent event such as a finished scan or a
+/// tooltip: `just now`, `5m ago` or `3h ago` within a day, then the [`age`] buckets followed by
+/// `ago`. `-` when the time is unknown or in the future.
+///
+/// @example
+/// let label = format!("Scanned {}", units::since(Some(report.scanned)));
+pub fn since(time: Option<SystemTime>) -> String {
+    let Some(seconds) = elapsed(time) else {
         return "-".to_owned();
     };
+    match seconds {
+        0..60 => "just now".to_owned(),
+        60..3_600 => format!("{}m ago", seconds / 60),
+        3_600..86_400 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{} ago", days(seconds / 86_400)),
+    }
+}
+
+fn elapsed(time: Option<SystemTime>) -> Option<u64> {
+    time.and_then(|time| SystemTime::now().duration_since(time).ok())
+        .map(|elapsed| elapsed.as_secs())
+}
+
+fn days(days: u64) -> String {
     match days {
         0 => "today".to_owned(),
         1..=13 => format!("{days}d"),
@@ -152,6 +178,20 @@ pub fn age(time: Option<SystemTime>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn since_is_fine_within_a_day_and_matches_age_after() {
+        let now = SystemTime::now();
+        let ago = |seconds| Some(now - Duration::from_secs(seconds));
+        assert_eq!(since(Some(now)), "just now");
+        assert_eq!(since(ago(7_200)), "2h ago");
+        assert_eq!(
+            since(ago(20 * 86_400)),
+            format!("{} ago", age(ago(20 * 86_400)))
+        );
+        assert_eq!(age(ago(20 * 86_400)), "2w");
+        assert_eq!(since(None), age(None));
+    }
 
     #[test]
     fn an_idle_age_before_the_clock_can_reach_is_rejected() {

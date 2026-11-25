@@ -1,11 +1,11 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::SystemTime;
 
 use gpui::{Hsla, Pixels, Rems, Rgba, SharedString, Styled, hsla, px, rems, rgb, rgba};
 use kuizer::config::{Accent, Density, Theme};
 use kuizer::detect::Category;
 use kuizer::units::ByteSize;
+pub use kuizer::units::age;
 
 pub const REM: f32 = 16.;
 
@@ -605,26 +605,6 @@ pub fn bytes(value: u64) -> String {
     ByteSize(value).to_string()
 }
 
-/// @name age
-/// @description Formats how long ago a time was in a short form such as `3d` or `5mo`.
-///
-/// @example
-/// assert_eq!(age(Some(SystemTime::now())), "now");
-pub fn age(time: Option<SystemTime>) -> String {
-    let Some(elapsed) = time.and_then(|time| SystemTime::now().duration_since(time).ok()) else {
-        return String::new();
-    };
-    let seconds = elapsed.as_secs();
-    match seconds {
-        0..60 => "now".to_owned(),
-        60..3_600 => format!("{}m", seconds / 60),
-        3_600..86_400 => format!("{}h", seconds / 3_600),
-        86_400..2_592_000 => format!("{}d", seconds / 86_400),
-        2_592_000..31_536_000 => format!("{}mo", seconds / 2_592_000),
-        _ => format!("{}y", seconds / 31_536_000),
-    }
-}
-
 /// @name share
 /// @description Returns `part` as a fraction of `whole` between 0 and 1, for bar widths.
 ///
@@ -643,19 +623,7 @@ pub fn share(part: u64, whole: u64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-
-    #[test]
-    fn age_uses_the_largest_whole_unit() {
-        let now = SystemTime::now();
-        assert_eq!(age(None), "");
-        assert_eq!(age(Some(now)), "now");
-        assert_eq!(age(Some(now - Duration::from_secs(7_200))), "2h");
-        assert_eq!(age(Some(now - Duration::from_secs(3 * 86_400))), "3d");
-        assert_eq!(age(Some(now - Duration::from_secs(400 * 86_400))), "1y");
-    }
 
     #[test]
     fn share_is_clamped_and_safe_for_zero() {

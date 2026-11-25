@@ -405,13 +405,15 @@ impl Kuizer {
             cx.notify();
             return;
         };
-        let checked = cx.background_spawn(async move { start::check_folder(&path) });
+        let checked = cx.background_spawn(async move {
+            start::check_folder(&path).map(|root| scan::normalize_roots(&[root]))
+        });
         self.folder_check = Some(cx.spawn(async move |this, cx| {
             let result = checked.await;
             this.update(cx, |app, cx| match result {
-                Ok(root) => {
+                Ok(roots) => {
                     app.folder_error = None;
-                    app.roots = scan::normalize_roots(&[root]);
+                    app.roots = roots;
                     app.recent.remember(&app.roots);
                     app.rescan(cx);
                 }
@@ -429,6 +431,8 @@ impl Kuizer {
             cancel.cancel();
         }
         self.task = None;
+        let refreshed = std::mem::take(&mut self.refreshed);
+        cx.background_spawn(async move { drop(refreshed) }).detach();
         self.scan_over();
         self.set_phase(Phase::Start, cx);
         cx.notify();
@@ -436,26 +440,34 @@ impl Kuizer {
 
     /// Ends the running scan and keeps what it found so far. Parts that had not finished stay
     /// empty, and the report is marked as stopped early.
+    ///
+    /// Every part was filtered as it arrived, so a report already on screen keeps its rows,
+    /// figures and map as they are; only a scan still in its activity view builds them, from the
+    /// few parts that arrived before any artifact. What the stop throws away is dropped off the
+    /// UI thread.
     pub(super) fn stop_scan(&mut self, cx: &mut Context<Self>) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
         self.task = None;
-        let mut dropped = Vec::new();
-        if matches!(self.phase, Phase::Loading(_)) {
+        let mut dropped = vec![Loaded::Found(std::mem::take(&mut self.refreshed))];
+        let shown = matches!(self.phase, Phase::Loading(_));
+        if shown {
             self.show_parts(&mut dropped);
         }
         if let Phase::Ready(report) = &mut self.phase {
             report.summary.cancelled = true;
-            report.drop_paths(&self.excluded);
+            if shown {
+                report.drop_paths(&self.excluded);
+            }
         }
         self.scan_over();
-        self.refresh_stats();
-        self.refresh_rows();
-        self.refresh_map(cx);
-        if !dropped.is_empty() {
-            cx.background_spawn(async move { drop(dropped) }).detach();
+        if shown {
+            self.refresh_stats();
+            self.refresh_rows();
+            self.refresh_map(cx);
         }
+        cx.background_spawn(async move { drop(dropped) }).detach();
         cx.notify();
     }
 

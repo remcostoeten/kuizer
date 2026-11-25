@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use kuizer::detect::{Category, Safety};
+use kuizer::history::{self, History, TrashSnapshot};
 use kuizer::scan::Candidate;
 
 use crate::model::{Bucket, Report, Source, TrashState};
@@ -338,6 +339,16 @@ pub struct HistoryStats {
     pub in_trash: u64,
 }
 
+impl HistoryStats {
+    pub fn of(history: &History, trash: &TrashSnapshot) -> Self {
+        Self {
+            trash: trash.states(history),
+            freed: history::freed_bytes(history, trash),
+            in_trash: trash.in_trash(history).bytes,
+        }
+    }
+}
+
 /// The overview charts, added up the first time the overview shows a report.
 pub struct Charts {
     pub categories: Vec<Bucket<Category>>,
@@ -351,8 +362,9 @@ pub struct Charts {
 
 /// @name ReportStats
 /// @description What the sidebar, the status line, the overview and the history tab add up from
-/// the report. Totals are counted when the report changes; charts and trash states the first
-/// time a view asks for them, so a streaming scan only pays for what is on screen.
+/// the report. Totals are counted when the report changes and charts the first time a view asks
+/// for them, so a streaming scan only pays for what is on screen. Trash states come with the
+/// history view, which works them out on the history thread.
 ///
 /// @example
 /// let stats = ReportStats::new(&report);
@@ -366,7 +378,6 @@ pub struct ReportStats {
     /// Bytes of the project artifacts per category, largest first.
     pub categories: Vec<(Category, u64)>,
     charts: OnceCell<Charts>,
-    history: OnceCell<Option<HistoryStats>>,
 }
 
 impl ReportStats {
@@ -378,7 +389,6 @@ impl ReportStats {
             docker: Totals::of(report.section(Source::Docker)),
             categories: by_category(&report.candidates),
             charts: OnceCell::new(),
-            history: OnceCell::new(),
         }
     }
 
@@ -406,24 +416,6 @@ impl ReportStats {
                 }),
             }
         })
-    }
-
-    pub fn history(&self, report: &Report) -> Option<&HistoryStats> {
-        self.history
-            .get_or_init(|| {
-                report.history.as_ref().ok().map(|view| HistoryStats {
-                    trash: view.trash_states(),
-                    freed: view.freed(),
-                    in_trash: view.in_trash(),
-                })
-            })
-            .as_ref()
-    }
-
-    pub fn trash_state(&self, report: &Report, run: usize) -> TrashState {
-        self.history(report)
-            .and_then(|history| history.trash.get(run).copied())
-            .unwrap_or(TrashState::NotTrashed)
     }
 }
 

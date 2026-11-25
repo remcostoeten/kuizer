@@ -2,23 +2,28 @@ mod app;
 mod jobs;
 mod keys;
 mod palette;
+mod sources;
 mod view;
 mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Sender, TryRecvError, unbounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::config::Config;
-use crate::delete::{Mode, Target};
+use crate::delete::Mode;
+use crate::history::HistoryError;
 use crate::keymap::{Action, Keymap, Scope};
 use crate::scan::{self, Cancel, Event};
-use app::{App, Overlay, project_of};
+use crate::source::Source;
+use app::{App, Load, Overlay, Tab, project_of};
 use jobs::{Changes, Job, Outcome};
+use sources::{CacheWork, Found};
 pub use watch::watch;
 
 const FRAME: Duration = Duration::from_millis(50);
@@ -27,20 +32,83 @@ const REFRESH: Duration = Duration::from_millis(100);
 const EVENTS_PER_FRAME: usize = 5_000;
 const PAGE: isize = 20;
 
-fn dispatch(app: &mut App, jobs: &Sender<Job>, batch: Vec<(u64, Target, Mode)>) {
-    for (id, target, mode) in batch {
+struct Queues {
+    artifacts: Sender<Job>,
+    caches: Sender<Job>,
+}
+
+fn dispatch(app: &mut App, queues: &Queues, batch: Vec<(u64, Mode)>) {
+    for (id, mode) in batch {
         let Some(item) = app.item(id) else {
             continue;
         };
+        let source = item.source;
+        let queue = match source {
+            Source::Cache => &queues.caches,
+            _ => &queues.artifacts,
+        };
         let job = Job {
-            id,
-            target,
+            source,
             mode,
             candidate: item.candidate.clone(),
         };
-        if jobs.send(job).is_err() {
-            app.restore_deleting();
+        if queue.send(job).is_err() {
+            app.restore_deleting(source);
             return;
+        }
+    }
+}
+
+fn list_only(action: Action) -> bool {
+    matches!(
+        action,
+        Action::ExtendDown
+            | Action::ExtendUp
+            | Action::Toggle
+            | Action::SelectAll
+            | Action::SelectNone
+            | Action::SelectProject
+            | Action::Delete
+            | Action::DeleteCursor
+            | Action::CycleSort
+            | Action::Group
+            | Action::Category
+            | Action::SafeOnly
+    )
+}
+
+fn view_of(action: Action) -> Option<Tab> {
+    Tab::ALL.into_iter().find(|tab| tab.action() == action)
+}
+
+fn receive(app: &mut App, found: Found) {
+    match found {
+        Found::Cache(candidate) => app.push_cache(candidate),
+        Found::CachesDone => app.caches = Load::Done,
+        Found::CachesFailed(problem) => {
+            app.caches = Load::Done;
+            notify(app, problem.clone());
+            app.cache_problem = Some(problem);
+        }
+        Found::Stage(stage) => app.duplicates.stage = Some(stage),
+        Found::Duplicates(found) => app.set_duplicates(found),
+        Found::DuplicatesFailed(problem) => app.duplicates_failed(problem),
+    }
+}
+
+fn drain(app: &mut App, results: &Receiver<Outcome>, source: Source) -> bool {
+    let mut removed = false;
+    loop {
+        match results.try_recv() {
+            Ok((id, mode, result)) => {
+                app.finish(id, mode, result);
+                removed = true;
+            }
+            Err(TryRecvError::Disconnected) if app.deleting_in(source) > 0 => {
+                app.restore_deleting(source);
+                return true;
+            }
+            Err(_) => return removed,
         }
     }
 }
@@ -75,7 +143,7 @@ fn handle_filter(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+fn handle_key(app: &mut App, key: KeyEvent, queues: &Queues) {
     let now = Instant::now();
     let held_enter = key.code == KeyCode::Enter && app.enter_repeats(now);
     let held_key = app.action_key_repeats(key, now);
@@ -107,11 +175,24 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         handle_filter(app, key);
         return;
     }
+    if app.overlay == Overlay::None
+        && let Some(tab) = action.and_then(view_of)
+    {
+        app.switch(tab);
+        return;
+    }
+    if app.overlay == Overlay::None && app.tab.source().is_none() && action.is_some_and(list_only) {
+        app.message = Some(format!(
+            "{} are a report, nothing here is selected or deleted",
+            app.tab.label()
+        ));
+        return;
+    }
     match app.overlay {
         Overlay::Confirm { .. } => match keys::action(&app.keymap, Scope::TuiConfirm, key) {
             Some(Action::Confirm) if !(held_enter || held_key) => {
                 let batch = app.confirm();
-                dispatch(app, jobs, batch);
+                dispatch(app, queues, batch);
             }
             Some(Action::Confirm) => {}
             Some(Action::Cancel) => app.overlay = Overlay::None,
@@ -141,11 +222,11 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             Some(Action::SelectNone) => app.clear_selection(),
             Some(Action::DeleteCursor) if !held_key => {
                 let batch = app.delete();
-                dispatch(app, jobs, batch);
+                dispatch(app, queues, batch);
             }
             Some(Action::Delete) if !held_key => {
                 let batch = app.delete_selected();
-                dispatch(app, jobs, batch);
+                dispatch(app, queues, batch);
             }
             Some(Action::CycleSort) => app.cycle_sort(),
             Some(Action::Group) => app.toggle_grouping(),
@@ -157,6 +238,69 @@ fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             Some(Action::Help) => app.overlay = Overlay::Help,
             _ => {}
         },
+    }
+}
+
+struct Background {
+    config: Config,
+    roots: Vec<PathBuf>,
+    cancel: Cancel,
+    stop: Arc<AtomicBool>,
+    found: Sender<Found>,
+    cache_queue: Option<(Receiver<Job>, Sender<Outcome>)>,
+    caches: Option<JoinHandle<Option<HistoryError>>>,
+    duplicates: Option<JoinHandle<()>>,
+}
+
+impl Background {
+    fn start(&mut self, app: &mut App) {
+        if app.tab == Tab::Caches
+            && app.caches == Load::Idle
+            && let Some((jobs, results)) = self.cache_queue.take()
+        {
+            app.caches = Load::Loading;
+            let work = CacheWork {
+                config: self.config.clone(),
+                jobs,
+                results,
+                stop: Arc::clone(&self.stop),
+                cancel: self.cancel.clone(),
+                found: self.found.clone(),
+            };
+            match sources::spawn_caches(work) {
+                Ok(handle) => self.caches = Some(handle),
+                Err(error) => {
+                    app.caches = Load::Done;
+                    app.cache_problem = Some(format!("could not list caches: {error}"));
+                }
+            }
+        }
+        if app.tab == Tab::Duplicates && app.duplicates.load == Load::Idle {
+            app.duplicates.load = Load::Loading;
+            match sources::spawn_duplicates(
+                self.config.clone(),
+                self.roots.clone(),
+                self.cancel.clone(),
+                self.found.clone(),
+            ) {
+                Ok(handle) => self.duplicates = Some(handle),
+                Err(error) => {
+                    app.duplicates_failed(format!("could not look for duplicates: {error}"));
+                }
+            }
+        }
+    }
+
+    fn finish(self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.duplicates {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.caches
+            && let Ok(Some(error)) = handle.join()
+        {
+            eprintln!("kuizer: {error}");
+        }
     }
 }
 
@@ -199,7 +343,24 @@ pub fn run_with_notice(
     };
     let (job_tx, job_rx) = unbounded::<Job>();
     let (result_tx, result_rx) = unbounded::<Outcome>();
+    let (cache_job_tx, cache_job_rx) = unbounded::<Job>();
+    let (cache_result_tx, cache_result_rx) = unbounded::<Outcome>();
+    let queues = Queues {
+        artifacts: job_tx,
+        caches: cache_job_tx,
+    };
     let stop = Arc::new(AtomicBool::new(false));
+    let (found_tx, found_rx) = unbounded::<Found>();
+    let mut background = Background {
+        config: config.clone(),
+        roots: roots.to_vec(),
+        cancel: Cancel::new(),
+        stop: Arc::clone(&stop),
+        found: found_tx,
+        cache_queue: Some((cache_job_rx, cache_result_tx)),
+        caches: None,
+        duplicates: None,
+    };
     let deleter = match jobs::spawn_deleters(
         roots.to_vec(),
         config.delete.clone(),
@@ -247,7 +408,7 @@ pub fn run_with_notice(
                         }
                         app.push(candidate);
                     }
-                    Ok(Event::Issue(_)) => app.issues += 1,
+                    Ok(Event::Issue(issue)) => app.push_issue(issue),
                     Ok(Event::Finished(summary)) => {
                         app.finished = Some(summary);
                         scanning = false;
@@ -262,21 +423,12 @@ pub fn run_with_notice(
                 app.set_statuses(updates);
                 redraw = true;
             }
-            let mut removed = false;
-            loop {
-                match result_rx.try_recv() {
-                    Ok((id, mode, result)) => {
-                        app.finish(id, mode, result);
-                        removed = true;
-                    }
-                    Err(TryRecvError::Disconnected) if app.deleting() > 0 => {
-                        app.restore_deleting();
-                        redraw = true;
-                        break;
-                    }
-                    Err(_) => break,
-                }
+            for found in found_rx.try_iter() {
+                receive(&mut app, found);
+                redraw = true;
             }
+            let removed = drain(&mut app, &result_rx, Source::Artifact)
+                | drain(&mut app, &cache_result_rx, Source::Cache);
             if removed {
                 let _ = nudge_tx.send(());
                 redraw = true;
@@ -300,7 +452,7 @@ pub fn run_with_notice(
                 terminal.draw(|frame| view::draw(frame, &app))?;
                 redraw = false;
             }
-            let busy = scanning || app.deleting() > 0 || app.awaiting_status() > 0;
+            let busy = scanning || app.deleting() > 0 || app.awaiting_status() > 0 || app.loading();
             if !event::poll(if busy { FRAME } else { IDLE })? {
                 continue;
             }
@@ -311,7 +463,8 @@ pub fn run_with_notice(
                     if app.changed() && !app.filtering {
                         app.refresh();
                     }
-                    handle_key(&mut app, key, &job_tx);
+                    handle_key(&mut app, key, &queues);
+                    background.start(&mut app);
                 }
                 redraw = true;
                 let confirming = matches!(app.overlay, Overlay::Confirm { .. } | Overlay::Quit);
@@ -325,7 +478,7 @@ pub fn run_with_notice(
     ratatui::restore();
 
     stop.store(true, Ordering::Relaxed);
-    drop(job_tx);
+    drop(queues);
     drop(project_tx);
     drop(nudge_tx);
     drop(handle);
@@ -334,6 +487,7 @@ pub fn run_with_notice(
     {
         eprintln!("kuizer: {error}");
     }
+    background.finish();
     outcome
 }
 
@@ -379,13 +533,24 @@ mod tests {
 
     use ratatui::crossterm::event::KeyModifiers;
 
-    fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode, modifiers: KeyModifiers) {
+    fn queues() -> (Queues, Receiver<Job>) {
+        let (jobs, queued) = unbounded::<Job>();
+        (
+            Queues {
+                artifacts: jobs.clone(),
+                caches: jobs,
+            },
+            queued,
+        )
+    }
+
+    fn press(app: &mut App, jobs: &Queues, code: KeyCode, modifiers: KeyModifiers) {
         handle_key(app, KeyEvent::new(code, modifiers), jobs);
     }
 
     #[test]
     fn holding_enter_never_confirms_a_deletion() {
-        let (jobs, queued) = unbounded::<Job>();
+        let (jobs, queued) = queues();
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
         app.confirm_before_delete = true;
@@ -398,7 +563,7 @@ mod tests {
 
     #[test]
     fn esc_backs_out_one_level_and_never_quits() {
-        let (jobs, _queued) = unbounded::<Job>();
+        let (jobs, _queued) = queues();
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
         app.set_filter("node".to_owned());
@@ -413,7 +578,7 @@ mod tests {
 
     #[test]
     fn quitting_during_a_deletion_asks_and_a_held_key_never_confirms() {
-        let (jobs, _queued) = unbounded::<Job>();
+        let (jobs, _queued) = queues();
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::NONE);
         assert_eq!(app.deleting(), 1);
@@ -435,7 +600,7 @@ mod tests {
 
     #[test]
     fn holding_p_never_widens_to_review_items() {
-        let (jobs, _queued) = unbounded::<Job>();
+        let (jobs, _queued) = queues();
         let mut app = App::new(Mode::Permanent, false);
         app.push(candidate(1, "/p/x/node_modules"));
         let mut review = candidate(2, "/p/x/dist");
@@ -455,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_dead_delete_worker_keeps_the_queue_selected() {
-        let (jobs, queued) = unbounded::<Job>();
+        let (jobs, queued) = queues();
         drop(queued);
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char(' '), KeyModifiers::NONE);
@@ -469,7 +634,7 @@ mod tests {
 
     #[test]
     fn control_and_alt_chords_never_run_the_plain_key_actions() {
-        let (jobs, queued) = unbounded::<Job>();
+        let (jobs, queued) = queues();
         let mut app = app();
         press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert_eq!(app.cursor, (PAGE / 2) as usize);
@@ -500,7 +665,7 @@ mod tests {
 
     #[test]
     fn chords_do_not_confirm_a_dialog_or_type_into_the_filter() {
-        let (jobs, queued) = unbounded::<Job>();
+        let (jobs, queued) = queues();
         let mut app = app();
         app.open_confirm();
         press(&mut app, &jobs, KeyCode::Char('y'), KeyModifiers::CONTROL);
@@ -512,5 +677,71 @@ mod tests {
         press(&mut app, &jobs, KeyCode::Char('d'), KeyModifiers::CONTROL);
         press(&mut app, &jobs, KeyCode::Char('D'), KeyModifiers::SHIFT);
         assert_eq!(app.filter, "D");
+    }
+
+    #[test]
+    fn number_keys_switch_views_and_each_list_deletes_only_its_own_source() {
+        let (artifacts, artifact_jobs) = unbounded::<Job>();
+        let (caches, cache_jobs) = unbounded::<Job>();
+        let queues = Queues { artifacts, caches };
+        let mut app = app();
+        app.set_changes_unknown();
+        app.push_cache(candidate(1, "/home/me/.cache/pip"));
+        press(&mut app, &queues, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(app.selected_count(), 1);
+
+        press(&mut app, &queues, KeyCode::Char('2'), KeyModifiers::NONE);
+        app.refresh();
+        assert_eq!(app.tab, Tab::Caches);
+        assert_eq!(app.view.len(), 1);
+        assert_eq!(app.selected_count(), 0);
+        press(&mut app, &queues, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(artifact_jobs.is_empty());
+        let job = cache_jobs.try_recv().expect("cache job");
+        assert_eq!(job.source, Source::Cache);
+        assert_eq!(job.candidate.path, PathBuf::from("/home/me/.cache/pip"));
+
+        press(&mut app, &queues, KeyCode::Char('1'), KeyModifiers::NONE);
+        app.refresh();
+        assert_eq!(app.tab, Tab::Artifacts);
+        assert_eq!(app.selected_count(), 1);
+        assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn report_views_never_select_or_delete_and_esc_only_clears_their_search() {
+        let (jobs, queued) = queues();
+        let mut app = app();
+        press(&mut app, &jobs, KeyCode::Char('4'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Issues);
+        for path in ["/p/locked", "/p/gone"] {
+            app.push_issue(scan::Issue {
+                path: PathBuf::from(path),
+                kind: scan::IssueKind::PermissionDenied,
+                message: "denied".to_owned(),
+            });
+        }
+        for code in [KeyCode::Char(' '), KeyCode::Char('a'), KeyCode::Char('d')] {
+            press(&mut app, &jobs, code, KeyModifiers::NONE);
+        }
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(queued.is_empty());
+        assert!(app.items.iter().all(|item| !item.selected));
+        assert_eq!(app.overlay, Overlay::None);
+
+        press(&mut app, &jobs, KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "lock".chars() {
+            press(&mut app, &jobs, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        press(&mut app, &jobs, KeyCode::Enter, KeyModifiers::NONE);
+        app.refresh();
+        assert_eq!(app.issues.rows, [0]);
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        app.refresh();
+        assert_eq!(app.issues.rows, [0, 1]);
+        press(&mut app, &jobs, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Issues);
+        assert!(!app.quit);
     }
 }

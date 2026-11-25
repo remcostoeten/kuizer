@@ -3,18 +3,19 @@ pub mod pins;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 pub use pins::{Pin, PinFinder};
 
-use crate::config::Config;
+use crate::config::{Config, Excludes};
 use crate::delete::{self, DeleteError, Guard, Mode, Target};
 use crate::detect::{Category, Kind, RuleInfo, Safety};
 use crate::output::display_path;
 use crate::process;
-use crate::scan::{self, Cancel, Candidate};
+use crate::scan::{self, Cancel, Candidate, Usage};
+use crate::source::Source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -388,6 +389,23 @@ pub fn find(locations: &Locations, tools: &[Tool]) -> Vec<Toolchain> {
     found
 }
 
+/// @name find_excluding
+/// @description Like [`find`], and leaves out every version whose folder or any folder above it
+/// matches `excludes`, so a toolchain the user excluded from scans is neither listed nor offered
+/// for deletion.
+///
+/// @example
+/// let found = toolchains::find_excluding(&Locations::for_user()?, &Tool::ALL, &config.excludes()?);
+pub fn find_excluding(
+    locations: &Locations,
+    tools: &[Tool],
+    excludes: &Excludes,
+) -> Vec<Toolchain> {
+    let mut found = find(locations, tools);
+    found.retain(|toolchain| !toolchain.path.ancestors().any(|dir| excludes.path(dir)));
+    found
+}
+
 /// @name apply_pins
 /// @description Records on each toolchain the files that pin it. Each pin is resolved against
 /// the versions of one tool at a time, so `lts/*` marks the newest Node of nvm and of fnm.
@@ -427,6 +445,31 @@ pub fn apply_pins(toolchains: &mut [Toolchain], pins: &[Pin]) {
     }
 }
 
+/// @name apply_pins_measured
+/// @description Like [`apply_pins`] for toolchains that were already measured, as when the pin
+/// search ran alongside the sizing. Each candidate's safety follows its toolchain's new pins, so
+/// a pinned version becomes a review item.
+///
+/// @example
+/// toolchains::apply_pins_measured(&mut entries, &walked.pins);
+pub fn apply_pins_measured(entries: &mut [(Toolchain, Candidate)], pins: &[Pin]) {
+    let mut found: Vec<Toolchain> = entries
+        .iter()
+        .map(|(toolchain, _)| toolchain.clone())
+        .collect();
+    apply_pins(&mut found, pins);
+    for ((toolchain, candidate), pinned) in entries.iter_mut().zip(found) {
+        let safety = pinned.safety();
+        if candidate.rule.safety != safety {
+            candidate.rule = Arc::new(RuleInfo {
+                safety,
+                ..RuleInfo::clone(&candidate.rule)
+            });
+        }
+        *toolchain = pinned;
+    }
+}
+
 /// @name measure
 /// @description Measures every toolchain in parallel and pairs it with a removal candidate,
 /// largest first. The rule name is the tool, so `--select nvm` picks every nvm version.
@@ -439,8 +482,8 @@ pub fn measure(found: Vec<Toolchain>) -> Vec<(Toolchain, Candidate)> {
 
 /// @name measure_with
 /// @description Like `measure`, but stops sizing once `cancel` is set and calls `on_measured`
-/// from the measuring thread as each toolchain is done. Sizing runs on as many threads as a scan
-/// of the folders holding the versions would use, not one per version.
+/// from the measuring thread as each toolchain is done. Sizing shares one pool of
+/// `scan::size_threads` threads, not one thread per version.
 ///
 /// @example
 /// let entries = toolchains::measure_with(found, &cancel, |candidate| done.push(candidate.id));
@@ -449,68 +492,45 @@ pub fn measure_with(
     cancel: &Cancel,
     on_measured: impl Fn(&Candidate) + Sync,
 ) -> Vec<(Toolchain, Candidate)> {
-    let mut parents: Vec<PathBuf> = found
-        .iter()
-        .filter_map(|toolchain| toolchain.path.parent().map(Path::to_path_buf))
-        .collect();
-    parents.sort();
-    parents.dedup();
-    let threads = scan::scan_threads(&Config::default(), &parents);
-    measure_with_threads(found, cancel, threads, on_measured)
+    measure_with_threads(
+        found,
+        cancel,
+        scan::size_threads(&Config::default()),
+        on_measured,
+    )
 }
 
 /// @name measure_with_threads
-/// @description Like `measure_with`, on at most `threads` threads, so a frontend can pass the
-/// count from `scan::size_threads` or `scan::scan_threads` for its configuration.
+/// @description Like `measure_with`, on one shared pool of at most `threads` threads, so a
+/// frontend can pass `scan::size_threads` for its configuration.
 ///
 /// @example
-/// let entries = toolchains::measure_with_threads(found, &cancel, 4, |_| {});
+/// let entries = toolchains::measure_with_threads(found, &cancel, scan::size_threads(&config), |_| {});
 pub fn measure_with_threads(
     found: Vec<Toolchain>,
     cancel: &Cancel,
     threads: usize,
     on_measured: impl Fn(&Candidate) + Sync,
 ) -> Vec<(Toolchain, Candidate)> {
-    let on_measured = &on_measured;
-    let workers = threads.clamp(1, found.len().max(1));
-    let queue = Mutex::new(found.into_iter().enumerate().collect::<Vec<_>>());
-    let done = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let next = queue.lock().unwrap_or_else(PoisonError::into_inner).pop();
-                    let Some((index, toolchain)) = next else {
-                        break;
-                    };
-                    let measured = scan::measure(&toolchain.path, cancel);
-                    let candidate = Candidate {
-                        id: index as u64 + 1,
-                        path: toolchain.path.clone(),
-                        kind: Kind::Dir,
-                        rule: Arc::new(toolchain.rule()),
-                        project: None,
-                        usage: measured.usage,
-                        newest: measured.newest,
-                        identity: measured.identity,
-                        project_last_active: None,
-                    };
-                    on_measured(&candidate);
-                    done.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push((toolchain, candidate));
-                }
-            });
-        }
-    });
-    let mut entries = done.into_inner().unwrap_or_else(PoisonError::into_inner);
-    entries.sort_by(|(a, x), (b, y)| {
-        y.usage
-            .allocated
-            .cmp(&x.usage.allocated)
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    entries
+    let items = found
+        .into_iter()
+        .enumerate()
+        .map(|(index, toolchain)| {
+            let candidate = Candidate {
+                id: index as u64 + 1,
+                path: toolchain.path.clone(),
+                kind: Kind::Dir,
+                rule: Arc::new(toolchain.rule()),
+                project: None,
+                usage: Usage::default(),
+                newest: None,
+                identity: None,
+                project_last_active: None,
+            };
+            (toolchain, candidate)
+        })
+        .collect();
+    scan::measure_candidates(items, cancel, threads, on_measured)
 }
 
 /// @name roots
@@ -520,13 +540,7 @@ pub fn measure_with_threads(
 /// @example
 /// let guard = Guard::new(&toolchains::roots(&selected));
 pub fn roots(candidates: &[Candidate]) -> Vec<PathBuf> {
-    let mut parents: Vec<PathBuf> = candidates
-        .iter()
-        .filter_map(|candidate| candidate.path.parent().map(Path::to_path_buf))
-        .collect();
-    parents.sort();
-    parents.dedup();
-    parents
+    crate::caches::guard_roots(candidates)
 }
 
 fn uninstall(program: &str, tool: Tool, version: &str) -> Result<(), DeleteError> {
@@ -578,10 +592,7 @@ pub fn remove(guard: &Guard, candidate: &Candidate, mode: Mode) -> Result<(), De
     } else {
         guard
     };
-    let mode = match mode {
-        Mode::DryRun => Mode::DryRun,
-        Mode::Trash | Mode::Permanent => Mode::Permanent,
-    };
+    let mode = Source::Toolchain.mode(mode);
     match tool.uninstaller() {
         Some(program) => {
             guard.check(&target.path, target.identity)?;
@@ -796,5 +807,38 @@ mod tests {
         measured.sort();
         assert_eq!(total, 3);
         assert_eq!(seen, measured);
+    }
+
+    #[test]
+    fn a_pin_found_after_sizing_makes_the_version_a_review_item() {
+        let tmp = home();
+        let found = find(&Locations::under(tmp.path()), &[Tool::Rustup]);
+        let mut entries = measure(found);
+        let pinned = |entries: &[(Toolchain, Candidate)]| {
+            entries
+                .iter()
+                .find(|(toolchain, _)| toolchain.version.starts_with("1.80.0"))
+                .map(|(toolchain, candidate)| (toolchain.safety(), candidate.rule.safety))
+        };
+        assert_eq!(pinned(&entries), Some((Safety::Safe, Safety::Safe)));
+        apply_pins_measured(
+            &mut entries,
+            &[Pin {
+                runtime: "rust".to_owned(),
+                spec: "1.80.0".to_owned(),
+                file: tmp.path().join("apps/tool/rust-toolchain.toml"),
+            }],
+        );
+        assert_eq!(pinned(&entries), Some((Safety::Review, Safety::Review)));
+    }
+
+    #[test]
+    fn excluded_versions_are_not_listed() {
+        let tmp = home();
+        let pattern = tmp.path().join(".nvm").display().to_string();
+        let excludes = Excludes::new(&[pattern], &[]).expect("excludes");
+        let found = find_excluding(&Locations::under(tmp.path()), &Tool::ALL, &excludes);
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|toolchain| toolchain.tool != Tool::Nvm));
     }
 }

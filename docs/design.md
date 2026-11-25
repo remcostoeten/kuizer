@@ -1,6 +1,6 @@
 # kuizer design
 
-Status: CLI, Ratatui TUI and GPUI desktop app (`kuizer-gui`) are shipped on Linux and macOS: project artifacts, global caches, toolchains, Docker/Podman, git repositories, duplicates, `--idle`, HTML reports and dashboard, guarded deletion (permanent by default, opt-in trash), deletion history with ids, and `restore`. Still open from this spec: `--json-lines`, `big`, policies, `--rule`/`--project`/`--exclude` filters and filters on non-project sources, `cache`/`toolchain`/`docker` `clean` subcommands, a JSON schema file, exclusion from the UI, and the caches/duplicates/issues views in the TUI.
+Status: CLI, Ratatui TUI and GPUI desktop app (`kuizer-gui`) are shipped on Linux and macOS: project artifacts, global caches, toolchains, Docker/Podman, git repositories, duplicates, `--idle`, HTML reports and dashboard, guarded deletion (permanent by default, opt-in trash), deletion history with ids, and `restore`. Still open from this spec: `big`, policies, `--idle` on non-project sources, `cache`/`toolchain`/`docker` `clean` subcommands, a JSON schema file, exclusion from the UI, and the toolchain, Docker and git views in the TUI.
 
 ## 1. Product specification
 
@@ -54,7 +54,7 @@ Non-goals for 1.0: a daemon, cloud storage, Windows-specific caches before the p
 | `output` | text table and the versioned JSON report | scanning |
 | `commands` | one function per CLI command, wiring the above | rendering details |
 | `tui` (phase 2) | Ratatui app state, key handling, rendering | filesystem calls; it reads `scan::Event` and calls `delete` |
-| `delete` (phase 4) | revalidation, trash or unlink, per-item results | detection |
+| `delete` (phase 4) | revalidation, trash or unlink, the shared executor (per-item results, history, nested paths never at once), when to ask before deleting | detection, prompts and rendering |
 | `dupes` (phase 5) | size grouping, partial and full BLAKE3 hashing, byte compare | artifact rules |
 | `repos` | git repositories noted during the walk, `count-objects` estimates, merged branches, busy checks, `git gc` and branch deletion with revalidation | artifact rules, the trash |
 
@@ -87,7 +87,8 @@ kuizer/
 │  ├─ main.rs            exit codes, top-level error print
 │  ├─ lib.rs
 │  ├─ cli.rs             clap definitions
-│  ├─ units.rs           ByteSize parse and display
+│  ├─ units.rs           ByteSize parse and display, shared item ages
+│  ├─ source.rs          removal sources and which of them can go to the trash
 │  ├─ commands/          scan, config, rules (clean, duplicates, cache later)
 │  ├─ config/            schema, defaults, exclusions
 │  ├─ detect/            rule types, built-ins, detector
@@ -109,7 +110,7 @@ It stays one crate until compile times or reuse justify a workspace split (`kuiz
 
 | Crate | Use | Decision |
 | --- | --- | --- |
-| `clap` 4 (derive) | CLI parsing, help, completions later | Adopted. Standard, well maintained. |
+| `clap` 4 (derive) | CLI parsing, help | Adopted. Standard, well maintained. `clap_complete` and `clap_mangen` print completions and man pages from the hidden `kuizer generate` command, so no build script is needed. |
 | `serde`, `toml`, `serde_json` | config and JSON output | Adopted. |
 | `globset` | exclusion globs and rule patterns | Adopted. From ripgrep, compiles many globs into one matcher. |
 | `crossbeam-channel` | bounded MPMC channels, `recv_timeout` | Adopted. `std::sync::mpsc` lacks multi-consumer receivers for the sizing pool. |
@@ -160,6 +161,7 @@ File: `~/.config/kuizer/config.toml` (`kuizer config path`). Every key is option
 | `appearance.theme` | `dark` | `dark` or `light` color theme in the GUI |
 | `appearance.accent` | `purple` | `purple`, `blue`, `teal` or `pink`: the color of the selection, the focus outline and the bars in the GUI |
 | `appearance.density` | `comfortable` | `comfortable` or `compact`: `compact` uses shorter list rows and less vertical padding |
+| `appearance.zoom` | `100` | GUI interface size in percent, 50 to 200, rounded to steps of ten. The zoom shortcuts change it and save it here |
 | `route_shortcuts.enabled` | `true` | Whether `Shift+1` to `Shift+9` switch GUI sidebar sections |
 | `route_shortcuts.hints` | `true` | Whether key badges appear in the GUI sidebar and section tooltips |
 | `toolchains.tools` | `["rustup", "nvm", "fnm", "volta", "pyenv", "uv", "sdkman", "go"]` | Toolchain managers to inspect |
@@ -246,11 +248,11 @@ kuizer config show | path | init | check
 
 FILTERS
     --category NAME                      repeatable: dependencies, build, cache, temp
-    --rule NAME                          repeatable (planned)
+    --rule NAME                          repeatable, a name --select takes
     --min-size SIZE                      10MB, 1.5GiB
     --idle DURATION                      30d, 2w, 6mo, 1y; `--older-than` is an alias
-    --project GLOB                       repeatable, matched on the project path (planned)
-    --exclude GLOB                       repeatable, added to scan.exclude (planned)
+    --project GLOB                       repeatable, matched on the project path or a folder above it
+    --exclude GLOB                       repeatable, added to scan.exclude
 
 REMOVAL
     --select safe|all|RULE               repeatable, default safe
@@ -261,6 +263,8 @@ REMOVAL
 ### 6.1 Filters and selection
 
 Filters decide which items are listed; `--select` decides which listed items are removed. `scan` and `clean` take the same filters, so `kuizer scan X` lists exactly what `kuizer clean X` considers. `scan --safe-only` stays as a hidden alias for `--select safe` applied as a filter. Within one flag, repeated values are a union; across flags, an intersection.
+
+Flags narrow the config and never widen it. `--project` and `--exclude` globs use the `scan.exclude` syntax: a pattern with a `/` matches a whole path, one without matches a folder name, and `~` is the home directory. An item without a project, such as a global cache, never matches `--project`. Project activity for `--idle` and toolchain pins are still gathered without the `--exclude` globs, so excluding a folder cannot make a project look idle or a pinned version look unused. `cache`, `toolchain` and `docker` take `--category`, `--min-size`, `--rule`, `--project` and `--exclude` before or after `clean`; `--idle` is not available on them yet.
 
 ### 6.2 Sources
 
@@ -312,16 +316,19 @@ Scripts migrating from version 1 can read `candidates` in place of `caches`, `to
 }
 ```
 
-Fields are only added within a schema version; renames or removals bump it. `--json-lines` prints one candidate per line as it is found, then one summary line with `"type": "summary"`.
+Fields are only added within a schema version; renames or removals bump it. `--json-lines` prints one candidate per line as it is found, with `"type": "candidate"` and the fields of a report row, then one summary line with `"type": "summary"` and every other field of the report. It works on `scan` and the `cache`, `toolchain` and `docker` listings; a removal asks for `--json`. With `--idle`, `--sort idle` or `--limit` a scan prints its lines once it finishes, in sort order.
 
 ## 7. TUI interaction model
 
 The TUI shows project artifacts, scan progress, the focused item's details, and selection totals. It draws on input or at most every 50 ms while scanning. A worker streams results and the UI processes a bounded number of events per frame.
 
+Four views sit on `1` to `4`: artifacts, caches, duplicates and issues. Caches are measured and duplicates searched the first time their view opens, on their own threads: each cache appears once it is sized, and duplicates appear when the search finishes, with its progress in the header. Artifacts and caches are lists you select from and delete; each keeps its own selection and cursor, and a delete removes only what the open view selected. Caches are revalidated against their parent folders, as `kuizer cache clean` does. Duplicates and issues are reports: selection and deletion keys say so and do nothing, and `/` searches their paths.
+
 The GUI and TUI read configured shortcuts from the same `[keys]` table. The TUI help overlay shows the effective bindings. These are the TUI defaults.
 
 | Key | Action |
 | --- | --- |
+| `1`, `2`, `3`, `4` | Switch view: artifacts, caches, duplicates, issues |
 | `j`, `k`, up, down | Move one row |
 | `g`, `G`, Home, End | Jump to the first or last row |
 | `J`, `K`, Shift+Up, Shift+Down | Move and extend selection |

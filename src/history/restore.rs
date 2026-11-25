@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{Action, Entry, History, HistoryError, Run, TrashRecord};
+use super::{Action, Entry, History, HistoryError, Restored, Run, TrashRecord, TrashView};
 use crate::delete::Mode;
 use crate::output;
 
@@ -70,6 +70,25 @@ impl Restore {
         }
         super::record(Run::restore(super::now(), self.put_back.clone()))
     }
+
+    /// @name Restore::record_into
+    /// @description Records the restore like `record` and adds the same run to `history` in
+    /// memory, so a frontend can show the result without reading the history file again.
+    ///
+    /// @example
+    /// let restore = restore::restore_listed(&history, &targets, false, &mut view);
+    /// restore.record_into(&mut history)?;
+    pub fn record_into(&self, history: &mut History) -> Result<(), HistoryError> {
+        if self.put_back.is_empty() {
+            return Ok(());
+        }
+        let mut run = Run::restore(super::now(), self.put_back.clone());
+        run.id = super::record_session(run.clone())?;
+        history.next_session = history.next_session.max(run.id + 1);
+        history.runs.push(run);
+        history.recompute();
+        Ok(())
+    }
 }
 
 #[cfg(any(
@@ -81,7 +100,7 @@ impl Restore {
         not(target_os = "android")
     )
 ))]
-mod backend {
+pub(super) mod backend {
     use super::RestoreError;
 
     pub fn list() -> Result<Vec<trash::TrashItem>, RestoreError> {
@@ -102,7 +121,7 @@ mod backend {
         not(target_os = "android")
     )
 )))]
-mod backend {
+pub(super) mod backend {
     use super::RestoreError;
 
     pub fn list() -> Result<Vec<trash::TrashItem>, RestoreError> {
@@ -119,8 +138,8 @@ mod backend {
 /// returns those items, which is what `kuizer restore --last` brings back.
 ///
 /// @example
-/// let targets = restore::latest_run(&history, &restored).unwrap_or_default();
-pub fn latest_run(history: &History, restored: &HashSet<String>) -> Option<Vec<(usize, usize)>> {
+/// let targets = restore::latest_run(&history, &Restored::of(&history)).unwrap_or_default();
+pub fn latest_run(history: &History, restored: &Restored) -> Option<Vec<(usize, usize)>> {
     history
         .runs
         .iter()
@@ -130,24 +149,20 @@ pub fn latest_run(history: &History, restored: &HashSet<String>) -> Option<Vec<(
         .map(|(run_index, run)| {
             (0..run.deleted.len())
                 .filter(|&entry| run.deleted[entry].mode == Mode::Trash)
-                .filter(|&entry| !restored.contains(&history.item_id(run_index, entry)))
+                .filter(|&entry| !restored.contains((run_index, entry)))
                 .map(|entry| (run_index, entry))
                 .collect::<Vec<_>>()
         })
         .find(|targets| !targets.is_empty())
 }
 
-fn precheck(
-    history: &History,
-    restored: &HashSet<String>,
-    target: (usize, usize),
-) -> Option<String> {
+fn precheck(history: &History, restored: &Restored, target: (usize, usize)) -> Option<String> {
     let (run, entry) = target;
     let item = &history.runs[run].deleted[entry];
     if history.runs[run].action == Action::Restore {
         return Some("is a restore, not a deletion".to_owned());
     }
-    if restored.contains(&history.item_id(run, entry)) {
+    if restored.contains(target) {
         return Some("was already restored".to_owned());
     }
     match item.mode {
@@ -185,11 +200,7 @@ pub fn restore_with(
     trash: &[TrashRecord],
     mut put: impl FnMut(usize) -> Result<(), String>,
 ) -> Restore {
-    let restored: HashSet<String> = history
-        .restored_ids()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let restored = Restored::of(history);
     let reasons: Vec<Option<String>> = targets
         .iter()
         .map(|&target| precheck(history, &restored, target))
@@ -252,14 +263,38 @@ pub fn restore(
     targets: &[(usize, usize)],
     dry_run: bool,
 ) -> Result<Restore, RestoreError> {
-    let items = backend::list()?;
-    let records: Vec<TrashRecord> = items
-        .iter()
-        .map(|item| TrashRecord::new(item.original_path(), item.time_deleted))
-        .collect();
-    Ok(restore_with(history, targets, dry_run, &records, |index| {
-        backend::restore(items[index].clone())
-    }))
+    Ok(restore_listed(
+        history,
+        targets,
+        dry_run,
+        &mut TrashView::list()?,
+    ))
+}
+
+/// @name restore_listed
+/// @description Restores like `restore` from a trash listing the caller already holds, and drops
+/// every item it put back from that listing, so the same view answers what is still in the trash
+/// afterwards without listing the trash again.
+///
+/// @example
+/// let mut view = TrashView::list()?;
+/// let restore = restore::restore_listed(&history, &targets, false, &mut view);
+/// let trash = view.snapshot(&history);
+pub fn restore_listed(
+    history: &History,
+    targets: &[(usize, usize)],
+    dry_run: bool,
+    trash: &mut TrashView,
+) -> Restore {
+    let mut taken = HashSet::new();
+    let items = &trash.items;
+    let restore = restore_with(history, targets, dry_run, &trash.records, |index| {
+        backend::restore(items[index].clone())?;
+        taken.insert(index);
+        Ok(())
+    });
+    trash.forget(&taken);
+    restore
 }
 
 #[cfg(test)]
@@ -438,8 +473,14 @@ mod tests {
             Run::new(now(), &[], vec![entry(&path, Mode::Trash)]),
             Run::new(now(), &[], vec![entry(&path, Mode::Permanent)]),
         ]);
-        assert_eq!(latest_run(&history, &HashSet::new()), Some(vec![(0, 0)]));
-        let restored = HashSet::from(["s1.1".to_owned()]);
-        assert_eq!(latest_run(&history, &restored), None);
+        assert_eq!(
+            latest_run(&history, &Restored::default()),
+            Some(vec![(0, 0)])
+        );
+        let mut restored = history.clone();
+        let back = Entry::restored(&restored.runs[0].deleted[0], "s1.1".to_owned());
+        restored.runs.push(Run::restore(now(), vec![back]));
+        restored.runs[2].id = 3;
+        assert_eq!(latest_run(&restored, &Restored::of(&restored)), None);
     }
 }

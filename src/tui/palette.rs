@@ -12,6 +12,7 @@ pub const ON_FILL: Color = Color::Black;
 pub const SEARCH_FILL: Color = Color::White;
 pub const KEY_FG: Color = Color::White;
 pub const KEY_BG: Color = Color::Indexed(238);
+pub const ACCENT: Color = Color::Indexed(99);
 
 pub fn category(category: Category) -> Color {
     match category {

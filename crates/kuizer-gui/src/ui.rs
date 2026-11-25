@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    Div, ElementId, FontFeatures, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled,
-    div, prelude::*, relative,
+    Animation, AnimationExt, AnyElement, Div, ElementId, FontFeatures, FontWeight, ParentElement,
+    Rgba, SharedString, Stateful, Styled, div, prelude::*, relative,
 };
 
 use crate::glossary::Term;
 use crate::icon::{self, Icon};
+use crate::motion;
 use crate::theme::{self, font, size, space, unit};
 use crate::tooltip::{self, Tip};
 
@@ -334,6 +335,28 @@ pub fn empty(text: impl Into<SharedString>) -> Div {
         .p(unit(space::GUTTER))
         .text_color(theme::faint())
         .child(text.into())
+}
+
+/// @name appear
+/// @description Fades `element` in over one motion step the first time it is drawn under `id`,
+/// and shows it at once when `appearance.motion` is off.
+///
+/// @example
+/// let state = appear("scan-failed", div().child("The scan failed"));
+pub fn appear(
+    id: impl Into<ElementId>,
+    element: impl Styled + IntoElement + 'static,
+) -> AnyElement {
+    if motion::reduced() {
+        return element.into_any_element();
+    }
+    element
+        .with_animation(
+            id,
+            Animation::new(motion::STEP).with_easing(motion::ease_out),
+            |element, progress| element.opacity(progress),
+        )
+        .into_any_element()
 }
 
 pub fn safety_label(id: impl Into<ElementId>, review: bool) -> Stateful<Div> {

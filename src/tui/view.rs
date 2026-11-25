@@ -6,16 +6,22 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, TableState,
 };
 
-use super::app::{App, ConfirmStats, Group, Grouping, Item, Overlay, Row, Status, project_of};
+use super::app::{
+    App, ConfirmStats, Group, Grouping, Item, Load, Overlay, Row, Spot, Status, Tab, project_of,
+};
 use super::palette::{
-    self, CURSOR, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL, SELECTED, WARNING,
+    self, ACCENT, CURSOR, FAINT, KEY_BG, KEY_FG, MUTED, ON_FILL, SAFE, SEARCH_FILL, SELECTED,
+    WARNING,
 };
 use crate::cli::SortKey;
 use crate::delete::Mode;
 use crate::detect::{Category, Safety};
+use crate::dupes::Stage;
 use crate::keymap::{Action, Scope};
 use crate::output::display_path;
-use crate::units::{ByteSize, age};
+use crate::scan::IssueKind;
+use crate::source::Source;
+use crate::units::{ByteSize, age, since};
 
 const BAR: u16 = 8;
 pub(super) const CURRENT_WIDTH: usize = 48;
@@ -67,6 +73,15 @@ fn explain(candidate: &crate::scan::Candidate) -> &'static str {
 
 fn filters(app: &App) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
+    if app.tab.source().is_none() {
+        if !app.filter.is_empty() {
+            spans.push(Span::styled(
+                format!(" \"{}\" ", app.filter),
+                Style::new().fg(ON_FILL).bg(SEARCH_FILL),
+            ));
+        }
+        return spans;
+    }
     if let Some(category) = app.category {
         spans.push(Span::styled(
             format!(" {} ", category.as_str()),
@@ -105,25 +120,19 @@ fn header(app: &App) -> Line<'static> {
         Some(summary) => format!("done in {:.1}s", summary.duration.as_secs_f64()),
         None => "scanning".to_owned(),
     };
-    let total = app.total_bytes();
     let mut spans = vec![
         Span::styled(" kuizer ", Style::new().add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
                 " {state}  {} dirs  {} files  {} issues ",
-                app.progress.dirs, app.progress.files, app.issues
+                app.progress.dirs,
+                app.progress.files,
+                app.issues.entries.len()
             ),
             Style::new().fg(MUTED),
         ),
-        Span::raw(format!(" {} found  {} ", app.items.len(), ByteSize(total))),
-        Span::styled(
-            format!(" sort {} ", sort_label(app.sort)),
-            Style::new().fg(MUTED),
-        ),
     ];
-    if app.grouping == Grouping::Project {
-        spans.push(Span::styled(" by project ", Style::new().fg(MUTED)));
-    }
+    spans.extend(summary(app));
     spans.extend(filters(app));
     spans.extend(disk(app));
     if app.finished.is_none()
@@ -133,6 +142,76 @@ fn header(app: &App) -> Line<'static> {
             format!(" in {} ", shorten(&display_path(folder), CURRENT_WIDTH)),
             Style::new().fg(MUTED),
         ));
+    }
+    Line::from(spans)
+}
+
+fn summary(app: &App) -> Vec<Span<'static>> {
+    match app.tab {
+        Tab::Artifacts | Tab::Caches => {
+            let mut spans = vec![
+                Span::raw(format!(
+                    " {} found  {} ",
+                    app.total_items(),
+                    ByteSize(app.total_bytes())
+                )),
+                Span::styled(
+                    format!(" sort {} ", sort_label(app.sort)),
+                    Style::new().fg(MUTED),
+                ),
+            ];
+            if app.tab == Tab::Artifacts && app.grouping == Grouping::Project {
+                spans.push(Span::styled(" by project ", Style::new().fg(MUTED)));
+            }
+            spans
+        }
+        Tab::Duplicates if app.duplicates.load == Load::Done => {
+            let found = &app.duplicates.found;
+            vec![Span::raw(format!(
+                " {} groups  {} reclaimable ",
+                found.groups.len(),
+                ByteSize(found.reclaimable())
+            ))]
+        }
+        Tab::Duplicates => vec![Span::styled(
+            format!(" {} ", duplicate_stage(app.duplicates.stage)),
+            Style::new().fg(MUTED),
+        )],
+        Tab::Issues => vec![Span::raw(format!(
+            " {} unreadable or skipped ",
+            app.issues.entries.len()
+        ))],
+    }
+}
+
+fn duplicate_stage(stage: Option<Stage>) -> String {
+    match stage {
+        None => "looking for duplicates".to_owned(),
+        Some(Stage::Walking { files }) => format!("walking {files} files"),
+        Some(Stage::Hashing { files }) => format!("hashing {files} files"),
+        Some(Stage::Verifying { groups }) => format!("comparing bytes in {groups} groups"),
+    }
+}
+
+fn tabs(app: &App) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for tab in Tab::ALL {
+        let key = app.keymap.keys(Scope::Tui, tab.action()).next();
+        let count = match tab {
+            Tab::Issues if !app.issues.entries.is_empty() => {
+                format!(" {}", app.issues.entries.len())
+            }
+            _ => String::new(),
+        };
+        let style = if tab == app.tab {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(MUTED)
+        };
+        if let Some(key) = key {
+            spans.push(key_chip(key));
+        }
+        spans.push(Span::styled(format!(" {}{count}  ", tab.label()), style));
     }
     Line::from(spans)
 }
@@ -221,7 +300,92 @@ fn item_row(item: &Item, largest: u64, path_width: usize) -> TableRow<'static> {
     .style(style)
 }
 
+fn window(cursor: usize, rows: usize, height: usize) -> (usize, usize) {
+    let start = (cursor + 1).saturating_sub(height.max(1));
+    (start, (start + height).min(rows))
+}
+
+fn report_table(frame: &mut Frame, rows: Vec<TableRow<'static>>, cursor: usize, area: Rect) {
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(16),
+            Constraint::Fill(1),
+        ],
+    )
+    .row_highlight_style(Style::new().bg(CURSOR))
+    .column_spacing(1);
+    let mut state = TableState::default().with_selected(Some(cursor));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn duplicates_table(frame: &mut Frame, app: &App, area: Rect) {
+    let list = &app.duplicates;
+    let height = usize::from(area.height);
+    let path_width = usize::from(area.width.saturating_sub(10 + 16 + 2));
+    let (start, stop) = window(list.cursor, list.rows.len(), height);
+    let rows = list.rows[start.min(stop)..stop]
+        .iter()
+        .map(|spot| match *spot {
+            Spot::Group(group) => {
+                let group = &list.found.groups[group];
+                TableRow::new(vec![
+                    Cell::from(format!("{:>10}", ByteSize(group.size).to_string())),
+                    Cell::from(format!("{} copies", group.members.len())),
+                    Cell::from(format!("{} reclaimable", ByteSize(group.reclaimable()))),
+                ])
+                .style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD))
+            }
+            Spot::Member(group, member) => {
+                let member = &list.found.groups[group].members[member];
+                TableRow::new(vec![
+                    Cell::from(""),
+                    Cell::from(age(member.modified)).style(Style::new().fg(MUTED)),
+                    Cell::from(shorten(&display_path(&member.path), path_width)),
+                ])
+            }
+        })
+        .collect();
+    report_table(frame, rows, list.cursor - start, area);
+}
+
+fn issue_label(kind: IssueKind) -> &'static str {
+    match kind {
+        IssueKind::PermissionDenied => "permission denied",
+        IssueKind::Vanished => "vanished",
+        IssueKind::Io => "read error",
+        IssueKind::SkippedMount => "skipped mount",
+        IssueKind::InvalidRoot => "invalid root",
+        IssueKind::Protected => "protected",
+    }
+}
+
+fn issues_table(frame: &mut Frame, app: &App, area: Rect) {
+    let list = &app.issues;
+    let height = usize::from(area.height);
+    let path_width = usize::from(area.width.saturating_sub(10 + 16 + 2));
+    let (start, stop) = window(list.cursor, list.rows.len(), height);
+    let rows = list.rows[start.min(stop)..stop]
+        .iter()
+        .map(|&index| {
+            let issue = &list.entries[index];
+            TableRow::new(vec![
+                Cell::from(""),
+                Cell::from(issue_label(issue.kind)).style(Style::new().fg(WARNING)),
+                Cell::from(shorten(&display_path(&issue.path), path_width)),
+            ])
+        })
+        .collect();
+    report_table(frame, rows, list.cursor - start, area);
+}
+
 fn table(frame: &mut Frame, app: &App, area: Rect) {
+    match app.tab {
+        Tab::Duplicates => return duplicates_table(frame, app, area),
+        Tab::Issues => return issues_table(frame, app, area),
+        Tab::Artifacts | Tab::Caches => {}
+    }
     let path_width = usize::from(area.width.saturating_sub(FIXED_COLUMNS + 8));
     let height = usize::from(area.height.saturating_sub(1));
     let cursor_row = app.view_row.get(app.cursor).copied();
@@ -266,15 +430,92 @@ fn table(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+fn muted(text: impl Into<String>) -> Line<'static> {
+    Line::styled(format!(" {}", text.into()), Style::new().fg(MUTED))
+}
+
+fn empty_text(app: &App) -> String {
+    match app.tab {
+        Tab::Artifacts if app.finished.is_some() => "Nothing found.".to_owned(),
+        Tab::Artifacts => "Scanning, results appear as they are found.".to_owned(),
+        Tab::Caches => match (&app.cache_problem, app.caches) {
+            (Some(problem), _) => problem.clone(),
+            (None, Load::Done) => "No global tool caches found.".to_owned(),
+            (None, _) => "Measuring global tool caches, they appear as they are sized.".to_owned(),
+        },
+        Tab::Duplicates => match (&app.duplicates.problem, app.duplicates.load) {
+            (Some(problem), _) => problem.clone(),
+            (None, Load::Done) => "No duplicate files found.".to_owned(),
+            (None, _) => format!(
+                "{}, results appear when done.",
+                duplicate_stage(app.duplicates.stage)
+            ),
+        },
+        Tab::Issues if app.finished.is_some() => "Every folder was read.".to_owned(),
+        Tab::Issues => "Scanning, unreadable folders appear here.".to_owned(),
+    }
+}
+
+fn duplicate_detail(app: &App) -> Option<Vec<Line<'static>>> {
+    let list = &app.duplicates;
+    let report = "Report only: kuizer lists duplicates and never deletes them.";
+    Some(match *list.rows.get(list.cursor)? {
+        Spot::Group(group) => {
+            let group = &list.found.groups[group];
+            let check = if group.verified {
+                "compared byte for byte"
+            } else {
+                "matched by content hash"
+            };
+            vec![
+                Line::raw(format!(
+                    " {} identical files of {}, {} reclaimable",
+                    group.members.len(),
+                    ByteSize(group.size),
+                    ByteSize(group.reclaimable())
+                )),
+                muted(format!("{check} · blake3 {}", group.hash)),
+                muted(report),
+            ]
+        }
+        Spot::Member(group, member) => {
+            let member = &list.found.groups[group].members[member];
+            let links = match member.links.len() {
+                0 => String::new(),
+                count => format!(" · {count} hard links"),
+            };
+            vec![
+                Line::raw(format!(" {}", display_path(&member.path))),
+                muted(format!("modified {}{links}", since(member.modified))),
+                muted(report),
+            ]
+        }
+    })
+}
+
+fn issue_detail(app: &App) -> Option<Vec<Line<'static>>> {
+    let list = &app.issues;
+    let issue = &list.entries[*list.rows.get(list.cursor)?];
+    Some(vec![
+        Line::raw(format!(" {}", display_path(&issue.path))),
+        Line::styled(
+            format!(" {}: {}", issue_label(issue.kind), issue.message),
+            Style::new().fg(WARNING),
+        ),
+        muted("Nothing below this path was counted."),
+    ])
+}
+
 fn detail(app: &App) -> Vec<Line<'static>> {
-    let Some(item) = app.current() else {
-        let text = if app.finished.is_some() {
-            "Nothing found."
-        } else {
-            "Scanning, results appear as they are found."
-        };
-        return vec![Line::styled(format!(" {text}"), Style::new().fg(MUTED))];
+    let shown = match app.tab {
+        Tab::Duplicates => duplicate_detail(app),
+        Tab::Issues => issue_detail(app),
+        Tab::Artifacts | Tab::Caches => app.current().map(|item| item_detail(app, item)),
     };
+    shown.unwrap_or_else(|| vec![muted(empty_text(app))])
+}
+
+fn item_detail(app: &App, item: &Item) -> Vec<Line<'static>> {
     let candidate = &item.candidate;
     let mut first = vec![Span::raw(format!(" {}", display_path(&candidate.path)))];
     if candidate.usage.partial {
@@ -282,6 +523,17 @@ fn detail(app: &App) -> Vec<Line<'static>> {
     }
     let second = match &item.status {
         Status::Failed(error) => format!(" failed: {error}"),
+        _ if item.source == Source::Cache => format!(
+            " {} · {} · {} entries{}",
+            candidate.rule.name,
+            candidate.rule.ecosystem,
+            candidate.usage.entries,
+            if item.note.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", item.note)
+            },
+        ),
         _ => format!(
             " {} · {} · {} entries · project {}",
             candidate.rule.name,
@@ -392,6 +644,9 @@ fn footer(app: &App) -> Line<'static> {
         ));
         return Line::from(spans);
     }
+    if app.tab.source().is_none() {
+        return report_footer(app);
+    }
     let selected = app.selected_count();
     let mut spans = vec![mode_chip(app), Span::raw(" ")];
     let review = app.selected_review();
@@ -455,6 +710,31 @@ fn footer(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+fn report_footer(app: &App) -> Line<'static> {
+    let mut spans = vec![mode_chip(app), Span::raw(" ")];
+    if let Some(message) = &app.message {
+        spans.push(Span::raw(format!(" {message}  ")));
+    }
+    spans.extend(key_hints(
+        app,
+        Scope::Tui,
+        &[
+            (Action::Down, "move"),
+            (Action::FilterFocus, "search"),
+            (Action::Help, "help"),
+            (Action::Quit, "quit"),
+        ],
+    ));
+    if !app.filter.is_empty() {
+        spans.extend(key_hints(
+            app,
+            Scope::Tui,
+            &[(Action::Back, "clear search")],
+        ));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn cells(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
@@ -472,7 +752,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::delete::Mode) {
     const DIRTY_SHOWN: usize = 3;
-    let checking_lines = usize::from(stats.checking > 0 || app.changes_unknown());
+    let checking_lines = usize::from(stats.checking > 0 || stats.unknown);
     let dirty_lines = stats.dirty.len().min(DIRTY_SHOWN + 1);
     let area = centered(
         frame.area(),
@@ -545,7 +825,7 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
             Style::new().fg(WARNING),
         ));
     }
-    if app.changes_unknown() {
+    if stats.unknown {
         lines.push(Line::styled(
             "  Could not check these projects for uncommitted changes.",
             Style::new().fg(WARNING),
@@ -572,7 +852,16 @@ fn confirm(frame: &mut Frame, app: &App, stats: &ConfirmStats, mode: crate::dele
 
 fn help(frame: &mut Frame, app: &App) {
     use Action::*;
-    const SECTIONS: [HelpSection; 4] = [
+    const SECTIONS: [HelpSection; 5] = [
+        (
+            "Views",
+            &[
+                (&[Artifacts], "project artifacts"),
+                (&[Caches], "global tool caches"),
+                (&[Duplicates], "duplicate files, report only"),
+                (&[Issues], "folders that could not be read"),
+            ],
+        ),
         (
             "Navigate",
             &[
@@ -685,7 +974,8 @@ fn help(frame: &mut Frame, app: &App) {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let [top, main, info, bottom] = Layout::vertical([
+    let [top, bar, main, info, bottom] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(3),
@@ -693,6 +983,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(frame.area());
     frame.render_widget(Paragraph::new(header(app)), top);
+    frame.render_widget(Paragraph::new(tabs(app)), bar);
     table(frame, app, main);
     frame.render_widget(Paragraph::new(detail(app)), info);
     frame.render_widget(Paragraph::new(footer(app)), bottom);

@@ -31,9 +31,10 @@ Build each in `src/` with tests, then switch all three frontends over.
 - Move `SortKey`, `sort_candidates`, a `Filter`/`Query` type with narrowing, and the shift-range `Span` into a core module (new file under `src/scan`). `model.rs:10` currently imports `kuizer::cli::SortKey`.
 - TUI `App::matches` (`tui/app.rs:187-200`) and the GUI per-source matchers in `lists.rs` and `keys.rs` then share one matcher. The GUI `refresh_rows` and `extend` duplicate TUI logic.
 
-### 4. Bounded measuring pool (P1-01 follow-up, P2-07, P3-05)
-- `commands::cache::measure_with`, `toolchains::measure_with` and `repos.rs:426,435` each spawn one thread per item and call the serial `scan::measure`. Switch all to `scan::measure_many` behind one helper with a thread budget; the GUI reaches the same code through `measure_caches_with`.
-- Pass `config.excludes()` to `caches::find_excluding` and `toolchains::find` from the CLI dashboard and the GUI, and remove the GUI-only filters in `measure_caches` and `measure_toolchains`.
+### 4. Bounded measuring pool (P1-01 follow-up, P2-07, P3-05): done
+- Caches and toolchains are sized through `scan::measure_candidates`, which runs `scan::measure_many` on one pool of `scan::size_threads` threads. `repos.rs` no longer measures per item; `collect_garbage` measures one git folder before and after.
+- The CLI cache, toolchain and dashboard commands and the GUI call `caches::find_excluding` and `toolchains::find_excluding`; the GUI-only filters are gone.
+- Also moved from the GUI into the core (#83): `caches::guard_roots`, `toolchains::apply_pins_measured`, `units::age` and `units::since` for ages, and `source::Source` for which sources can go to the trash.
 
 ### 5. Protection lists in `protect.rs` (P1-07)
 - Move the `PROTECTED` prefixes (`guard.rs:7-32`), the anchors (`guard.rs:72-76`) and the mount refusal (`guard.rs:121-144`) behind `Protected`. Add `delete.protected` to config, the example file and the GUI settings view. Invalid entries are reported and skipped.
@@ -44,9 +45,8 @@ Build each in `src/` with tests, then switch all three frontends over.
 - `dupes::Files` stats through `entry.stat()` during the walk and keeps only files at or above `min_size`, dropping the post-walk `in_parallel` stat pass. `PinFinder::file` matches `entry.name` before building a path.
 
 ### 7. Trash and history types (P2-10, P2-12, P5-07)
-- `TrashSnapshot`/`TrashState` and a `Restored` type, replacing the re-derivation in GUI `model.rs`, `stats.rs`, `commands/history.rs`, `dashboard.rs` and `restore.rs`. Changes the signatures of `item_state`, `restorable`, `freed_bytes`, `latest_run` and `precheck`.
-- A `TrashView` and a restore variant that accepts an existing listing, so the GUI stops reloading history after clean and restore.
-- Compute `HistoryStats` in `HistoryView::load` on the history thread, not lazily in render (`stats.rs:400-410`).
+- Done: `Restored`, `TrashSnapshot`, `TrashState` and `TrashView` live in `src/history/state.rs`, `restore::restore_listed` restores from an existing listing, and the GUI computes `HistoryStats` in `HistoryView::new` on the history thread. A GUI restore lists the trash once and updates the history in memory.
+- Left: after a clean the GUI still calls `HistoryView::load()`. It can push the recorded run into the view once the delete executor hands back the run it recorded.
 
 ### 8. Build shape (P2-06)
 - Make `clap` and `ratatui` optional behind a default `cli` feature, mark the `kuizer` bin `required-features`, and set `default-features = false` in the GUI manifest. Needs `SortKey` and `sort_candidates` moved first (item 3).

@@ -33,7 +33,6 @@ use gpui::{
 use kuizer::config::Config;
 
 use crate::app::Kuizer;
-use crate::zoom::Zoom;
 
 const BUNDLED_FONTS: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/SchibstedGrotesk-Regular.ttf"),
@@ -88,7 +87,7 @@ fn start_platform() -> Application {
 }
 
 fn main() -> ExitCode {
-    let (config, problem) = match Config::load(None) {
+    let (mut config, problem) = match Config::load(None) {
         Ok(loaded) => {
             for warning in &loaded.warnings {
                 eprintln!("kuizer-gui: config: {warning}");
@@ -103,6 +102,11 @@ fn main() -> ExitCode {
             )
         }
     };
+    zoom::migrate(
+        &mut config,
+        kuizer::config::default_path().as_deref(),
+        zoom::legacy_file().as_deref(),
+    );
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let roots = kuizer::scan::normalize_roots(&paths);
 
@@ -132,7 +136,6 @@ fn main() -> ExitCode {
                             roots,
                             start::Recent::for_user(),
                             snapshot::Snapshots::for_user(),
-                            Zoom::for_user(),
                             font,
                             window,
                             cx,

@@ -168,6 +168,68 @@ pub fn scan_report(
 }
 
 #[derive(Serialize)]
+struct Line<Row: Serialize> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(flatten)]
+    row: Row,
+}
+
+fn candidate_line<Row: Serialize>(row: Row) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&Line {
+        kind: "candidate",
+        row,
+    })
+}
+
+fn summary_line<Row: Serialize>(row: Row) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&Line {
+        kind: "summary",
+        row,
+    })
+}
+
+/// @name scan_line
+/// @description Serializes one project candidate as a single `--json-lines` line with
+/// `"type": "candidate"` and the fields of a `scan` report row.
+///
+/// @example
+/// println!("{}", output::scan_line(&candidate)?);
+pub fn scan_line(candidate: &Candidate) -> Result<String, serde_json::Error> {
+    candidate_line(CandidateJson::new(Source::Projects, candidate))
+}
+
+#[derive(Serialize)]
+struct ScanSummary<'a> {
+    schema_version: u32,
+    command: &'static str,
+    #[serde(serialize_with = "lossy_paths")]
+    roots: &'a [PathBuf],
+    issues: Vec<IssueJson<'a>>,
+    summary: &'a Summary,
+}
+
+/// @name scan_summary_line
+/// @description Serializes the closing `--json-lines` line of a scan: `"type": "summary"` with
+/// every `scan` report field except `candidates`.
+///
+/// @example
+/// println!("{}", output::scan_summary_line(&roots, &issues, &summary)?);
+pub fn scan_summary_line(
+    roots: &[PathBuf],
+    issues: &[Issue],
+    summary: &Summary,
+) -> Result<String, serde_json::Error> {
+    summary_line(ScanSummary {
+        schema_version: SCHEMA_VERSION,
+        command: "scan",
+        roots,
+        issues: issues_json(issues),
+        summary,
+    })
+}
+
+#[derive(Serialize)]
 struct RemovalJson<'a> {
     #[serde(flatten)]
     candidate: CandidateJson<'a>,
@@ -351,9 +413,16 @@ struct ListingSummary {
 struct ListingReport<'a, Details: Serialize> {
     schema_version: u32,
     command: &'static str,
-    candidates: Vec<CandidateDetails<'a, Details>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidates: Option<Vec<CandidateDetails<'a, Details>>>,
     issues: Vec<IssueJson<'a>>,
     summary: ListingSummary,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Document,
+    Lines,
 }
 
 fn listing_report<'a, Item, Details: Serialize>(
@@ -361,13 +430,14 @@ fn listing_report<'a, Item, Details: Serialize>(
     entries: &'a [(Item, Candidate)],
     issues: Vec<IssueJson<'a>>,
     details: impl Fn(&'a Item) -> Details,
+    shape: Shape,
 ) -> Result<String, serde_json::Error> {
     let mut summary = ListingSummary {
         items: entries.len(),
         bytes: 0,
         safe_bytes: 0,
     };
-    let candidates = entries
+    let candidates: Vec<CandidateDetails<'a, Details>> = entries
         .iter()
         .map(|(item, candidate)| {
             summary.bytes += candidate.usage.allocated;
@@ -380,14 +450,23 @@ fn listing_report<'a, Item, Details: Serialize>(
             }
         })
         .collect();
-    let report = ListingReport {
+    let mut report = ListingReport {
         schema_version: SCHEMA_VERSION,
         command: source.command(),
-        candidates,
+        candidates: None,
         issues,
         summary,
     };
-    serde_json::to_string_pretty(&report)
+    if shape == Shape::Document {
+        report.candidates = Some(candidates);
+        return serde_json::to_string_pretty(&report);
+    }
+    let mut lines = candidates
+        .into_iter()
+        .map(candidate_line)
+        .collect::<Result<Vec<_>, _>>()?;
+    lines.push(summary_line(report)?);
+    Ok(lines.join("\n"))
 }
 
 #[derive(Serialize)]
@@ -403,11 +482,31 @@ struct CacheJson {
 /// @example
 /// let report = cache_report(&entries)?;
 pub fn cache_report(entries: &[(KnownCache, Candidate)]) -> Result<String, serde_json::Error> {
-    listing_report(Source::Cache, entries, Vec::new(), |cache| CacheJson {
+    listing_report(
+        Source::Cache,
+        entries,
+        Vec::new(),
+        cache_json,
+        Shape::Document,
+    )
+}
+
+/// @name cache_lines
+/// @description Serializes global cache candidates as `--json-lines`: one candidate per line,
+/// then a summary line.
+///
+/// @example
+/// println!("{}", output::cache_lines(&entries)?);
+pub fn cache_lines(entries: &[(KnownCache, Candidate)]) -> Result<String, serde_json::Error> {
+    listing_report(Source::Cache, entries, Vec::new(), cache_json, Shape::Lines)
+}
+
+fn cache_json(cache: &KnownCache) -> CacheJson {
+    CacheJson {
         name: cache.name,
         tool: cache.tool,
         note: (!cache.note.is_empty()).then_some(cache.note),
-    })
+    }
 }
 
 #[derive(Serialize)]
@@ -426,15 +525,39 @@ struct ToolchainJson<'a> {
 /// @example
 /// let report = toolchain_report(&entries)?;
 pub fn toolchain_report(entries: &[(Toolchain, Candidate)]) -> Result<String, serde_json::Error> {
-    listing_report(Source::Toolchain, entries, Vec::new(), |toolchain| {
-        ToolchainJson {
-            tool: toolchain.tool.name(),
-            runtime: &toolchain.runtime,
-            version: &toolchain.version,
-            default: toolchain.default,
-            pinned_by: &toolchain.pins,
-        }
-    })
+    listing_report(
+        Source::Toolchain,
+        entries,
+        Vec::new(),
+        toolchain_json,
+        Shape::Document,
+    )
+}
+
+/// @name toolchain_lines
+/// @description Serializes installed toolchains as `--json-lines`: one candidate per line, then
+/// a summary line.
+///
+/// @example
+/// println!("{}", output::toolchain_lines(&entries)?);
+pub fn toolchain_lines(entries: &[(Toolchain, Candidate)]) -> Result<String, serde_json::Error> {
+    listing_report(
+        Source::Toolchain,
+        entries,
+        Vec::new(),
+        toolchain_json,
+        Shape::Lines,
+    )
+}
+
+fn toolchain_json(toolchain: &Toolchain) -> ToolchainJson<'_> {
+    ToolchainJson {
+        tool: toolchain.tool.name(),
+        runtime: &toolchain.runtime,
+        version: &toolchain.version,
+        default: toolchain.default,
+        pinned_by: &toolchain.pins,
+    }
 }
 
 #[derive(Serialize)]
@@ -455,21 +578,53 @@ pub fn docker_report(
     entries: &[(Item, Candidate)],
     issues: &[String],
 ) -> Result<String, serde_json::Error> {
-    let issues = issues
+    listing_report(
+        Source::Docker,
+        entries,
+        docker_issues(issues),
+        docker_json,
+        Shape::Document,
+    )
+}
+
+/// @name docker_lines
+/// @description Serializes container engine candidates as `--json-lines`: one candidate per
+/// line, then a summary line that carries the engine failures as issues.
+///
+/// @example
+/// println!("{}", output::docker_lines(&entries, &listing.issues)?);
+pub fn docker_lines(
+    entries: &[(Item, Candidate)],
+    issues: &[String],
+) -> Result<String, serde_json::Error> {
+    listing_report(
+        Source::Docker,
+        entries,
+        docker_issues(issues),
+        docker_json,
+        Shape::Lines,
+    )
+}
+
+fn docker_issues(issues: &[String]) -> Vec<IssueJson<'_>> {
+    issues
         .iter()
         .map(|message| IssueJson {
             path: Path::new("docker"),
             kind: IssueKind::Io,
             message,
         })
-        .collect();
-    listing_report(Source::Docker, entries, issues, |item| DockerJson {
+        .collect()
+}
+
+fn docker_json(item: &Item) -> DockerJson<'_> {
+    DockerJson {
         engine: &item.engine,
         object: item.object,
         object_id: &item.id,
         name: &item.label,
         note: (!item.note.is_empty()).then_some(item.note.as_str()),
-    })
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -550,5 +705,33 @@ mod tests {
             removal_report("clean", Mode::Trash, &[odd], &[removal], &[issue]).expect("serializes");
         let value: serde_json::Value = serde_json::from_str(&text).expect("valid json");
         assert_eq!(value["items"][0]["path_lossy"], true);
+    }
+
+    #[test]
+    fn json_lines_keep_the_report_fields_one_object_per_line() {
+        let summary = Summary {
+            progress: Progress::default(),
+            duration: Duration::ZERO,
+            cancelled: false,
+        };
+        let found = candidate(PathBuf::from("/p/ok/node_modules"));
+        let document: serde_json::Value = serde_json::from_str(
+            &scan_report(&[], std::slice::from_ref(&found), &[], &summary).expect("serializes"),
+        )
+        .expect("valid json");
+        let mut line: serde_json::Value =
+            serde_json::from_str(&scan_line(&found).expect("serializes")).expect("valid json");
+        assert_eq!(line["type"], "candidate");
+        line.as_object_mut().expect("object").remove("type");
+        assert_eq!(line, document["candidates"][0]);
+
+        let closing: serde_json::Value =
+            serde_json::from_str(&scan_summary_line(&[], &[], &summary).expect("serializes"))
+                .expect("valid json");
+        let mut expected = document;
+        let report = expected.as_object_mut().expect("object");
+        report.remove("candidates");
+        report.insert("type".to_owned(), "summary".into());
+        assert_eq!(closing, expected);
     }
 }

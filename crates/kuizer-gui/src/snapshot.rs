@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use kuizer::caches;
+use kuizer::history::TrashSnapshot;
 use kuizer::snapshot::{self as core, SavedHistory};
 
 use crate::model::{Disk, HistoryView, Loaded, Report};
@@ -42,9 +43,9 @@ impl Recorder {
                 history
                     .as_ref()
                     .map(|view| SavedHistory {
-                        history: view.history.clone(),
-                        kept: view.kept.clone(),
-                        trash_known: view.trash_known,
+                        history: (*view.history).clone(),
+                        kept: view.trash.kept.clone(),
+                        trash_known: view.trash.known,
                     })
                     .map_err(Clone::clone),
             ),
@@ -63,10 +64,9 @@ pub fn load(snapshots: &Snapshots, roots: &[PathBuf], options: &ScanOptions) -> 
         .into_iter()
         .filter_map(|(name, path, candidate)| Some((caches::known(&name, path)?, candidate)))
         .collect();
-    let history = saved.history.map(|saved| HistoryView {
-        history: saved.history,
-        kept: saved.kept,
-        trash_known: saved.trash_known,
+    let history = saved.history.map(|saved| {
+        let trash = TrashSnapshot::new(&saved.history, saved.trash_known.then_some(saved.kept));
+        HistoryView::new(saved.history, trash)
     });
     let disks = saved
         .disks

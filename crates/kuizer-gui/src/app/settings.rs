@@ -1,16 +1,20 @@
 //! The settings popover: pages of switches that read and write the config file.
 
-use gpui::Keystroke;
-use kuizer::config::{Accent, Config, DeleteMode, Density, SettingValue, Sidebar, Theme};
+use gpui::{Keystroke, canvas};
+use kuizer::config::{
+    self, Accent, Config, DEFAULT_ZOOM, DeleteMode, Density, MAX_ZOOM, MIN_ZOOM, SettingValue,
+    Sidebar, Theme,
+};
 
 use super::*;
+use crate::zoom;
 
 #[derive(Default)]
 pub(super) struct SettingWrites {
     saved: Vec<(Setting, usize)>,
     queued: Vec<(Setting, usize)>,
     writing: bool,
-    writing_paths: bool,
+    field: Option<Field>,
 }
 
 impl SettingWrites {
@@ -51,15 +55,26 @@ pub(super) enum Setting {
     Density,
     Motion,
     SidebarCollapsed,
+    Zoom,
     RoutesEnabled,
     RouteHints,
     Trash,
     CrossDevice,
+    DuplicatesAuto,
+    DuplicatesVerify,
+    DuplicatesHidden,
+    GitAggressive,
+    ToolchainPins,
 }
 
 const THEMES: [&str; 2] = ["Dark", "Light"];
 const ACCENTS: [&str; 4] = ["Purple", "Blue", "Teal", "Pink"];
 const DENSITIES: [&str; 2] = ["Comfortable", "Compact"];
+const ZOOM_STEPS: usize = ((MAX_ZOOM - MIN_ZOOM) / zoom::STEP) as usize + 1;
+
+fn zoom_step(percent: u16) -> usize {
+    usize::from((zoom::snap(percent) - MIN_ZOOM) / zoom::STEP)
+}
 
 impl Setting {
     fn label(self) -> &'static str {
@@ -69,10 +84,16 @@ impl Setting {
             Self::Density => "Density",
             Self::Motion => "Motion",
             Self::SidebarCollapsed => "Open the sidebar collapsed",
+            Self::Zoom => "Interface size",
             Self::RoutesEnabled => "Section shortcuts",
             Self::RouteHints => "Show shortcut hints",
             Self::Trash => "Move to the trash",
             Self::CrossDevice => "Allow crossing filesystem boundaries",
+            Self::DuplicatesAuto => "Search after every scan",
+            Self::DuplicatesVerify => "Compare byte by byte",
+            Self::DuplicatesHidden => "Include hidden folders",
+            Self::GitAggressive => "Aggressive garbage collection",
+            Self::ToolchainPins => "Look for pinned versions",
         }
     }
 
@@ -85,6 +106,9 @@ impl Setting {
             Self::SidebarCollapsed => {
                 "Start as a strip of icons. The sidebar shortcut switches it while the app runs."
             }
+            Self::Zoom => {
+                "Left and right change it in steps of ten, Enter goes back to 100%. The zoom shortcuts work anywhere in the app."
+            }
             Self::RoutesEnabled => "Use keyboard shortcuts to open sidebar sections.",
             Self::RouteHints => "Key badges in the sidebar and in the section tooltips.",
             Self::Trash => {
@@ -92,6 +116,21 @@ impl Setting {
             }
             Self::CrossDevice => {
                 "Allow deletion from a different filesystem, including mounted folders."
+            }
+            Self::DuplicatesAuto => {
+                "Look for duplicate files once the rest of the results are on screen. Off searches only when you ask."
+            }
+            Self::DuplicatesVerify => {
+                "Read every match in full before it is listed. Slower, and rules out hash collisions."
+            }
+            Self::DuplicatesHidden => {
+                "Also search hidden home folders such as ~/.cache and folders tools manage, such as Go modules."
+            }
+            Self::GitAggressive => {
+                "Run git gc with --aggressive. It frees more space and takes much longer."
+            }
+            Self::ToolchainPins => {
+                "Find versions a project pins with files such as .nvmrc or rust-toolchain, and mark them review."
             }
         }
     }
@@ -105,6 +144,10 @@ impl Setting {
         }
     }
 
+    fn stepped(self) -> bool {
+        self.choices().is_some() || self == Self::Zoom
+    }
+
     fn value(self, config: &Config) -> usize {
         match self {
             Self::Theme => usize::from(config.appearance.theme == Theme::Light),
@@ -115,19 +158,31 @@ impl Setting {
             Self::Density => usize::from(config.appearance.density == Density::Compact),
             Self::Motion => usize::from(config.appearance.motion),
             Self::SidebarCollapsed => usize::from(config.appearance.sidebar == Sidebar::Collapsed),
+            Self::Zoom => zoom_step(config.appearance.zoom),
             Self::RoutesEnabled => usize::from(config.route_shortcuts.enabled),
             Self::RouteHints => usize::from(config.route_shortcuts.hints),
             Self::Trash => usize::from(config.delete.mode == DeleteMode::Trash),
             Self::CrossDevice => usize::from(config.delete.cross_device),
+            Self::DuplicatesAuto => usize::from(config.duplicates.enabled),
+            Self::DuplicatesVerify => usize::from(config.duplicates.verify),
+            Self::DuplicatesHidden => usize::from(config.duplicates.include_hidden),
+            Self::GitAggressive => usize::from(config.git.aggressive),
+            Self::ToolchainPins => usize::from(config.toolchains.pins),
         }
     }
 
     fn count(self) -> usize {
-        self.choices().map_or(2, <[_]>::len)
+        match self {
+            Self::Zoom => ZOOM_STEPS,
+            _ => self.choices().map_or(2, <[_]>::len),
+        }
     }
 
     fn next(self, config: &Config) -> usize {
-        (self.value(config) + 1) % self.count()
+        match self {
+            Self::Zoom => zoom_step(DEFAULT_ZOOM),
+            _ => (self.value(config) + 1) % self.count(),
+        }
     }
 
     fn step(self, config: &Config, delta: isize) -> usize {
@@ -166,6 +221,7 @@ impl Setting {
                     Sidebar::Expanded
                 };
             }
+            Self::Zoom => config.appearance.zoom = zoom_percent(value),
             Self::RoutesEnabled => config.route_shortcuts.enabled = on,
             Self::RouteHints => config.route_shortcuts.hints = on,
             Self::Trash => {
@@ -176,49 +232,384 @@ impl Setting {
                 };
             }
             Self::CrossDevice => config.delete.cross_device = on,
+            Self::DuplicatesAuto => config.duplicates.enabled = on,
+            Self::DuplicatesVerify => config.duplicates.verify = on,
+            Self::DuplicatesHidden => config.duplicates.include_hidden = on,
+            Self::GitAggressive => config.git.aggressive = on,
+            Self::ToolchainPins => config.toolchains.pins = on,
         }
     }
 
     fn entry(self, value: usize) -> (&'static str, &'static str, SettingValue) {
         let on = value == 1;
+        let text = |text: &str| SettingValue::Text(text.to_owned());
         match self {
             Self::Theme => (
                 "appearance",
                 "theme",
-                SettingValue::Text(if on { "light" } else { "dark" }),
+                text(if on { "light" } else { "dark" }),
             ),
             Self::Accent => (
                 "appearance",
                 "accent",
-                SettingValue::Text(Accent::ALL[value.min(Accent::ALL.len() - 1)].key()),
+                text(Accent::ALL[value.min(Accent::ALL.len() - 1)].key()),
             ),
             Self::Density => (
                 "appearance",
                 "density",
-                SettingValue::Text(if on { "compact" } else { "comfortable" }),
+                text(if on { "compact" } else { "comfortable" }),
             ),
             Self::Motion => ("appearance", "motion", SettingValue::Bool(on)),
             Self::SidebarCollapsed => (
                 "appearance",
                 "sidebar",
-                SettingValue::Text(if on { "collapsed" } else { "expanded" }),
+                text(if on { "collapsed" } else { "expanded" }),
+            ),
+            Self::Zoom => (
+                "appearance",
+                "zoom",
+                SettingValue::Integer(i64::from(zoom_percent(value))),
             ),
             Self::RoutesEnabled => ("route_shortcuts", "enabled", SettingValue::Bool(on)),
             Self::RouteHints => ("route_shortcuts", "hints", SettingValue::Bool(on)),
             Self::Trash => (
                 "delete",
                 "mode",
-                SettingValue::Text(if on { "trash" } else { "permanent" }),
+                text(if on { "trash" } else { "permanent" }),
             ),
             Self::CrossDevice => ("delete", "cross_device", SettingValue::Bool(on)),
+            Self::DuplicatesAuto => ("duplicates", "enabled", SettingValue::Bool(on)),
+            Self::DuplicatesVerify => ("duplicates", "verify", SettingValue::Bool(on)),
+            Self::DuplicatesHidden => ("duplicates", "include_hidden", SettingValue::Bool(on)),
+            Self::GitAggressive => ("git", "aggressive", SettingValue::Bool(on)),
+            Self::ToolchainPins => ("toolchains", "pins", SettingValue::Bool(on)),
         }
     }
+}
+
+fn zoom_percent(step: usize) -> u16 {
+    let step = u16::try_from(step.min(ZOOM_STEPS - 1)).unwrap_or_default();
+    MIN_ZOOM + step * zoom::STEP
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    List,
+    Size,
+    Number,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Field {
+    Roots,
+    Exclude,
+    MinSize,
+    SizeThreads,
+    DuplicateMinSize,
+    DuplicateThreads,
+    MinGain,
+    KeepBranches,
+    GitThreads,
+    Tools,
+    Engines,
+    DockerTimeout,
+    RecentHours,
+    Protected,
+}
+
+enum Write {
+    Setting {
+        table: &'static str,
+        key: &'static str,
+        value: SettingValue,
+        parsed: Box<Config>,
+    },
+    Protected(Vec<PathBuf>),
+}
+
+impl Write {
+    fn run(self, file: &Path) -> Result<Box<Config>, String> {
+        match self {
+            Self::Setting {
+                table,
+                key,
+                value,
+                parsed,
+            } => config::set_setting(file, table, key, value)
+                .map(|()| parsed)
+                .map_err(|error| error.to_string()),
+            Self::Protected(paths) => config::set_protected_paths(file, &paths)
+                .map(|()| {
+                    let mut parsed = Box::<Config>::default();
+                    parsed.delete.protected = paths;
+                    parsed
+                })
+                .map_err(|error| error.to_string()),
+        }
+    }
+}
+
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Roots => "Scan roots",
+            Self::Exclude => "Excluded paths",
+            Self::MinSize => "Smallest item",
+            Self::SizeThreads => "Sizing threads",
+            Self::DuplicateMinSize => "Smallest file",
+            Self::DuplicateThreads => "Hashing threads",
+            Self::MinGain => "Smallest gain",
+            Self::KeepBranches => "Kept branches",
+            Self::GitThreads => "Repository threads",
+            Self::Tools => "Version managers",
+            Self::Engines => "Engines",
+            Self::DockerTimeout => "Timeout in seconds",
+            Self::RecentHours => "Recent within hours",
+            Self::Protected => "Protected paths",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Roots => {
+                "Folders a scan covers when none is given. The start screen opens on the first one."
+            }
+            Self::Exclude => "Glob patterns no scan enters, such as vendor or ~/archive/**.",
+            Self::MinSize => "Items smaller than this are left out of the results.",
+            Self::SizeThreads => {
+                "Threads that measure folder sizes. 0 picks a number from the core count."
+            }
+            Self::DuplicateMinSize => "Files smaller than this are never compared.",
+            Self::DuplicateThreads => {
+                "Threads that hash files. 0 picks a number from the core count."
+            }
+            Self::MinGain => "List a repository when git gc would free at least this much.",
+            Self::KeepBranches => "Branches that are never offered for deletion, even when merged.",
+            Self::GitThreads => {
+                "Repositories checked at the same time. 0 picks a number from the core count."
+            }
+            Self::Tools => {
+                "Toolchain managers to look at: rustup, nvm, fnm, volta, pyenv, uv, sdkman and go."
+            }
+            Self::Engines => "Container engines asked for images, containers and volumes.",
+            Self::DockerTimeout => "How long to wait for an engine to answer.",
+            Self::RecentHours => {
+                "Containers that stopped less than this many hours ago are marked recent."
+            }
+            Self::Protected => {
+                "Folders deletion always refuses, on top of the system folders it never touches."
+            }
+        }
+    }
+
+    fn kind(self) -> Kind {
+        match self {
+            Self::Roots
+            | Self::Exclude
+            | Self::KeepBranches
+            | Self::Tools
+            | Self::Engines
+            | Self::Protected => Kind::List,
+            Self::MinSize | Self::DuplicateMinSize | Self::MinGain => Kind::Size,
+            Self::SizeThreads
+            | Self::DuplicateThreads
+            | Self::GitThreads
+            | Self::DockerTimeout
+            | Self::RecentHours => Kind::Number,
+        }
+    }
+
+    fn key(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Roots => ("scan", "roots"),
+            Self::Exclude => ("scan", "exclude"),
+            Self::MinSize => ("scan", "min_size"),
+            Self::SizeThreads => ("scan", "size_threads"),
+            Self::DuplicateMinSize => ("duplicates", "min_size"),
+            Self::DuplicateThreads => ("duplicates", "threads"),
+            Self::MinGain => ("git", "min_gain"),
+            Self::KeepBranches => ("git", "keep_branches"),
+            Self::GitThreads => ("git", "threads"),
+            Self::Tools => ("toolchains", "tools"),
+            Self::Engines => ("docker", "engines"),
+            Self::DockerTimeout => ("docker", "timeout_secs"),
+            Self::RecentHours => ("docker", "recent_hours"),
+            Self::Protected => ("delete", "protected"),
+        }
+    }
+
+    fn items(self, config: &Config) -> Vec<String> {
+        match self {
+            Self::Roots => config
+                .scan
+                .roots
+                .iter()
+                .map(|root| config::home_relative(root))
+                .collect(),
+            Self::Exclude => config.scan.exclude.clone(),
+            Self::KeepBranches => config.git.keep_branches.clone(),
+            Self::Tools => config
+                .toolchains
+                .tools
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect(),
+            Self::Engines => config.docker.engines.clone(),
+            Self::Protected => config
+                .delete
+                .protected
+                .iter()
+                .map(|path| config::home_relative(path))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn text(self, config: &Config) -> String {
+        match self {
+            Self::MinSize => config.scan.min_size.to_string(),
+            Self::SizeThreads => config.scan.size_threads.to_string(),
+            Self::DuplicateMinSize => config.duplicates.min_size.to_string(),
+            Self::DuplicateThreads => config.duplicates.threads.to_string(),
+            Self::MinGain => config.git.min_gain.to_string(),
+            Self::GitThreads => config.git.threads.to_string(),
+            Self::DockerTimeout => config.docker.timeout_secs.to_string(),
+            Self::RecentHours => config.docker.recent_hours.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn summary(self, config: &Config) -> String {
+        match self.kind() {
+            Kind::List => {
+                let items = self.items(config);
+                if items.is_empty() {
+                    "None".to_owned()
+                } else {
+                    items.join(", ")
+                }
+            }
+            Kind::Number
+                if self.text(config) == "0"
+                    && matches!(
+                        self,
+                        Self::SizeThreads | Self::DuplicateThreads | Self::GitThreads
+                    ) =>
+            {
+                "Automatic".to_owned()
+            }
+            _ => self.text(config),
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self.kind() {
+            Kind::List => match self {
+                Self::Roots | Self::Protected => "Folder path",
+                Self::Exclude => "Pattern",
+                Self::KeepBranches => "Branch name",
+                Self::Tools => "Version manager",
+                _ => "Name",
+            },
+            Kind::Size => "Size, such as 4KiB or 1MB",
+            Kind::Number => "Whole number",
+        }
+    }
+
+    fn separators(self) -> &'static [char] {
+        match self {
+            Self::Roots | Self::Exclude | Self::Protected => field::PATH,
+            _ => field::WORDS,
+        }
+    }
+
+    fn request(self, config: &Config, input: &str) -> Result<Option<Write>, String> {
+        let value = match self.kind() {
+            Kind::Number => {
+                let number: u32 = input
+                    .parse()
+                    .map_err(|_| "Enter a whole number, 0 or more".to_owned())?;
+                SettingValue::Integer(i64::from(number))
+            }
+            Kind::Size if input.is_empty() => return Err("Enter a size".to_owned()),
+            Kind::Size => SettingValue::Text(input.to_owned()),
+            Kind::List if input.is_empty() => return Ok(None),
+            Kind::List => {
+                let (entry, remove) = input
+                    .strip_prefix('-')
+                    .map_or((input, false), |rest| (rest.trim(), true));
+                if self == Self::Protected {
+                    return protected(config, entry, remove).map(Some);
+                }
+                let entry = match self {
+                    Self::Roots => config::home_relative(&config::expand_home(Path::new(entry))),
+                    Self::Tools => entry.to_ascii_lowercase(),
+                    _ => entry.to_owned(),
+                };
+                let mut items = self.items(config);
+                let known = items.contains(&entry);
+                match (remove, known) {
+                    (true, false) => return Err(format!("{entry} is not in the list")),
+                    (false, true) => return Err(format!("{entry} is already in the list")),
+                    (true, true) => items.retain(|item| *item != entry),
+                    (false, false) => items.push(entry),
+                }
+                SettingValue::List(items)
+            }
+        };
+        let (table, key) = self.key();
+        let parsed = config::check_setting(table, key, &value)?;
+        Ok(Some(Write::Setting {
+            table,
+            key,
+            value,
+            parsed: Box::new(parsed),
+        }))
+    }
+
+    fn apply(self, config: &mut Config, parsed: Config) {
+        match self {
+            Self::Roots => config.scan.roots = parsed.scan.roots,
+            Self::Exclude => config.scan.exclude = parsed.scan.exclude,
+            Self::MinSize => config.scan.min_size = parsed.scan.min_size,
+            Self::SizeThreads => config.scan.size_threads = parsed.scan.size_threads,
+            Self::DuplicateMinSize => config.duplicates.min_size = parsed.duplicates.min_size,
+            Self::DuplicateThreads => config.duplicates.threads = parsed.duplicates.threads,
+            Self::MinGain => config.git.min_gain = parsed.git.min_gain,
+            Self::KeepBranches => config.git.keep_branches = parsed.git.keep_branches,
+            Self::GitThreads => config.git.threads = parsed.git.threads,
+            Self::Tools => config.toolchains.tools = parsed.toolchains.tools,
+            Self::Engines => config.docker.engines = parsed.docker.engines,
+            Self::DockerTimeout => config.docker.timeout_secs = parsed.docker.timeout_secs,
+            Self::RecentHours => config.docker.recent_hours = parsed.docker.recent_hours,
+            Self::Protected => config.delete.protected = parsed.delete.protected,
+        }
+    }
+}
+
+fn protected(config: &Config, entry: &str, remove: bool) -> Result<Write, String> {
+    let path = config::expand_home(Path::new(entry));
+    let mut paths = config.delete.protected.clone();
+    let known = paths.contains(&path);
+    match (remove, known) {
+        (true, false) => return Err("This folder is absent from the list".to_owned()),
+        (false, true) => return Err("This folder is already protected".to_owned()),
+        (true, true) => paths.retain(|known| *known != path),
+        (false, false) => paths.push(path),
+    }
+    Ok(Write::Protected(paths))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Setting(Setting),
+    Field(Field),
 }
 
 struct Group {
     title: &'static str,
     hint: Option<&'static str>,
-    settings: &'static [Setting],
+    rows: &'static [Row],
 }
 
 struct Page {
@@ -227,9 +618,7 @@ struct Page {
     groups: &'static [Group],
 }
 
-const DELETING_PAGE: usize = 1;
-
-const PAGES: [Page; 3] = [
+const PAGES: [Page; 7] = [
     Page {
         title: "General",
         detail: "Choose how kuizer looks and opens.",
@@ -237,12 +626,20 @@ const PAGES: [Page; 3] = [
             Group {
                 title: "Theme",
                 hint: Some("Applied to the whole window as soon as you pick it."),
-                settings: &[Setting::Theme, Setting::Accent, Setting::Density],
+                rows: &[
+                    Row::Setting(Setting::Theme),
+                    Row::Setting(Setting::Accent),
+                    Row::Setting(Setting::Density),
+                ],
             },
             Group {
                 title: "Interface",
                 hint: None,
-                settings: &[Setting::Motion, Setting::SidebarCollapsed],
+                rows: &[
+                    Row::Setting(Setting::Motion),
+                    Row::Setting(Setting::SidebarCollapsed),
+                    Row::Setting(Setting::Zoom),
+                ],
             },
         ],
     },
@@ -252,8 +649,80 @@ const PAGES: [Page; 3] = [
         groups: &[Group {
             title: "Removed items",
             hint: None,
-            settings: &[Setting::Trash, Setting::CrossDevice],
+            rows: &[
+                Row::Setting(Setting::Trash),
+                Row::Setting(Setting::CrossDevice),
+                Row::Field(Field::Protected),
+            ],
         }],
+    },
+    Page {
+        title: "Scanning",
+        detail: "Choose where scans look and what they skip. Changes apply to the next scan.",
+        groups: &[
+            Group {
+                title: "Folders",
+                hint: None,
+                rows: &[Row::Field(Field::Roots), Row::Field(Field::Exclude)],
+            },
+            Group {
+                title: "Limits",
+                hint: None,
+                rows: &[Row::Field(Field::MinSize), Row::Field(Field::SizeThreads)],
+            },
+        ],
+    },
+    Page {
+        title: "Duplicates",
+        detail: "Choose when and how kuizer looks for duplicate files.",
+        groups: &[Group {
+            title: "Search",
+            hint: None,
+            rows: &[
+                Row::Setting(Setting::DuplicatesAuto),
+                Row::Setting(Setting::DuplicatesVerify),
+                Row::Setting(Setting::DuplicatesHidden),
+                Row::Field(Field::DuplicateMinSize),
+                Row::Field(Field::DuplicateThreads),
+            ],
+        }],
+    },
+    Page {
+        title: "Git",
+        detail: "Choose which repositories and branches are listed.",
+        groups: &[Group {
+            title: "Repositories",
+            hint: None,
+            rows: &[
+                Row::Field(Field::MinGain),
+                Row::Setting(Setting::GitAggressive),
+                Row::Field(Field::KeepBranches),
+                Row::Field(Field::GitThreads),
+            ],
+        }],
+    },
+    Page {
+        title: "Tools",
+        detail: "Choose which toolchains and container engines are listed.",
+        groups: &[
+            Group {
+                title: "Toolchains",
+                hint: None,
+                rows: &[
+                    Row::Field(Field::Tools),
+                    Row::Setting(Setting::ToolchainPins),
+                ],
+            },
+            Group {
+                title: "Docker",
+                hint: None,
+                rows: &[
+                    Row::Field(Field::Engines),
+                    Row::Field(Field::DockerTimeout),
+                    Row::Field(Field::RecentHours),
+                ],
+            },
+        ],
     },
     Page {
         title: "Shortcuts",
@@ -261,17 +730,27 @@ const PAGES: [Page; 3] = [
         groups: &[Group {
             title: "Sidebar sections",
             hint: None,
-            settings: &[Setting::RoutesEnabled, Setting::RouteHints],
+            rows: &[
+                Row::Setting(Setting::RoutesEnabled),
+                Row::Setting(Setting::RouteHints),
+            ],
         }],
     },
 ];
 
-fn rows(page: usize) -> Vec<Setting> {
+fn rows(page: usize) -> Vec<Row> {
     PAGES[page]
         .groups
         .iter()
-        .flat_map(|group| group.settings.iter().copied())
+        .flat_map(|group| group.rows.iter().copied())
         .collect()
+}
+
+#[derive(Debug)]
+struct Editor {
+    field: Field,
+    text: String,
+    error: Option<String>,
 }
 
 /// Which page of the settings popover is open and which row has the cursor.
@@ -279,8 +758,9 @@ fn rows(page: usize) -> Vec<Setting> {
 pub(super) struct Settings {
     page: usize,
     row: usize,
-    protected_path: Option<String>,
-    protected_error: Option<String>,
+    editor: Option<Editor>,
+    scroll: ScrollHandle,
+    reveal: Rc<Cell<bool>>,
 }
 
 impl Kuizer {
@@ -297,9 +777,9 @@ impl Kuizer {
         if self
             .settings
             .as_ref()
-            .is_some_and(|state| state.protected_path.is_some())
+            .is_some_and(|state| state.editor.is_some())
         {
-            self.protected_path_key(keystroke, cx);
+            self.field_key(keystroke, cx);
             return;
         }
         if commands::lookup(&self.keymap, keystroke, false) == Some(Command::Settings) {
@@ -313,18 +793,20 @@ impl Kuizer {
         let action = self
             .keymap
             .lookup(Scope::Settings, commands::stroke(keystroke));
-        let settings = rows(state.page);
-        let count = settings.len() + usize::from(state.page == DELETING_PAGE);
-        let setting = settings.get(state.row).copied();
+        let page = rows(state.page);
+        let count = page.len();
+        let row = page.get(state.row).copied();
         match action {
             Some(Key::Back) => self.settings = None,
-            Some(Key::SettingsNext) => state.row = (state.row + 1).min(count - 1),
-            Some(Key::SettingsPrevious) => state.row = state.row.saturating_sub(1),
-            Some(Key::SettingsFirst) => state.row = 0,
-            Some(Key::SettingsLast) => state.row = count - 1,
+            Some(Key::SettingsNext) => move_to(state, (state.row + 1).min(count - 1)),
+            Some(Key::SettingsPrevious) => move_to(state, state.row.saturating_sub(1)),
+            Some(Key::SettingsFirst) => move_to(state, 0),
+            Some(Key::SettingsLast) => move_to(state, count - 1),
             Some(Key::SettingsRight | Key::SettingsLeft) => {
                 let forward = action == Some(Key::SettingsRight);
-                if let Some(setting) = setting.filter(|setting| setting.choices().is_some()) {
+                if let Some(Row::Setting(setting)) = row
+                    && setting.stepped()
+                {
                     let delta = if forward { 1 } else { -1 };
                     self.change(setting, setting.step(&self.config, delta), cx);
                     return;
@@ -334,10 +816,12 @@ impl Kuizer {
             Some(Key::SettingsPreviousTab) => switch_page(state, PAGES.len() - 1),
             Some(Key::SettingsNextTab) => switch_page(state, 1),
             Some(Key::SettingsChange) => {
-                if let Some(setting) = setting {
-                    self.change(setting, setting.next(&self.config), cx);
-                } else {
-                    self.edit_protected_paths(cx);
+                match row {
+                    Some(Row::Setting(setting)) => {
+                        self.change(setting, setting.next(&self.config), cx);
+                    }
+                    Some(Row::Field(field)) => self.edit_field(field, cx),
+                    None => {}
                 }
                 return;
             }
@@ -346,129 +830,155 @@ impl Kuizer {
         cx.notify();
     }
 
-    fn edit_protected_paths(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = &mut self.settings
-            && !self.setting_writes.writing_paths
-        {
-            state.row = rows(DELETING_PAGE).len();
-            state.protected_path.get_or_insert_default();
-            state.protected_error = None;
-            cx.notify();
+    pub(super) fn set_zoom(&mut self, percent: u16, cx: &mut Context<Self>) {
+        let percent = zoom::snap(percent);
+        if percent == zoom::snap(self.config.appearance.zoom) {
+            return;
         }
+        if self.config_path.is_none() {
+            self.config.appearance.zoom = percent;
+            cx.notify();
+            return;
+        }
+        self.change(Setting::Zoom, zoom_step(percent), cx);
     }
 
-    pub(super) fn saving_protected_paths(&self) -> bool {
-        self.setting_writes.writing_paths
-    }
-
-    fn protected_path_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    fn edit_field(&mut self, field: Field, cx: &mut Context<Self>) {
+        if self.setting_writes.field.is_some() {
+            return;
+        }
+        let text = field.text(&self.config);
         let Some(state) = &mut self.settings else {
             return;
         };
-        if self.setting_writes.writing_paths {
+        if let Some(at) = rows(state.page)
+            .iter()
+            .position(|row| *row == Row::Field(field))
+        {
+            state.row = at;
+        }
+        state.editor = Some(Editor {
+            field,
+            text,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn saving_protected_paths(&self) -> bool {
+        self.setting_writes.field == Some(Field::Protected)
+    }
+
+    fn field_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        if self.setting_writes.field.is_some() {
             return;
         }
+        let Some(state) = &mut self.settings else {
+            return;
+        };
         match self
             .keymap
             .lookup(Scope::PathEditor, commands::stroke(keystroke))
         {
-            Some(Key::Back) => {
-                state.protected_path = None;
-                state.protected_error = None;
-            }
+            Some(Key::Back) => state.editor = None,
             Some(Key::SaveProtectedPath) => {
-                self.save_protected_path(cx);
+                self.save_field(cx);
                 return;
             }
             _ => {
-                let Some(input) = &mut state.protected_path else {
+                let Some(editor) = &mut state.editor else {
                     return;
                 };
                 let paste = || cx.read_from_clipboard().and_then(|item| item.text());
-                if !field::edit(&self.keymap, input, keystroke, field::PATH, paste) {
+                let separators = editor.field.separators();
+                if !field::edit(&self.keymap, &mut editor.text, keystroke, separators, paste) {
                     return;
                 }
-                state.protected_error = None;
+                editor.error = None;
             }
         }
         cx.notify();
     }
 
-    fn save_protected_path(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = &mut self.settings else {
+    fn save_field(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self
+            .settings
+            .as_mut()
+            .and_then(|state| state.editor.as_mut())
+        else {
             return;
         };
-        let Some(input) = state.protected_path.as_deref().map(str::trim) else {
-            return;
-        };
-        if input.is_empty() {
-            return;
-        }
+        let field = editor.field;
         let Some(file) = self.config_path.clone() else {
-            state.protected_error = Some("This system has no config folder".to_owned());
+            editor.error = Some("This system has no config folder".to_owned());
             cx.notify();
             return;
         };
-        let (input, remove) = input
-            .strip_prefix('-')
-            .map_or((input, false), |path| (path, true));
-        let path = kuizer::config::expand_home(Path::new(input));
-        let mut paths = self.config.delete.protected.clone();
-        if remove {
-            let count = paths.len();
-            paths.retain(|known| *known != path);
-            if count == paths.len() {
-                state.protected_error = Some("This folder is absent from the list".to_owned());
+        let write = match field.request(&self.config, editor.text.trim()) {
+            Ok(Some(write)) => write,
+            Ok(None) => {
+                if let Some(state) = &mut self.settings {
+                    state.editor = None;
+                }
                 cx.notify();
                 return;
             }
-        } else if !paths.contains(&path) {
-            paths.push(path);
-        }
-        self.setting_writes.writing_paths = true;
-        state.protected_error = None;
+            Err(error) => {
+                editor.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        editor.error = None;
+        self.setting_writes.field = Some(field);
         let written = cx.background_spawn(async move {
             let _one_writer = CONFIG_WRITE
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            kuizer::config::set_protected_paths(&file, &paths)
-                .map(|()| paths)
-                .map_err(|error| error.to_string())
+            write.run(&file)
         });
         cx.spawn(async move |this, cx| {
             let result = written.await;
-            let _ = this.update(cx, |app, cx| app.protected_paths_written(result, cx));
+            let _ = this.update(cx, |app, cx| app.field_written(field, result, cx));
         })
         .detach();
         cx.notify();
     }
 
-    fn protected_paths_written(
+    fn field_written(
         &mut self,
-        result: Result<Vec<PathBuf>, String>,
+        field: Field,
+        result: Result<Box<Config>, String>,
         cx: &mut Context<Self>,
     ) {
-        self.setting_writes.writing_paths = false;
+        self.setting_writes.field = None;
         match result {
-            Ok(paths) => {
-                self.config.delete.protected = paths;
-                if let Some(state) = &mut self.settings {
-                    state.protected_path = None;
-                    state.protected_error = None;
+            Ok(parsed) => {
+                field.apply(&mut self.config, *parsed);
+                if field == Field::MinSize {
+                    self.options.min_size = self.config.scan.min_size.0;
                 }
-            }
-            Err(error) => {
                 if let Some(state) = &mut self.settings
-                    && state.protected_path.is_some()
+                    && state
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.field == field)
                 {
-                    state.protected_error = Some(error);
-                } else {
-                    self.tell(
-                        Notice::Failed(format!("Could not save protected paths: {error}")),
-                        cx,
-                    );
+                    state.editor = None;
                 }
             }
+            Err(error) => match self
+                .settings
+                .as_mut()
+                .and_then(|state| state.editor.as_mut())
+                .filter(|editor| editor.field == field)
+            {
+                Some(editor) => editor.error = Some(error),
+                None => self.tell(
+                    Notice::Failed(format!("Could not save {}: {error}", field.label())),
+                    cx,
+                ),
+            },
         }
         cx.notify();
     }
@@ -484,10 +994,17 @@ impl Kuizer {
             return;
         };
         let was = setting.value(&self.config);
-        setting.set(&mut self.config, value);
+        self.apply_setting(setting, value);
         self.setting_writes.queue(setting, was, value);
         self.write_next_setting(file, cx);
         cx.notify();
+    }
+
+    fn apply_setting(&mut self, setting: Setting, value: usize) {
+        setting.set(&mut self.config, value);
+        if setting == Setting::DuplicatesAuto {
+            self.options.duplicates = self.config.duplicates.enabled;
+        }
     }
 
     fn write_next_setting(&mut self, file: PathBuf, cx: &mut Context<Self>) {
@@ -525,7 +1042,7 @@ impl Kuizer {
             .finished(setting, value, written.is_ok());
         if let Err(error) = written {
             if let Some(saved) = rollback {
-                setting.set(&mut self.config, saved);
+                self.apply_setting(setting, saved);
             }
             self.tell(
                 Notice::Failed(format!("Could not save {}: {error}", setting.label())),
@@ -564,8 +1081,7 @@ impl Kuizer {
                     if let Some(state) = &mut app.settings {
                         state.page = index;
                         state.row = 0;
-                        state.protected_path = None;
-                        state.protected_error = None;
+                        state.editor = None;
                         cx.notify();
                     }
                 }))
@@ -577,15 +1093,24 @@ impl Kuizer {
             .groups
             .iter()
             .map(|group| {
-                let last_setting = group.settings.len() - 1;
-                let settings: Vec<_> = group
-                    .settings
+                let last_row = group.rows.len() - 1;
+                let rows: Vec<_> = group
+                    .rows
                     .iter()
                     .enumerate()
-                    .map(|(at, &setting)| {
+                    .map(|(at, &row)| {
                         let index = position;
                         position += 1;
-                        self.setting_row(setting, index, state.row, at < last_setting, cx)
+                        let rule = at < last_row;
+                        let line = match row {
+                            Row::Setting(setting) => {
+                                self.setting_row(setting, index, state.row, rule, cx)
+                            }
+                            Row::Field(field) => self.field_row(field, index, state, rule, cx),
+                        };
+                        line.relative().when(index == state.row, |line| {
+                            line.child(reveal(state.scroll.clone(), Rc::clone(&state.reveal)))
+                        })
                     })
                     .collect();
                 div()
@@ -605,7 +1130,7 @@ impl Kuizer {
                                     .child(hint)
                             })),
                     )
-                    .children(settings)
+                    .children(rows)
             })
             .collect();
         let hint = |keys: &[Key], what: &'static str| {
@@ -677,6 +1202,7 @@ impl Kuizer {
                     .flex_1()
                     .min_w_0()
                     .overflow_y_scroll()
+                    .track_scroll(&state.scroll)
                     .px(unit(space::XXL))
                     .py(unit(space::XXL))
                     .child(
@@ -700,11 +1226,7 @@ impl Kuizer {
                                     )
                                     .child(div().text_color(theme::muted()).child(page.detail)),
                             )
-                            .children(groups)
-                            .children(
-                                (state.page == DELETING_PAGE)
-                                    .then(|| self.protected_paths_row(state, cx)),
-                            ),
+                            .children(groups),
                     ),
             );
         Some(
@@ -729,63 +1251,98 @@ impl Kuizer {
         )
     }
 
-    fn protected_paths_row(&self, state: &Settings, cx: &mut Context<Self>) -> Stateful<Div> {
-        let editing = state.protected_path.is_some();
-        let detail = if self.config.delete.protected.is_empty() {
-            "No additional folders".to_owned()
-        } else {
-            self.config
-                .delete
-                .protected
-                .iter()
-                .map(|path| display_path(path))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+    fn field_row(
+        &self,
+        field: Field,
+        index: usize,
+        state: &Settings,
+        rule: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let focused = index == state.row;
+        let editor = state.editor.as_ref().filter(|editor| editor.field == field);
+        let list = field.kind() == Kind::List;
+        let summary = field.summary(&self.config);
+        let label = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap(unit(space::XXS))
+            .child(div().font_weight(FontWeight::MEDIUM).child(field.label()))
+            .child(
+                div()
+                    .text_size(unit(font::SMALL))
+                    .text_color(theme::muted())
+                    .child(field.hint()),
+            )
+            .when(list, |this| {
+                this.child(div().text_color(theme::text()).child(summary.clone()))
+            });
         div()
-            .id("protected-paths")
-            .debug_selector(|| "setting-Protected paths".to_owned())
+            .id(("setting", index))
+            .debug_selector(move || format!("setting-{}", field.label()))
             .flex()
             .flex_col()
             .gap(unit(space::XS))
             .px(unit(space::M))
             .py(unit(space::row_y()))
             .rounded(theme::radius_control())
-            .when(state.row == rows(DELETING_PAGE).len(), |row| {
-                row.bg(theme::selected())
-            })
-            .child(ui::heading("Protected paths"))
-            .child(div().text_color(theme::muted()).child(detail))
-            .when(!editing, |row| {
+            .when(rule, |this| this.border_b_1().border_color(theme::border()))
+            .when(focused, |this| this.bg(theme::selected()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(unit(space::L))
+                    .child(label)
+                    .when(!list && editor.is_none(), |this| {
+                        this.child(div().flex_none().text_color(theme::muted()).child(summary))
+                    }),
+            )
+            .when(editor.is_none(), |row| {
                 row.cursor_pointer()
-                    .on_click(cx.listener(|app, _: &ClickEvent, _, cx| {
-                        app.edit_protected_paths(cx);
+                    .when(!focused, |this| {
+                        this.hover(|style| style.bg(theme::hover()))
+                    })
+                    .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                        app.edit_field(field, cx);
                     }))
             })
-            .when_some(state.protected_path.as_deref(), |row, input| {
-                let detail = if self.setting_writes.writing_paths {
-                    "Saving protected paths".to_owned()
+            .when_some(editor, |row, editor| {
+                let detail = if self.setting_writes.field == Some(field) {
+                    "Saving".to_owned()
                 } else {
-                    format!(
-                        "{} saves. {} cancels. Prefix a path with - to remove it.",
+                    let keys = format!(
+                        "{} saves. {} cancels.",
                         self.key_hint(Scope::PathEditor, Key::SaveProtectedPath),
                         self.key_hint(Scope::PathEditor, Key::Back),
-                    )
+                    );
+                    if list {
+                        format!("{keys} Type an entry to add it, or - and an entry to remove it.")
+                    } else {
+                        keys
+                    }
                 };
                 row.child(field::view(
-                    "protected-path-input",
-                    input,
-                    "Folder path",
+                    ("setting-input", index),
+                    &editor.text,
+                    field.placeholder(),
                     true,
                 ))
-                .child(div().text_color(theme::muted()).child(detail))
+                .child(
+                    div()
+                        .text_size(unit(font::SMALL))
+                        .text_color(theme::muted())
+                        .child(detail),
+                )
+                .children(
+                    editor
+                        .error
+                        .clone()
+                        .map(|error| div().text_color(theme::review()).child(error)),
+                )
             })
-            .children(
-                state
-                    .protected_error
-                    .clone()
-                    .map(|error| div().text_color(theme::review()).child(error)),
-            )
     }
 
     fn setting_row(
@@ -821,6 +1378,12 @@ impl Kuizer {
             .rounded(theme::radius_control())
             .when(rule, |this| this.border_b_1().border_color(theme::border()))
             .when(focused, |this| this.bg(theme::selected()));
+        if setting == Setting::Zoom {
+            return row
+                .items_center()
+                .child(label)
+                .child(zoom_stepper(value, cx));
+        }
         match setting.choices() {
             Some(choices) => {
                 row.flex_col()
@@ -851,6 +1414,54 @@ impl Kuizer {
                 })),
         }
     }
+}
+
+fn reveal(scroll: ScrollHandle, reveal: Rc<Cell<bool>>) -> Div {
+    div().absolute().inset_0().child(
+        canvas(
+            move |area, window, _| {
+                if reveal.take() {
+                    keep_visible(&scroll, area, window);
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .size_full(),
+    )
+}
+
+fn zoom_stepper(value: usize, cx: &mut Context<Kuizer>) -> Div {
+    let button = |name: &'static str, glyph: &'static str, step: usize| {
+        div()
+            .id(name)
+            .debug_selector(move || name.to_owned())
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(unit(size::CONTROL))
+            .rounded(theme::radius_control())
+            .border_1()
+            .border_color(theme::border())
+            .cursor_pointer()
+            .hover(|style| style.border_color(theme::border_strong()))
+            .child(glyph)
+            .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
+                app.change(Setting::Zoom, step, cx);
+            }))
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(unit(space::S))
+        .child(button("zoom-out", "-", value.saturating_sub(1)))
+        .child(
+            div()
+                .min_w(unit(size::GAUGE))
+                .text_center()
+                .child(format!("{}%", zoom_percent(value))),
+        )
+        .child(button("zoom-in", "+", (value + 1).min(ZOOM_STEPS - 1)))
 }
 
 fn theme_card(
@@ -975,9 +1586,15 @@ fn choice_chip(
         }))
 }
 
+fn move_to(state: &mut Settings, row: usize) {
+    state.row = row;
+    state.reveal.set(true);
+}
+
 fn switch_page(state: &mut Settings, step: usize) {
     state.page = (state.page + step) % PAGES.len();
     state.row = 0;
+    state.scroll.set_offset(gpui::point(px(0.), px(0.)));
 }
 
 #[cfg(test)]
@@ -997,5 +1614,82 @@ mod write_tests {
         writes.queue(Setting::Motion, 1, 0);
         assert_eq!(writes.next(), Some((Setting::Motion, 0)));
         assert_eq!(writes.finished(Setting::Motion, 0, false), Some(1));
+    }
+
+    #[test]
+    fn list_fields_add_and_remove_one_entry_and_refuse_bad_input() {
+        let config = Config::default();
+        let added = |field: Field, input: &str| match field.request(&config, input) {
+            Ok(Some(Write::Setting { value, .. })) => Ok(value),
+            Ok(_) => Err("nothing to write".to_owned()),
+            Err(error) => Err(error),
+        };
+        assert_eq!(
+            added(Field::Engines, "-docker"),
+            Ok(SettingValue::List(vec!["podman".to_owned()]))
+        );
+        assert!(added(Field::Engines, "podman").is_err());
+        assert!(added(Field::Engines, "-nerdctl").is_err());
+        assert!(added(Field::Tools, "asdf").is_err());
+        assert!(added(Field::Exclude, "[").is_err());
+        assert!(added(Field::MinSize, "big").is_err());
+        assert!(added(Field::SizeThreads, "-1").is_err());
+        assert!(added(Field::SizeThreads, "65").is_err());
+        assert_eq!(
+            added(Field::DuplicateThreads, "4"),
+            Ok(SettingValue::Integer(4))
+        );
+        assert!(matches!(Field::Roots.request(&config, ""), Ok(None)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+    use kuizer::units::ByteSize;
+
+    use super::*;
+    use crate::app::tests::{open, type_text};
+
+    #[gpui::test]
+    fn a_typed_size_is_checked_inline_and_written_to_the_config(cx: &mut TestAppContext) {
+        cx.update(bind_keys);
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open(cx, dir.path().join("recent"));
+        cx.simulate_keystrokes("ctrl-, tab tab tab j j j enter ctrl-u");
+        type_text(cx, "big");
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            let editor = app
+                .settings
+                .as_ref()
+                .and_then(|state| state.editor.as_ref());
+            assert!(editor.is_some_and(|editor| editor.error.is_some()));
+            assert_eq!(app.config.duplicates.min_size, ByteSize(4096));
+        });
+        cx.simulate_keystrokes("ctrl-u");
+        type_text(cx, "8KiB");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.config.duplicates.min_size, ByteSize(8192));
+            assert!(
+                app.settings
+                    .as_ref()
+                    .is_some_and(|state| state.editor.is_none())
+            );
+        });
+        let written = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(written.contains("min_size = \"8KiB\""), "{written}");
+        cx.simulate_keystrokes("enter escape");
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.settings
+                    .as_ref()
+                    .is_some_and(|state| state.editor.is_none())
+            );
+        });
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |app, _| assert!(app.settings.is_none()));
     }
 }

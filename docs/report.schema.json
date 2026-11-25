@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kuizer versioned JSON report",
-  "description": "Version 2 of the reports emitted by Kuizer with --json.",
+  "description": "Version 2 of the reports emitted by Kuizer with --json. With --json-lines, scan and the cache, toolchain and docker listings print one candidateLine per item and end with one summaryLine.",
   "oneOf": [
     {"$ref": "#/$defs/scan"},
     {"$ref": "#/$defs/cache"},
@@ -70,6 +70,26 @@
           "description": "Project activity time in Unix seconds, when known."
         },
         "path_lossy": {"const": true, "description": "Present when a path was converted from non-UTF-8."}
+      }
+    },
+    "candidateLine": {
+      "description": "One --json-lines row: the candidate row of the matching report, with type candidate.",
+      "allOf": [
+        {"$ref": "#/$defs/candidate"},
+        {"type": "object", "required": ["type"], "properties": {"type": {"const": "candidate"}}}
+      ]
+    },
+    "summaryLine": {
+      "description": "The last --json-lines line: the matching report without candidates, with type summary.",
+      "type": "object",
+      "required": ["type", "schema_version", "command", "issues", "summary"],
+      "properties": {
+        "type": {"const": "summary"},
+        "schema_version": {"$ref": "#/$defs/version"},
+        "command": {"enum": ["scan", "cache", "toolchain", "docker"]},
+        "roots": {"$ref": "#/$defs/paths"},
+        "issues": {"$ref": "#/$defs/issues"},
+        "summary": {"type": "object"}
       }
     },
     "listingSummary": {

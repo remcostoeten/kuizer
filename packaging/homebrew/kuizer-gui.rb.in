@@ -1,0 +1,19 @@
+cask "kuizer-gui" do
+  arch arm: "aarch64", intel: "x86_64"
+
+  version "@VERSION@"
+  sha256 arm:   "@SHA256_ARM@",
+         intel: "@SHA256_INTEL@"
+
+  url "https://github.com/remcostoeten/kuizer/releases/download/v#{version}/kuizer-gui-#{arch}-apple-darwin.tar.xz"
+  name "kuizer"
+  desc "Desktop app for keyboard-driven disk cleanup"
+  homepage "https://kuizer.app"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  binary "kuizer-gui-#{arch}-apple-darwin/kuizer-gui"
+end

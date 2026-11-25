@@ -1,11 +1,8 @@
-use std::collections::HashSet;
-
 use serde::Serialize;
 
 use super::AppError;
 use crate::cli::{HistoryAction, HistoryArgs};
-use crate::delete::Mode;
-use crate::history::{self, Action, Entry, History, Run, Total};
+use crate::history::{self, Action, Entry, History, Run, Total, TrashSnapshot, TrashState};
 use crate::output;
 use crate::units::ByteSize;
 
@@ -33,41 +30,6 @@ struct ShowReport<'a> {
     items: Vec<ItemJson<'a>>,
 }
 
-struct Trash {
-    kept: HashSet<(usize, usize)>,
-    known: bool,
-}
-
-impl Trash {
-    fn read(history: &History) -> Self {
-        let trashed = history::trashed_paths();
-        Self {
-            kept: trashed
-                .as_deref()
-                .map(|paths| history::still_in_trash(history, paths))
-                .unwrap_or_default(),
-            known: trashed.is_some(),
-        }
-    }
-
-    fn state(
-        &self,
-        history: &History,
-        restored: &HashSet<&str>,
-        run: usize,
-        entry: usize,
-    ) -> &'static str {
-        history::item_state(
-            history,
-            restored,
-            self.known.then_some(&self.kept),
-            run,
-            entry,
-        )
-        .as_str()
-    }
-}
-
 pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
     let path = history::default_path()?;
     let history = history::load(&path)?;
@@ -75,12 +37,12 @@ pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
         println!("nothing deleted yet, history is kept in {}", path.display());
         return Ok(());
     }
-    let trash = Trash::read(&history);
+    let trash = TrashSnapshot::read(&history);
     if let Some(HistoryAction::Show { run }) = args.command {
         return show(&history, &trash, &run, json);
     }
-    let in_trash = trash.known.then(|| kept_total(&history, &trash.kept));
-    let freed = history::freed_bytes(&history, trash.known.then_some(&trash.kept));
+    let in_trash = trash.known.then(|| trash.in_trash(&history));
+    let freed = history::freed_bytes(&history, &trash);
     if json {
         let report = Report {
             history: &history,
@@ -128,40 +90,20 @@ pub fn run(args: HistoryArgs, json: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-fn kept_total(history: &History, kept: &HashSet<(usize, usize)>) -> Total {
-    Total::sum(
-        kept.iter()
-            .filter_map(|&(run, entry)| history.runs.get(run)?.deleted.get(entry)),
-    )
-}
-
-fn trash_column(history: &History, trash: &Trash, run_index: usize) -> String {
-    let run = &history.runs[run_index];
-    if run.action == Action::Restore {
+fn trash_column(history: &History, trash: &TrashSnapshot, run_index: usize) -> String {
+    if history.runs[run_index].action == Action::Restore {
         return "restore".to_owned();
     }
-    let trashed = run
-        .deleted
-        .iter()
-        .filter(|entry| entry.mode == Mode::Trash)
-        .count();
-    if trashed == 0 {
-        return "-".to_owned();
-    }
-    if !trash.known {
-        return "unknown".to_owned();
-    }
-    let kept = (0..run.deleted.len())
-        .filter(|&entry| trash.kept.contains(&(run_index, entry)))
-        .count();
-    if kept == 0 {
-        "emptied".to_owned()
-    } else {
-        format!("{kept} kept")
+    match trash.state(history, run_index) {
+        TrashState::Restorable { items, .. } => format!("{items} kept"),
+        TrashState::Restored => "restored".to_owned(),
+        TrashState::Emptied => "emptied".to_owned(),
+        TrashState::Unknown => "unknown".to_owned(),
+        TrashState::NotTrashed => "-".to_owned(),
     }
 }
 
-fn print_runs(history: &History, trash: &Trash) {
+fn print_runs(history: &History, trash: &TrashSnapshot) {
     println!(
         "{:<6}  {:<25}  {:>5}  {:>10}  {:<9}  COMMAND",
         "ID", "STARTED", "ITEMS", "SIZE", "TRASH"
@@ -179,21 +121,20 @@ fn print_runs(history: &History, trash: &Trash) {
     }
 }
 
-fn show(history: &History, trash: &Trash, id: &str, json: bool) -> Result<(), AppError> {
+fn show(history: &History, trash: &TrashSnapshot, id: &str, json: bool) -> Result<(), AppError> {
     let run_index = history
         .runs
         .iter()
         .position(|run| run.session() == id)
         .ok_or_else(|| AppError::UnknownRun(id.to_owned()))?;
     let run = &history.runs[run_index];
-    let restored = history.restored_ids();
     let items: Vec<ItemJson> = run
         .deleted
         .iter()
         .enumerate()
         .map(|(entry_index, entry)| ItemJson {
             id: history.item_id(run_index, entry_index),
-            state: trash.state(history, &restored, run_index, entry_index),
+            state: history::item_state(history, trash, run_index, entry_index).as_str(),
             entry,
         })
         .collect();
