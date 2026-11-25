@@ -276,7 +276,7 @@ impl Kuizer {
         .flex_1()
         .w_full()
         .when(!self.selection.is_empty(), |this| {
-            this.pb(unit(space::XXL * 2. + space::L))
+            this.pb(unit(size::SUMMARY_HEIGHT + space::L))
         })
     }
 

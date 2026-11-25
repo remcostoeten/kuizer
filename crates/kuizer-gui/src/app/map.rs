@@ -9,7 +9,6 @@ use crate::treemap::{self, Item, Kind, Leaf, Node};
 
 /// The size the layout assumes before the map has been painted once.
 const FALLBACK: (f32, f32) = (960., 540.);
-const ZOOM: Duration = Duration::from_millis(180);
 /// The smallest tile, in pixels, that shows its name and size.
 const LABEL: (f32, f32) = (72., 36.);
 /// The smallest tile, in pixels, that shows its name.
@@ -462,8 +461,8 @@ impl Kuizer {
             layer
                 .with_animation(
                     ("map-zoom", self.map.epoch),
-                    Animation::new(ZOOM).with_easing(motion::ease_out),
-                    |layer, progress| layer.opacity(0.35 + 0.65 * progress),
+                    Animation::new(motion::STEP).with_easing(motion::ease_out),
+                    |layer, progress| layer.opacity(motion::fade_from(motion::ZOOM_FROM, progress)),
                 )
                 .into_any_element()
         };
@@ -556,7 +555,7 @@ impl Kuizer {
                     this.border_1().border_color(color)
                 }
             })
-            .hover(|style| style.opacity(0.8))
+            .hover(|style| style.opacity(theme::DIM))
             .when_some(edge, |this, edge| {
                 this.child(
                     div()

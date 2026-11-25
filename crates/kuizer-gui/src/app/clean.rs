@@ -390,15 +390,9 @@ impl Kuizer {
                 .child(dismiss()),
             ),
             Notice::Info(text) => panel.child(
-                line.child(icon::sized(
-                    Icon::Check,
-                    theme::ok(),
-                    None,
-                    self.zoom.rem_size(),
-                    size::CHECK,
-                ))
-                .child(div().flex_1().child(text.clone()))
-                .child(dismiss()),
+                line.child(icon::sized(Icon::Check, theme::ok(), size::CHECK))
+                    .child(div().flex_1().child(text.clone()))
+                    .child(dismiss()),
             ),
         };
         Some(panel.into_any_element())

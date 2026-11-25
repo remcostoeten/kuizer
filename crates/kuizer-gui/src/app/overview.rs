@@ -283,12 +283,7 @@ impl Kuizer {
                 .cursor_pointer()
                 .hover(|style| style.bg(theme::hover()))
                 .tip(tooltip::term(tab.term()))
-                .child(icon::view(
-                    tab.icon(),
-                    theme::muted(),
-                    None,
-                    self.zoom.rem_size(),
-                ))
+                .child(icon::view(tab.icon(), theme::muted()))
                 .child(
                     div()
                         .w(unit(col::XXL))
@@ -317,7 +312,8 @@ impl Kuizer {
                             this.child(
                                 div()
                                     .h_full()
-                                    .w(gpui::relative(theme::share(bytes, largest).max(0.005)))
+                                    .w(gpui::relative(theme::share(bytes, largest)))
+                                    .min_w(unit(size::SLIVER))
                                     .rounded(theme::radius_bar())
                                     .bg(theme::bar()),
                             )

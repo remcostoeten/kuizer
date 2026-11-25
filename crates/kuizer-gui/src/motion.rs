@@ -1,6 +1,45 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static OFF: AtomicBool = AtomicBool::new(false);
+
+/// The longest a state change may take to animate.
+pub const LIMIT: Duration = Duration::from_millis(150);
+
+/// One step of a state change: a row blending between delete-flow states, the summary bar
+/// rising in, the space map zooming into a folder.
+pub const STEP: Duration = Duration::from_millis(140);
+
+/// How long a tooltip takes to fade and rise in.
+pub const TOOLTIP_IN: Duration = Duration::from_millis(125);
+
+/// How long the pointer rests on an element before its tooltip opens.
+pub const TOOLTIP_DELAY: Duration = Duration::from_millis(250);
+
+/// How soon after one tooltip closes the next opens at once, without delay or fade.
+pub const TOOLTIP_WARM: Duration = Duration::from_millis(300);
+
+/// One beat of the pulse on a chart that is still measuring. Progress loops show ongoing work,
+/// not a state change, so `LIMIT` does not apply to them.
+pub const PULSE: Duration = Duration::from_millis(1_400);
+
+/// One pass of the sweep along a bar that is still measuring.
+pub const SWEEP: Duration = Duration::from_millis(1_100);
+
+/// The opacity the space map starts from when it zooms into or out of a folder.
+pub const ZOOM_FROM: f32 = 0.35;
+
+const _: () =
+    assert!(STEP.as_millis() <= LIMIT.as_millis() && TOOLTIP_IN.as_millis() <= LIMIT.as_millis());
+
+/// @name fade_from
+/// @description The opacity at `progress` of a fade that starts at `from` and ends opaque.
+///
+/// @example
+/// assert_eq!(fade_from(0.5, 1.0), 1.0);
+pub fn fade_from(from: f32, progress: f32) -> f32 {
+    from + (1.0 - from) * progress
+}
 
 /// @name ease_out
 /// @description The strong UI ease-out, `cubic-bezier(0.23, 1, 0.32, 1)`, as a GPUI easing.

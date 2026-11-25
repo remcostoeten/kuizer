@@ -431,23 +431,14 @@ impl Kuizer {
             .text_color(theme::faint())
             .cursor_pointer()
             .hover(|style| style.bg(theme::hover()).text_color(theme::muted()))
-            .tip_hover(
+            .tip(
                 Tooltip::new("Search every command, section and recent folder")
                     .title("Search or run a command")
                     .keys(&[&key])
                     .build(),
-                cx.listener(|app, hovered: &bool, _, cx| {
-                    app.hover_icon(Icon::Search, *hovered, cx);
-                }),
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(icon::sized(
-                Icon::Search,
-                theme::faint(),
-                self.icon_epoch(Icon::Search),
-                self.zoom.rem_size(),
-                size::CHECK,
-            ))
+            .child(icon::sized(Icon::Search, theme::faint(), size::CHECK))
             .child(
                 div()
                     .flex_1()

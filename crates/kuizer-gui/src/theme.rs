@@ -79,6 +79,8 @@ pub mod size {
     pub const SIDEBAR_COLLAPSED: f32 = 48.;
     pub const METER: f32 = 12.;
     pub const TRACK: f32 = 4.;
+    /// The least a bar or a bar segment draws of a nonzero value, so it stays visible.
+    pub const SLIVER: f32 = 2.;
     /// The height of the composition strip above a list.
     pub const STRIP: f32 = 6.;
     /// The width of the size bar next to a size in a table row.
@@ -103,6 +105,8 @@ pub mod size {
     pub const DIALOG: f32 = 520.;
     /// The narrowest the floating selection summary gets while there is room for it.
     pub const SUMMARY: f32 = 540.;
+    /// The height of the floating selection summary: a tile, its padding and its border.
+    pub const SUMMARY_HEIGHT: f32 = TILE + 2. * super::space::S + 2. * HAIR;
     pub const PALETTE: f32 = 560.;
     pub const PAGE: f32 = 760.;
     pub const SHORTCUTS: f32 = 820.;

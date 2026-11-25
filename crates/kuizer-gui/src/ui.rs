@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::{
     Div, ElementId, FontFeatures, FontWeight, ParentElement, Rgba, SharedString, Stateful, Styled,
-    div, prelude::*, px, relative,
+    div, prelude::*, relative,
 };
 
 use crate::glossary::Term;
@@ -94,8 +94,6 @@ pub fn check_mark(weight: f32) -> Div {
         this.bg(faded(theme::bar())).child(icon::sized(
             Icon::Check,
             faded(theme::on_accent()),
-            None,
-            px(theme::REM),
             size::GLYPH,
         ))
     })
@@ -221,7 +219,8 @@ pub fn gauge(fraction: f32, fill: Rgba, track: Rgba) -> Div {
         .child(
             div()
                 .h_full()
-                .w(relative(fraction.clamp(0.05, 1.0)))
+                .w(relative(fraction.clamp(0.0, 1.0)))
+                .min_w(unit(size::SLIVER))
                 .rounded(theme::radius_bar())
                 .bg(fill),
         )
@@ -322,7 +321,8 @@ pub fn bar_row(
                 .child(
                     div()
                         .h_full()
-                        .w(relative(fraction.max(0.005)))
+                        .w(relative(fraction))
+                        .min_w(unit(size::SLIVER))
                         .rounded(theme::radius_bar())
                         .bg(fill),
                 ),

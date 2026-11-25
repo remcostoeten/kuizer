@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{
     Animation, AnimationExt, AnyView, App, Bounds, Context, Corner, DispatchPhase, ElementId,
@@ -16,9 +16,6 @@ use crate::motion;
 use crate::theme::{self, font, size, space, unit};
 use crate::ui;
 
-const DELAY: Duration = Duration::from_millis(250);
-const ENTER: Duration = Duration::from_millis(125);
-const WARM: Duration = Duration::from_millis(300);
 const RISE: f32 = 3.;
 const ROOM: f32 = 160.;
 const WRAP_AT: usize = 48;
@@ -231,14 +228,16 @@ impl Layer {
         {
             return;
         }
-        let warm =
-            self.shown.is_some() || self.closed.is_some_and(|closed| closed.elapsed() < WARM);
+        let warm = self.shown.is_some()
+            || self
+                .closed
+                .is_some_and(|closed| closed.elapsed() < motion::TOOLTIP_WARM);
         if warm {
             self.show(anchor, &build, false, window, cx);
             return;
         }
         let task = cx.spawn_in(window, async move |layer, cx| {
-            cx.background_executor().timer(DELAY).await;
+            cx.background_executor().timer(motion::TOOLTIP_DELAY).await;
             layer
                 .update_in(cx, |layer, window, cx| {
                     if layer
@@ -268,7 +267,10 @@ impl Layer {
         self.shown = Some(Shown {
             anchor,
             view: build(window, cx),
-            animate: animate && self.closed.is_none_or(|closed| closed.elapsed() >= WARM),
+            animate: animate
+                && self
+                    .closed
+                    .is_none_or(|closed| closed.elapsed() >= motion::TOOLTIP_WARM),
             epoch: self.epoch,
         });
         cx.notify();
@@ -364,7 +366,7 @@ impl Render for Layer {
                 content
                     .with_animation(
                         ("tooltip-enter", shown.epoch),
-                        Animation::new(ENTER).with_easing(motion::ease_out),
+                        Animation::new(motion::TOOLTIP_IN).with_easing(motion::ease_out),
                         move |card, progress| {
                             card.opacity(progress)
                                 .top(unit(direction * (1. - progress)))
@@ -561,10 +563,10 @@ mod tests {
     fn a_tooltip_waits_then_opens_below_its_trigger(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
-        cx.executor().advance_clock(DELAY / 2);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY / 2);
         cx.run_until_parked();
         assert!(!visible(cx));
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         assert!(bounds.origin.y >= px(40.));
@@ -574,7 +576,7 @@ mod tests {
     fn leaving_the_trigger_closes_the_tooltip(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         assert!(shown(cx).is_some());
         hover(cx, 600., 400.);
@@ -587,7 +589,7 @@ mod tests {
     fn the_next_tooltip_opens_at_once(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         hover(cx, 20., 60.);
         cx.run_until_parked();
@@ -599,7 +601,7 @@ mod tests {
     fn a_click_closes_the_tooltip(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 20.);
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         assert!(visible(cx));
         cx.simulate_click(point(px(20.), px(20.)), Modifiers::default());
@@ -619,7 +621,7 @@ mod tests {
         let cx = open(cx);
         aim(cx, Some("second"));
         assert!(!visible(cx), "the keyboard waits like the mouse");
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         assert!(
@@ -639,7 +641,7 @@ mod tests {
     fn long_text_wraps_inside_the_card(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 100.);
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         let text = cx.debug_bounds("tooltip-text").expect("the tooltip text");
@@ -650,7 +652,7 @@ mod tests {
     fn the_card_grows_to_hold_wrapped_text(cx: &mut TestAppContext) {
         let cx = open(cx);
         hover(cx, 20., 140.);
-        cx.executor().advance_clock(DELAY);
+        cx.executor().advance_clock(motion::TOOLTIP_DELAY);
         cx.run_until_parked();
         let bounds = shown(cx).expect("the tooltip is painted");
         let text = cx.debug_bounds("tooltip-text").expect("the tooltip text");

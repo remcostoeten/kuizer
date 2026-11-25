@@ -398,7 +398,7 @@ impl Kuizer {
             .cursor_pointer()
             .hover(|style| style.bg(theme::hover()))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .tip_hover(
+            .tip(
                 Tooltip::new(if collapsed {
                     "Show section names"
                 } else {
@@ -406,16 +406,8 @@ impl Kuizer {
                 })
                 .keys(&[&self.hint(&Command::Sidebar)])
                 .build(),
-                cx.listener(|app, hovered: &bool, _, cx| {
-                    app.hover_icon(Icon::Sidebar, *hovered, cx);
-                }),
             )
-            .child(icon::view(
-                Icon::Sidebar,
-                theme::muted(),
-                self.icon_epoch(Icon::Sidebar),
-                self.zoom.rem_size(),
-            ));
+            .child(icon::view(Icon::Sidebar, theme::muted()));
         self.control(toggle, cx, |app, _, cx| {
             app.collapsed = !app.collapsed;
             cx.notify();
@@ -518,20 +510,12 @@ impl Kuizer {
         let settings = ui::nav_item("sidebar-settings", false)
             .debug_selector(|| "sidebar-settings".to_owned())
             .when(collapsed, |this| this.justify_center().px_0())
-            .tip_hover(
+            .tip(
                 Tooltip::new("Settings")
                     .keys(&[&self.hint(&Command::Settings)])
                     .build(),
-                cx.listener(|app, hovered: &bool, _, cx| {
-                    app.hover_icon(Icon::Settings, *hovered, cx);
-                }),
             )
-            .child(icon::view(
-                Icon::Settings,
-                theme::faint(),
-                self.icon_epoch(Icon::Settings),
-                self.zoom.rem_size(),
-            ))
+            .child(icon::view(Icon::Settings, theme::faint()))
             .when(!collapsed, |this| {
                 this.child(div().flex_1().min_w_0().truncate().child("Settings"))
                     .child(ui::kbd(self.hint(&Command::Settings)))
@@ -577,17 +561,6 @@ impl Kuizer {
             )
     }
 
-    pub(super) fn hover_icon(&mut self, icon: Icon, hovered: bool, cx: &mut Context<Self>) {
-        if hovered && !motion::reduced() {
-            *self.icon_hovers.entry(icon.name()).or_default() += 1;
-            self.redraw_chrome(cx);
-        }
-    }
-
-    pub(super) fn icon_epoch(&self, icon: Icon) -> Option<u64> {
-        self.icon_hovers.get(icon.name()).copied()
-    }
-
     pub(super) fn render_tab(&self, tab: Tab, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self.tab == tab;
         let collapsed = self.collapsed;
@@ -611,12 +584,7 @@ impl Kuizer {
         let item = ui::nav_item(tab.label(), active)
             .debug_selector(|| tab.label().to_owned())
             .when(collapsed, |this| this.justify_center().px_0())
-            .tip_hover(
-                tip,
-                cx.listener(move |app, hovered: &bool, _, cx| {
-                    app.hover_icon(tab.icon(), *hovered, cx);
-                }),
-            )
+            .tip(tip)
             .child(icon::view(
                 tab.icon(),
                 if active {
@@ -624,8 +592,6 @@ impl Kuizer {
                 } else {
                     theme::faint()
                 },
-                self.icon_epoch(tab.icon()),
-                self.zoom.rem_size(),
             ))
             .when(!collapsed, |this| {
                 this.child(div().flex_1().min_w_0().truncate().child(tab.label()))

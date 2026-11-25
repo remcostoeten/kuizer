@@ -282,7 +282,7 @@ impl Kuizer {
             );
         let header = table_header()
             .child(div().flex_1().child("FILE"))
-            .child(column(col::L).text_right().child("CHANGED"));
+            .child(head(col::L, "Changed", Term::Changed).text_right());
         let count = self.listed(Tab::Duplicates).lines.len();
         let list = self
             .table_list(
@@ -374,10 +374,11 @@ impl Kuizer {
                                     .child(
                                         div()
                                             .h_full()
-                                            .w(gpui::relative(
-                                                theme::share(group.reclaimable(), largest)
-                                                    .max(0.005),
-                                            ))
+                                            .w(gpui::relative(theme::share(
+                                                group.reclaimable(),
+                                                largest,
+                                            )))
+                                            .min_w(unit(size::SLIVER))
                                             .rounded(theme::radius_bar())
                                             .bg(theme::bar()),
                                     ),

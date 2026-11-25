@@ -589,7 +589,7 @@ fn an_item_deleted_mid_scan_stays_gone_when_the_scan_delivers_it(cx: &mut TestAp
         };
         app.take(vec![Update::Loaded(artifacts)], cx);
     });
-    cx.executor().advance_clock(flow::STEP);
+    cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     view.update(cx, |app, _| {
         let report = app.report().unwrap();
@@ -768,9 +768,6 @@ fn hovering_a_section_explains_it(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear());
     let tip = cx.debug_bounds("tooltip").expect("the History tooltip");
     assert!(tip.origin.y >= history.bottom());
-    view.read_with(cx, |app, _| {
-        assert_eq!(app.icon_epoch(Icon::History), Some(1));
-    });
     cx.simulate_mouse_move(issues.center(), None, Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear());
     let next = cx
@@ -1041,7 +1038,7 @@ fn deleting_the_selection_removes_it_for_good_inside(cx: &mut TestAppContext) {
             })
         )
     });
-    cx.executor().advance_clock(flow::STEP);
+    cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     assert!(!modules.exists());
     assert!(
@@ -1192,7 +1189,7 @@ esac
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
-    cx.executor().advance_clock(flow::STEP);
+    cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
     assert_eq!(calls.lines().last(), Some("image rm aaaaaaaaaaaaaaaa"));
@@ -1250,7 +1247,7 @@ fn toolchains_are_deleted_for_good_inside(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("permanent-warning").is_some());
     cx.simulate_keystrokes("enter");
     wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
-    cx.executor().advance_clock(flow::STEP);
+    cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     assert!(!old.exists());
     assert!(versions.join("v20.11.0").exists());
@@ -1583,7 +1580,7 @@ fn enter_deletes_the_selection_at_once_but_a_held_enter_never_does_inside(cx: &m
         assert!(app.dialog.is_none(), "Enter never asks")
     });
     wait_until(&view, cx, "the removal", |app| app.cleaning.is_none());
-    cx.executor().advance_clock(flow::STEP);
+    cx.executor().advance_clock(motion::STEP);
     cx.run_until_parked();
     assert!(!first.exists());
 

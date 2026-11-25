@@ -6,8 +6,6 @@ use gpui::Rgba;
 
 use super::*;
 
-/// How long one step of the delete flow takes to blend into the next.
-pub(super) const STEP: Duration = Duration::from_millis(140);
 const SLIDE: f32 = space::XXL;
 const MARKS: usize = 64;
 
@@ -62,7 +60,7 @@ impl Flow {
         }
         let now = Instant::now();
         self.marks
-            .retain(|_, at| now.saturating_duration_since(*at) < STEP);
+            .retain(|_, at| now.saturating_duration_since(*at) < motion::STEP);
         if self.marks.len() < MARKS {
             self.marks.insert(key, now);
         }
@@ -109,7 +107,7 @@ impl Flow {
             return false;
         }
         let now = Instant::now();
-        let fresh = |at: Instant| now.saturating_duration_since(at) < STEP;
+        let fresh = |at: Instant| now.saturating_duration_since(at) < motion::STEP;
         self.settling.is_some()
             || deleting.is_some_and(fresh)
             || self.bar.as_ref().is_some_and(|shown| fresh(shown.at))
@@ -177,7 +175,7 @@ impl Kuizer {
             return;
         }
         let task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(STEP).await;
+            cx.background_executor().timer(motion::STEP).await;
             let _ = this.update(cx, |app, cx| {
                 if let Some(settling) = app.flow.settling.take() {
                     app.depart(settling.removed, cx);
@@ -236,7 +234,9 @@ fn progress(since: Instant, now: Instant) -> f32 {
     if motion::reduced() {
         return 1.0;
     }
-    motion::ease_out(now.saturating_duration_since(since).as_secs_f32() / STEP.as_secs_f32())
+    motion::ease_out(
+        now.saturating_duration_since(since).as_secs_f32() / motion::STEP.as_secs_f32(),
+    )
 }
 
 fn deleting(started: Instant, now: Instant) -> f32 {

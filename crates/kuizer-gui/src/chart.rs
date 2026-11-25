@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, ElementId, IntoElement, ParentElement,
     Render, Rgba, SharedString, Styled, Window, div, prelude::*, relative,
@@ -10,8 +8,6 @@ use crate::motion;
 use crate::theme::{self, font, size, space, unit};
 use crate::tooltip::{Tip, Tooltip};
 
-const PULSE: Duration = Duration::from_millis(1_400);
-const SWEEP: Duration = Duration::from_millis(1_100);
 const SWEEP_WIDTH: f32 = 0.3;
 
 pub struct Segment {
@@ -61,7 +57,8 @@ pub fn composition(id: &'static str, segments: &[Segment], whole: u64) -> Div {
                         .id((id, index))
                         .debug_selector(move || format!("{id}-{index}"))
                         .h_full()
-                        .w(relative(share.max(0.004)))
+                        .w(relative(share))
+                        .min_w(unit(size::SLIVER))
                         .flex_shrink()
                         .bg(segment.fill)
                         .hover(|style| style.opacity(theme::DIM))
@@ -198,7 +195,7 @@ pub fn breathe(id: impl Into<ElementId>, element: Div) -> AnyElement {
     element
         .with_animation(
             id,
-            Animation::new(PULSE)
+            Animation::new(motion::PULSE)
                 .repeat()
                 .with_easing(gpui::pulsating_between(0.45, 1.)),
             |element, delta| element.opacity(delta),
@@ -235,7 +232,7 @@ pub fn loader() -> AnyElement {
                 .bg(theme::bar())
                 .with_animation(
                     "loader-sweep",
-                    Animation::new(SWEEP)
+                    Animation::new(motion::SWEEP)
                         .repeat()
                         .with_easing(motion::ease_in_out),
                     |sweep, delta| sweep.left(relative(delta * (1. + SWEEP_WIDTH) - SWEEP_WIDTH)),

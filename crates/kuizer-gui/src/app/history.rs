@@ -36,9 +36,8 @@ impl Kuizer {
                     .id(("cleanup-bar", run.id))
                     .flex_1()
                     .max_w(unit(size::BAR))
-                    .h(gpui::relative(
-                        theme::share(run.total.bytes, tallest).max(0.02),
-                    ))
+                    .h(gpui::relative(theme::share(run.total.bytes, tallest)))
+                    .min_h(unit(size::SLIVER))
                     .rounded_t(theme::radius_bar())
                     .bg(theme::bar())
                     .hover(|style| style.bg(theme::text()))
