@@ -566,7 +566,25 @@ impl Kuizer {
                 view.update(cx, |app, cx| app.rescan(cx)).ok();
             });
         }
+        #[cfg(not(test))]
+        if app.config.appearance.update_check {
+            Self::check_for_updates(app.config.clone(), cx);
+        }
         app
+    }
+
+    #[cfg(not(test))]
+    fn check_for_updates(config: Config, cx: &mut Context<Self>) {
+        let checked = cx.background_spawn(async move { kuizer::update::check_if_enabled(&config) });
+        cx.spawn(async move |this, cx| {
+            if let Some(notice) = checked.await {
+                this.update(cx, |app, cx| {
+                    app.show_toast(Notice::Info(notice.message()), cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn probe_recent(paths: Vec<PathBuf>, cx: &mut Context<Self>) {

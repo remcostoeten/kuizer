@@ -263,6 +263,7 @@ pub struct AppearanceConfig {
     pub accent: Accent,
     pub density: Density,
     pub zoom: u16,
+    pub update_check: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -274,6 +275,7 @@ impl Default for AppearanceConfig {
             accent: Accent::default(),
             density: Density::default(),
             zoom: DEFAULT_ZOOM,
+            update_check: false,
         }
     }
 }

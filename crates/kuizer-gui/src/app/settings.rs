@@ -62,6 +62,7 @@ pub(super) enum Setting {
     Motion,
     SidebarCollapsed,
     Zoom,
+    UpdateCheck,
     RoutesEnabled,
     RouteHints,
     Trash,
@@ -88,6 +89,7 @@ impl Setting {
             Self::Motion => "Motion",
             Self::SidebarCollapsed => "Open the sidebar collapsed",
             Self::Zoom => "Interface size",
+            Self::UpdateCheck => "Check for updates",
             Self::RoutesEnabled => "Section shortcuts",
             Self::RouteHints => "Show shortcut hints",
             Self::Trash => "Move to the trash",
@@ -111,6 +113,9 @@ impl Setting {
             }
             Self::Zoom => {
                 "Left and right change it in steps of ten, Enter goes back to 100%. The zoom shortcuts work anywhere in the app."
+            }
+            Self::UpdateCheck => {
+                "Check GitHub releases on launch and show a notice when a newer version exists. Off by default; never installs anything automatically."
             }
             Self::RoutesEnabled => "Use keyboard shortcuts to open sidebar sections.",
             Self::RouteHints => "Key badges in the sidebar and in the section tooltips.",
@@ -171,6 +176,7 @@ impl Setting {
             Self::Motion => usize::from(config.appearance.motion),
             Self::SidebarCollapsed => usize::from(config.appearance.sidebar == Sidebar::Collapsed),
             Self::Zoom => zoom_step(config.appearance.zoom),
+            Self::UpdateCheck => usize::from(config.appearance.update_check),
             Self::RoutesEnabled => usize::from(config.route_shortcuts.enabled),
             Self::RouteHints => usize::from(config.route_shortcuts.hints),
             Self::Trash => usize::from(config.delete.mode == DeleteMode::Trash),
@@ -233,6 +239,7 @@ impl Setting {
                 };
             }
             Self::Zoom => config.appearance.zoom = zoom_percent(value),
+            Self::UpdateCheck => config.appearance.update_check = on,
             Self::RoutesEnabled => config.route_shortcuts.enabled = on,
             Self::RouteHints => config.route_shortcuts.hints = on,
             Self::Trash => {
@@ -285,6 +292,7 @@ impl Setting {
                 "zoom",
                 SettingValue::Integer(i64::from(zoom_percent(value))),
             ),
+            Self::UpdateCheck => ("appearance", "update_check", SettingValue::Bool(on)),
             Self::RoutesEnabled => ("route_shortcuts", "enabled", SettingValue::Bool(on)),
             Self::RouteHints => ("route_shortcuts", "hints", SettingValue::Bool(on)),
             Self::Trash => (
@@ -659,6 +667,7 @@ const PAGES: [Page; 8] = [
                     Row::Setting(Setting::Motion),
                     Row::Setting(Setting::SidebarCollapsed),
                     Row::Setting(Setting::Zoom),
+                    Row::Setting(Setting::UpdateCheck),
                 ],
             },
         ],

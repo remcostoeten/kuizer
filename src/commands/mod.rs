@@ -201,7 +201,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     if !rejected.is_empty() && removes_unattended(cli.command.as_ref()) {
         return Err(AppError::ScopeRejected(rejected.join(", ")));
     }
-    match cli.command {
+    let result = match cli.command {
         None if !json && interactive() => {
             let notice = config_notice(&loaded);
             let config_path = cli
@@ -235,5 +235,13 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Some(Command::Git(args)) => git::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Dashboard(args)) => dashboard::run(&loaded.config, args, cli.json, cli.quiet),
         Some(Command::Generate { target }) => generate::run(&target),
+    };
+    if result.is_ok()
+        && !json
+        && !cli.quiet
+        && let Some(notice) = crate::update::check_if_enabled(&loaded.config)
+    {
+        eprintln!("kuizer: {} — {}", notice.message(), notice.url);
     }
+    result
 }

@@ -25,6 +25,7 @@ pub mod toolchains;
 #[cfg(feature = "cli")]
 pub(crate) mod tui;
 pub mod units;
+pub mod update;
 
 /// @name run_cli
 /// @description Parses command-line arguments and runs the requested CLI or TUI command.

@@ -81,6 +81,8 @@ density = "comfortable"
 # Interface size in percent, from 50 to 200. Ctrl+= and Ctrl+- (Cmd on macOS) change it in steps
 # of ten while the app runs and save the new size here.
 zoom = 100
+# Check GitHub releases for a newer version and show a notice. Off by default; never auto-installs.
+update_check = false
 
 # The keys that open a sidebar section in the GUI (Shift+1 to Shift+9). With enabled = false
 # they do nothing; the command palette still opens every section. hints = false hides the
