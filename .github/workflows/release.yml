@@ -265,19 +265,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Import Apple Developer signing certificate (optional)
-        if: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD || 'kuizer-ci-keychain' }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
         run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "No Apple Developer signing certificate configured; building ad-hoc signed bundle."
+            exit 0
+          fi
+          keychain_password="${KEYCHAIN_PASSWORD:-kuizer-ci-keychain}"
           cert="$RUNNER_TEMP/cert.p12"
           printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$cert"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security create-keychain -p "$keychain_password" build.keychain
           security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security unlock-keychain -p "$keychain_password" build.keychain
           security import "$cert" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" build.keychain
           rm -f "$cert"
       - run: cargo build --locked --release -p kuizer-gui --target ${{ matrix.target }}
       - name: Build Kuizer.app bundle and DMG
