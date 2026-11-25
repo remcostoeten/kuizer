@@ -4,6 +4,7 @@ mod config;
 mod dashboard;
 mod docker;
 mod duplicates;
+mod explain;
 mod filter;
 mod generate;
 mod git;
@@ -217,6 +218,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Some(Command::Config { action }) => config::run(&loaded, action, cli.json),
         Some(Command::Policy(args)) => policy::run(&loaded.config, args, cli.json),
         Some(Command::Rules(_)) => rules::run(&loaded.config, cli.json),
+        Some(Command::Explain(args)) => explain::run(&loaded.config, &args.path, cli.json),
         Some(Command::History(args)) => history::run(args, cli.json),
         Some(Command::Restore(args)) => restore::run(args, cli.json),
         Some(Command::Duplicates(args)) => {

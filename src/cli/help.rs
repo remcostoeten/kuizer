@@ -32,6 +32,7 @@ pub(super) const ABOUT_RESTORE: &str = "Put trashed items from a past run back";
 pub(super) const ABOUT_DASHBOARD: &str =
     "Open a web overview of artifacts, caches, duplicates and history";
 pub(super) const ABOUT_RULES: &str = "List the active detection rules";
+pub(super) const ABOUT_EXPLAIN: &str = "Explain why a path is or is not a candidate";
 pub(super) const ABOUT_POLICY: &str = "List and inspect configured cleanup policies";
 pub(super) const ABOUT_CONFIG: &str = "Show, create and validate the config file";
 
@@ -53,6 +54,7 @@ pub(super) const COMMAND_GROUPS: [(&str, &[(&str, &str)]); 3] = [
         &[
             ("dashboard", ABOUT_DASHBOARD),
             ("duplicates", ABOUT_DUPLICATES),
+            ("explain", ABOUT_EXPLAIN),
             ("history", ABOUT_HISTORY),
         ],
     ),
@@ -420,6 +422,21 @@ pub(super) fn rules_examples() -> String {
     examples(&[
         ("kuizer rules", "", "List built-in and custom rules"),
         ("kuizer --json rules", "", "Print the rules as JSON"),
+    ])
+}
+
+pub(super) fn explain_examples() -> String {
+    examples(&[
+        (
+            "kuizer explain",
+            "./node_modules",
+            "Show which rule, markers, safety and guards apply to a path",
+        ),
+        (
+            "kuizer --json explain",
+            "./dist",
+            "Print the explanation as JSON",
+        ),
     ])
 }
 

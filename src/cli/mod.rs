@@ -116,6 +116,8 @@ pub enum Command {
     Policy(PolicyArgs),
     #[command(about = ABOUT_RULES, after_help = rules_examples())]
     Rules(CommandArgs),
+    #[command(about = ABOUT_EXPLAIN, after_help = explain_examples())]
+    Explain(ExplainArgs),
     #[command(about = ABOUT_HISTORY, visible_alias = "insight", after_help = history_examples())]
     History(HistoryArgs),
     #[command(about = ABOUT_RESTORE, after_help = restore_help())]
@@ -130,6 +132,12 @@ pub enum Command {
         #[command(subcommand)]
         target: GenerateTarget,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ExplainArgs {
+    #[arg(value_name = "PATH", help = "Path to inspect")]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]

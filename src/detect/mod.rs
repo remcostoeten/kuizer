@@ -1,10 +1,12 @@
 mod builtin;
 mod detector;
+mod explain;
 
 use serde::{Deserialize, Serialize};
 
 pub use builtin::builtin_rules;
 pub use detector::{Detector, Listing, Match, RuleError, RuleInfo};
+pub use explain::{Explanation, MatchedRule, NearMiss, explain_path};
 
 pub(crate) const APP_DATA_MARKERS: &[&[&str]] = &[
     &["Local State"],
